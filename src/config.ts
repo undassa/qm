@@ -768,6 +768,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       "[config] SANDBOX_BACKEND=porter without PORTER_SANDBOX_EGRESS_PROXY_URL — sandboxes run with NO egress enforcement (fail-open); set PORTER_SANDBOX_EGRESS_PROXY_URL to the egress proxy to force sandbox traffic through it.",
     );
   }
+  if (env.DEPLOY_PROVIDER === "porter" && !env.PORTER_DEPLOY_APPS_DOMAIN) {
+    console.warn(
+      "[config] DEPLOY_PROVIDER=porter without PORTER_DEPLOY_APPS_DOMAIN — published apps only get a URL if the cluster assigns one, so a deploy can succeed with no reachable address; point a wildcard DNS record at the cluster ingress and set PORTER_DEPLOY_APPS_DOMAIN to give every app a stable hostname.",
+    );
+  }
   for (const [selected, label] of [
     [porterSandboxSelected, "SANDBOX_BACKEND=porter"],
     [env.DEPLOY_PROVIDER === "porter", "DEPLOY_PROVIDER=porter"],
