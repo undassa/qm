@@ -15,7 +15,7 @@ CHART_NS="${REPO%/*}"
 SERVICES=(core auth web-ui admin portal egress-proxy)
 
 for svc in "${SERVICES[@]}"; do
-  image="$REPO-$svc:$TAG"
+  image="$REPO/$svc:$TAG"
   echo ">> building $image from deploy/$svc/Dockerfile"
   docker build \
     --platform "$PLATFORM" \

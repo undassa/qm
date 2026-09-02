@@ -156,7 +156,7 @@ export function createPorterDeployProvider(opts: PorterDeployProviderOptions): D
       serialized(d, async () => {
         if (!appsDomain) {
           throw new Error(
-            `porter deploy ${d.id}: PORTER_DEPLOY_APPS_DOMAIN is not set, so the app would have no address — enable sandbox ingress on the cluster in the Porter dashboard, point a wildcard DNS record at it, and set PORTER_DEPLOY_APPS_DOMAIN`,
+            `porter deploy ${d.id}: PORTER_DEPLOY_APPS_DOMAIN is not set, so the app would have no address — enable sandbox ingress on the cluster, point a wildcard DNS record at it, and set PORTER_DEPLOY_APPS_DOMAIN (docs/porter.md)`,
           );
         }
         resolveCache.delete(d.id);
@@ -178,7 +178,7 @@ export function createPorterDeployProvider(opts: PorterDeployProviderOptions): D
           .catch((e) => {
             if (errMessage(e).includes("sandbox ingress")) {
               throw new Error(
-                `porter deploy ${d.id}: the cluster refused the app's ${visibility} domain because sandbox ingress is not enabled — turn it on for this cluster in the Porter dashboard, then point PORTER_DEPLOY_APPS_DOMAIN's wildcard DNS record at it (${errMessage(e)})`,
+                `porter deploy ${d.id}: the cluster refused the app's ${visibility} domain because sandbox ingress is not enabled — turn it on for this cluster (docs/porter.md), then point PORTER_DEPLOY_APPS_DOMAIN's wildcard DNS record at it (${errMessage(e)})`,
                 { cause: e },
               );
             }

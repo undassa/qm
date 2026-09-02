@@ -18,7 +18,12 @@ import {
   type PorterSandboxLike,
 } from "./porter-client.ts";
 import { shq } from "../util/shell.ts";
-import { nonInteractiveShellPrefix, DROPPED_PROXY_ENV, proxyExportPrefix } from "./sandbox-env.ts";
+import {
+  nonInteractiveShellPrefix,
+  DROPPED_PROXY_ENV,
+  forceThroughProxyEnv,
+  proxyExportPrefix,
+} from "./sandbox-env.ts";
 import { createExecProcessSessions, type ExecProcessIo } from "./exec-process-session.ts";
 import { materializeRoLayers } from "./ro-layers.ts";
 import {
@@ -138,15 +143,25 @@ export function createPorterSandbox(workspace: WorkspaceStore, opts: PorterSandb
     kind: "scope" | "scratch" = "scope",
   ): Promise<BodyEntry> {
     const name = bodyName(slug);
-    const sb = await client.sandboxes.create({
-      image,
-      name,
-      command: ["sleep", "infinity"],
-      tags: { [SCOPE_TAG]: slug, [EGRESS_TAG]: egressMode, [KIND_TAG]: kind },
-      ...(volume ? { volume_mounts: { [volume.mountPath]: volume.id } } : {}),
-      ...(egressMode === "proxy" && egressProxyHost ? { egress: { allowed_destinations: [egressProxyHost] } } : {}),
-      ttl_seconds: ttlSec,
-    });
+    const sb = await client.sandboxes
+      .create({
+        image,
+        name,
+        command: ["sleep", "infinity"],
+        tags: { [SCOPE_TAG]: slug, [EGRESS_TAG]: egressMode, [KIND_TAG]: kind },
+        ...(volume ? { volume_mounts: { [volume.mountPath]: volume.id } } : {}),
+        ...(egressMode === "proxy" && egressProxyHost ? { egress: { allowed_destinations: [egressProxyHost] } } : {}),
+        ttl_seconds: ttlSec,
+      })
+      .catch((e) => {
+        if (errMessage(e).includes("egress restriction is not available")) {
+          throw new Error(
+            `porter sandbox ${name}: PORTER_SANDBOX_EGRESS_PROXY_URL is set but this cluster has egress restriction turned off, so Porter refuses to create the body at all — enable it on the cluster's sandbox-api system application or unset the proxy URL (docs/porter.md) (${errMessage(e)})`,
+            { cause: e },
+          );
+        }
+        throw e;
+      });
     try {
       await waitPorterRunning(name, sb);
     } catch (e) {
@@ -228,20 +243,6 @@ export function createPorterSandbox(workspace: WorkspaceStore, opts: PorterSandb
   }
 
   const { execRaw, writeAbsBytes, readAbsBytes } = createPorterExec(client, async (id) => (await refFor(id)).sb.id);
-
-  function proxyEnv(token: string): Record<string, string> {
-    const u = new URL(opts.egressProxyUrl!);
-    const url = `${u.protocol}//x:${token}@${u.host}`;
-    const noProxy = "localhost,127.0.0.1,::1";
-    return {
-      HTTPS_PROXY: url,
-      HTTP_PROXY: url,
-      NO_PROXY: noProxy,
-      https_proxy: url,
-      http_proxy: url,
-      no_proxy: noProxy,
-    };
-  }
 
   const profile: AgentComputerProfile = {
     backend: "porter",
@@ -342,7 +343,10 @@ export function createPorterSandbox(workspace: WorkspaceStore, opts: PorterSandb
       const turnEnv = Object.fromEntries(
         Object.entries(provOpts?.env ?? {}).filter(([k]) => !DROPPED_PROXY_ENV.has(k)),
       );
-      const env = { ...turnEnv, ...(forceEgress ? proxyEnv(provOpts!.egressToken!) : {}) };
+      const env = {
+        ...turnEnv,
+        ...(forceEgress ? forceThroughProxyEnv(opts.egressProxyUrl!, provOpts!.egressToken!) : {}),
+      };
       const handle: SandboxHandle = {
         id: name,
         rootDir: workspaceDir,

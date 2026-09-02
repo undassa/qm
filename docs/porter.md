@@ -80,7 +80,21 @@ entry ... no encryption`.
 manage the release themselves; it expects the images published at
 `ghcr.io/yc-software/qm/<service>` and an ingress you configure. Pin `image.tag` to a
 commit that actually carries the Porter backend — the published tags are commit SHAs, and
-one from before Porter support landed rejects `SANDBOX_BACKEND=porter` at startup.
+one from before Porter support landed rejects `SANDBOX_BACKEND=porter` at startup. Set
+`publicUrl` and the chart derives the broker wiring (`AUTH_ISSUER`, `AUTH_REDIRECT_URI`
+and the portal's `OIDC_*` endpoints) the way `cli/src/services.ts` does for the other
+targets; what it cannot invent is the identity allow-list, so production still refuses to
+boot until `AUTH_ALLOWED_EMAILS`/`AUTH_ALLOWED_EMAIL_DOMAIN` is set, and the auth broker
+needs a real mail transport (`RESEND_API_KEY` or the `SMTP_*` set) because there is no
+console transport. `SANDBOX_BACKEND` has no default and core refuses to start in
+production without it.
+
+`porter kubectl --print-kubeconfig` is enough to read a Porter cluster but not to install
+into one: the kubeconfig it prints authenticates as `porter-readonly-sa-customer`, which
+holds `get`/`list`/`watch` and nothing else, so `helm install` fails on the first write. On
+EKS, grant yourself real access through AWS instead — `aws eks update-cluster-config
+--access-config authenticationMode=API_AND_CONFIG_MAP`, then an access entry for your own
+principal with `AmazonEKSClusterAdminPolicy`, then `aws eks update-kubeconfig`.
 
 ## Giving published apps stable hostnames
 
@@ -89,12 +103,51 @@ Apps the agent deploys are reachable only if the cluster gives them an address. 
 front, before anything is created.
 
 The address comes from Porter's **sandbox ingress**, which is separate from the ingress
-that serves Porter apps and is enabled per cluster from the dashboard. A cluster without
-it rejects every publish before DNS is ever consulted, with
-`HTTP 400: validation error: visibility: no private sandbox ingress is configured on this
-cluster` (`no public sandbox ingress` when `PORTER_DEPLOY_VISIBILITY=public`). Turn
-sandbox ingress on first; the wildcard record below is what gives the resulting apps
-stable names.
+that serves Porter apps and is configured per cluster. A cluster without it rejects every
+publish before DNS is ever consulted, with `HTTP 400: validation error: visibility: no
+private sandbox ingress is configured on this cluster` (`no public sandbox ingress` when
+`PORTER_DEPLOY_VISIBILITY=public`). Turn sandbox ingress on first; the wildcard record
+below is what gives the resulting apps stable names.
+
+The dashboard has a toggle for it, but it is also a plain field on the cluster contract,
+so it can be turned on headlessly. `GET /api/projects/<project>/contracts` returns the
+revisions for the project, newest last, each with a `base64_contract`; decode the current
+one, add the sandbox load balancer, and `POST` the whole contract back to
+`/api/projects/<project>/contract` (singular, raw protojson — not base64, not wrapped):
+
+```json
+{
+  "kind": "LOAD_BALANCER_KIND_NLB",
+  "owner": "LOAD_BALANCER_OWNER_SANDBOX",
+  "networkAccess": "NETWORK_ACCESS_PUBLIC",
+  "dnsProviderConfig": { "provider": "DNS_PROVIDER_TYPE_ROUTE53", "route53Domain": "" },
+  "rootDomains": ["apps.example.com"],
+  "waf": { "enabled": false }
+}
+```
+
+appended to `cluster.additionalLoadBalancers`, alongside `cluster.eksKind.sandboxesEnabled:
+true`. Route53 authenticates through the cluster's own pod identity and needs no token;
+`DNS_PROVIDER_TYPE_CLOUDFLARE` needs one stored first at `POST
+/api/v2/projects/<project>/clusters/<cluster>/dns/credentials`. The same route creates a
+cluster in the first place — omit `cluster.clusterId` and Porter provisions a new one.
+Once the revision reconciles, `GET
+/api/v2/projects/<project>/clusters/<cluster>/load-balancers` returns the new
+`owner: "sandbox"` entry whose `address.value` is what the wildcard record points at.
+
+Routing and TLS arrive separately, and only the first is reliable. The load balancer and
+the ingress rules come up within a couple of minutes and published apps answer on the
+wildcard domain straight away — but the wildcard certificate is a `Certificate` in the
+`porter-sandbox` namespace naming a `letsencrypt-sandbox-<visibility>-route53-prod`
+ClusterIssuer, and on a cluster whose Porter IAM came from the standard CloudFormation
+template that issuer is never created: the template grants no Route53 actions to any
+`porter-*` role, and cert-manager gets neither an IAM role annotation nor an EKS pod
+identity association, so the DNS-01 challenge has no credentials. Until that is sorted out
+the ingress serves nginx's self-signed _Kubernetes Ingress Controller Fake Certificate_,
+so every client — including the agent's own probe of the app it just published, which is
+why it reports a gateway error it cannot explain — fails certificate verification against
+an app that is otherwise serving correctly. Check with `kubectl get certificate -n
+porter-sandbox` before believing a publish is broken.
 
 Point a wildcard DNS record at the cluster's ingress load balancer and name it:
 
@@ -106,17 +159,50 @@ Each deployment then publishes at `<name>.apps.example.com`. Deployments are **p
 by default, matching the other providers; `PORTER_DEPLOY_VISIBILITY=public` opts a
 deployment's domain into public ingress.
 
+## Forcing sandbox egress through the proxy
+
+`PORTER_SANDBOX_EGRESS_PROXY_URL` makes core pass `egress.allowed_destinations: [<proxy
+host>]` when it creates a sandbox, and inject `HTTPS_PROXY`/`HTTP_PROXY` pointing at the
+proxy with a capability token as the password. Two cluster-side facts decide whether that
+works at all, and both fail in ways that do not name the real cause:
+
+- **The cluster must have egress restriction turned on.** Without it Porter rejects the
+  create outright — `HTTP 400: validation error: egress: egress restriction is not
+available on this cluster` — so the agent ends up with no computer rather than an
+  unrestricted one. It is a per-cluster setting on the `sandbox-api` system application:
+  `PATCH /api/v2/projects/<project>/clusters/<cluster>/system-applications/sandbox-api`
+  with `{"sandbox_config":{"egress_enabled":true}}`, then `POST
+.../trigger-system-application-reconcile` with `{"dry_run":false,
+"system_application_name":"sandbox-api"}`. `GET` on the same path reads it back, and
+  turning it on installs Cilium, which enforces the allowlist. A project API token is
+  refused here with `PERMISSION_DENIED` even though it may create clusters — this call
+  needs a Porter account with admin rights on the project.
+- **The proxy has to be reachable from outside the cluster.** Porter attaches a
+  NetworkPolicy to every sandbox that permits DNS plus `0.0.0.0/0` _except_ `10.0.0.0/8`,
+  `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16` and `100.64.0.0/10` — every RFC1918
+  range, which is where both the pod and service CIDRs live. A sandbox therefore cannot
+  reach an in-cluster Service, so a `*.svc.cluster.local` proxy URL times out with no
+  error worth reading. Give the proxy an internet-reachable address (a `LoadBalancer`
+  Service in front of it is enough) and point `PORTER_SANDBOX_EGRESS_PROXY_URL` there.
+  This is also why `deploy/helm/`'s `egress-proxy` service cannot serve Porter sandboxes
+  as-is: it is a ClusterIP worker.
+
+The proxy itself runs fine unprivileged, but `deploy/egress-proxy` wants `NET_ADMIN` to
+install the iptables rule that blocks the cloud metadata endpoint. Without the capability
+it logs `could not install metadata firewall ... NET_ADMIN missing?` and keeps serving, so
+grep for that line rather than assuming the container's own metadata block is in place.
+
 ## Other knobs
 
-| Variable                                           | Meaning                                                                            |
-| -------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| `PORTER_DEPLOY_URL`                                | Porter API host, when it isn't `https://dashboard.porter.run`                      |
-| `PORTER_SANDBOX_IMAGE`                             | Image agent computers boot from                                                    |
-| `PORTER_DEPLOY_RUNNER_IMAGE`                       | Image published apps boot from (defaults to the sandbox image)                     |
-| `PORTER_SANDBOX_EGRESS_PROXY_URL`                  | Forces sandbox traffic through the egress proxy; unset means no egress enforcement |
-| `PORTER_SANDBOX_NAME_PREFIX`                       | Prefix for sandbox and app names on the cluster                                    |
-| `PORTER_DEPLOY_VISIBILITY`                         | `public` puts a published app on public ingress; default is private                |
-| `PORTER_DEPLOY_TTL_SEC` / `PORTER_SANDBOX_TTL_SEC` | Reap bodies after this long                                                        |
+| Variable                                           | Meaning                                                                                                        |
+| -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `PORTER_DEPLOY_URL`                                | Porter API host, when it isn't `https://dashboard.porter.run`                                                  |
+| `PORTER_SANDBOX_IMAGE`                             | Image agent computers boot from                                                                                |
+| `PORTER_DEPLOY_RUNNER_IMAGE`                       | Image published apps boot from (defaults to the sandbox image)                                                 |
+| `PORTER_SANDBOX_EGRESS_PROXY_URL`                  | Forces sandbox traffic through the egress proxy; unset means no egress enforcement (see the constraints below) |
+| `PORTER_SANDBOX_NAME_PREFIX`                       | Prefix for sandbox and app names on the cluster                                                                |
+| `PORTER_DEPLOY_VISIBILITY`                         | `public` puts a published app on public ingress; default is private                                            |
+| `PORTER_DEPLOY_TTL_SEC` / `PORTER_SANDBOX_TTL_SEC` | Reap bodies after this long                                                                                    |
 
 To QA a branch against a real Porter cluster before deploying it, the dev instance takes
 the same backend:
