@@ -1,0 +1,13 @@
+version: v2
+name: qm-egress-proxy
+build:
+  method: docker
+  context: .
+  dockerfile: ./deploy/egress-proxy/Dockerfile
+services:
+  - name: egress-proxy
+    type: worker
+    run: /app/start.sh
+    instances: 1
+    cpuCores: 0.25
+    ramMegabytes: 512

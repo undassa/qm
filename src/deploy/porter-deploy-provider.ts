@@ -20,7 +20,7 @@ import { createMemoryMap, type DurableMap } from "../persistence/durable-map.ts"
 import { createNoopAdvisoryLock, type AdvisoryLock } from "../persistence/advisory-lock.ts";
 import { createKeyedQueue } from "../util/async.ts";
 import { shq } from "../util/shell.ts";
-import { swallow } from "../util/errors.ts";
+import { errMessage, swallow } from "../util/errors.ts";
 
 const APP_DIR = "/app";
 const HOME_DIR = "/root";
@@ -159,16 +159,26 @@ export function createPorterDeployProvider(opts: PorterDeployProviderOptions): D
         await retireBodies(d, true);
         await store.delete(d.id).catch((e) => swallow("porter-deploy: clear stale pointer", e));
         const name = `${baseName(d)}-${randomUUID().slice(0, 5)}`;
-        const sb = await client.sandboxes.create({
-          image,
-          name,
-          command: ["sleep", "infinity"],
-          tags: { [KIND_TAG]: "app", [DEPLOY_TAG]: d.id },
-          env: appEnv(version),
-          volume_mounts: { [DATA_DIR]: volumeId },
-          networking: [{ port: appPort, ...(domainOf(d) ? { domains: [{ domain: domainOf(d), visibility }] } : {}) }],
-          ...(opts.ttlSec ? { ttl_seconds: opts.ttlSec } : {}),
-        });
+        const sb = await client.sandboxes
+          .create({
+            image,
+            name,
+            command: ["sleep", "infinity"],
+            tags: { [KIND_TAG]: "app", [DEPLOY_TAG]: d.id },
+            env: appEnv(version),
+            volume_mounts: { [DATA_DIR]: volumeId },
+            networking: [{ port: appPort, ...(domainOf(d) ? { domains: [{ domain: domainOf(d), visibility }] } : {}) }],
+            ...(opts.ttlSec ? { ttl_seconds: opts.ttlSec } : {}),
+          })
+          .catch((e) => {
+            if (errMessage(e).includes("sandbox ingress")) {
+              throw new Error(
+                `porter deploy ${d.id}: the cluster refused the app's ${visibility} domain because sandbox ingress is not enabled — turn it on for this cluster in the Porter dashboard, then point PORTER_DEPLOY_APPS_DOMAIN's wildcard DNS record at it (${errMessage(e)})`,
+                { cause: e },
+              );
+            }
+            throw e;
+          });
         try {
           await waitPorterRunning(name, sb);
           const host = (await sb.refresh()).host || domainOf(d);

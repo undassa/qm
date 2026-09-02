@@ -29,7 +29,7 @@ spec:
       {{- end }}
       containers:
         - name: {{ $name }}
-          image: "{{ $root.Values.image.repository }}-{{ $svc.image }}:{{ $svc.tag | default $root.Values.image.tag | default $root.Chart.AppVersion }}"
+          image: "{{ $root.Values.image.repository }}{{ $root.Values.image.separator | default "/" }}{{ $svc.image }}:{{ $svc.tag | default $root.Values.image.tag | default $root.Chart.AppVersion }}"
           imagePullPolicy: {{ $root.Values.image.pullPolicy }}
           {{- with $svc.command }}
           command:
@@ -39,9 +39,25 @@ spec:
             - name: {{ ternary "http" "proxy" (eq $svc.type "web") }}
               containerPort: {{ $svc.port }}
           {{- $wired := dict }}
+          {{- $svcHost := printf "%s-%%s.%s.svc.cluster.local" (include "qm.fullname" $root) $root.Release.Namespace }}
+          {{- if ne $name "core" }}
+          {{- $_ := set $wired "CORE_API_URL" (printf "http://%s:%v" (printf $svcHost "core") (index $root.Values.services "core").port) }}
+          {{- end }}
+          {{- if eq $name "portal" }}
+          {{- $_ := set $wired "WEB_UI_UPSTREAM" (printf "http://%s:%v" (printf $svcHost "web-ui") (index $root.Values.services "web-ui").port) }}
+          {{- $_ := set $wired "ADMIN_UPSTREAM" (printf "http://%s:%v" (printf $svcHost "admin") (index $root.Values.services "admin").port) }}
+          {{- if (index $root.Values.services "auth").enabled }}
+          {{- $_ := set $wired "AUTH_BROKER_UPSTREAM" (printf "http://%s:%v" (printf $svcHost "auth") (index $root.Values.services "auth").port) }}
+          {{- $_ := set $wired "AUTH_BROKER_PREFIX" "/idp" }}
+          {{- end }}
+          {{- end }}
           {{- if $root.Values.publicUrl }}
-          {{- if eq $name "core" }}{{- $_ := set $wired "AGENT_API_URL" $root.Values.publicUrl }}{{- end }}
+          {{- if eq $name "core" }}
+          {{- $_ := set $wired "AGENT_API_URL" $root.Values.publicUrl }}
+          {{- $_ := set $wired "PUBLIC_WEB_URL" $root.Values.publicUrl }}
+          {{- end }}
           {{- if eq $name "portal" }}{{- $_ := set $wired "PORTAL_PUBLIC_URL" $root.Values.publicUrl }}{{- end }}
+          {{- if eq $name "web-ui" }}{{- $_ := set $wired "WEB_UI_PUBLIC_URL" $root.Values.publicUrl }}{{- end }}
           {{- end }}
           {{- if or $wired $root.Values.env $svc.env }}
           env:

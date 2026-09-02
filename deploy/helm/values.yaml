@@ -1,5 +1,6 @@
 image:
-  repository: ghcr.io/porter-dev/qm
+  repository: ghcr.io/yc-software/qm
+  separator: "/"
   tag: ""
   pullPolicy: IfNotPresent
 
