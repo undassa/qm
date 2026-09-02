@@ -14,6 +14,7 @@ import {
   resolveModel,
   SELECTABLE_BASE_MODELS,
   ALL_PROVIDERS_AVAILABLE,
+  type HarnessId,
 } from "../../model/pi-models.ts";
 import { resolveRuntimeChoiceDurable } from "../../harness/harness-router.ts";
 import { sanitizeBranding } from "../../resolution/branding.ts";
@@ -31,10 +32,64 @@ import { resolverFor } from "./connectors.ts";
 import { encodeRef, serviceCredRef } from "../../acl/resource-ref.ts";
 import { audit } from "./shared.ts";
 import { errMessage } from "../../util/errors.ts";
-import { parseSecurityPosture, SECURITY_POSTURES, type SecurityPosture } from "../../security/security-posture.ts";
+import {
+  DEFAULT_SECURITY_SCREEN_RUBRIC,
+  parseSecurityPosture,
+  SECURITY_POSTURES,
+  type SecurityPosture,
+} from "../../security/security-posture.ts";
 import type { ApprovalGrantModes } from "../../types.ts";
 import { parseEgressPolicy } from "../../resolution/egress-policy.ts";
 import { DEVICE_FLOW_CUTOVER_MODES, type DeviceFlowCutoverMode } from "../../credentials/device-flow-cutover.ts";
+
+export interface AutoFlaggerDraft {
+  harnessId: HarnessId;
+  modelId: string;
+  rubric: string;
+}
+
+const AUTO_FLAGGER_MAX_RUBRIC_CHARS = 20_000;
+
+/** The flagger a deployment falls back to when nothing is configured. */
+export function defaultAutoFlaggerConfig(deps: Pick<ServerDeps, "harnessId" | "baseModelDefault">): AutoFlaggerDraft {
+  const harnessId = (isHarnessId(deps.harnessId ?? "") ? deps.harnessId : "pi") as HarnessId;
+  return {
+    harnessId,
+    modelId: defaultModelForHarness(harnessId, deps.baseModelDefault),
+    rubric: DEFAULT_SECURITY_SCREEN_RUBRIC,
+  };
+}
+
+/**
+ * Validate an Auto flagger configuration — shared by the governance save and the test run, so a
+ * rubric that tests cleanly is exactly the one that can be applied.
+ */
+export async function parseAutoFlaggerDraft(
+  deps: Pick<ServerDeps, "providerKeys" | "modelCredentials">,
+  body: { harnessId?: unknown; modelId?: unknown; rubric?: unknown },
+): Promise<{ value: AutoFlaggerDraft } | { error: string }> {
+  if (typeof body.harnessId !== "string" || !isHarnessId(body.harnessId) || body.harnessId === "mock") {
+    return { error: "auto-flagger requires a valid harnessId" };
+  }
+  if (typeof body.modelId !== "string" || !body.modelId.trim()) {
+    return { error: "auto-flagger requires a modelId" };
+  }
+  const modelId = body.modelId.trim();
+  if (!modelSupportedByHarness(modelId, body.harnessId)) {
+    return { error: `model ${modelId} is not supported by ${body.harnessId}` };
+  }
+  if (typeof body.rubric !== "string" || !body.rubric.trim() || body.rubric.length > AUTO_FLAGGER_MAX_RUBRIC_CHARS) {
+    return {
+      error: `auto-flagger requires a non-empty rubric of at most ${AUTO_FLAGGER_MAX_RUBRIC_CHARS} characters`,
+    };
+  }
+  const configuredKeys = deps.providerKeys ?? ALL_PROVIDERS_AVAILABLE;
+  const managedKeys = deps.modelCredentials ? await deps.modelCredentials.availability() : configuredKeys;
+  if (!modelServiceable(modelId, modelProviderAvailabilityFor(body.harnessId, configuredKeys, managedKeys))) {
+    return { error: `model ${modelId} isn't serviceable on this deployment` };
+  }
+  return { value: { harnessId: body.harnessId, modelId, rubric: body.rubric.trim() } };
+}
 
 type Actor = { id: string };
 
@@ -117,34 +172,14 @@ export const ADMIN_RESOURCES: readonly AdminResource[] = [
     apply: async (ctx, _actor, scope) => {
       const bad = orgOnly(scope, "the Auto flagger is org-wide");
       if (bad) return bad;
-      const body = ctx.body as { harnessId?: unknown; modelId?: unknown; rubric?: unknown; reset?: unknown };
+      const body = ctx.body as { reset?: unknown };
       if (body.reset === true) {
         ctx.deps.config!.setAutoFlaggerConfig(null);
         return { ok: true };
       }
-      if (typeof body.harnessId !== "string" || !isHarnessId(body.harnessId) || body.harnessId === "mock") {
-        return { error: "auto-flagger requires a valid harnessId" };
-      }
-      if (typeof body.modelId !== "string" || !body.modelId.trim()) {
-        return { error: "auto-flagger requires a modelId" };
-      }
-      if (!modelSupportedByHarness(body.modelId.trim(), body.harnessId)) {
-        return { error: `model ${body.modelId.trim()} is not supported by ${body.harnessId}` };
-      }
-      if (typeof body.rubric !== "string" || !body.rubric.trim() || body.rubric.length > 20_000) {
-        return { error: "auto-flagger requires a non-empty rubric of at most 20000 characters" };
-      }
-      const configuredKeys = ctx.deps.providerKeys ?? ALL_PROVIDERS_AVAILABLE;
-      const managedKeys = ctx.deps.modelCredentials ? await ctx.deps.modelCredentials.availability() : configuredKeys;
-      const providers = modelProviderAvailabilityFor(body.harnessId, configuredKeys, managedKeys);
-      if (!modelServiceable(body.modelId.trim(), providers)) {
-        return { error: `model ${body.modelId.trim()} isn't serviceable on this deployment` };
-      }
-      ctx.deps.config!.setAutoFlaggerConfig({
-        harnessId: body.harnessId,
-        modelId: body.modelId.trim(),
-        rubric: body.rubric.trim(),
-      });
+      const parsed = await parseAutoFlaggerDraft(ctx.deps, ctx.body as Record<string, unknown>);
+      if ("error" in parsed) return parsed;
+      ctx.deps.config!.setAutoFlaggerConfig(parsed.value);
       return { ok: true };
     },
   },

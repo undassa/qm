@@ -4095,8 +4095,32 @@
                   </div>
                   <div class="foot">
                     <button class="primary" data-save="auto-flagger">Apply</button>
+                    <button id="auto-flagger-test" type="button">Test</button>
+                    <label
+                      for="auto-flagger-window"
+                      style="display: inline-flex; align-items: center; gap: 6px; margin: 0; font-size: 13px"
+                      >on the last
+                      <input
+                        id="auto-flagger-window"
+                        type="number"
+                        min="1"
+                        max="500"
+                        step="1"
+                        value="100"
+                        style="width: 78px"
+                      />
+                      screenings</label
+                    >
+                    <label
+                      style="display: inline-flex; align-items: center; gap: 6px; margin: 0; font-size: 13px"
+                      title="Also replay the configuration in effect today, so the flag rates are comparable"
+                      ><input type="checkbox" id="auto-flagger-compare" /> compare with current</label
+                    >
                     <button id="auto-flagger-reset" type="button">Restore default</button>
                     <span class="status" id="st-auto-flagger"></span>
+                  </div>
+                  <div class="foot" id="auto-flagger-test-result" hidden>
+                    <span class="status" id="st-auto-flagger-test"></span>
                   </div>
                 </section>
                 <section class="card setting-row hidden" id="card-approval-grant-modes">
@@ -8291,6 +8315,25 @@
         "branding",
       ]);
       const sectionSnapshots = new Map();
+      function autoFlaggerTestSummary(data) {
+        if (!data.sampled) return data.message || "No past screenings to replay yet.";
+        const pct = (value) => (value == null ? "n/a" : (value * 100).toFixed(1) + "%");
+        const parts = ["Flagged " + data.flagged + " of " + data.scored + " scored (" + pct(data.flagRate) + ")"];
+        if (data.baseline) {
+          parts.push(
+            "current rubric flags " +
+              pct(data.baseline.flagRate) +
+              " · " +
+              plural(data.baseline.changed, "verdict") +
+              " changed",
+          );
+        }
+        if (data.unscreened) parts.push(plural(data.unscreened, "sample") + " came back unscreened");
+        if (data.errors) parts.push(plural(data.errors, "sample") + " errored");
+        if (data.partial) parts.push("stopped at the time limit — partial result");
+        parts.push("sampled " + data.sampled + " · " + Math.round(data.durationMs / 100) / 10 + "s");
+        return parts.join(" · ");
+      }
       function sectionButton(key) {
         return document.querySelector('[data-save="' + key + '"]');
       }
@@ -8368,6 +8411,37 @@
         return Promise.resolve(true);
       }
       let governanceSaveSeq = 0;
+      $("auto-flagger-test").onclick = async () => {
+        const button = $("auto-flagger-test");
+        const windowField = $("auto-flagger-window");
+        const requested = Number(windowField.value);
+        if (!Number.isInteger(requested) || requested < 1 || requested > 500) {
+          return setStatus("st-auto-flagger-test", "Window must be a whole number between 1 and 500.", "err", true);
+        }
+        $("auto-flagger-test-result").hidden = false;
+        setStatus(
+          "st-auto-flagger-test",
+          "Replaying the last " + requested + " screenings through this rubric…",
+          "",
+          true,
+        );
+        button.disabled = true;
+        try {
+          const r = await api("POST", "/api/scopes/" + encodeURIComponent(scope) + "/auto-flagger/test", {
+            window: requested,
+            compare: $("auto-flagger-compare").checked,
+            harnessId: $("auto-flagger-harness").value,
+            modelId: $("auto-flagger-model").value,
+            rubric: $("auto-flagger-rubric").value,
+          });
+          if (!r.ok) {
+            return setStatus("st-auto-flagger-test", r.data?.message || "Test run failed.", "err", true);
+          }
+          setStatus("st-auto-flagger-test", autoFlaggerTestSummary(r.data), r.data.errors ? "warn" : "ok", true);
+        } finally {
+          button.disabled = false;
+        }
+      };
       $("auto-flagger-reset").onclick = async () => {
         const r = await api("PUT", "/api/scopes/" + encodeURIComponent(scope) + "/auto-flagger", { reset: true });
         if (!r.ok) return setStatus("st-auto-flagger", r.data?.message || "Reset failed.", "err");

@@ -63,7 +63,8 @@ import { createAuditLog, type AuditLog } from "./audit/audit-log.ts";
 import { createPostgresAuditLog } from "./admin/postgres-audit-log.ts";
 import { createRateLimiter, type RateLimiter } from "./ratelimit/rate-limiter.ts";
 import { createPostgresRateLimiter } from "./ratelimit/postgres-rate-limiter.ts";
-import { createBudgetTracker } from "./ratelimit/budget.ts";
+import { createBudgetTracker, estimateCostUsd } from "./ratelimit/budget.ts";
+import type { SecurityScreenProbe } from "./security/security-screener.ts";
 import { createPostgresBudgetTracker } from "./ratelimit/postgres-budget.ts";
 import { createCronStore, type CronStore } from "./cron/cron-store.ts";
 import { createMemoryCronFireStore, createPostgresCronFireStore } from "./cron/cron-fire-store.ts";
@@ -328,6 +329,7 @@ export function stopWithBackstop(
 
 export interface BuiltApp {
   app: App;
+  screenSecurity?: SecurityScreenProbe;
   deploymentLayer: DeploymentLayerRuntime;
   brokeredTools: readonly BrokeredLayerTool[];
   deploymentLayerStore: DeploymentLayerStore;
@@ -1244,6 +1246,20 @@ export function buildApp(
     ? createPostgresAckEmojiPickStore(config.databaseUrl)
     : createMemoryAckEmojiPickStore();
   const providerKeys = providerKeysPresent(config);
+  const screenSecurity: SecurityScreenProbe | undefined = harness.models.screenSecurity
+    ? ({ payload, harnessId, modelId, systemPrompt, actorId, scopeLabel, signal }) =>
+        harness.models.screenSecurity!({
+          payload,
+          harnessId,
+          modelId,
+          systemPrompt,
+          signal,
+          recordModelCall: (rec) => {
+            modelGateway.recordCall({ at: Date.now(), scopeLabel, ...rec });
+            void budget?.record(actorId, estimateCostUsd(rec.inputTokens));
+          },
+        })
+    : undefined;
   const app = createApp({
     identity,
     ...(config.publicWebUrl ? { publicWebUrl: config.publicWebUrl } : {}),
@@ -1302,6 +1318,7 @@ export function buildApp(
     surfaceCache,
     channelPolicy,
     ...(harness.models.judge ? { ambientJudge: (s: string, pr: string) => harness.models.judge!(s, pr) } : {}),
+    ...(screenSecurity ? { screenSecurity } : {}),
     ambientCursors: artifactMap<{ lastJudgedTs: string; lastJudgedAt?: number }>("ambient_cursors"),
     ambientJudgments,
     ackEmojiPicks,
@@ -1599,6 +1616,7 @@ export function buildApp(
 
   return {
     app,
+    ...(screenSecurity ? { screenSecurity } : {}),
     deploymentLayer,
     deploymentLayerStore,
     brokeredTools,
@@ -1686,6 +1704,7 @@ export function serverDeps(
     ...(config.requireSignedPortalIdentity ? { requireSignedPortalIdentity: true } : {}),
     ...(built.replayDedupe ? { replayDedupe: built.replayDedupe } : {}),
     config: built.config,
+    ...(built.screenSecurity ? { screenSecurity: built.screenSecurity } : {}),
     ...(configuredModel ? { baseModelDefault: configuredModel } : {}),
     ...(carriedModelAuth ? { harnessCarriedModelAuth: carriedModelAuth } : {}),
     modelProviders: modelProviderAvailabilityFor(config.harness, providerKeysPresent(config)),

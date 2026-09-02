@@ -77,7 +77,11 @@ import {
 import { ELIDED_IMAGE_TEXT, planTapeSeed } from "./tape-fold.ts";
 import { compactTranscript, deterministicCompactSummary, estimateHistoryTokens } from "./context-compaction.ts";
 import { countTokens } from "../util/tokens.ts";
-import { parseSecurityScreenVerdict, SECURITY_SCREEN_SYSTEM_PROMPT } from "../security/security-posture.ts";
+import {
+  parseSecurityScreenVerdict,
+  SECURITY_SCREEN_STEP,
+  SECURITY_SCREEN_SYSTEM_PROMPT,
+} from "../security/security-posture.ts";
 import { errMessage } from "../util/errors.ts";
 import { createGrindMeter, meterGrindCall } from "./grind.ts";
 import { enforceGoal, goalSteeringNote, meterGoalCall, type GoalRecord } from "./goal.ts";
@@ -2109,7 +2113,7 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
           });
           await recordLlmRequest?.({
             turnSeq: null,
-            step: -1,
+            step: SECURITY_SCREEN_STEP,
             model: modelId,
             promptEnvelope: { system: systemPrompt, messages: [{ role: "user", content: payload }] },
             truncated: false,

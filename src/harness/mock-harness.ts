@@ -11,7 +11,7 @@ import { NonRetryableTurnError } from "../core/turn-error.ts";
 import { NeedsApproval } from "../tools/primitives.ts";
 import { deterministicCompactSummary, estimateHistoryTokens } from "./context-compaction.ts";
 import { countTokens } from "../util/tokens.ts";
-import { SECURITY_SCREEN_SYSTEM_PROMPT } from "../security/security-posture.ts";
+import { SECURITY_SCREEN_STEP, SECURITY_SCREEN_SYSTEM_PROMPT } from "../security/security-posture.ts";
 
 const READ_ONLY_BLOCKED_PREFIXES = [
   "!preamble",
@@ -796,7 +796,7 @@ export function createMockHarness(): Harness {
         });
         await recordLlmRequest?.({
           turnSeq: null,
-          step: -1,
+          step: SECURITY_SCREEN_STEP,
           model,
           promptEnvelope: { system: systemPrompt, messages: [{ role: "user", content: payload }] },
           truncated: false,
