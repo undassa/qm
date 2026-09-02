@@ -131,6 +131,16 @@ true`. Route53 authenticates through the cluster's own pod identity and needs no
 `DNS_PROVIDER_TYPE_CLOUDFLARE` needs one stored first at `POST
 /api/v2/projects/<project>/clusters/<cluster>/dns/credentials`. The same route creates a
 cluster in the first place — omit `cluster.clusterId` and Porter provisions a new one.
+
+Put the sandbox load balancer in the contract you create the cluster with, and treat every
+later revision as a one-at-a-time operation: **submit a revision only when the cluster
+reads `READY`, and let it finish.** A revision submitted while another is reconciling
+supersedes it, and the interrupted one stops with `CONCURRENT_UPDATE` ("contract revision
+is obsolete, and has been acked"). That path can strand the cluster in `UPDATING` with no
+reconcile running, and Porter gates both recovery routes on the status — a new contract is
+refused with `cluster status forbids updating` and deletion with `unable to delete cluster
+that is updating`. Cancelling the dead revision returns 200 without clearing it, so the
+cluster has to be unstuck by Porter support.
 Once the revision reconciles, `GET
 /api/v2/projects/<project>/clusters/<cluster>/load-balancers` returns the new
 `owner: "sandbox"` entry whose `address.value` is what the wildcard record points at.
