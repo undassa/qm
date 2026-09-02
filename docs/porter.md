@@ -29,16 +29,19 @@ for f in porter/apps/*.yaml; do porter apply -f "$f"; done
 Porter runs the services and assigns each **public** web service an `onporter.run`
 hostname with a Let's Encrypt certificate, so this path needs no DNS record, no TLS
 certificate, and no ingress controller. Only the portal is meant to be Internet-facing;
-auth, web-ui, and admin carry `private: true` so Porter creates no ingress for them and
-they are reachable only at their in-cluster address.
+core, auth, web-ui, and admin carry `private: true` so Porter creates no ingress for them
+and they are reachable only at their in-cluster address.
 
 Two things `porter apply` will not do for you:
 
 - **Building on an Apple Silicon machine fails.** `build.method: docker` builds locally
   for `linux/amd64` and the legacy builder cannot cross-compile: the apply dies with
   `image ... does not provide the specified platform (linux/amd64)`. Build and push with
-  `docker buildx build --platform linux/amd64 --push`, then point the app at the pushed
-  image with an `image: {repository, tag}` block, or use `porter apply --remote`.
+  `docker buildx build --platform linux/amd64 --push` to the registry Porter already
+  connected for the project (`porter registry list` prints it), then point the app at the
+  pushed image with an `image: {repository, tag}` block. `porter apply --remote` builds
+  server-side but is an opt-in project feature and fails with `remote build is not
+enabled for this project` until Porter enables it.
 - **Env groups created by `porter env create` are not visible to `porter apply`.** Both
   the `envGroups:` key and `--attach-env-groups` fail with `internal: unable to find
 latest environment with provided name`, because `porter env create` makes a
@@ -49,15 +52,24 @@ latest environment with provided name`, because `porter env create` makes a
 Nothing generates the inter-service wiring for you — `cli/src/services.ts` has `fly` and
 `docker` targets but no Porter one — so set it by hand on each app:
 
-| Service      | Wiring                                                                                                                                                                                                                                                                  |
-| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| all but core | `CORE_API_URL=http://qm-core-core.<namespace>.svc.cluster.local:8080`, `CORE_ORG_ID`, `CORE_SIGNING_SECRET`, `PORTAL_IDENTITY_SECRET`                                                                                                                                   |
-| core         | `ORG_ID`, `MODEL_PROVIDER`, `HARNESS`, `SANDBOX_BACKEND`, `PUBLIC_WEB_URL`/`WEB_UI_PUBLIC_URL` (the portal's hostname), `CAPABILITY_SECRET`, `CONNECTOR_SECRET_KEY`, `SKILL_SIGNING_SECRET`, and `DATABASE_URL` when `SESSION_STORE`/`RUN_STORE` are `postgres`         |
-| portal       | `PORTAL_PUBLIC_URL`, `PORTAL_SESSION_SECRET`, `WEB_UI_UPSTREAM`, `ADMIN_UPSTREAM`, `AUTH_BROKER_UPSTREAM`, `AUTH_BROKER_PREFIX=/idp`, and the `OIDC_*` set from `brokerWiring` in `cli/src/services.ts`                                                                 |
-| auth         | `AUTH_ISSUER=<portal>/idp`, `AUTH_CLIENT_ID`, `AUTH_CLIENT_SECRET`, `AUTH_REDIRECT_URI=<portal>/auth/callback`, `AUTH_TOKEN_SECRET`, `AUTH_SIGNING_JWK` (a P-256 private JWK), and a `RESEND_API_KEY` or SMTP credentials — without a mail transport nobody can sign in |
+| Service      | Wiring                                                                                                                                                                                                                                                                                                                                            |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| all          | `CORE_ORG_ID`/`ORG_ID`, `CORE_SIGNING_SECRET`, `PORTAL_IDENTITY_SECRET`                                                                                                                                                                                                                                                                           |
+| all but core | `CORE_API_URL=http://qm-core-core.<namespace>.svc.cluster.local:8080`                                                                                                                                                                                                                                                                             |
+| core         | `MODEL_PROVIDER`, `HARNESS`, `SANDBOX_BACKEND`, `PUBLIC_WEB_URL`/`WEB_UI_PUBLIC_URL` (the portal's hostname), `CAPABILITY_SECRET`, `CONNECTOR_SECRET_KEY`, `SKILL_SIGNING_SECRET`, and `DATABASE_URL` when `SESSION_STORE`/`RUN_STORE` are `postgres`                                                                                             |
+| portal       | `PORTAL_PUBLIC_URL`, `PORTAL_SESSION_SECRET`, `WEB_UI_UPSTREAM`, `ADMIN_UPSTREAM`, `AUTH_BROKER_UPSTREAM`, `AUTH_BROKER_PREFIX=/idp`, the `OIDC_*` set from `brokerWiring` in `cli/src/services.ts` (including `OIDC_CLIENT_SECRET`), and `OIDC_ALLOWED_EMAILS` or `OIDC_ALLOWED_EMAIL_DOMAIN` — production refuses to boot without an allow-list |
+| admin        | `ADMIN_BASE_PATH=/admin`                                                                                                                                                                                                                                                                                                                          |
+| auth         | `AUTH_ISSUER=<portal>/idp`, `AUTH_CLIENT_ID`, `AUTH_CLIENT_SECRET`, `AUTH_REDIRECT_URI=<portal>/auth/callback`, `AUTH_TOKEN_SECRET`, `AUTH_SIGNING_JWK` (a P-256 private JWK), `AUTH_EMAIL_FROM`, and `AUTH_EMAIL_TRANSPORT` with a `RESEND_API_KEY` or SMTP credentials — without a mail transport nobody can sign in                            |
+
+`src/deployment/secret-schema.ts` is the authoritative list of what each service
+requires; when a boot refusal names a variable this table doesn't, that file is the place
+to look.
 
 The portal's hostname is only knowable after its first apply, and core, portal, and auth
-all need it, so expect to apply twice: once to mint the hostname, once to wire it in.
+all need it, so expect to apply twice: once to mint the hostname, once to wire it in. The
+CLI does not print the assigned hostname — read it from the app's page in the dashboard,
+or from the ingress itself: `porter kubectl --print-kubeconfig` writes a short-lived
+kubeconfig, and `kubectl get ingress` lists every assigned host.
 
 Porter's own Postgres datastores are created from the dashboard. An RDS instance in the
 cluster's VPC works too, but Postgres 17 defaults to `rds.force_ssl=1`, so the URL needs
@@ -72,8 +84,9 @@ one from before Porter support landed rejects `SANDBOX_BACKEND=porter` at startu
 
 ## Giving published apps stable hostnames
 
-Apps the agent deploys are reachable only if the cluster gives them an address. Without
-one, `apply` fails with `the cluster assigned no hostname`, and core warns at startup.
+Apps the agent deploys are reachable only if the cluster gives them an address. With
+`PORTER_DEPLOY_APPS_DOMAIN` unset, core warns at startup and every publish is refused up
+front, before anything is created.
 
 The address comes from Porter's **sandbox ingress**, which is separate from the ingress
 that serves Porter apps and is enabled per cluster from the dashboard. A cluster without

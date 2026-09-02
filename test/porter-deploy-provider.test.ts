@@ -249,7 +249,7 @@ test("a body that vanished between list and terminate does not break destroy or 
   assert.match(await fetchText("/"), /^hello from/);
 });
 
-test("without an apps domain the cluster-assigned hostname becomes the URL", async () => {
+test("without an apps domain apply refuses up front and creates nothing", async () => {
   const bare = createPorterDeployProvider({
     namePrefix: "qmt",
     appPort,
@@ -257,13 +257,20 @@ test("without an apps domain the cluster-assigned hostname becomes the URL", asy
     client: fake.client,
     store,
   });
-  const d = deployment("dep-8");
-  const endpoint = await bare.apply(d, version({ "server.js": SERVER }, "node server.js"));
-  const body = fake.bodies().find((b) => b.phase === "running")!;
-  assert.deepEqual(body.networking, [{ port: appPort }]);
-  assert.match(endpoint.host, /^qmt-app-dep-8-[a-z0-9]{5}\.fake\.test$/);
+  await assert.rejects(
+    bare.apply(deployment("dep-8"), version({ "server.js": SERVER }, "node server.js")),
+    /PORTER_DEPLOY_APPS_DOMAIN is not set/,
+  );
+  assert.equal(fake.bodies().length, 0);
+  assert.equal(fake.volumeNames().length, 0);
+});
+
+test("a cluster-assigned hostname wins over the derived domain", async () => {
+  const d = deployment("dep-8b", "kept");
+  const endpoint = await provider.apply(d, version({ "server.js": SERVER }, "node server.js"));
+  assert.equal(endpoint.host, "kept.apps.test");
   assert.equal(endpoint.publicUrl, `https://${endpoint.host}/`);
-  assert.deepEqual(await bare.resolveEndpoint!({ ...d, endpoint }, version({}, "")), endpoint);
+  assert.deepEqual(await provider.resolveEndpoint!({ ...d, endpoint }, version({}, "")), endpoint);
   assert.match(await fetchText("/"), /^hello from/);
 });
 

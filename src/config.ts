@@ -770,7 +770,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   }
   if (env.DEPLOY_PROVIDER === "porter" && !env.PORTER_DEPLOY_APPS_DOMAIN) {
     console.warn(
-      "[config] DEPLOY_PROVIDER=porter without PORTER_DEPLOY_APPS_DOMAIN — published apps only get a URL if the cluster assigns one, so a deploy can succeed with no reachable address; point a wildcard DNS record at the cluster ingress and set PORTER_DEPLOY_APPS_DOMAIN to give every app a stable hostname.",
+      "[config] DEPLOY_PROVIDER=porter without PORTER_DEPLOY_APPS_DOMAIN — every publish will be refused because the app would have no address; enable sandbox ingress on the cluster, point a wildcard DNS record at it, and set PORTER_DEPLOY_APPS_DOMAIN.",
     );
   }
   for (const [selected, label] of [

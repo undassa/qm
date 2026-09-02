@@ -7,6 +7,7 @@ build:
 services:
   - name: core
     type: web
+    private: true
     run: node src/index.ts
     instances: 1
     cpuCores: 1
