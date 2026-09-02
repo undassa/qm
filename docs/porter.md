@@ -136,11 +136,35 @@ Put the sandbox load balancer in the contract you create the cluster with, and t
 later revision as a one-at-a-time operation: **submit a revision only when the cluster
 reads `READY`, and let it finish.** A revision submitted while another is reconciling
 supersedes it, and the interrupted one stops with `CONCURRENT_UPDATE` ("contract revision
-is obsolete, and has been acked"). That path can strand the cluster in `UPDATING` with no
-reconcile running, and Porter gates both recovery routes on the status — a new contract is
-refused with `cluster status forbids updating` and deletion with `unable to delete cluster
-that is updating`. Cancelling the dead revision returns 200 without clearing it, so the
-cluster has to be unstuck by Porter support.
+is obsolete, and has been acked"). That path can strand the cluster in `UPDATING`, and
+Porter gates both recovery routes on the status — a new contract is refused with `cluster
+status forbids updating` and deletion with `unable to delete cluster that is updating`.
+Cancelling the dead revision returns 200 without clearing it, so the cluster has to be
+unstuck by Porter support.
+
+A stranded cluster is not idle. Porter's Cluster API controllers keep reconciling it from
+Porter's own account, so tearing its AWS resources out by hand does not work: delete the
+EKS cluster and the nodes and they are rebuilt within minutes, by
+`arn:aws:iam::<account>:role/porter-manager` with a `aws.cluster.x-k8s.io` user agent —
+`aws cloudtrail lookup-events --lookup-attributes
+AttributeKey=EventName,AttributeValue=CreateCluster` shows the recreate. The reconcile
+loop enters the account through one door, so close that first: `porter-manager` and
+`porter-access-manager` each trust `arn:aws:iam::108458755588:role/CAPIManagement` under an
+external id, and dropping those two statements from their trust policies (`aws iam
+update-assume-role-policy`) stops the rebuild immediately. Only then does a manual sweep
+hold. **For a wedged cluster the IAM revoke comes first, not last** — the usual teardown
+order that leaves IAM until the end cannot terminate.
+
+Deleting a cluster through the API needs an admin-role Porter token: `DELETE
+/api/projects/<project>/clusters/<cluster>` answers a project API token with `403
+{"error":"insufficient permissions to perform action"}` even when that token may create
+clusters. Check that you hold one before you provision anything you will need to remove.
+
+The same status gate makes the contract endpoint useless for schema discovery on a wedged
+cluster. Porter resolves the cluster and checks its status _before_ it parses the protojson
+body, so an unknown field and a well-formed one come back with the identical `cluster status
+forbids updating`, and a nonexistent `clusterId` returns `sql: no rows in result set` just
+as uniformly — probing for whether a contract field exists needs a healthy cluster.
 Once the revision reconciles, `GET
 /api/v2/projects/<project>/clusters/<cluster>/load-balancers` returns the new
 `owner: "sandbox"` entry whose `address.value` is what the wildcard record points at.
