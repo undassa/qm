@@ -310,7 +310,7 @@ impl Mcp {
                 "body": s("тело целиком"), "description": s("описание"), "tools": s("инструменты"),
                 "model": s("модель"), "set": s("набор умений") }, "required": ["name", "body"] } }));
         tools.push(json!({ "name": "sensor-spec-add", "description": "объявить датчик: где искать, чем вынимать, как назвать факт",
-            "inputSchema": { "type": "object", "properties": { "fact": s("род факта"),
+            "inputSchema": { "type": "object", "properties": { "skip": s("строка, которую датчик не считает находкой — образец"), "allow": s("места, где правило не действует — образцы пути через пробел"), "fact": s("род факта"),
                 "reads": s("что читать: backend/**/*.rs"), "extract": s("образец: пустой — факт о самом файле"),
                 "note": s("зачем"), "how": s("extract · files · secret-fields · declared-paths · lines · domain-vs-check · contract-vs-schema"), "drop": json!({"type":"boolean"}) }, "required": ["fact"] } }));
         tools.push(json!({ "name": "sensor-specs", "description": "чем снимать факты: объявленные датчики",
@@ -480,6 +480,13 @@ impl Mcp {
                 "probe": s("запрос, подсаживающий нарушение — им самотест роняет пункт"),
                 "why": s("почему способа нет — для рода unknown"),
                 "drop": json!({"type":"boolean","description":"снять пункт вместе с его замерами"}) }, "required": ["phase", "item", "itemKind"] } }));
+        tools.push(json!({ "name": "ceiling-set", "description": "объявить потолок долга правила: сколько находок сегодня терпимо и почему; держит не долг, а его рост",
+            "inputSchema": { "type": "object", "properties": {
+                "rule": s("имя правила — оно же род факта"),
+                "ceiling": json!({"type":"integer","description":"сколько находок терпимо"}),
+                "why": s("что этот потолок держит; без причины дверь отказывает"),
+                "drop": json!({"type":"boolean","description":"снять объявленное этой же дверью"}) },
+                "required": ["rule"] } }));
         tools.push(json!({ "name": "requirements-of", "description": "требования задачи; объявленное отсутствие доезжает фразой, а не пустотой",
             "inputSchema": { "type": "object", "properties": { "id": s("имя задачи") }, "required": ["id"] } }));
         tools.push(json!({ "name": "tasks-of", "description": "задачи истории через требования; исключение называется исключением",
@@ -522,7 +529,7 @@ impl Mcp {
     const WRITES: &[&str] = &[
         "put", "put-section", "rm", "document-add", "reparse", "reproject", "sweep",
         "task-state-push", "code-facts-push", "skills-push", "preflight-push", "worktree-push",
-        "frozen-tree-set", "scheme-term-set", "orphans-purge", "surface-source-add", "sensor-spec-add", "agent-set", "donor-add", "guard-add", "gate-sign", "gate-item-set", "method-set", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "step-selftest", "version-close", "phase-gate-set", "exception-set",
+        "ceiling-set", "frozen-tree-set", "scheme-term-set", "orphans-purge", "surface-source-add", "sensor-spec-add", "agent-set", "donor-add", "guard-add", "gate-sign", "gate-item-set", "method-set", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "step-selftest", "version-close", "phase-gate-set", "exception-set",
         "author-set", "screen-area-set", "skill-set", "version-freeze",
         "links-rewrite", "links-retarget",
     ];
@@ -1336,7 +1343,8 @@ impl Mcp {
             "sensor-spec-add" => {
                 let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
                 match crate::projector::declare_sensor_spec(&self.pool, p, &g("fact"), &g("reads"),
-                        &g("extract"), &g("note"), &g("how"), args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
+                        &g("extract"), &g("note"), &g("how"), &g("skip"), &g("allow"),
+                                                          args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
                 }
@@ -1501,6 +1509,14 @@ impl Mcp {
                     return refusal(Miss::Db("заморозка без каталога не объявляется".into()));
                 }
                 let drop = args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false);
+                // Заморозка без хэша — не заморозка. Дверь приняла пустой хэш
+                // однажды (имя поля перепутали), и гейт позеленел: сверять было
+                // не с чем, а «не с чем» прочиталось как «сошлось».
+                if !drop && g("hash").trim().is_empty() {
+                    return refusal(Miss::Db(
+                        "заморозка без хэша ничего не держит: назовите хэш дерева либо снимите заморозку `drop=true`"
+                            .into()));
+                }
                 let client = self.pool.get().await.expect("пул отдал соединение");
                 let done = if drop {
                     client.execute("DELETE FROM project_frozen_tree WHERE project_id=$1 AND path=$2",
@@ -1838,6 +1854,18 @@ impl Mcp {
                 Ok(v) => ok(v),
                 Err(e) => refusal(Miss::Db(e.to_string())),
             },
+            "ceiling-set" => {
+                let rule = args.get("rule").and_then(|v| v.as_str()).unwrap_or("");
+                let ceiling = args.get("ceiling").and_then(|v| v.as_i64())
+                    .or_else(|| args.get("ceiling").and_then(|v| v.as_str()).and_then(|t| t.parse().ok()))
+                    .unwrap_or(0) as i32;
+                let why = args.get("why").and_then(|v| v.as_str()).unwrap_or("");
+                match crate::projector::set_ceiling(&self.pool, p, rule, ceiling, why,
+                        args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
+                    Ok(v) => ok(v),
+                    Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
+                }
+            }
             "gate-item-set" => {
                 let phase = args.get("phase").and_then(|v| v.as_str()).unwrap_or("");
                 let item = args.get("item").and_then(|v| v.as_str()).unwrap_or("");

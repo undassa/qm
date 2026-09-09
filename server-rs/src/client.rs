@@ -403,6 +403,12 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
             continue;
         }
         let how = spec["how"].as_str().unwrap_or("extract");
+        // Строка, которую датчик не считает находкой, и места, где правило не
+        // действует. Без первого правило ловит себя же в объяснении, без
+        // второго — запрещает шкале называть размеры, а часам — форматировать
+        // время: то есть запрещает единственному месту быть этим местом.
+        let skip = spec["skip"].as_str().unwrap_or("");
+        let allow: Vec<&str> = spec["allow"].as_str().unwrap_or("").split_whitespace().collect();
         // Объявленное дерево спрашивается у сервера, а не обходится образцом:
         // объявлены в основном КАТАЛОГИ, и половина их — «описано вперёд», то
         // есть на диске их нет. Обход по диску такую строку не найдёт вовсе и
@@ -738,8 +744,16 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
                 // Построчный датчик: имя факта — путь и НОМЕР строки, пояснение —
                 // сама строка. Оговорки («это донор», «отменено») правилом не
                 // разбираются: датчик подаёт наблюдение, а решает гейт.
+                // Место, где правило объявлено недействующим, пропускается
+                // целиком: скажет оно ровно то, ради чего это место и заведено.
+                if allow.iter().any(|a| short == *a || short.ends_with(a)) {
+                    continue;
+                }
                 for (n, line) in text.split('\n').enumerate() {
                     if re.is_empty() || !suspect_line(re, line) {
+                        continue;
+                    }
+                    if !skip.is_empty() && suspect_line(skip, line) {
                         continue;
                     }
                     let key = format!("{short}:{}", n + 1);

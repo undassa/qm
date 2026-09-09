@@ -1430,6 +1430,31 @@ CREATE TABLE IF NOT EXISTS project_sensor_spec (
 -- объявлений Rust: `#[derive(Debug)]`, за ним поля, и голое секрето-подобное
 -- имя среди них. Последнее не выражается образцом и потому названо родом.
 ALTER TABLE project_sensor_spec ADD COLUMN IF NOT EXISTS how text NOT NULL DEFAULT 'extract';
+-- Строка, которую датчик НЕ считает находкой. Комментарий — не код: правило
+-- «не кричать прописными» ловит слово `uppercase` в объяснении самого правила,
+-- и без этого пропуска у каждого правила появляется столько ложных находок,
+-- сколько раз о нём написали. Пустая строка значит «пропускать нечего».
+ALTER TABLE project_sensor_spec ADD COLUMN IF NOT EXISTS skip_re text NOT NULL DEFAULT '';
+-- Места, где правило не действует, перечнем образцов пути через пробел.
+-- Шкала размеров живёт в одном файле, и запрещать ей называть размеры значит
+-- запрещать шкале быть шкалой.
+ALTER TABLE project_sensor_spec ADD COLUMN IF NOT EXISTS allow text NOT NULL DEFAULT '';
+
+-- ХРАПОВИК: объявленный потолок долга, который может только опускаться.
+--
+-- Гейт, краснеющий в день, когда его завели, назавтра выключают. Долг, который
+-- уже есть, не должен никого держать; РОСТ долга — должен. Потолок называет,
+-- сколько находок сегодня терпимо, и почему.
+--
+-- Красным становится и счёт НИЖЕ потолка: долг погасили, а потолок не опустили —
+-- значит завтра он молча вырастет обратно, и никто не заметит.
+CREATE TABLE IF NOT EXISTS rule_ceiling (
+  project_id text NOT NULL,
+  rule text NOT NULL,
+  ceiling integer NOT NULL,
+  why text NOT NULL DEFAULT '',
+  origin text NOT NULL DEFAULT 'declared',
+  PRIMARY KEY (project_id, rule));
 ALTER TABLE rule_exception ADD COLUMN IF NOT EXISTS closes text NOT NULL DEFAULT '';
 ALTER TABLE rule_exception ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'declared';
 ALTER TABLE project_feature_requirements ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'declared';
@@ -5628,7 +5653,7 @@ pub async fn declare_stand_row(
 #[allow(clippy::too_many_arguments)]
 pub async fn declare_sensor_spec(
     pool: &Pool, project: &str, fact: &str, reads: &str, extract: &str, note: &str, how: &str,
-    drop_it: bool,
+    skip: &str, allow: &str, drop_it: bool,
 ) -> Result<Value, tokio_postgres::Error> {
     if fact.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "датчик без имени факта не объявляется" }));
@@ -5649,24 +5674,57 @@ pub async fn declare_sensor_spec(
                           "why": format!("род датчика не из этих: {}", KINDS.join(" · ")) }));
     }
     client.execute(
-        "INSERT INTO project_sensor_spec (project_id, fact, reads, extract_re, note, how)
-         VALUES ($1,$2,$3,$4,$5,$6)
+        "INSERT INTO project_sensor_spec (project_id, fact, reads, extract_re, note, how, skip_re, allow)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
          ON CONFLICT (project_id, fact) DO UPDATE SET reads = EXCLUDED.reads,
-           extract_re = EXCLUDED.extract_re, note = EXCLUDED.note, how = EXCLUDED.how",
-        &[&project, &fact, &reads, &extract, &note, &how]).await?;
+           extract_re = EXCLUDED.extract_re, note = EXCLUDED.note, how = EXCLUDED.how,
+           skip_re = EXCLUDED.skip_re, allow = EXCLUDED.allow",
+        &[&project, &fact, &reads, &extract, &note, &how, &skip, &allow]).await?;
     Ok(json!({ "status": "declared", "fact": fact, "reads": reads, "how": how }))
+}
+
+/// Объявить потолок долга: сколько находок правила сегодня терпимо и почему.
+///
+/// Гейт, краснеющий в день, когда его завели, назавтра выключают. Потолок даёт
+/// правилу приехать в проект, где долг уже есть: держит он не долг, а его РОСТ.
+pub async fn set_ceiling(
+    pool: &Pool, project: &str, rule: &str, ceiling: i32, why: &str, drop_it: bool,
+) -> Result<Value, tokio_postgres::Error> {
+    if rule.trim().is_empty() {
+        return Ok(json!({ "status": "nameless", "why": "потолок без правила не объявляется" }));
+    }
+    let client = pool.get().await.expect("пул отдал соединение");
+    if drop_it {
+        let gone = client
+            .execute("DELETE FROM rule_ceiling WHERE project_id = $1 AND rule = $2", &[&project, &rule])
+            .await?;
+        return Ok(json!({ "status": if gone > 0 { "dropped" } else { "not_found" }, "rule": rule }));
+    }
+    // Потолок без причины — это разрешение, выданное неизвестно кем и зачем.
+    // Через полгода его никто не решится опустить: непонятно, что он держит.
+    if why.trim().is_empty() {
+        return Ok(json!({ "status": "no_reason",
+                          "why": "потолок без причины — дыра с разрешением: назовите, что он держит" }));
+    }
+    client.execute(
+        "INSERT INTO rule_ceiling (project_id, rule, ceiling, why, origin)
+         VALUES ($1,$2,$3,$4,'declared')
+         ON CONFLICT (project_id, rule) DO UPDATE SET ceiling = EXCLUDED.ceiling, why = EXCLUDED.why",
+        &[&project, &rule, &ceiling, &why]).await?;
+    Ok(json!({ "status": "declared", "rule": rule, "ceiling": ceiling }))
 }
 
 /// Чем снимать факты: перечень объявленных датчиков для клиента.
 pub async fn sensor_specs(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
     let client = pool.get().await.expect("пул отдал соединение");
     let rows = client
-        .query("SELECT fact, reads, extract_re, note, how FROM project_sensor_spec
+        .query("SELECT fact, reads, extract_re, note, how, skip_re, allow FROM project_sensor_spec
                  WHERE project_id = $1 ORDER BY fact", &[&project]).await?;
     Ok(json!({ "specs": rows.iter().map(|r| json!({
         "fact": r.get::<_, String>(0), "reads": r.get::<_, String>(1),
         "extract": r.get::<_, String>(2), "note": r.get::<_, String>(3),
-        "how": r.get::<_, String>(4) })).collect::<Vec<_>>() }))
+        "how": r.get::<_, String>(4), "skip": r.get::<_, String>(5),
+        "allow": r.get::<_, String>(6) })).collect::<Vec<_>>() }))
 }
 
 /// Объявить проект: имя и репозиторий, которому он принадлежит.
