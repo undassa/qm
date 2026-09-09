@@ -1,0 +1,3283 @@
+/*
+ * Язык «Волн»: цвет несёт состояние, моноширинный — идентификатор, у каждого
+ * числа рядом сказано, что оно значит. Тема одна, тёмная.
+ */
+:root {
+  color-scheme: dark;
+  --ground: #0a0a0b;
+  --panel: #131316;
+  --panel-2: #17171b;
+  --line: #26262b;
+  --line-soft: #1e1e22;
+  --ink: #e9e9ec;
+  --ink-2: #a7a7b0;
+  --muted: #71717c;
+  --done: #4f9d6b;
+  --ready: #e0a458;
+  --wait: #3d3d46;
+  --warn: #c2604f;
+  --code: #6b7fb5;
+  --live: #5aa6c4;
+  --sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+h1,
+h2,
+h3 {
+  margin: 0;
+  text-wrap: balance;
+}
+button {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+:focus-visible {
+  outline: 2px solid var(--ready);
+  outline-offset: 2px;
+}
+
+/* ─── каркас ─────────────────────────────────────────────────────────── */
+.app {
+  display: grid;
+  grid-template-columns: 264px minmax(0, 1fr);
+  height: 100vh;
+  height: 100dvh;
+}
+.side {
+  border-right: 1px solid var(--line);
+  padding: 14px 10px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.main {
+  overflow-y: auto;
+  padding: 22px 26px 60px;
+  /*
+   * Одна мера на всю страницу: шапка, полосы и список кончаются на одной
+   * вертикали. Проза внутри уже — строка длиной во всю страницу не читается.
+   */
+  --measure: 1180px;
+}
+.main > .head,
+.main > .stats,
+.main > .switch,
+.main > .areas,
+.main > .qs,
+.main > .articles,
+.main > .board,
+.main > .chain-line,
+.main > .rule,
+.main > h3 {
+  max-width: var(--measure);
+}
+
+/* ─── место проекта ──────────────────────────────────────────────────── */
+.place {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  width: 100%;
+  text-align: start;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  margin-bottom: 12px;
+}
+.place:hover {
+  border-color: color-mix(in srgb, var(--ready) 45%, var(--line));
+}
+.place-k {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.place-n {
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+/* ─── единый сайдбар: этапы процесса и их сущности ───────────────────── */
+.phase-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  text-align: start;
+  padding: 7px 8px;
+  border: 0;
+  background: none;
+  border-radius: 7px;
+  margin-top: 10px;
+}
+.phase-head:hover {
+  background: var(--panel-2);
+}
+.phase-head.on {
+  background: var(--panel-2);
+  box-shadow: inset 2px 0 0 var(--ready);
+}
+.phase-key {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--muted);
+  font-weight: 600;
+}
+.phase-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+.gate {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.gate.ok {
+  border-color: color-mix(in srgb, var(--done) 45%, var(--line));
+  color: var(--done);
+}
+.gate.bad {
+  border-color: color-mix(in srgb, var(--warn) 55%, var(--line));
+  color: var(--warn);
+}
+.ent {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  text-align: start;
+  padding: 3px 8px 3px 22px;
+  border: 0;
+  background: none;
+  border-radius: 6px;
+  color: var(--ink-2);
+  font-size: 12.5px;
+}
+.ent:hover {
+  background: var(--panel-2);
+  color: var(--ink);
+}
+.ent.on {
+  background: var(--panel-2);
+  color: var(--ink);
+}
+.ent-n {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ent-c {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.ent-c b {
+  color: var(--warn);
+  font-weight: 600;
+}
+
+/* ─── заголовок области ──────────────────────────────────────────────── */
+.head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: baseline;
+  justify-content: space-between;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 20px;
+}
+.head h1 {
+  font-size: 19px;
+  font-weight: 600;
+}
+.prov {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.prov b {
+  color: var(--ink-2);
+  font-weight: 500;
+}
+
+/* ─── находки ────────────────────────────────────────────────────────── */
+.finds {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.find {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+  width: 100%;
+  text-align: start;
+  background: var(--panel-2);
+  border: 1px solid var(--line-soft);
+  border-radius: 9px;
+  padding: 11px 14px 11px 16px;
+  position: relative;
+  overflow: hidden;
+}
+.find::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--warn);
+}
+.find.soft::before {
+  background: var(--ready);
+}
+.find.code::before {
+  background: var(--code);
+}
+.find:hover {
+  border-color: var(--line);
+}
+.find-n {
+  font-family: var(--mono);
+  font-size: 21px;
+  font-weight: 600;
+  min-width: 2.4ch;
+  text-align: end;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+.find-t {
+  font-size: 13.5px;
+}
+.find-m {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+}
+.find-go {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--ink-2);
+  white-space: nowrap;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 4px 10px;
+  background: var(--ground);
+}
+.find-go:hover {
+  border-color: color-mix(in srgb, var(--ready) 50%, var(--line));
+  color: var(--ink);
+}
+
+/* ─── таблица сущности ───────────────────────────────────────────────── */
+.tablewrap {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-2);
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+th {
+  position: sticky;
+  top: 0;
+  background: var(--panel-2);
+  text-align: start;
+  white-space: nowrap;
+  padding: 9px 12px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+}
+td {
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line-soft);
+  vertical-align: top;
+}
+tbody tr:last-child td {
+  border-bottom: 0;
+}
+td.mono {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+td.num {
+  text-align: end;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.note {
+  color: var(--ink-2);
+  font-size: 13px;
+  max-width: 80ch;
+  margin: 0 0 18px;
+}
+.note b {
+  color: var(--ink);
+  font-weight: 600;
+}
+.empty {
+  color: var(--muted);
+  font-size: 13px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  padding: 14px 16px;
+  background: color-mix(in srgb, var(--panel) 60%, transparent);
+}
+
+/* ─── конституция ────────────────────────────────────────────────────── */
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
+  gap: 26px 32px;
+  padding: 16px 20px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  margin-bottom: 18px;
+}
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.stat-n {
+  font-family: var(--mono);
+  font-size: 24px;
+  font-weight: 600;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+.stat-n.warn {
+  color: var(--warn);
+}
+.stat-n.done {
+  color: var(--done);
+}
+.stat-of {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--muted);
+}
+.stat-l {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+  min-height: 2.7em;
+}
+
+.articles {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.art {
+  background: var(--panel-2);
+  border: 1px solid var(--line-soft);
+  border-radius: 9px;
+  overflow: hidden;
+  position: relative;
+}
+.art::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--wait);
+}
+.art.held::before {
+  background: var(--done);
+}
+.art.bad::before {
+  background: var(--warn);
+}
+.art-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: baseline;
+  width: 100%;
+  text-align: start;
+  border: 0;
+  background: none;
+  padding: 11px 14px 11px 17px;
+}
+.art-head:hover {
+  background: color-mix(in srgb, var(--ready) 5%, transparent);
+}
+.art-no {
+  font-family: var(--mono);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--muted);
+  min-width: 2ch;
+  text-align: end;
+  font-variant-numeric: tabular-nums;
+}
+.art-t {
+  font-size: 13.5px;
+}
+.art-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.art-cite {
+  flex: 0 0 74px;
+  text-align: right;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.art-amend {
+  flex: 0 0 78px;
+  text-align: right;
+  color: var(--live);
+}
+.art-check {
+  flex: 0 0 96px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  text-align: center;
+  color: var(--muted);
+}
+.art-check.none {
+  border-style: dashed;
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 40%, var(--line));
+}
+.art-check.ok {
+  color: var(--done);
+  border-color: color-mix(in srgb, var(--done) 45%, var(--line));
+}
+.art-check.bad {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 55%, var(--line));
+}
+.art-body {
+  padding: 0 14px 14px 17px;
+  border-top: 1px solid var(--line-soft);
+}
+.art-text {
+  color: var(--ink-2);
+  font-size: 13px;
+  white-space: pre-wrap;
+  margin: 12px 0;
+  max-width: 84ch;
+}
+.art-line {
+  margin: 6px 0 0;
+  font-size: 12.5px;
+  color: var(--ink-2);
+}
+.art-k {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-right: 9px;
+}
+
+/* ─── дровер: предмет сбоку, список за ним на месте ──────────────────── */
+.drawer-scrim {
+  position: fixed;
+  inset: 0;
+  background: color-mix(in srgb, #000 55%, transparent);
+  display: flex;
+  justify-content: flex-end;
+  z-index: 20;
+}
+.drawer {
+  width: min(760px, 100%);
+  height: 100%;
+  background: var(--panel);
+  border-left: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  outline: none;
+}
+.drawer-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 22px 14px;
+  border-bottom: 1px solid var(--line);
+}
+.drawer-head h2 {
+  font-size: 16px;
+  font-weight: 600;
+  max-width: 60ch;
+}
+.drawer-close {
+  flex: none;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--ink-2);
+  border-radius: 7px;
+  width: 28px;
+  height: 28px;
+  line-height: 1;
+}
+.drawer-close:hover {
+  color: var(--ink);
+  border-color: color-mix(in srgb, var(--ready) 50%, var(--line));
+}
+.drawer-body {
+  overflow-y: auto;
+  padding: 20px 22px 32px;
+}
+
+/*
+ * Размеченное тело: читается как текст, а не как исходник.
+ *
+ * Набор моноширинный — тот же, которым везде набраны идентификаторы. В этом
+ * корпусе проза и имена идут вперемешку, и разнобой шрифтов рвал строку на
+ * куски; одна ширина знака ставит `FR-RT-09` в текст, не выделяя его в объект.
+ * Плата — знак шире, поэтому строка короче и кегль на полтора пункта ниже.
+ */
+.md {
+  font-family: var(--mono);
+  font-variant-ligatures: none;
+}
+.md p {
+  margin: 0 0 15px;
+  max-width: 68ch;
+  color: var(--ink-2);
+  font-size: 12.5px;
+  line-height: 1.72;
+}
+.md b {
+  color: var(--ink);
+  font-weight: 600;
+}
+.md i {
+  color: var(--ink-2);
+}
+.md code {
+  font-family: inherit;
+  font-size: 1em;
+  background: var(--panel-2);
+  border: 1px solid var(--line-soft);
+  border-radius: 3px;
+  padding: 0 2px;
+  color: var(--ink);
+}
+.md a {
+  color: var(--live);
+  text-underline-offset: 3px;
+}
+.md blockquote {
+  margin: 0 0 15px;
+  padding: 10px 14px;
+  border-left: 2px solid var(--ready);
+  background: color-mix(in srgb, var(--ready) 6%, transparent);
+  color: var(--ink-2);
+  font-size: 12.5px;
+  line-height: 1.72;
+  max-width: 68ch;
+}
+.md pre {
+  margin: 0 0 14px;
+  padding: 12px 14px;
+  background: var(--panel-2);
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--ink-2);
+}
+
+.drawer-facts {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px 18px;
+  margin: 22px 0 0;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+.drawer-facts dt {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.drawer-facts dd {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+.drawer-facts dd.none {
+  color: var(--warn);
+}
+.drawer-facts dd.calm {
+  color: var(--muted);
+}
+.drawer-facts dd.done {
+  color: var(--done);
+}
+.drawer-facts dd.ready {
+  color: var(--ready);
+}
+.drawer-facts.wide {
+  border-top: 0;
+  margin-top: 0;
+  padding-top: 0;
+}
+
+/* ─── доска волн ─────────────────────────────────────────────────────── */
+/*
+ * Столбец — заход, а не раздел плана. Цвет полосы слева говорит одно и то же
+ * везде: зелёная — сделано, янтарная — можно брать, серая — ждёт.
+ */
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  margin: 22px 0 14px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.sw {
+  width: 3px;
+  height: 13px;
+  border-radius: 2px;
+  background: var(--wait);
+}
+.sw.done {
+  background: var(--done);
+}
+.sw.ready {
+  background: var(--ready);
+}
+.sw.crit {
+  background: var(--code);
+}
+
+.board {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 12px;
+  overflow-x: auto;
+  padding: 4px 4px 18px;
+  margin: 0;
+  list-style: none;
+  scrollbar-color: var(--line) transparent;
+}
+.col {
+  flex: 0 0 208px;
+  align-self: flex-start;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.col > h2 {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.col > h2 em {
+  font-style: normal;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+.stack {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.card {
+  position: relative;
+  border-radius: 7px;
+  overflow: hidden;
+  background: var(--panel-2);
+  border: 1px solid var(--line-soft);
+}
+.card::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--wait);
+}
+.card.done::before {
+  background: var(--done);
+}
+.card.ready::before {
+  background: var(--ready);
+}
+.card.crit::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--code);
+}
+.card > button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 0;
+  padding: 8px 10px 9px 14px;
+}
+.card:hover {
+  border-color: var(--line);
+}
+.card-id {
+  display: block;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+.card-t {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin-top: 3px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--muted);
+}
+.card-n {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.card-m {
+  color: var(--ink-2);
+}
+.card-n .none {
+  color: var(--warn);
+}
+
+.card.dim {
+  opacity: 0.32;
+}
+
+/* Выбор между двумя законными раскладками стоит рядом с числом, которое он меняет. */
+.switch {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin: 22px 0 4px;
+}
+.switch button {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.switch button.on {
+  border-color: color-mix(in oklab, var(--ready) 50%, var(--line));
+  color: var(--ink);
+}
+.switch .prov {
+  margin: 0;
+}
+
+/* ─── реестр вопросов ────────────────────────────────────────────────── */
+/* Мерка стоит над числами, которые ею получены, — иначе они просто счёт. */
+.rule {
+  margin: 22px 0 4px;
+  padding: 14px 18px;
+  border-left: 3px solid var(--ready);
+  background: var(--panel);
+  border-radius: 0 8px 8px 0;
+  color: var(--ink-2);
+  font-size: 13.5px;
+  max-width: 82ch;
+}
+.rule b {
+  color: var(--ink);
+  font-weight: 600;
+}
+.rule cite {
+  display: block;
+  margin-top: 8px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-style: normal;
+  color: var(--muted);
+}
+
+.qs {
+  list-style: none;
+  margin: 14px 0 40px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.q {
+  background: var(--panel);
+  border: 1px solid var(--line-soft);
+  border-left: 3px solid var(--wait);
+  border-radius: 7px;
+  overflow: hidden;
+}
+.q.open {
+  border-left-color: var(--ready);
+}
+.q.bad {
+  border-left-color: var(--warn);
+}
+.q > button {
+  display: flex;
+  gap: 14px;
+  align-items: baseline;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 0;
+  padding: 9px 14px;
+}
+.q > button > b {
+  flex: 0 0 92px;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 500;
+}
+.q-t {
+  flex: 1;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+.q-k {
+  flex: 0 0 200px;
+  text-align: right;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+}
+.q-k i {
+  font-style: normal;
+  color: var(--warn);
+}
+.q-gate {
+  margin: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  padding: 0 14px 10px 120px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--muted);
+  max-width: 92ch;
+}
+
+/* Срезы покрытия: полный — зелёной каймой, пустой — пунктиром. */
+.areas {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 20px 0 4px;
+}
+.chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 4px 11px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+.chip b {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.chip span {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.chip.full {
+  border-color: color-mix(in oklab, var(--done) 45%, var(--line));
+}
+.chip.full span {
+  color: var(--done);
+}
+.chip.none {
+  border-style: dashed;
+}
+.chip.none span {
+  color: var(--warn);
+}
+.q > button:disabled {
+  cursor: default;
+}
+
+/* Заголовок внутри документа: он делит текст, а не соперничает с шапкой дровера. */
+.md h3,
+.md h4,
+.md h5,
+.md h6 {
+  margin: 24px 0 10px;
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.md > :first-child {
+  margin-top: 0;
+}
+.md-table {
+  margin: 0 0 15px;
+  overflow-x: auto;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+}
+.md-table table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12px;
+}
+.md-table th,
+.md-table td {
+  padding: 7px 12px;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--ink-2);
+}
+.md-table th {
+  color: var(--muted);
+  font-weight: 500;
+  white-space: nowrap;
+  background: var(--panel-2);
+}
+.md-table tr:last-child td {
+  border-bottom: 0;
+}
+
+/*
+ * Правая колонка строки — мера, а не подпись: одна ширина на весь список, числа
+ * табличные, поэтому они стоят столбиком и сравниваются взглядом.
+ */
+.q-num {
+  display: flex;
+  flex: 0 0 124px;
+  gap: 6px;
+  align-items: baseline;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-2);
+}
+.q-num b {
+  flex: 0 0 34px;
+  text-align: right;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.q-num i {
+  font-style: normal;
+  color: var(--muted);
+}
+.q-num.none i {
+  color: var(--warn);
+}
+.q-row {
+  display: flex;
+  gap: 14px;
+  align-items: baseline;
+  padding: 9px 14px;
+}
+.q-row > b {
+  flex: 0 0 92px;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 500;
+}
+.q-t.muted {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Подзаголовок списка: два разных предмета в одном столбце должны быть названы. */
+.group {
+  margin: 22px 0 0;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.main > .group {
+  max-width: var(--measure);
+}
+
+/* Глубина покрытия: столбик читается сравнением длин, а не чтением чисел. */
+.depth {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 12px 0 8px;
+  max-width: var(--measure);
+}
+.depth-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+}
+.depth-k {
+  flex: 0 0 108px;
+  text-align: right;
+}
+.depth-bar {
+  flex: 1;
+  height: 14px;
+  background: var(--panel);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.depth-bar i {
+  display: block;
+  height: 100%;
+  background: var(--wait);
+}
+.depth-bar i.thin {
+  background: var(--ready);
+}
+.depth-bar i.ok {
+  background: var(--done);
+}
+.depth-bar i.bad {
+  background: var(--warn);
+}
+.depth-n {
+  flex: 0 0 42px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-2);
+}
+.chip.on {
+  border-color: var(--ready);
+  color: var(--ink);
+}
+
+/* Колонки таблицы: столбик имён, а не абзац через точку. */
+.cols {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--ink-2);
+}
+.cols li {
+  padding: 5px 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--line-soft);
+  border-radius: 5px;
+}
+
+/*
+ * Воронка трассируемости: три полосы одной шкалы одна под другой. Сравниваются
+ * длины, а не числа, поэтому подсистемы видно рядом, а не по очереди.
+ */
+.funnel {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 18px 0 40px;
+  max-width: var(--measure);
+}
+.funnel-head,
+.funnel-row {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr) 74px 128px;
+  gap: 14px;
+  align-items: center;
+}
+.funnel-head {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--line-soft);
+  margin-bottom: 4px;
+}
+.funnel-head span:nth-child(3),
+.funnel-head span:nth-child(4) {
+  text-align: right;
+}
+.funnel-row {
+  padding: 5px 0;
+  border-radius: 4px;
+}
+.funnel-row:hover {
+  background: var(--panel);
+}
+.funnel-k {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--ink-2);
+}
+.funnel-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.funnel-bars i {
+  display: block;
+  height: 5px;
+  border-radius: 2px;
+  min-width: 2px;
+  position: relative;
+  overflow: hidden;
+}
+.funnel-bars i.all {
+  background: color-mix(in oklab, var(--done) 55%, var(--wait));
+}
+.funnel-bars i.con {
+  background: var(--ready);
+}
+.funnel-bars i.code {
+  background: var(--code);
+}
+.funnel-bars i.code em {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  background: var(--warn);
+}
+.funnel-n {
+  text-align: right;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-2);
+}
+.funnel-n.off {
+  color: var(--muted);
+}
+.funnel-bars i.none {
+  background: transparent;
+}
+.sw.all {
+  background: color-mix(in oklab, var(--done) 55%, var(--wait));
+}
+.sw.con {
+  background: var(--ready);
+}
+.sw.code {
+  background: var(--code);
+}
+.sw.red {
+  background: var(--warn);
+}
+
+/*
+ * Матрица риска: строка — влияние, столбец — вероятность. Правый верхний угол
+ * горячее прочих, и это видно цветом, а не подписью.
+ */
+.matrix {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 20px 0 36px;
+  max-width: var(--measure);
+}
+.matrix-row {
+  display: grid;
+  grid-template-columns: 148px repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  align-items: stretch;
+}
+.matrix-head span {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding-bottom: 2px;
+}
+.matrix-k {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding-right: 4px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+  text-align: right;
+}
+.matrix-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 76px;
+  padding: 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line-soft);
+  background: var(--panel);
+}
+.matrix-cell.heat-1 {
+  border-color: var(--line-soft);
+}
+.matrix-cell.heat-2 {
+  border-color: color-mix(in oklab, var(--ready) 38%, var(--line));
+  background: color-mix(in oklab, var(--ready) 5%, var(--panel));
+}
+.matrix-cell.heat-3 {
+  border-color: color-mix(in oklab, var(--warn) 48%, var(--line));
+  background: color-mix(in oklab, var(--warn) 7%, var(--panel));
+}
+.matrix-cell.empty {
+  border-style: dashed;
+  background: none;
+}
+.matrix-risk {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.matrix-risk b {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--ink);
+}
+.matrix-risk i {
+  font-style: normal;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--ink-2);
+}
+.matrix-risk em {
+  font-style: normal;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--muted);
+}
+
+/*
+ * Требование со своими проверками. Проверка сама по себе ничего не говорит —
+ * смысл у неё от того, что она доказывает, и потому она стоит под ним.
+ */
+.proofs {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 12px 0 40px;
+  max-width: var(--measure);
+}
+.proof {
+  display: grid;
+  grid-template-columns: 168px minmax(0, 1fr);
+  gap: 14px;
+  padding: 8px 14px;
+  background: var(--panel);
+  border: 1px solid var(--line-soft);
+  border-left: 3px solid var(--done);
+  border-radius: 7px;
+}
+.proof.thin {
+  border-left-color: var(--ready);
+}
+.proof-k {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-top: 2px;
+}
+.proof-k b {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ink);
+}
+.proof-k span {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--muted);
+}
+.proof-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.proof-list button {
+  display: flex;
+  gap: 12px;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 0;
+  padding: 3px 0;
+}
+.proof-list b {
+  flex: 0 0 92px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--muted);
+}
+.proof-list span {
+  flex: 1;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--ink-2);
+}
+.proof-list button:hover span {
+  color: var(--ink);
+}
+
+/*
+ * Цепочка харнеса сверху вниз: звено — строка, стык — строка между ними. По
+ * горизонтали шесть звеньев с подписями не помещаются, и подписи стыков резались;
+ * а вертикально у стыка есть место сказать не только «сколько», но и «что».
+ */
+.chain-n {
+  font-family: var(--mono);
+  font-size: 18px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  color: var(--ink);
+}
+.chain-t {
+  font-size: 13px;
+  color: var(--ink-2);
+}
+.chain-jn {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--muted);
+}
+.chain-jw {
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: var(--muted);
+}
+.map {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin: 18px 0 40px;
+  max-width: var(--measure);
+}
+.map-area > h2 {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 8px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+.map-area > h2 em {
+  font-style: normal;
+  font-size: 10.5px;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--muted);
+}
+.map-cells {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.map-cell {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--line-soft);
+  background: var(--panel);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.map-cell b {
+  font-weight: 500;
+  color: var(--ink-2);
+}
+.map-cell i {
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+.map-cell.heat-2 {
+  border-color: color-mix(in oklab, var(--live) 34%, var(--line));
+  background: color-mix(in oklab, var(--live) 6%, var(--panel));
+}
+.map-cell.heat-2 b {
+  color: var(--ink);
+}
+.map-cell.heat-3 {
+  border-color: color-mix(in oklab, var(--live) 55%, var(--line));
+  background: color-mix(in oklab, var(--live) 12%, var(--panel));
+}
+.map-cell.heat-3 b {
+  color: var(--ink);
+}
+.map-cell.heat-3 i {
+  color: var(--live);
+}
+
+/* Мокап — как он написан: моноширинный, без переносов, со своей прокруткой. */
+.mockup {
+  margin: 0 0 18px;
+  padding: 14px 16px;
+  background: var(--ground);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--ink-2);
+  white-space: pre;
+}
+.map-cell {
+  cursor: pointer;
+  text-align: left;
+}
+
+/*
+ * Лента миграций: схема росла слева направо, и видно, где документ перестал за
+ * ней успевать. Таблица без описанных колонок тусклая — она есть в базе и её нет
+ * в документе.
+ */
+.tl {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 14px 0 40px;
+  max-width: var(--measure);
+}
+.tl-step {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  gap: 16px;
+  padding: 10px 14px;
+  border-left: 2px solid var(--line);
+  background: var(--panel);
+  border-radius: 0 7px 7px 0;
+}
+.tl-step.silent {
+  border-left-color: var(--warn);
+}
+.tl-k {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  font-family: var(--mono);
+}
+.tl-k b {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--ink);
+}
+.tl-k span {
+  font-size: 10.5px;
+  color: var(--muted);
+}
+.tl-k em {
+  font-style: normal;
+  font-size: 10.5px;
+  color: var(--warn);
+}
+.tl-cells {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  align-content: flex-start;
+}
+.tl-cell {
+  padding: 4px 9px;
+  border-radius: 5px;
+  border: 1px solid var(--line-soft);
+  background: var(--panel-2);
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-2);
+}
+.tl-cell:hover {
+  border-color: var(--line);
+  color: var(--ink);
+}
+.tl-cell.silent {
+  border-style: dashed;
+  border-color: color-mix(in oklab, var(--warn) 40%, var(--line));
+  background: none;
+  color: var(--warn);
+}
+
+/* Требования внутри среза: строка на требование, мера справа. */
+.req-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.req-list button {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 0;
+  padding: 3px 0;
+}
+.req-list b {
+  flex: 0 0 96px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--muted);
+}
+.req-list span {
+  flex: 1;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--ink-2);
+}
+.req-list button:hover span {
+  color: var(--ink);
+}
+.req-list i {
+  flex: 0 0 52px;
+  text-align: right;
+  font-style: normal;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+.req-list i.none {
+  color: var(--warn);
+}
+
+/*
+ * Откуда числа. Строка тихая — она не спорит с содержанием страницы, но стоит
+ * на каждой: без неё читатель верит выведенному ровно как введённому руками.
+ */
+.prov-foot {
+  margin: 32px 0 0;
+  padding-top: 14px;
+  border-top: 1px solid var(--line-soft);
+  max-width: var(--measure);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.prov-foot b {
+  color: var(--ink-2);
+  font-weight: 500;
+}
+.prov-foot code {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--ink-2);
+}
+/* Дата решения — своя колонка: возраст сравнивается взглядом, как и мера. */
+.q-date {
+  flex: 0 0 84px;
+  text-align: right;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+/*
+ * Находка, разделённая на две половины: у каждой свой способ чинить. Без этого
+ * «13 имён не существуют» — половина работы, и вторая ложится на читателя.
+ */
+.split {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 12px;
+  margin: 4px 0 18px;
+  max-width: var(--measure);
+}
+.split-half {
+  padding: 14px 16px;
+  background: var(--panel);
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+}
+.split-half h3 {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 0 0 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.split-half h3 em {
+  font-style: normal;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--ready);
+}
+.split-half p {
+  margin: 0 0 8px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+.split-do {
+  padding-top: 8px;
+  border-top: 1px solid var(--line-soft);
+  color: var(--muted) !important;
+}
+.split-do b {
+  color: var(--ink-2);
+}
+
+/*
+ * Полоса работы со списком: поиск, разрезы, счёт, подсказка клавиш.
+ *
+ * Взято у Jira то, за что её хвалят, — скорость без мыши. Не взято у ClickUp то,
+ * на что жалуются, — конструктор представлений: разрезы названы заранее.
+ */
+.rows-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 18px 0 10px;
+  max-width: var(--measure);
+}
+.rows-search {
+  flex: 1 1 260px;
+  min-width: 0;
+  padding: 7px 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--ink);
+}
+.rows-search::placeholder {
+  color: var(--muted);
+}
+.rows-search:focus {
+  outline: none;
+  border-color: color-mix(in oklab, var(--ready) 55%, var(--line));
+}
+.rows-slices {
+  display: flex;
+  gap: 6px;
+}
+.rows-slices button {
+  padding: 5px 11px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+}
+.rows-slices button.on {
+  border-color: color-mix(in oklab, var(--ready) 50%, var(--line));
+  color: var(--ink);
+}
+.rows-count {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.rows-count b {
+  color: var(--ink-2);
+  font-weight: 500;
+}
+.rows-hint {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--muted);
+}
+.rows-hint kbd {
+  display: inline-block;
+  min-width: 15px;
+  padding: 1px 4px;
+  margin: 0 1px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--panel-2);
+  font-family: var(--mono);
+  font-size: 10px;
+  text-align: center;
+  color: var(--ink-2);
+}
+
+/* Строка под курсором клавиатуры — видна и не спорит с наведением мыши. */
+.req-list li.at,
+.qs .q.at {
+  outline: 1px solid color-mix(in oklab, var(--ready) 60%, var(--line));
+  outline-offset: 1px;
+  border-radius: 5px;
+}
+.req-list li.at span,
+.qs .q.at .q-t {
+  color: var(--ink);
+}
+.proof-list li.at {
+  outline: 1px solid color-mix(in oklab, var(--ready) 60%, var(--line));
+  outline-offset: 1px;
+  border-radius: 4px;
+}
+.proof-list li.at span {
+  color: var(--ink);
+}
+
+/*
+ * Лестница комплекта: уровень — ступень, гейт — перемычка между ними. Порядок
+ * нормативен, и потому рисуется порядком, а не списком: следующая фаза не
+ * начинается до гейта предыдущей.
+ */
+.ladder {
+  display: flex;
+  flex-direction: column;
+  margin: 14px 0 28px;
+  max-width: 760px;
+}
+.ladder-node {
+  display: grid;
+  grid-template-columns: 104px minmax(0, 1fr) 148px;
+  gap: 14px;
+  align-items: baseline;
+  padding: 11px 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.ladder-node.loose {
+  border-color: color-mix(in oklab, var(--warn) 40%, var(--line));
+}
+.ladder-k {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--ink);
+}
+.ladder-t {
+  font-size: 12.5px;
+  color: var(--ink-2);
+}
+.ladder-n {
+  text-align: right;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+.ladder-gate {
+  display: grid;
+  grid-template-columns: 104px minmax(0, 1fr) 148px;
+  gap: 14px;
+  align-items: center;
+  padding: 4px 14px;
+}
+.ladder-gate i {
+  display: block;
+  justify-self: end;
+  width: 2px;
+  height: 20px;
+  background: var(--wait);
+}
+.ladder-gate span {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+.ladder-gate em {
+  font-style: normal;
+  text-align: right;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--muted);
+}
+.ladder-gate.ok i {
+  background: var(--done);
+}
+.ladder-gate.ok em {
+  color: var(--done);
+}
+.ladder-gate.bad i {
+  background: var(--warn);
+}
+.ladder-gate.bad em {
+  color: var(--warn);
+}
+.ladder-gate.blind i {
+  background: none;
+  border-left: 2px dashed var(--ink-2);
+  width: 0;
+}
+
+/*
+ * Чип фильтрует — значит он кнопка и ведёт себя как кнопка. Чип, который
+ * выглядит нажимаемым и не нажимается, хуже отсутствующего: он обещает.
+ */
+button.chip {
+  cursor: pointer;
+}
+button.chip:hover {
+  border-color: var(--ink-2);
+}
+button.chip.on {
+  border-color: var(--ready);
+  color: var(--ink);
+}
+button.chip.on span {
+  color: var(--ink-2);
+}
+
+/*
+ * Охват термина по этапам: строка — имя, клетка — этап. Схему из определений
+ * строить было не из чего (связей 28 на 42 термина, и граф распадался на два
+ * десятка кусков), а вот где имя живёт — связь настоящая и сплошная.
+ */
+.reach {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 12px 0 36px;
+  max-width: var(--measure);
+}
+.reach-row {
+  display: grid;
+  grid-template-columns: 150px repeat(8, minmax(0, 1fr)) 52px;
+  gap: 3px;
+  align-items: center;
+  width: 100%;
+  padding: 3px 0;
+  background: none;
+  border: 0;
+  text-align: left;
+}
+.reach-row:not(.reach-head):hover {
+  background: var(--panel);
+  border-radius: 5px;
+}
+.reach-head span {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  text-align: center;
+  padding-bottom: 4px;
+}
+.reach-head span:first-child,
+.reach-head .reach-sum {
+  text-align: right;
+}
+.reach-k {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--ink-2);
+  text-align: right;
+  padding-right: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.reach-k.none {
+  color: var(--warn);
+}
+.reach-cell {
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  background: var(--panel);
+  border: 1px solid var(--line-soft);
+  font-family: var(--mono);
+  font-size: 10px;
+  color: transparent;
+}
+.reach-cell.on {
+  background: color-mix(in oklab, var(--live) 16%, var(--panel));
+  border-color: color-mix(in oklab, var(--live) 30%, var(--line));
+  color: var(--ink-2);
+}
+.reach-cell.warm {
+  background: color-mix(in oklab, var(--live) 34%, var(--panel));
+  border-color: color-mix(in oklab, var(--live) 45%, var(--line));
+  color: var(--ink);
+}
+.reach-cell.hot {
+  background: color-mix(in oklab, var(--live) 55%, var(--panel));
+  border-color: var(--live);
+  color: var(--ink);
+}
+.reach-sum {
+  text-align: right;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+/* Первая фраза страницы: что это и с чего начинать. */
+.lede {
+  margin: 0 0 16px;
+  max-width: 88ch;
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+.lede b {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+/* Признак приоритета на строке очереди. */
+.q-hold {
+  flex: 0 0 132px;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--muted);
+}
+.q-hold em {
+  font-style: normal;
+  font-size: 10px;
+  color: var(--wait);
+}
+.q-hold.holds {
+  color: var(--warn);
+}
+.q-hold.unsaid {
+  color: var(--ready);
+}
+
+/*
+ * Помощник ответа: найти место, собрать ссылку, увидеть вердикт. Правку корпуса
+ * он не делает — собирает текст, вставляет человек.
+ */
+.answer {
+  margin: 0 0 22px;
+  padding: 14px 16px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+}
+.answer .group {
+  margin-top: 0;
+  margin-bottom: 10px;
+}
+.answer-hits {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.answer-hits button {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  width: 100%;
+  text-align: left;
+  padding: 5px 8px;
+  background: none;
+  border: 0;
+  border-radius: 5px;
+}
+.answer-hits button:hover {
+  background: var(--panel-2);
+}
+.answer-hits b {
+  flex: 0 0 104px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--ink);
+}
+.answer-hits i {
+  flex: 0 0 78px;
+  font-style: normal;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--muted);
+}
+.answer-hits span {
+  flex: 1;
+  font-size: 12px;
+  color: var(--ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.answer-draft {
+  width: 100%;
+  margin-top: 10px;
+  padding: 9px 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink);
+  resize: vertical;
+}
+.answer-draft:focus {
+  outline: none;
+  border-color: color-mix(in oklab, var(--ready) 55%, var(--line));
+}
+.answer-verdict {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+.answer-verdict b {
+  font-weight: 600;
+}
+.answer-verdict.ok b {
+  color: var(--done);
+}
+.answer-verdict.warn b {
+  color: var(--ready);
+}
+.answer-verdict.bad b {
+  color: var(--warn);
+}
+.answer-out {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  background: var(--ground);
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--ink-2);
+  white-space: pre-wrap;
+  overflow-x: auto;
+}
+.answer-do {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+.answer-do button {
+  padding: 6px 14px;
+  border: 1px solid color-mix(in oklab, var(--ready) 50%, var(--line));
+  border-radius: 7px;
+  background: var(--panel-2);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--ink);
+}
+.answer-do button:hover {
+  border-color: var(--ready);
+}
+.answer-hint {
+  margin: 10px 0 0;
+  line-height: 1.5;
+}
+
+/* Поиск внутри помощника занимает всю ширину: он тут единственный. */
+.answer .rows-search {
+  flex: none;
+  width: 100%;
+}
+
+/* Шаги ответа: где я сейчас и что уже выбрано. */
+.answer .group em {
+  font-style: normal;
+  margin-left: 10px;
+  color: var(--ready);
+}
+.steps {
+  list-style: none;
+  display: flex;
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 0;
+  flex-wrap: wrap;
+}
+.steps li {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 4px 11px;
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--muted);
+}
+.steps li b {
+  color: var(--wait);
+  font-weight: 600;
+}
+.steps li.at {
+  border-color: color-mix(in oklab, var(--ready) 55%, var(--line));
+  color: var(--ink);
+}
+.steps li.at b {
+  color: var(--ready);
+}
+.steps li.done b {
+  color: var(--done);
+}
+.steps li i {
+  font-style: normal;
+  color: var(--ink-2);
+}
+
+/* Пять мест приземления — выбор, а не список полей. */
+.landings {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 8px;
+}
+.landings button {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 11px 13px;
+  text-align: left;
+  background: var(--panel-2);
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+}
+.landings button:hover:not(:disabled) {
+  border-color: color-mix(in oklab, var(--ready) 45%, var(--line));
+}
+.landings button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.landings button b {
+  font-size: 12.5px;
+  color: var(--ink);
+}
+.landings button span {
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--ink-2);
+}
+.landings button i {
+  font-style: normal;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--muted);
+}
+.landings-none {
+  grid-column: 1 / -1;
+  margin: 4px 0 0;
+  line-height: 1.5;
+}
+
+.answer-back {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.answer-back button {
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-2);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--ink-2);
+}
+.answer-back button:hover {
+  border-color: var(--ink-2);
+}
+.answer-hits button b {
+  flex: 0 0 116px;
+}
+
+/* Вызов формы ответа: одна кнопка вместо развёрнутого помощника. */
+.answer-open {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 0 0 18px;
+}
+.answer-open button {
+  padding: 6px 14px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--ink-2);
+}
+.answer-open button:hover {
+  border-color: var(--ink-2);
+  color: var(--ink);
+}
+.answer-open button.call {
+  border-color: color-mix(in oklab, var(--ready) 55%, var(--line));
+  background: color-mix(in oklab, var(--ready) 8%, var(--panel));
+  color: var(--ink);
+}
+.answer-open button.call:hover {
+  border-color: var(--ready);
+}
+
+/* Полоса доказанности на карточке волны: сколько требований задачи доказано. */
+.card-bar {
+  display: block;
+  height: 2px;
+  margin-top: 7px;
+  background: var(--line);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.card-bar i {
+  display: block;
+  height: 100%;
+  background: var(--wait);
+}
+.card-bar i.part {
+  background: var(--ready);
+}
+.card-bar i.full {
+  background: var(--done);
+}
+
+/* Три доски одного процесса: тесты → preflight → код. */
+.tracks {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 18px 0 10px;
+  max-width: var(--measure);
+}
+.tracks button {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 9px 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  text-align: left;
+}
+.tracks button b {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--ink-2);
+}
+.tracks button span {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--muted);
+}
+.tracks button:hover {
+  border-color: var(--ink-2);
+}
+.tracks button.on {
+  border-color: color-mix(in oklab, var(--ready) 55%, var(--line));
+  background: color-mix(in oklab, var(--ready) 7%, var(--panel));
+}
+.tracks button.on b {
+  color: var(--ink);
+}
+
+/* Корпус: имя файла впереди, путь следом — по имени ищут, по пути понимают. */
+.corp-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.corp-list button {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 0;
+  padding: 3px 0;
+}
+.corp-list b {
+  flex: 1;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.corp-list button:hover b {
+  color: var(--ink);
+}
+.corp-list i.when {
+  flex: 0 0 82px;
+}
+.corp-list i {
+  flex: 0 0 62px;
+  text-align: right;
+  font-style: normal;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+.corp-list li.at {
+  outline: 1px solid color-mix(in oklab, var(--ready) 60%, var(--line));
+  outline-offset: 1px;
+  border-radius: 5px;
+}
+.corp-list li.at b {
+  color: var(--ink);
+}
+
+/* Пояснение в колонке: почему её нижняя часть пуста. */
+.side-note {
+  margin: 8px 10px 12px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+.ent.top {
+  margin-bottom: 6px;
+}
+
+/* Путь каталога длинный — ему разрешено переноситься по косой, а не по буквам. */
+.corp .tl-k b {
+  line-height: 1.35;
+}
+.corp-more button {
+  background: none;
+  border: 0;
+  padding: 4px 0;
+  font-size: 11px;
+  color: var(--muted);
+}
+.corp-more button:hover {
+  color: var(--ready);
+}
+
+.md hr {
+  border: 0;
+  border-top: 1px solid var(--line-soft);
+  margin: 18px 0;
+}
+
+/* ─── выбор проекта ──────────────────────────────────────────────────── */
+.picker {
+  position: relative;
+}
+.place-s {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+.picks {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% - 6px);
+  left: 0;
+  right: 0;
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 12px 28px rgb(0 0 0 / 55%);
+}
+.picks button {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  width: 100%;
+  text-align: start;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+}
+.picks li.at button {
+  background: var(--panel);
+}
+.picks b {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink-2);
+}
+.picks button.on b {
+  color: var(--ready);
+}
+.picks span {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--muted);
+}
+.side-note.warn {
+  color: var(--warn);
+}
+.side-note code {
+  font-size: 10px;
+}
+
+/* Строка предметной таблицы: поле и значение. */
+.ent-row {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.ent-row dt {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+.ent-row dd {
+  margin: 2px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-2);
+  white-space: pre-wrap;
+}
+.corp-list i.none {
+  color: var(--wait);
+}
+
+/* ─── полоска прогресса: три доли, и неизвестное — своя ───────────────── */
+.bar {
+  display: flex;
+  height: 5px;
+  width: 100%;
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--wait);
+  margin-top: 7px;
+}
+.bar i {
+  display: block;
+  height: 100%;
+}
+.bar-done { background: var(--done); }
+.bar-open { background: var(--ready); }
+/* Неизвестное — штриховкой: сплошной цвет читался бы как ещё одно состояние. */
+.bar-unknown {
+  background: repeating-linear-gradient(135deg, var(--wait) 0 3px, var(--line) 3px 6px);
+}
+
+/* ─── карточка «где мы» ───────────────────────────────────────────────── */
+.now {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 16px;
+  padding: 18px 20px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--ready);
+  border-radius: 10px;
+  margin-bottom: 18px;
+}
+.now-k {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding-top: 4px;
+}
+.now-q {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--ink);
+}
+.now-run {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--ready);
+}
+.now-why {
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--ink-2);
+}
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 14px;
+  margin-bottom: 18px;
+}
+.tile {
+  padding: 12px 14px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+}
+.tile-t {
+  font-size: 12px;
+  color: var(--ink-2);
+}
+.tile-n {
+  font-family: var(--mono);
+  font-size: 22px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+}
+.tile-n.dim { color: var(--muted); font-size: 15px; }
+.tile-s {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+.tile-u {
+  color: var(--warn);
+}
+/* Ступени лестницы */
+.rungs { display: flex; flex-direction: column; gap: 2px; }
+.rung {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr) auto auto;
+  gap: 10px;
+  align-items: baseline;
+  padding: 7px 10px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+}
+.rung.at { border-color: color-mix(in oklab, var(--ready) 55%, var(--line)); background: var(--panel-2); }
+.rung-n { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.rung-q { font-size: 12.5px; color: var(--ink-2); }
+.rung.at .rung-q { color: var(--ink); }
+.rung-o { font-family: var(--mono); font-size: 10.5px; color: var(--code); }
+.rung-s { font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: .05em; }
+.rung-s.passed { color: var(--done); }
+.rung-s.skipped { color: var(--muted); }
+.rung-s.unknown { color: var(--warn); }
+.rung-s.held { color: var(--wait); }
+
+/* ─── доска: перенос раскладки «Волн» на ступени процесса ──────────────
+   Полоса этапа · столбцы · карточка с цветной кромкой слева · барьер
+   правилом поперёк доски. Токены те же, что у доски, и добавлен --phase. */
+:root { --phase: #b4544a; }
+
+.stage {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--ink-2);
+  margin: 0 0 10px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+.board {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 12px;
+  overflow-x: auto;
+  padding: 4px 4px 18px;
+  margin: 0;
+  list-style: none;
+  scrollbar-color: var(--line) transparent;
+}
+.col {
+  flex: 0 0 210px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+/* Первый столбец — тот, что брать сейчас: выделен так же, как первая волна. */
+.col.first {
+  border-color: color-mix(in oklab, var(--ready) 42%, var(--line));
+  background: color-mix(in oklab, var(--ready) 5%, var(--panel));
+}
+.col.repo { border-color: color-mix(in oklab, var(--code) 26%, var(--line)); }
+.col > h2 {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin: 0;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--muted);
+  font-family: var(--mono);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.col > h2 em {
+  font-style: normal;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+.card {
+  position: relative;
+  background: var(--panel-2);
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  padding: 9px 11px 9px 14px;
+  list-style: none;
+}
+/* Карточка сама стала столбцом доски: у лестницы нет группы, которую держал бы
+   столбец, и заголовок столбца лишь повторял карточку. */
+.card.col {
+  flex: 0 0 224px;
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+}
+.card.col.repo { border-color: color-mix(in oklab, var(--code) 26%, var(--line-soft)); }
+/* Кромка слева — состояние цветом; слово состояния стоит рядом, не вместо. */
+.card::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  border-radius: 7px 0 0 7px;
+  background: var(--wait);
+}
+.card.s-passed::before { background: var(--done); }
+.card.s-at::before { background: var(--ready); }
+.card.s-unknown::before { background: var(--warn); }
+.card.s-skipped::before { background: var(--line); }
+.card.s-held::before { background: var(--code); }
+.card.s-at { border-color: color-mix(in oklab, var(--ready) 40%, var(--line-soft)); }
+.card .id {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+.card .pre { font-size: 11px; font-weight: 600; line-height: 1; flex: 0 0 auto; }
+.card.s-passed .pre { color: var(--done); }
+.card.s-at .pre { color: var(--ready); }
+.card.s-unknown .pre { color: var(--warn); }
+.card.s-skipped .pre { color: var(--muted); }
+.card.s-held .pre { color: var(--code); }
+.card .t {
+  color: var(--ink-2);
+  font-size: 11.5px;
+  line-height: 1.35;
+  margin-top: 3px;
+}
+.card .n {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--muted);
+  margin-top: 5px;
+  font-variant-numeric: tabular-nums;
+}
+.stack { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 7px; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 20px 0 22px; }
+.chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 5px 11px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.chip b { font-weight: 600; letter-spacing: 0.02em; }
+.chip span { color: var(--muted); font-variant-numeric: tabular-nums; }
+.chip.full { border-color: color-mix(in oklab, var(--done) 45%, var(--line)); }
+.chip.full span { color: var(--done); }
+.chip.warn { border-color: color-mix(in oklab, var(--warn) 45%, var(--line)); }
+.chip.warn span { color: var(--warn); }
+/* Пунктиром — то, чего нет: пустое не выдаёт себя за посчитанное. */
+.chip.none { border-style: dashed; }
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+  margin: 20px 0 14px;
+  font-size: 12px;
+  color: var(--muted);
+  font-family: var(--mono);
+}
+.legend i {
+  display: inline-block;
+  width: 3px;
+  height: 13px;
+  border-radius: 2px;
+  margin-right: 7px;
+  vertical-align: -2px;
+}
+/* Барьер — правило поперёк доски, а не подпись под ней. */
+.barrier { display: flex; align-items: center; gap: 14px; margin: 26px 0 18px; }
+.barrier .edge {
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, var(--line), transparent);
+}
+.barrier .edge.l { background: linear-gradient(270deg, var(--line), transparent); }
+.barrier .txt { color: var(--ink-2); font-size: 12.5px; max-width: 74ch; text-align: center; }
+.barrier .txt b { color: var(--ink); font-weight: 600; }
+
+/* Доска волн: столбцы со стопкой карточек — как у «Волн». */
+.waves {
+  display: flex;
+  gap: 12px;
+  overflow-x: auto;
+  padding: 4px 4px 18px;
+  align-items: flex-start;
+  scrollbar-color: var(--line) transparent;
+}
+.waves .col {
+  /* Колонка гейта шире: в карточке живёт целая фраза («состояние задачи сходится
+     с историей»), и на 196 пикселях она рвалась на четыре строки. */
+  flex: 0 0 268px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.card .bar {
+  height: 2px;
+  background: var(--line);
+  border-radius: 2px;
+  margin-top: 7px;
+  overflow: hidden;
+}
+.card .bar i { display: block; height: 100%; background: var(--wait); }
+.card.done .bar i { background: var(--done); }
+.card .t {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* ─── цепочка фаз: фаза · гейт · фаза ─────────────────────────────────── */
+.chain-cell { display: flex; align-items: stretch; }
+.phase {
+  position: relative;
+  min-width: 168px;
+  padding: 10px 12px 10px 15px;
+  background: var(--panel-2);
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+}
+.phase::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  border-radius: 8px 0 0 8px;
+  background: var(--wait);
+}
+.phase.s-passed::before { background: var(--done); }
+.phase.s-unknown::before { background: var(--warn); }
+.phase-h { font-size: 13px; font-weight: 600; color: var(--ink); }
+.phase-h b { font-family: var(--mono); color: var(--ink-2); font-weight: 500; margin-right: 4px; }
+.phase-l {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--muted);
+  margin-top: 3px;
+  font-variant-numeric: tabular-nums;
+}
+.phase-l b { color: var(--ink-2); font-weight: 500; }
+/* Гейт между фазами — не украшение стрелки, а сам переход. */
+.gatepin {
+  align-self: center;
+  margin: 0 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 3px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.gatepin.g-passed { border-color: color-mix(in oklab, var(--done) 45%, var(--line)); color: var(--done); }
+.gatepin.g-unknown { border-color: color-mix(in oklab, var(--warn) 45%, var(--line)); color: var(--warn); }
+.gatepin.g-none { border-style: dashed; }
+.gatepin i { font-style: normal; margin-left: 5px; color: var(--warn); }
+
+/* ─── цепочка фаз: фаза · гейт · фаза ─────────────────────────────────── */
+.phases {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 6px 0;
+  margin-bottom: 18px;
+}
+.phases > div { display: flex; align-items: stretch; }
+
+/* Что о гейте говорит сам набор — цитатой под столбцом, мелким и приглушённым:
+   это чужие слова, а не наш вывод. */
+.says {
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--muted);
+  margin: 4px 0 0;
+  border-top: 1px solid var(--line-soft);
+  padding-top: 7px;
+}
+.card .disagree { color: var(--warn); font-weight: 500; }
+/* Чек-лист гейта в дровере: чем он, собственно, считается. Открытый пункт
+   выделен — иначе в списке из девяти теряется тот, ради которого пришли. */
+.checklist { list-style: none; margin: 6px 0 10px; padding: 0; display: grid; gap: 4px; }
+.checklist li {
+  display: grid;
+  grid-template-columns: 16px 1fr auto;
+  gap: 8px;
+  align-items: baseline;
+  padding: 6px 8px;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.35;
+}
+.checklist li.here { border-color: var(--line); background: var(--bg-soft, rgba(127, 127, 127, 0.07)); }
+.checklist li.passed .pre { color: var(--done); }
+.checklist li.unknown .pre { color: var(--warn); }
+.checklist li.wait .pre { color: var(--wait); }
+/* То, что держит ступень: по одной находке в строку, а не сплошняком. */
+.now-why code.held { display: block; margin: 2px 0; font-size: 11.5px; }
+.checklist em { font-style: normal; color: var(--muted); font-size: 11px; white-space: nowrap; }
+
+/* ─── читалка: виды · сущности · документ ─────────────────────────────── */
+.reader {
+  display: grid;
+  grid-template-columns: 168px 220px minmax(0, 1fr);
+}
+.reader.solo {
+  grid-template-columns: 168px minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+.reader-kinds,
+.rk-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 74vh;
+  overflow-y: auto;
+  scrollbar-color: var(--line) transparent;
+}
+.rk {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  text-align: start;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--ink-2);
+}
+.rk:hover { background: var(--panel-2); color: var(--ink); }
+.rk.on { background: var(--panel-2); color: var(--ready); }
+.rk i {
+  font-style: normal;
+  font-size: 10.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.reader-list { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.reader-doc {
+  min-width: 0;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 16px 20px 20px;
+}
+.doc-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line-soft);
+  margin-bottom: 12px;
+}
+.doc-head b { font-family: var(--mono); font-size: 13px; color: var(--ink); }
+/* Оглавление: уровень заголовка виден отступом, а не только кеглем. */
+.backs { margin-top: 20px; border-top: 1px solid var(--line-soft); padding-top: 12px; }
+.backs-list { display: flex; flex-wrap: wrap; gap: 5px; }
+.back {
+  border: 1px solid var(--line);
+  background: none;
+  border-radius: 999px;
+  padding: 2px 9px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--code);
+}
+.back i { font-style: normal; color: var(--muted); }
+.back:hover { border-color: color-mix(in oklab, var(--code) 45%, var(--line)); color: var(--ink-2); }
+
+/* ─── документ блоками ────────────────────────────────────────────────── */
+.blocks .bl-h { scroll-margin-top: 12px; }
+/* Уровень заголовка виден линейкой слева, а не только кеглем: в наборе бывает
+   шесть уровней, и кеглями их не различить. */
+.blocks .bl-h.l2 { border-left: 2px solid var(--line); padding-left: 9px; }
+.blocks .bl-h.l3 { border-left: 2px solid var(--line-soft); padding-left: 9px; }
+.blocks .bl-h.l4,
+.blocks .bl-h.l5,
+.blocks .bl-h.l6 { border-left: 1px dashed var(--line-soft); padding-left: 9px; }
+.blocks .bl-code {
+  background: var(--panel-2);
+  border: 1px solid var(--line-soft);
+  border-left: 2px solid var(--code);
+  border-radius: 6px;
+  padding: 9px 12px;
+  overflow-x: auto;
+  font-size: 11.5px;
+}
+.blocks .bl-html {
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+  padding: 8px 11px;
+  color: var(--muted);
+  font-size: 11px;
+  overflow-x: auto;
+}
+.blocks .bl-list { margin: 6px 0; padding-left: 18px; }
+.blocks .bl-list li { margin: 2px 0; }
+.blocks .bl-list li.deep { margin-left: 16px; color: var(--ink-2); }
+.blocks .bl-table table { font-size: 11.5px; }
+
+/* ─── документ разделами ──────────────────────────────────────────────── */
+.doc-sum {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px solid var(--line-soft);
+  font-family: var(--mono); font-size: 11px; color: var(--muted);
+}
+.doc-secs { display: flex; flex-direction: column; }
+.sec { border-top: 1px solid var(--line-soft); }
+.sec:first-child { border-top: 0; }
+/* Уровень заголовка — отступ: вложенность видна, а не угадывается. */
+.sec.l2 { padding-left: 10px; }
+.sec.l3 { padding-left: 22px; }
+.sec.l4 { padding-left: 34px; }
+.sec-h {
+  display: flex; align-items: baseline; gap: 8px; width: 100%;
+  background: none; border: 0; padding: 7px 4px; cursor: pointer; text-align: left;
+  color: var(--ink-2); font-family: var(--sans); font-size: 12.5px;
+}
+.sec-h:hover { color: var(--ink); background: var(--panel-2); }
+.sec-h.on { color: var(--ink); }
+.sec-h .caret { font-style: normal; color: var(--muted); font-size: 10px; width: 10px; }
+.sec-h.on .caret { color: var(--ready); }
+/* Открытый раздел — это заголовок документа, а не строка списка: уровень
+   слышен в кегле, как он слышен на бумаге. */
+.sec-t { flex: 1; }
+.sec.l1 > .sec-h .sec-t { font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
+.sec.l2 > .sec-h .sec-t { font-size: 13.5px; font-weight: 550; }
+.sec-h.on .sec-t { color: var(--ink); }
+.sec-w {
+  font-family: var(--mono); font-size: 10px; color: var(--muted);
+  white-space: nowrap; font-variant-numeric: tabular-nums;
+}
+.sec > .md { padding: 2px 4px 14px 18px; }
+.sec > .side-note { padding-left: 18px; }
+
+.blocks .bl-hr { border: 0; border-top: 1px solid var(--line-soft); margin: 14px 0; }
+.doc-sum .ghost {
+  background: none; border: 1px solid var(--line); border-radius: 5px;
+  color: var(--muted); font-family: var(--mono); font-size: 10.5px;
+  padding: 3px 9px; cursor: pointer;
+}
+.doc-sum .ghost:hover { color: var(--ink-2); border-color: var(--ready); }
+
+/* Проза документа читается, а не разбирается: в читалке она набрана
+   наборным шрифтом, а моноширинный остаётся тому, что им и является —
+   коду, таблицам, именам сущностей. */
+.reader-doc .blocks p,
+.reader-doc .blocks li,
+.reader-doc .blocks blockquote { font-family: var(--sans); font-size: 13px; line-height: 1.66; }
+.reader-doc .blocks code { font-family: var(--mono); font-size: 0.92em; }
+
+/* ─── раздел: три числа, полка дыр, таблица, панель ───────────────────── */
+.three { display: flex; gap: 14px; font-family: var(--mono); font-size: 11px; align-items: baseline; }
+.three b { font-size: 15px; font-weight: 500; margin-right: 3px; font-variant-numeric: tabular-nums; }
+.three .t-done b { color: var(--done); }
+.three .t-open b { color: var(--warn); }
+.three .t-unknown b { color: var(--muted); }
+
+.holes-shelf { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.gap {
+  display: flex; align-items: baseline; gap: 7px; cursor: pointer; text-align: left;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  padding: 8px 12px; color: var(--ink-2); font-family: var(--sans); font-size: 12px;
+}
+.gap b { font-family: var(--mono); font-size: 15px; color: var(--warn); font-variant-numeric: tabular-nums; }
+.gap.zero b { color: var(--muted); }
+.gap:hover { border-color: var(--warn); }
+.gap.on { border-color: var(--warn); color: var(--ink); background: color-mix(in srgb, var(--warn) 8%, var(--panel)); }
+
+.rows-bar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
+.pick {
+  background: var(--panel); color: var(--ink-2); border: 1px solid var(--line);
+  border-radius: 6px; padding: 5px 8px; font-family: var(--mono); font-size: 11px;
+}
+.split { display: grid; grid-template-columns: 1fr; gap: 14px; align-items: start; }
+.split.open { grid-template-columns: minmax(0, 1fr) 340px; }
+.scroll-x { overflow-x: auto; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); }
+table.rows { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+table.rows th {
+  text-align: left; font-family: var(--mono); font-size: 10px; text-transform: uppercase;
+  letter-spacing: 0.06em; color: var(--muted); font-weight: 500; padding: 8px 10px;
+  border-bottom: 1px solid var(--line-soft); white-space: nowrap; position: sticky; top: 0;
+  background: var(--panel-2);
+}
+table.rows th.n, table.rows td.n { text-align: right; font-variant-numeric: tabular-nums; }
+table.rows td { padding: 6px 10px; border-bottom: 1px solid var(--line-soft); }
+table.rows tr.row { cursor: pointer; }
+table.rows tr.row:hover td { background: var(--panel-2); }
+table.rows tr.row.on td { background: color-mix(in srgb, var(--ready) 10%, var(--panel)); }
+table.rows td.k { font-family: var(--mono); font-size: 11.5px; color: var(--ink); white-space: nowrap; }
+table.rows td.k.dim { color: var(--muted); }
+table.rows td.t { color: var(--ink-2); max-width: 46ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+table.rows td.n { font-family: var(--mono); color: var(--ink-2); }
+/* Ноль в колонке связи — не число, а дыра: он и выглядит иначе. */
+table.rows td.n.hole { color: var(--warn); font-weight: 600; }
+
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 9px; padding: 13px 15px; position: sticky; top: 12px; }
+.panel-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
+.panel-head b { font-family: var(--mono); font-size: 13px; color: var(--ink); }
+.panel-text { font-size: 13px; color: var(--ink-2); margin: 0 0 10px; line-height: 1.55; }
+.panel-fields { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.panel-fields span {
+  font-family: var(--mono); font-size: 10.5px; color: var(--muted);
+  border: 1px solid var(--line-soft); border-radius: 4px; padding: 1px 6px;
+}
+.panel-fields span.done { color: var(--done); border-color: color-mix(in oklab, var(--done) 40%, var(--line)); }
+.panel-set { margin-bottom: 12px; }
+.panel-set h4 {
+  font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--muted); margin: 0 0 5px; font-weight: 500;
+}
+.panel-set h4 i { font-style: normal; color: var(--ink-2); }
+.panel-set ul { margin: 0; padding-left: 0; list-style: none; }
+.panel-set li { font-size: 11.5px; color: var(--ink-2); margin: 3px 0; line-height: 1.4; }
+.panel-set li code { font-family: var(--mono); font-size: 11px; color: var(--ink); background: none; border: 0; padding: 0; }
+.panel-set .none { font-size: 11px; color: var(--muted); margin: 0; font-style: italic; }
+.panel .ghost {
+  background: none; border: 1px solid var(--line); border-radius: 5px; color: var(--muted);
+  font-family: var(--mono); font-size: 10px; padding: 2px 8px; cursor: pointer;
+}
+.rule-body {
+  font-family: var(--sans); font-size: 12.5px; line-height: 1.6; color: var(--ink-2);
+  white-space: pre-wrap; margin: 0 0 12px; max-height: 46vh; overflow-y: auto;
+  border-left: 2px solid var(--line); padding-left: 11px;
+}
+
+/* ─── доска пути: колонка — фаза, карточка — история ──────────────────── */
+.board { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 8px; align-items: flex-start; }
+.phase-col {
+  min-width: 232px; max-width: 232px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 9px; padding: 10px;
+}
+.phase-col h3 {
+  font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--ink-2); margin: 0 0 2px; font-weight: 500;
+}
+.phase-col h3 i { font-style: normal; color: var(--muted); }
+.phase-spellings { font-size: 10px; color: var(--muted); margin-bottom: 8px; line-height: 1.35; }
+.story {
+  display: block; width: 100%; text-align: left; cursor: pointer; margin-bottom: 6px;
+  background: var(--panel-2); border: 1px solid var(--line-soft); border-radius: 7px;
+  padding: 7px 9px; color: var(--ink-2); font-family: var(--sans);
+}
+.story:hover { border-color: var(--ready); }
+.story.on { border-color: var(--ready); background: color-mix(in srgb, var(--ready) 10%, var(--panel-2)); }
+.story b { font-family: var(--mono); font-size: 11px; color: var(--ink); display: block; }
+.story-t { display: block; font-size: 11.5px; line-height: 1.35; margin: 2px 0 4px; }
+.story-n { display: block; font-family: var(--mono); font-size: 10px; color: var(--muted); }
+.story-n i { font-style: normal; }
+.story-n i.zero { color: var(--warn); }
+.retired-shelf {
+  font-family: var(--mono); font-size: 10.5px; color: var(--unknown);
+  border: 1px dashed color-mix(in oklab, var(--unknown) 45%, var(--line));
+  border-radius: 6px; padding: 4px 9px;
+}
+
+/* ─── отметка свежести ─────────────────────────────────────────────────── */
+.live-mark {
+  display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+  background: none; border: 1px solid var(--line); border-radius: 6px;
+  padding: 3px 9px; color: var(--muted); font-family: var(--mono); font-size: 10.5px;
+}
+.live-mark:hover { border-color: var(--ready); color: var(--ink-2); }
+.live-mark .dot {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--ready);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ready) 18%, transparent);
+}
+.live-mark .dot.cold { background: var(--muted); box-shadow: none; }
+
+/* Список нарушителей в дровере: моноширинный, чтобы имена сущностей выравнивались
+   и глаз ловил общий префикс — им они и группируются. */
+.rows-list { list-style: none; margin: .4rem 0 .8rem; padding: 0; }
+.rows-list li { padding: .28rem .5rem; border-left: 2px solid var(--warn); margin-bottom: .25rem;
+                background: var(--soft, rgba(127,127,127,.06)); border-radius: 0 3px 3px 0; }
+.rows-list code { font-size: .82rem; word-break: break-word; }
+
+/* Карточка пункта отзывается на курсор — но НЕ РАЗМЕРОМ и не сдвигом: соседи под
+   ней подрагивали, а глаз читает это как перерисовку доски. Меняется только фон
+   и цвет рамки, и рамка та же по толщине — иначе сдвиг вернётся через неё. */
+.stack .card[style*="cursor"] { transition: border-color .12s, background-color .12s; }
+.stack .card[style*="cursor"]:hover {
+  border-color: var(--ink, currentColor);
+  background-color: var(--soft, rgba(127, 127, 127, .07));
+}
+
+/* Знак состояния — крупнее слова: доску читают знаками, а слово подтверждает. */
+.card .id .pre { font-size: 1.05rem; line-height: 1; }

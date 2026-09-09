@@ -1,4 +1,4 @@
-# qm
+# mh
 
 To run and test, see [`README.md`](./README.md).
 
@@ -70,8 +70,8 @@ Two habits that keep task-focused changes from scarring the rest of the repo:
 
 ## Private forks
 
-Organizations run qm from private forks of this repository. A private fork is a
-standalone private repository whose history begins as a clone of qm. Everything
+Organizations run mh from private forks of this repository. A private fork is a
+standalone private repository whose history begins as a clone of mh. Everything
 organization-specific is confined to `deploy/layers/<org>/`, and every file outside
 that directory, which these rules call core, stays byte-identical to upstream. Core
 here covers the plugins, the CLI, the docs, and CI as much as the runtime under
@@ -81,15 +81,15 @@ private and its commits stay fetchable by SHA from the public side. The README s
 "Customize your instance" gives the creation procedure.
 
 Before you act, determine which repository this checkout is by running `git remote -v`.
-If `origin` points at `yc-software/qm`, you are in upstream qm. If `origin`
+If `origin` points at `undassa/mh`, you are in upstream mh. If `origin`
 points anywhere else, you are in a private fork, and five rules apply. Do not edit core;
-a change to core belongs in upstream qm, and the `upstream-pr` skill sends it there
+a change to core belongs in upstream mh, and the `upstream-pr` skill sends it there
 without leaking organization context. Keep every organization-specific file under
-`deploy/layers/<org>/`. Sync from upstream with the `update-qm` skill, which merges and
+`deploy/layers/<org>/`. Sync from upstream with the `update-mh` skill, which merges and
 never rebases. Pass `--repo` to every `gh` command, because `gh` may otherwise pick the
 upstream repository through the `upstream` remote and read or edit the wrong
 repository's pull requests. Never reference an upstream issue or pull request by number
-(`yc-software/qm#123`) in a fork's PRs, issues, comments, or commit messages: GitHub
+(`undassa/mh#123`) in a fork's PRs, issues, comments, or commit messages: GitHub
 mirrors such mentions onto the referenced upstream item as a permanent timeline event,
 so the fork's existence and the mentioning title become visible to whoever GitHub
 decides may see them. Name upstream work in plain words instead.

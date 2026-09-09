@@ -1,6 +1,6 @@
 # Security policy
 
-QM is designed to isolate each person's data and activity by scope. It is early,
+MH is designed to isolate each person's data and activity by scope. It is early,
 experimental software: that design goal is not a promise that data cannot leak,
 a certification, or a substitute for a deployment-specific security review.
 
@@ -23,13 +23,13 @@ that planned controls will ship.
 
 ### Scope
 
-QM's interactive agent surfaces currently assume one organization of authenticated
+MH's interactive agent surfaces currently assume one organization of authenticated
 internal users. Guests and external users are outside that interaction boundary,
 apart from a deployment's explicit, admin-controlled exception for internal users in
 Slack rooms that include external participants. Published apps are a separate,
 deliberate exception: an owner can distribute a capability link to visitors outside
 the organization. Holding that link authorizes reach to that app only; it does not
-create a QM principal or authorize interaction with the agent or control plane. QM is
+create a MH principal or authorize interaction with the agent or control plane. MH is
 not a hardened public or multi-tenant service boundary.
 
 ### Protected assets and actors
@@ -42,14 +42,14 @@ plugins, model and browser providers, and connected services.
 
 The security goals are to prevent unauthorized cross-scope reads, writes, and
 deliveries; keep credentials within their authorized scope; authenticate actors; and
-preserve attribution and audit evidence. QM does not guarantee correct model output
+preserve attribution and audit evidence. MH does not guarantee correct model output
 or continuous availability.
 
 ### Trust boundaries and operator assumptions
 
 - The deployment operator controls the cloud account, network, identity provider,
   database, object storage, runtime configuration, encryption keys, and initial admin
-  grants. QM does not protect a deployment from a malicious or compromised operator.
+  grants. MH does not protect a deployment from a malicious or compromised operator.
 - An org admin is a privileged content reader, not only a policy administrator.
   Admin content reads are scope-authorized and audited, but require no additional
   user approval.
@@ -64,12 +64,12 @@ or continuous availability.
   or initiating principal where implemented; it does not make the content safe.
 - A published app and its runtime are a separate trust boundary. App code receives
   visitor requests and data, may hold explicitly supplied app environment, and may
-  use configured per-app acting-as access. QM keeps ambient author credentials out of
+  use configured per-app acting-as access. MH keeps ambient author credentials out of
   the app, but does not review app code or guarantee how it handles visitor data.
 
 ### What the controls do and do not guarantee
 
-QM resolves a principal and scope for each turn, separates scope workspaces, uses
+MH resolves a principal and scope for each turn, separates scope workspaces, uses
 signed ingress and capability tokens, applies grants and audience checks, and records
 security-relevant actions. These controls are designed to reduce cross-scope access
 and make actions attributable. They are not a formal non-interference proof or a
@@ -115,7 +115,7 @@ these, not through them.
 - **Browser actions sit outside some core gates.** Actions inside the browser runner
   do not re-enter command policy or human-in-the-loop approval. They rely on
   task-level consent and the runner's spend checks. Browser traffic exits through the
-  browser provider rather than QM's egress proxy.
+  browser provider rather than MH's egress proxy.
 - **Sandbox credentials are plaintext while in use.** Credentials and capability
   tokens materialized as environment variables or files are readable by processes in
   that sandbox. Scope isolation and auditing limit exposure, and short-lived
@@ -182,3 +182,42 @@ may require upgrading.
 
 Public source releases must start from a fresh export; publishing a private
 repository's existing history is explicitly unsupported.
+
+## Вход в харнес: договорённость об edge-доверии
+
+Портал донора остановлен вместе с его кодом, и подписывать личность стало нечем.
+Пускает Caddy своим `basic_auth`, и это **целиком граница безопасности**. Ниже —
+границы этой договорённости, названные поимённо, чтобы её не приняли за
+аутентификацию.
+
+**Что она даёт.**
+
+- Сервер слушает только петлю (`127.0.0.1:8096`). Снаружи до него не достать,
+  минуя Caddy.
+- Край предъявляет общий секрет `X-Mh-Edge`. Он отвечает на вопрос «это точно
+  край», а не «этому человеку сюда можно».
+- Caddy **перезаписывает** оба заголовка (`header_up`), поэтому клиент их не
+  подделает: его значение затирается до того, как запрос уйдёт на сервер.
+- Имя вошедшего сверяется со списком допущенных в базе (`edge_principal`).
+  Незаявленному — отказ. Каждый вход записан в `edge_seen`: сколько раз пришёл,
+  когда впервые и когда последний раз, сколько раз получил отказ.
+- Список допущенных ведётся ручками `principal-allow` и `principals` — через
+  сервер, а не правкой настройки.
+
+**Чего она не даёт, и это не оговорка мелким шрифтом.**
+
+- Это **утверждение края о личности**, а не удостоверение её. Подпись портала
+  удостоверяла, кто пришёл; здесь Caddy говорит, кого он пустил.
+- Пароль `basic_auth` один на всех, кто заходит на домен. Разные люди за одним
+  паролем неотличимы: сервер увидит одно имя.
+- Всякий процесс на этой машине, прочитавший `MH_EDGE_SECRET`, может назваться
+  любым допущенным именем. Файл `.env` имеет права `0600`, и это вся защита.
+- Пустой список допущенных **пускает всякого**, кого назовёт край. Это сделано,
+  чтобы свежая установка не оказалась запертой; такой вход записывается как
+  незаявленный, и `principals` его называет. Объявите хотя бы одного — и дыра
+  закрывается тем же вызовом.
+
+**Когда это перестанет быть достаточным.** Как только на домен заходит больше
+одного человека: разные люди за общим паролем неразличимы, и запись «кто правил
+документ» станет неправдой. Тогда нужен настоящий вход — брокер с одноразовой
+ссылкой либо OIDC, — и договорённость выше снимается целиком, а не дополняется.

@@ -1,46 +1,46 @@
 ---
 name: upstream-pr
-description: Send a change to upstream qm without leaking organization-specific context. Use when asked to "upstream this", "open a PR against qm", "contribute this back", or when a fix made in a private fork belongs in core qm.
+description: Send a change to upstream mh without leaking organization-specific context. Use when asked to "upstream this", "open a PR against mh", "contribute this back", or when a fix made in a private fork belongs in core mh.
 ---
 
 # upstream-pr
 
-An organization customizes qm from a private fork: a standalone private repository in
+An organization customizes mh from a private fork: a standalone private repository in
 which everything organization-specific lives under `deploy/layers/<org>/` and the rest
 of the tree stays identical to upstream. That rest is what this skill means by core:
 every file outside the organization's layer directory, including the plugins, the CLI,
 the docs, and CI, not just the runtime under `src/`. A private fork's working tree
 therefore holds two kinds of material at once, and only one of them may travel upstream.
 
-Upstream qm is shared with organizations other than yours, and anything pushed there is
+Upstream mh is shared with organizations other than yours, and anything pushed there is
 permanent: it stays reachable by SHA in every clone and fork even after a deleted branch or
 a force-push. Treat a leak as unrecoverable and spend the effort before the push.
 
 See [`deploy/layers/README.md`](../../../deploy/layers/README.md) for the boundary, and the
-`update-qm` skill for syncing the other direction.
+`update-mh` skill for syncing the other direction.
 
 ## Where the branch will go
 
 `git remote -v` tells you which of three situations you are in. This decides the push
 target only; the scrub steps below run in every case.
 
-- `origin` is `yc-software/qm`: you are in upstream qm. Push the branch to `origin`
+- `origin` is `undassa/mh`: you are in upstream mh. Push the branch to `origin`
   and open the PR there.
-- `origin` is a GitHub fork of qm, meaning a repository created with GitHub's fork
-  feature and living inside qm's fork network: push to `origin` and open a normal
+- `origin` is a GitHub fork of mh, meaning a repository created with GitHub's fork
+  feature and living inside mh's fork network: push to `origin` and open a normal
   cross-repo PR.
 - `origin` is anything else, including a repository with no remotes: treat it as a
   private fork. Assume the working tree holds organization material even if
   `deploy/layers/` looks empty, and read "Pushing from a private fork" below.
 
 Judge by where `origin` points, not by the repository's name. A repository named
-`<org>/qm-<something>` in the same GitHub organization as the source is still a private
+`<org>/mh-<something>` in the same GitHub organization as the source is still a private
 fork.
 
 ## Decide whether the change belongs upstream
 
 Ask what the change would mean to an organization that is not yours. It belongs upstream
-when it is a fix or capability in core qm that any deployment would want. It does not
+when it is a fix or capability in core mh that any deployment would want. It does not
 belong upstream when it only makes sense given how your organization is set up: its tools,
 its vocabulary, its providers, its process. That change belongs in `deploy/layers/<org>/`.
 
@@ -105,7 +105,7 @@ change, which is why the pattern matches only paths inside an organization's
 subdirectory.
 
 **2. No organization identifiers in content, messages, or authorship.** Build the term list
-by reading your own layer: `qm.config.jsonc` has the org slug and public URL host,
+by reading your own layer: `mh.config.jsonc` has the org slug and public URL host,
 `.env.example` has the computed secret names, `.env` has the secret values,
 `slack-app-manifest.yml` has workspace and app names, `infra/terraform.tfvars` has cloud
 account and repository coordinates, and `sandbox/` has internal tool and system names. Add
@@ -161,16 +161,16 @@ itself is the subject of the change.
 A private fork is a standalone repository outside GitHub's fork network, so it cannot
 open a cross-repo pull request.
 
-If you have write access to upstream qm, push the topic branch there and open the PR inside
+If you have write access to upstream mh, push the topic branch there and open the PR inside
 that repository:
 
 ```bash
 git push upstream <topic>
-gh pr create --repo yc-software/qm --base main --head <topic> \
+gh pr create --repo undassa/mh --base main --head <topic> \
   --title "<title>" --body-file .generated/upstream-pr/body.md
 ```
 
-If you do not, keep a separate public GitHub fork of qm for contributions and push the
+If you do not, keep a separate public GitHub fork of mh for contributions and push the
 branch there from a different clone. Do not add that GitHub fork as a remote in the
 private fork's clone, where a mistyped push target would send private history to a
 public repository.
@@ -183,7 +183,7 @@ same reason, pass `--repo` to every `gh` command you run in a private fork: with
 prior body is recoverable through the GraphQL `userContentEdits` field.
 
 After the PR merges, do not also commit the change to the private fork. It arrives through the
-next `update-qm` sync, and committing it in both places guarantees a conflict.
+next `update-mh` sync, and committing it in both places guarantees a conflict.
 
 ## If something leaked
 

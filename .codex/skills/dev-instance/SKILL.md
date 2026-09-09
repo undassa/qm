@@ -81,7 +81,7 @@ silently loses half. So the rule is **one live instance per Slack app**.
 
 The way we keep out of each other's way is simple: **every developer has their own set of
 Slack apps**, listed as `poolN.env` files in their **own machine's** pool store
-(`~/.config/qm/slack-pool`). `up` claims the first free slot on _this_ machine and boots
+(`~/.config/mh/slack-pool`). `up` claims the first free slot on _this_ machine and boots
 that app's bot; the script prints its `@handle`. You QA by DMing that bot in
 `example.slack.com`.
 
@@ -157,9 +157,9 @@ DEV_INSTANCE_RECLAIM_STALE=0 bash scripts/dev-instance.sh up
 ## Env Discovery
 
 The launcher reads values from, in priority order: exported shell env, the machine-global
-`~/.config/qm/dev.env`, your login shell (for a model credential exported there), and this
+`~/.config/mh/dev.env`, your login shell (for a model credential exported there), and this
 worktree's `.env` (seeded from the main checkout in linked worktrees). Slack pool tokens
-default to `~/.config/qm/slack-pool`.
+default to `~/.config/mh/slack-pool`.
 
 When a cloud sandbox backend is configured it also validates that provider's access at
 startup, refreshes a stale provider token from the provider CLI's own logged-in session

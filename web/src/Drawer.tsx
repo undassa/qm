@@ -1,0 +1,52 @@
+import type React from "react";
+import { useEffect, useRef } from "react";
+
+/**
+ * Дровер: предмет раскрывается сбоку, а список за ним остаётся на месте — не
+ * теряется, куда ты вернёшься. Закрывается Escape и щелчком по подложке;
+ * фокус уходит внутрь и возвращается туда, откуда пришёл.
+ */
+export function Drawer({
+  title,
+  subtitle,
+  onClose,
+  children,
+}: {
+  title: string;
+  subtitle?: string;
+  onClose: () => void;
+  children: React.ReactNode;
+}): React.JSX.Element {
+  const panel = useRef<HTMLDivElement>(null);
+  const returnTo = useRef<Element | null>(null);
+
+  useEffect(() => {
+    returnTo.current = document.activeElement;
+    panel.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      if (returnTo.current instanceof HTMLElement) returnTo.current.focus();
+    };
+  }, [onClose]);
+
+  return (
+    <div className="drawer-scrim" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="drawer" role="dialog" aria-modal="true" aria-label={title} tabIndex={-1} ref={panel}>
+        <header className="drawer-head">
+          <div>
+            <h2>{title}</h2>
+            {subtitle ? <div className="prov">{subtitle}</div> : null}
+          </div>
+          <button type="button" className="drawer-close" onClick={onClose} aria-label="Закрыть">
+            ✕
+          </button>
+        </header>
+        <div className="drawer-body">{children}</div>
+      </div>
+    </div>
+  );
+}

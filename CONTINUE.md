@@ -5,11 +5,11 @@
 ## Что сейчас работает
 
 ```
-qm            :8100   ядро,      Postgres, systemd, enabled
-qm-ui         :8096   поверхность (Lit, plugins/web-ui)
-qm-portal     :8097   ПОРТАЛ — входная дверь, проксирует поверхность
+mh            :8100   ядро,      Postgres, systemd, enabled
+mh-ui         :8096   поверхность (Lit, plugins/web-ui)
+mh-portal     :8097   ПОРТАЛ — входная дверь, проксирует поверхность
 caddy                 TLS + basic_auth на code.undassa.com
-qm-pg                 docker, postgres:16-alpine, 127.0.0.1:5455, restart=unless-stopped
+mh-pg                 docker, postgres:16-alpine, 127.0.0.1:5455, restart=unless-stopped
 meta-harness  :7800   доска надзирателя (временная, отпадёт — см. HARNESS.md)
 ```
 
@@ -44,23 +44,23 @@ select * from admin_grants;   -- undassa@undassa | org:undassa | org_admin
 Проверить вход в API напрямую:
 
 ```bash
-cd /opt/src/github.com/undassa/qm
-node qm-login.mjs .env undassa                                  # whoami
-node qm-login.mjs .env undassa GET /v1/admin/scopes
-node qm-login.mjs .env undassa GET "/v1/admin/runs?scope=org:undassa"
+cd /opt/src/github.com/undassa/mh
+node mh-login.mjs .env undassa                                  # whoami
+node mh-login.mjs .env undassa GET /v1/admin/scopes
+node mh-login.mjs .env undassa GET "/v1/admin/runs?scope=org:undassa"
 ```
 
 ## Репозитории здесь
 
 ```
-/opt/src/github.com/undassa/qm            форк, ветка harness
-    origin   → git@github.com:undassa/qm.git      пишем сюда
-    upstream → git@github.com:yc-software/qm.git  push DISABLED
+/opt/src/github.com/undassa/mh            форк, ветка harness
+    origin   → git@github.com:undassa/mh.git      пишем сюда
+    upstream → git@github.com:undassa/mh.git  push DISABLED
     HARNESS.md — план переработки, шесть шагов
 
 /opt/src/github.com/undassa/meta-harness  прототип надзирателя и проекции
     origin → /opt/src/git/meta-harness.git (голый, локальный)
-    теги v0.0.1 … v0.5.0, QM.md — рунбук подъёма qm
+    теги v0.0.1 … v0.5.0, MH.md — рунбук подъёма mh
 ```
 
 ## Незакрытое, по важности

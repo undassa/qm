@@ -1,0 +1,117 @@
+//! Пересчёт по изменению: набор правят — гейты меряют заново.
+//!
+//! Раньше состояние гейта считалось при каждом открытии доски: тридцать восемь
+//! запросов на заход, и ни одного — когда документ действительно менялся. Теперь
+//! наоборот. Правка ставит отметку в `gate_dirty`, а этот работник её снимает:
+//! пересобирает проекции и меряет пункты, складывая измеренное в `project_gates`.
+//!
+//! Отметка одна на проект, и это сделано нарочно: десять правок подряд стоят
+//! одного прогона. Работник тоже один — два одновременных пересчёта писали бы в
+//! одни строки и оставили бы смесь двух замеров, о которой никто бы не узнал.
+//!
+//! Между `reproject` и `rebuild` набор неполон — первая команда снимает то, что
+//! кладёт вторая. Замер идёт ПОСЛЕ обеих, и до его конца доска показывает
+//! прошлый результат со своим временем: устаревшее, названное устаревшим, лучше
+//! свежего наполовину.
+
+use deadpool_postgres::Pool;
+
+/// Как часто заглядывать в отметку. Две секунды — это задержка между правкой и
+/// пересчётом; пара `reproject`+`rebuild` занимает около секунды, так что чаще
+/// смотреть незачем, а реже — заметно человеку.
+const TICK: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Отметить, что набор изменился и гейты пора мерить заново.
+///
+/// Зовётся с уже совершённой записи, а не до неё: отметка на неудавшейся правке
+/// заставила бы считать то же самое второй раз.
+/// Объявление ОБЩЕЕ — значит и пересчёт общий.
+///
+/// Пункт гейта, фаза и ступень лестницы одни на все проекты: разрабатываем по
+/// одной схеме. Пометить один проект после правки общего объявления значит
+/// оставить остальные с прежним числом пунктов — и разница прочитается как
+/// разница проектов, а не как непосчитанное. Так и вышло: у одного набора
+/// стояло шестьдесят три пункта, у другого сорок, и выглядело это отставанием.
+pub async fn touch_all(pool: &Pool, reason: &str) {
+    let Ok(client) = pool.get().await else { return };
+    let Ok(rows) = client.query("SELECT id FROM projects", &[]).await else { return };
+    for r in &rows {
+        let id: String = r.get(0);
+        touch(pool, &id, reason).await;
+    }
+}
+
+pub async fn touch(pool: &Pool, project: &str, reason: &str) {
+    let Ok(client) = pool.get().await else { return };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    // Ошибка здесь молчалива намеренно: пометка — не часть правки. Уронить
+    // записанный документ из-за неудавшейся отметки значило бы обменять
+    // сохранённое на своевременность пересчёта.
+    let _ = client
+        .execute(
+            "INSERT INTO gate_dirty(project_id, dirty_at, reason) VALUES ($1,$2,$3)
+             ON CONFLICT (project_id) DO UPDATE SET dirty_at = $2, reason = $3",
+            &[&project, &now, &reason],
+        )
+        .await;
+}
+
+/// Работник: смотрит отметку и, если набор менялся, пересчитывает.
+pub fn spawn(pool: Pool) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(TICK).await;
+            if let Err(e) = round(&pool).await {
+                // Пересчёт, упавший молча, — это доска, застывшая без объяснения.
+                tracing::warn!("пересчёт гейтов не прошёл: {e}");
+            }
+        }
+    });
+}
+
+async fn round(pool: &Pool) -> Result<(), tokio_postgres::Error> {
+    let client = pool.get().await.expect("пул отдал соединение");
+    let due = client
+        .query(
+            "SELECT project_id, dirty_at, reason FROM gate_dirty
+              WHERE ran_at IS NULL OR dirty_at > ran_at",
+            &[],
+        )
+        .await?;
+    drop(client);
+    for r in &due {
+        let project: String = r.get(0);
+        // Взятая отметка запоминается ДО работы: правка, пришедшая во время
+        // пересчёта, поставит время новее — и следующий круг посчитает снова.
+        // Записать «посчитано сейчас» в конце значило бы проглотить её.
+        let taken: i64 = r.get(1);
+        let reason: String = r.get(2);
+        let began = std::time::Instant::now();
+        crate::reproject::reproject(pool, &project).await?;
+        crate::projector::rebuild_before(pool, &project).await?;
+        crate::projector::rebuild(pool, &project).await?;
+        // Порядок обязателен и он такой: проекции, гейты, лестница, фазы.
+        // Ступени 4, 7 и 10 читают состояние пунктов гейта, фаза — состояние
+        // своего гейта. Посчитанные раньше, они прочли бы прошлый круг и
+        // разошлись бы с доской на один шаг — расхождение, невидимое глазом.
+        let out = crate::projector::measure_gates(pool, &project).await?;
+        crate::projector::measure_process(pool, &project, "godzy", "godzy").await?;
+        crate::projector::measure_phases(pool, &project).await?;
+        let spent = began.elapsed().as_millis() as i32;
+        let client = pool.get().await.expect("пул отдал соединение");
+        client
+            .execute(
+                "UPDATE gate_dirty SET ran_at = $2, ran_ms = $3 WHERE project_id = $1",
+                &[&project, &taken, &spent],
+            )
+            .await?;
+        tracing::info!(
+            "гейты пересчитаны: проект {project}, повод «{reason}», пунктов {}, провалено {}, {spent} мс",
+            out["measured"], out["failed"]
+        );
+    }
+    Ok(())
+}

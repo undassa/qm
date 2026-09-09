@@ -1,0 +1,22 @@
+[Unit]
+Description=mh web (code.undassa.com) — интерфейс и корпус на 127.0.0.1:8096
+After=network-online.target docker.service
+Wants=network-online.target
+# Тот же порт, что у прежней поверхности. Объявлено явно: иначе одновременный
+# запуск даёт «address in use» — отказ, по которому не видно, что виноват сосед.
+Conflicts=mh-ui.service
+
+[Service]
+Type=simple
+User=undassa
+Group=undassa
+WorkingDirectory=/opt/src/github.com/undassa/mh/server-rs
+EnvironmentFile=/opt/src/github.com/undassa/mh/server-rs/.env
+ExecStart=/opt/src/github.com/undassa/mh/server-rs/target/release/mh-server
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/mh-web.log
+StandardError=append:/var/log/mh-web.log
+
+[Install]
+WantedBy=multi-user.target

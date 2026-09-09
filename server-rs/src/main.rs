@@ -1,0 +1,204 @@
+//! Сервер харнеса: отдаёт интерфейсу корпус из Postgres.
+//!
+//! Рубеж первый — только чтение документов: `contexts`, `documents`, `document`.
+//! Границы и порядок работы описаны в `DESIGN.md` рядом.
+
+mod api;
+mod corpus;
+mod entities;
+mod kinds;
+mod mcp;
+mod parse;
+mod db;
+mod documents;
+mod identity;
+mod projector;
+mod reproject;
+mod scheme;
+mod projects;
+mod store;
+mod watch;
+
+use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+
+use tower_http::services::{ServeDir, ServeFile};
+
+/// Переменная окружения, без которой сервер не поднимается.
+///
+/// Не пускать всех при отсутствии секрета — единственное безопасное поведение:
+/// «пока не настроено, пускаем» превращает недонастроенный сервер в открытый.
+fn required(names: &[&str]) -> String {
+    for name in names {
+        if let Ok(value) = std::env::var(name) {
+            if !value.trim().is_empty() {
+                return value;
+            }
+        }
+    }
+    eprintln!("mh-server: не задано {}; без этого сервер не поднимается", names.join(" или "));
+    std::process::exit(2);
+}
+
+#[tokio::main]
+async fn main() {
+    // Логи — в stderr, и это не вкус. У подкоманды `mcp` stdout занят
+    // протоколом: одна строка лога, попавшая туда, делает ответ неразбираемым,
+    // и выглядит это как поломка сервера, а не как поломка вывода.
+    tracing_subscriber::fmt().with_writer(std::io::stderr).init();
+
+    let url = required(&["MH_DB_URL"]);
+    // Тот же секрет, что у портала, и под тем же именем: портал выписывает
+    // личность, этот сервер её проверяет. Завести для одного секрета второе имя
+    // значит однажды сменить его в одном месте и не сменить в другом — и вход
+    // сломается тихо, отказом «чужая подпись» на верных токенах.
+    let secret = required(&["MH_IDENTITY_SECRET", "PORTAL_IDENTITY_SECRET"]);
+    let port: u16 = std::env::var("MH_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8200);
+    let web = PathBuf::from(std::env::var("MH_WEB_DIR").unwrap_or_else(|_| "../web/dist".into()));
+
+    let pool = match db::pool(&url, 8) {
+        Ok(pool) => pool,
+        Err(why) => {
+            eprintln!("mh-server: {why}");
+            std::process::exit(2);
+        }
+    };
+
+    // Таблицы — ДО раскладки видов: раскладка теперь одна из них.
+    if let Err(e) = projector::ensure(&pool).await {
+        eprintln!("mh-server: таблицы проекций не заводятся: {e}");
+        std::process::exit(2);
+    }
+
+    // Раскладка видов — из БАЗЫ. Файл остаётся способом её завести: указали
+    // `MH_CORPUS_LAYOUT` — он читается и переносится в таблицу, дальше сервер
+    // живёт без него. Прежде путь к чужому репозиторию стоял умолчанием, и без
+    // того репозитория сервер не поднимался вовсе.
+    let kinds = match std::env::var("MH_CORPUS_LAYOUT") {
+        Ok(path) if !path.trim().is_empty() => match kinds::Kinds::load(&path) {
+            Ok(k) => {
+                match k.into_db(&pool, "MH_CORPUS_LAYOUT").await {
+                    Ok(n) => eprintln!("mh-server: раскладка видов перенесена в базу, {n} видов"),
+                    Err(why) => {
+                        eprintln!("mh-server: {why}");
+                        std::process::exit(2);
+                    }
+                }
+                k
+            }
+            Err(why) => {
+                eprintln!("mh-server: {why}");
+                std::process::exit(2);
+            }
+        },
+        _ => match kinds::Kinds::from_db(&pool).await {
+            Ok(k) if !k.is_empty() => k,
+            Ok(_) => {
+                eprintln!("mh-server: раскладки видов нет ни в базе, ни в MH_CORPUS_LAYOUT — \
+                           завести её нечем");
+                std::process::exit(2);
+            }
+            Err(why) => {
+                eprintln!("mh-server: {why}");
+                std::process::exit(2);
+            }
+        },
+    };
+
+    let app = api::App {
+        pool,
+        secret: Arc::new(secret.into_bytes()),
+        kinds: Arc::new(kinds),
+        edge: std::env::var("MH_EDGE_SECRET").ok().filter(|s| !s.trim().is_empty()).map(|secret| api::Edge { secret }),
+    };
+
+    // Подкоманда `parse-check`: сверка порта разбора с тем, что в базе оставил
+    // донор. Одноразовая по замыслу, но остаётся: порт, сошедшийся однажды,
+    // может разойтись при первой же правке.
+    if std::env::args().nth(1).as_deref() == Some("parse-check") {
+        let project = std::env::var("MH_PROJECT").unwrap_or_default();
+        if project.is_empty() {
+            eprintln!("mh-server parse-check: не задан MH_PROJECT — сверять нечего");
+            std::process::exit(2);
+        }
+        match parse::check_against_donor(&app.pool, &project).await {
+            Ok(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default()),
+            Err(e) => {
+                eprintln!("сверка не прошла: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    // Подкоманда `rebuild`: собственные проекции сервера, без записи документа.
+    // Нужна затем же, зачем `parse-check`, — прогнать сборку отдельно от правки
+    // и посмотреть, что она даёт.
+    if std::env::args().nth(1).as_deref() == Some("rebuild") {
+        let project = std::env::var("MH_PROJECT").unwrap_or_default();
+        // Пустой проект — не «проект по умолчанию», а не заданный: сборка с ним
+        // пишет строки, которые потом не удаляет никакая пересборка, потому что
+        // они не принадлежат ни одному проекту. Так уже вышло: шесть снятых
+        // терминов и семь заявленных предметов легли под пустым именем.
+        if project.is_empty() {
+            eprintln!("mh-server rebuild: не задан MH_PROJECT — собирать нечего");
+            std::process::exit(2);
+        }
+        if let Err(e) = projector::rebuild_before(&app.pool, &project).await {
+            eprintln!("подготовка не прошла: {}", projector::db_says(&e));
+            std::process::exit(1);
+        }
+        match projector::rebuild(&app.pool, &project).await {
+            Ok(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default()),
+            Err(e) => {
+                eprintln!("сборка не прошла: {}", projector::db_says(&e));
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    // Подкоманда `reproject`: перенесённые проекции — те, что прежде считал
+    // донор. Сверяется снимком таблиц до и после.
+    if std::env::args().nth(1).as_deref() == Some("reproject") {
+        let project = std::env::var("MH_PROJECT").unwrap_or_default();
+        if project.is_empty() {
+            eprintln!("mh-server reproject: не задан MH_PROJECT — пересобирать нечего");
+            std::process::exit(2);
+        }
+        match reproject::reproject(&app.pool, &project).await {
+            Ok(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default()),
+            Err(e) => {
+                eprintln!("пересборка не прошла: {}", projector::db_says(&e));
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    // Пересчёт гейтов при изменении набора. Живёт он только здесь, в сетевом
+    // сервере. Правку, пришедшую от клиента, он всё равно увидит: клиент ходит
+    // сюда же по сети, и отметка ложится в ту же таблицу.
+    watch::spawn(app.pool.clone());
+
+    let index = web.join("index.html");
+    let router = api::routes(app)
+        .nest_service("/next", ServeDir::new(&web).fallback(ServeFile::new(&index)))
+        // Корень — это то, куда портал приводит человека после входа. Пустой
+        // 404 на этом месте читается как «всё сломалось», хотя интерфейс жив
+        // одной строкой ниже по адресу.
+        .route("/", axum::routing::get(|| async { axum::response::Redirect::to("/next/") }));
+
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("mh-server: порт {port} не занять: {e}");
+            std::process::exit(2);
+        }
+    };
+    println!("mh-server: слушает http://{addr}/next/");
+    if let Err(e) = axum::serve(listener, router).await {
+        eprintln!("mh-server: остановился: {e}");
+        std::process::exit(1);
+    }
+}
