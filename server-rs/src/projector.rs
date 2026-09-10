@@ -963,6 +963,12 @@ ALTER TABLE harness_process_step ADD COLUMN IF NOT EXISTS probe text NOT NULL DE
 -- первым словом находки. Пусто — команды нет, и это видно: `next-step` не
 -- выдумывает её за набор.
 ALTER TABLE harness_process_step ADD COLUMN IF NOT EXISTS work_run text NOT NULL DEFAULT '';
+-- НАД ЧЕМ ступень меряет. Ступень «в плане документов не осталось ненаписанных»
+-- проходится, когда плана нет ВОВСЕ: пустой перечень отвечает «нарушений нет», и
+-- лестница объявляет пройденным то, чего не смотрела. Предмет объявляется, а не
+-- подразумевается: пусто — «нечем мерить», и это третье состояние.
+ALTER TABLE harness_process_step ADD COLUMN IF NOT EXISTS subject_query text NOT NULL DEFAULT '';
+ALTER TABLE harness_process_step ADD COLUMN IF NOT EXISTS subject_why text NOT NULL DEFAULT '';
 
 -- Что планируется — ВИДОМ И ИМЕНЕМ, а не строкой «constitution.md».
 --
@@ -6955,6 +6961,9 @@ pub async fn set_step_method(
     // Команда, которой видна единица работы этой ступени. `None` — не трогать
     // уже объявленную.
     run: Option<&str>,
+    // Запрос предмета ступени и слово о пустом предмете. `None` — не трогать.
+    subject: Option<&str>,
+    subject_why: Option<&str>,
     declared_by: &str,
     drop: bool,
 ) -> Result<Value, tokio_postgres::Error> {
@@ -7004,9 +7013,11 @@ pub async fn set_step_method(
         .execute(
             "UPDATE harness_process_step SET method_kind = $4,
                     method = coalesce($5, method),
-                    work_run = coalesce($6, work_run)
+                    work_run = coalesce($6, work_run),
+                    subject_query = coalesce($7, subject_query),
+                    subject_why = coalesce($8, subject_why)
               WHERE set_name = $1 AND process = $2 AND ord = $3",
-            &[&set_name, &process, &ord, &method_kind, &method, &run],
+            &[&set_name, &process, &ord, &method_kind, &method, &run, &subject, &subject_why],
         )
         .await?;
     Ok(json!({ "updated": n, "methodKind": method_kind, "declaredBy": declared_by,
@@ -7937,7 +7948,7 @@ async fn compute_next_step(
     let steps = client
         .query(
             "SELECT ord, question, method_kind, method, when_query, when_why, owner_kind, owner,
-                    touches, work_run
+                    touches, work_run, subject_query, subject_why
                FROM harness_process_step
               WHERE set_name = $1 AND process = $2 ORDER BY ord",
             &[&set_name, &process],
@@ -7960,6 +7971,14 @@ async fn compute_next_step(
     let mut unanswerable = Vec::new();
     let mut at: Option<Value> = None;
     let mut corpus_open = false;
+    // ВСЯ ОТКРЫТАЯ РАБОТА, а не только самая ранняя ступень. Лестница строго
+    // упорядочена, а работа — нет: у `tot-ade` одна неотвечаемая ступень
+    // («карты проекта нет») закрывала собой предполёт, у которого три задачи
+    // готовы прямо сейчас. Дефект на стороне сервера останавливал проект, чьи
+    // задачи готовы. Порядок остаётся правдой — `at` по-прежнему самая ранняя
+    // невыполненная, — но «работать не над чем» перестаёт быть ответом, когда
+    // работа есть.
+    let mut open_work: Vec<Value> = Vec::new();
     let mut journal: Vec<(i32, String, String)> = Vec::new();
 
     for row in &steps {
@@ -7973,6 +7992,8 @@ async fn compute_next_step(
         let owner: String = row.get(7);
         let touches: String = row.get(8);
         let work_run: String = row.get(9);
+        let subject_query: String = row.get(10);
+        let subject_why: String = row.get(11);
 
         // Условие ступени проверяется первым: пропущенная ступень не «пройдена».
         if !when_query.trim().is_empty() {
@@ -7987,7 +8008,22 @@ async fn compute_next_step(
             }
         }
 
-        let verdict = execute_method(&client, project, &method_kind, &method).await;
+        // ПУСТОЙ ПРЕДМЕТ — не «пройдено». Ступень «в плане документов не
+        // осталось ненаписанных» проходилась потому, что плана нет вовсе.
+        let verdict = if subject_empty(&client, project, &subject_query).await {
+            Verdict {
+                state: "unknown",
+                violations: 0,
+                detail: vec![],
+                why: if subject_why.trim().is_empty() {
+                    "предмет ступени пуст: мерить нечего, и это не «пройдено»".to_owned()
+                } else {
+                    subject_why.clone()
+                },
+            }
+        } else {
+            execute_method(&client, project, &method_kind, &method).await
+        };
         journal.push((ord, verdict.state.to_owned(), verdict.detail.join(" · ")));
 
         match verdict.state {
@@ -8007,6 +8043,22 @@ async fn compute_next_step(
                 }
             }
         }
+
+        let here_name = violator(verdict.detail.first().map(String::as_str).unwrap_or(""));
+        let here_run = if work_run.trim().is_empty() || here_name.is_empty() {
+            Value::Null
+        } else {
+            json!(work_run.replace("{имя}", &here_name))
+        };
+        open_work.push(json!({
+            "ord": ord,
+            "question": question,
+            "state": verdict.state,
+            "violations": verdict.violations,
+            "owner": owner,
+            "touches": touches,
+            "run": here_run,
+        }));
 
         if at.is_none() {
             // Репозиторная ступень при открытой фазе набора не выдаётся, и
@@ -8067,6 +8119,10 @@ async fn compute_next_step(
         "skipped": skipped,
         "unanswerable": unanswerable,
         "corpusPhaseOpen": corpus_open,
+        // Ступени, у которых работа есть ПРЯМО СЕЙЧАС, — включая те, что стоят
+        // позади текущей. Ответ «работать не над чем» при семидесяти шести
+        // готовых задачах был неправдой о проекте, а не о лестнице.
+        "openWork": open_work,
         // Номер ступени — НЕ мера пройденного, и читать его так значит ошибиться.
         // «Где мы» отвечает на «что чинить первым»: лестница останавливается на
         // самой ранней невыполненной. Проект с чистым набором и ненаписанным
@@ -8201,6 +8257,34 @@ pub async fn measure_process(
 ///
 /// Условная ступень отвечает `skipped` с причиной. Пропуск — не «пройдено»:
 /// слить их значило бы посчитать невыполненное выполненным.
+/// Пуст ли ПРЕДМЕТ ступени.
+///
+/// Ступень «в плане документов не осталось ненаписанных» проходится, когда плана
+/// нет ВОВСЕ: у `tot-ade` в нём ноль позиций, запрос возвращает ноль строк, и
+/// лестница объявляет пройденным то, чего не смотрела. Ровно тот случай, против
+/// которого написана вся доктрина «незнание называется словом».
+///
+/// Сходится и с самотестом: ступень, чей предмет пуст, проба не роняет — пустое
+/// множество не ломается подсадкой.
+///
+/// Предмет ОБЪЯВЛЯЕТСЯ. Не объявлен — проверять нечего, и ступень отвечает как
+/// прежде: выводить предмет из запроса значило бы гадать.
+async fn subject_empty(
+    client: &deadpool_postgres::Client,
+    project: &str,
+    subject_query: &str,
+) -> bool {
+    if subject_query.trim().is_empty() {
+        return false;
+    }
+    match client.query(subject_query, &[&project]).await {
+        Ok(rows) => rows.is_empty(),
+        // Запрос предмета, который не исполнился, — не «предмет пуст». Судит
+        // тогда сам способ, и его отказ будет виден своим словом.
+        Err(_) => false,
+    }
+}
+
 pub async fn process_state(
     pool: &Pool,
     project: &str,
@@ -8210,7 +8294,7 @@ pub async fn process_state(
     let rows = client
         .query(
             "SELECT ord, question, method_kind, method, when_query, when_why,
-                    owner_kind, owner, touches, probe, work_run
+                    owner_kind, owner, touches, probe, work_run, subject_query, subject_why
                FROM harness_process_step
               WHERE set_name = 'godzy' AND process = $1 ORDER BY ord",
             &[&process],
@@ -8241,10 +8325,18 @@ pub async fn process_state(
                 Err(_) => false,
             };
         }
-        let verdict = if skipped {
+        // Порядок колонок ЗДЕСЬ свой: перед `work_run` стоит `probe`, и те же
+        // номера, что у обходчика, читали бы соседнее поле.
+        let subject_query: String = r.get(11);
+        let subject_why: String = r.get(12);
+        let empty = subject_empty(&client, project, &subject_query).await;
+        // Находки отдаются ЦЕЛИКОМ. Пятёрка хороша там, где ответ читают мельком;
+        // эту ручку открывают затем, чтобы чинить, и «нарушений 76, показано 5»
+        // — это работа по половине предмета вслепую.
+        let verdict = if skipped || empty {
             None
         } else {
-            Some(execute_method(&client, project, &method_kind, &method).await)
+            Some(execute_method_upto(&client, project, &method_kind, &method, 200).await)
         };
         out.push(json!({
             "ord": ord,
@@ -8259,10 +8351,23 @@ pub async fn process_state(
             "owner": r.get::<_, String>(7),
             "touches": r.get::<_, String>(8),
             "workRun": r.get::<_, String>(10),
-            "computed": match &verdict { Some(v) => v.state, None => "skipped" },
+            "subjectQuery": subject_query,
+            "computed": match &verdict {
+                Some(v) => v.state,
+                None if skipped => "skipped",
+                None => "unknown",
+            },
             "violations": verdict.as_ref().map(|v| v.violations),
             "detail": verdict.as_ref().map(|v| v.detail.clone()),
-            "why": match &verdict { Some(v) => v.why.clone(), None => when_why },
+            "why": match &verdict {
+                Some(v) => v.why.clone(),
+                None if skipped => when_why,
+                None => if subject_why.trim().is_empty() {
+                    "предмет ступени пуст: мерить нечего, и это не «пройдено»".to_owned()
+                } else {
+                    subject_why
+                },
+            },
         }));
     }
     Ok(json!({
