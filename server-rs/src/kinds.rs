@@ -18,15 +18,6 @@ pub struct Kind {
     pub shape: String,
     #[serde(default)]
     pub single: bool,
-    #[serde(default)]
-    pub at: Option<String>,
-    #[serde(default)]
-    pub under: Option<String>,
-    #[serde(default, rename = "not-under")]
-    pub not_under: Option<String>,
-    /// Образец имени файла: `{id}.md`. Пусто — имя и есть путь под корнем.
-    #[serde(default)]
-    pub file: Option<String>,
     #[serde(default, rename = "in")]
     pub in_kind: Option<String>,
     /// Положена ли виду предметная таблица: `done` · `due` · `prose` ·

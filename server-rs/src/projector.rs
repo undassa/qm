@@ -1072,6 +1072,16 @@ CREATE OR REPLACE FUNCTION fact_fresh(p text, f text) RETURNS boolean AS $ф$
            - (SELECT s.stale_after_ms FROM sensor s WHERE s.project_id = p AND s.fact = f)
   END
 $ф$ LANGUAGE sql STABLE;
+-- ФАЙЛОВАЯ РАСКЛАДКА СНЯТА. `at`, `under`, `not-under`, `file` — след переезда
+-- из каталога в базу: сущность живёт строкой, а не файлом. Читал их код в трёх
+-- местах, и все три спрашивали не адрес, а форму: «много ли документов», «есть ли
+-- перечень имён». Форма сущности это знает сама — `shape` и `single`, — а
+-- «есть каталог» в точности совпадало с «документный и не одиночный»: 21 из 21,
+-- ни одного исключения.
+--
+-- Ключ, который ничего не значит, врёт читающему: по нему пойдут искать файл.
+UPDATE kind_layout SET spec = spec - 'at' - 'under' - 'not-under' - 'file'
+ WHERE spec ?| array['at', 'under', 'not-under', 'file'];
 ALTER TABLE scheme_term ADD COLUMN IF NOT EXISTS project_id text NOT NULL DEFAULT '';
 ALTER TABLE scheme_term DROP CONSTRAINT IF EXISTS scheme_term_pkey;
 ALTER TABLE scheme_term ADD PRIMARY KEY (project_id, role, value);

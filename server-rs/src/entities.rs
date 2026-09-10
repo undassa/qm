@@ -96,7 +96,11 @@ pub async fn locate(
             return Ok((r.get(0), r.get(1)));
         }
     }
-    if !k.is_inner() && table_of(kind).is_none() && k.under.is_none() && !k.single {
+    // Прежде здесь стояло `k.under.is_none()` — «нет каталога». Каталог в
+    // точности совпадал с «документный и не одиночный», то есть условие целиком
+    // было НЕДОСТИЖИМО: `!inner && (single||inner) && !single`. Условие,
+    // отвечающее «никогда», — это не условие.
+    if !k.is_inner() && table_of(kind).is_none() && !k.single {
         return Err(Miss::Unprojected(kind.to_owned()));
     }
     Err(Miss::NoEntity(kind.to_owned(), name.to_owned()))
@@ -124,7 +128,11 @@ pub async fn ids(pool: &Pool, kinds: &Kinds, project: &str, kind: &str) -> Resul
         let rows = client.query(&sql, &[&project]).await?;
         return Ok(rows.iter().map(|r| r.get::<_, String>(0)).collect());
     }
-    if k.under.is_none() {
+    // Перечня имён не бывает у одиночного вида и у внутреннего: у первого
+    // экземпляр один и без имени, у второго имена живут в чужом документе.
+    // Прежде это спрашивалось через «есть ли каталог» — файловым следом того,
+    // что и так сказано формой.
+    if k.single || k.is_inner() {
         return Err(Miss::Unprojected(kind.to_owned()));
     }
     let rows = client

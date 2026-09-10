@@ -686,10 +686,16 @@ impl Mcp {
                     // умения спрашивают у сервера «как зовётся сущность этого
                     // вида», и до сих пор не получали ответа — за ним ходили в
                     // карту проекта, файлом.
+                    // ФАЙЛОВОГО АДРЕСА ЗДЕСЬ НЕТ НАМЕРЕННО. Сущность живёт в
+                    // базе, а не в файле; `at`/`under`/`file` — след переезда,
+                    // и отдавать их наружу значит звать обратно.
                     out.push(json!({
                         "kind": kind, "single": k.single,
                         "shape": if k.is_inner() { "inner" } else { "document" },
                         "count": count,
+                        "in": k.in_kind.clone().unwrap_or_default(),
+                        "required": k.required,
+                        "requiredWhy": k.required_why.clone().unwrap_or_default(),
                         "idPattern": k.id.clone().unwrap_or_default(),
                         "nameIs": k.name_is.clone().unwrap_or_default(),
                         "projection": k.projection.clone().unwrap_or_default()
@@ -2507,7 +2513,11 @@ impl Mcp {
                 let mut undeclared = Vec::new();
                 for (kind, k) in &self.kinds.0 {
                     match k.projection.as_deref() {
-                        Some("due") => due.push(json!({ "kind": kind, "documents": k.at.is_none() })),
+                        // «Много ли документов» спрашивалось через `at.is_none()` — «нет
+                        // одного адреса». У семи одиночных видов адреса и так не
+                        // объявлено, и они отвечали «много». Форма сущности это
+                        // знает без файла.
+                        Some("due") => due.push(json!({ "kind": kind, "documents": !k.single })),
                         None => undeclared.push(kind.clone()),
                         _ => {}
                     }
