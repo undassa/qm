@@ -139,7 +139,8 @@ pub async fn put(
     now_ms: i64,
 ) -> Result<Value, tokio_postgres::Error> {
     if kind.is_empty() {
-        return Ok(json!({ "status": "not_found" }));
+        return Ok(json!({ "status": "not_found",
+                          "why": "вид документа не назван, а без вида адреса нет: `kind=` обязателен" }));
     }
     let bytes = content.as_bytes().len();
     if bytes > MAX_DOCUMENT_BYTES {
@@ -162,7 +163,16 @@ pub async fn put(
     // приходит, а первичным ключом он ещё остаётся. Отказ называется словом, а
     // не молчаливым созданием документа под выдуманным адресом.
     let Some(row) = current.first() else {
-        return Ok(json!({ "status": "not_found" }));
+        // Отказ НАЗЫВАЕТ ДВЕРЬ, в которую идти. Голое `not_found` верно и
+        // бесполезно: `put` правит написанное, а заводит `document-add`, и
+        // догадаться об этом из одного слова нельзя.
+        return Ok(json!({
+            "status": "not_found",
+            "why": format!(
+                "документа «{kind} {name}» нет, а `put` только ПРАВИТ написанное. \
+                 Завести его — `document-add kind={kind} id={name} content=…`; \
+                 после этого `put` будет писать в него."),
+        }));
     };
     let seen: i64 = row.get(0);
     if let Some(expected) = expected_revision {
@@ -234,7 +244,12 @@ pub async fn put_section(
         )
         .await?;
     let Some(row) = rows.first() else {
-        return Ok(json!({ "status": "not_found" }));
+        return Ok(json!({
+            "status": "not_found",
+            "why": format!(
+                "документа «{kind} {name}» нет, а `put-section` правит раздел написанного. \
+                 Завести — `document-add kind={kind} id={name} content=…`."),
+        }));
     };
     let content: String = row.get(0);
     let structure = parse_document(&content);
@@ -263,7 +278,8 @@ pub async fn remove(pool: &Pool, project: &str, kind: &str, name: &str) -> Resul
     // документа, а условие, под которое в песочных проектах подходят все сразу:
     // `p6` держит четыре таких, и одно удаление снесло бы четыре.
     if kind.is_empty() {
-        return Ok(json!({ "status": "not_found" }));
+        return Ok(json!({ "status": "not_found",
+                          "why": "вид документа не назван, а без вида адреса нет: `kind=` обязателен" }));
     }
     let mut client = pool.get().await.expect("пул отдал соединение");
     let tx = client.transaction().await?;

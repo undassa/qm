@@ -121,6 +121,17 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
     let mut client = pool.get().await.expect("пул отдал соединение");
     let tx = client.transaction().await?;
     tx.execute("DELETE FROM project_risks WHERE project_id = $1 AND origin = 'projected'", &[&project]).await?;
+    // ОБЪЯВЛЕННОЕ ТЕМ ЖЕ ИМЕНЕМ ПОГЛОЩАЕТСЯ ДОКУМЕНТОМ. Чистка снимала только
+    // строки происхождения `projected`, а объявленная дверью оставалась — и
+    // вставка документа с тем же именем падала на первичном ключе. Пересборка
+    // обрывалась целиком, гейт продолжал отдавать числа по недособранным
+    // проекциям, и час уходил на ложные находки.
+    //
+    // Документ — полнее объявления: все колонки, которые заполняет дверь, он
+    // считает сам. Побеждает он.
+    let ids: Vec<String> = all.iter().map(|r| r.id.clone()).collect();
+    tx.execute("DELETE FROM project_risks WHERE project_id = $1 AND id = ANY($2)",
+               &[&project, &ids]).await?;
     for r in &all {
         tx.execute(
             "INSERT INTO project_risks(project_id, id, number, title, state, impact, probability,

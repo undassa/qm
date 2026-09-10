@@ -5781,6 +5781,70 @@ pub async fn declare_sensor_spec(
     Ok(json!({ "status": "declared", "fact": fact, "reads": reads, "how": how }))
 }
 
+/// Объявлено дверью и не написано документом.
+///
+/// `question-list` отдавал имена, по которым `get` отказывает: сущность
+/// объявлена дверью, документа у неё нет. Двенадцать таких у myack, и увидеть
+/// расхождение можно было только вычитанием одного перечня из другого — то есть
+/// зная заранее, что оно бывает. `sweep` их не видит: он чистит разбор
+/// документов, а не объявления.
+///
+/// Различает их колонка `origin`. С тех пор как документ ПОГЛОЩАЕТ объявление
+/// того же имени, `declared` значит ровно одно: текста, из которого это
+/// выводится, нет.
+///
+/// ВНУТРЕННИЕ виды сюда не идут: у проверки и требования своего документа не
+/// бывает, и «не написано» у них — не пробел, а устройство.
+pub async fn declared_unwritten(
+    pool: &Pool,
+    kinds: &crate::kinds::Kinds,
+    project: &str,
+) -> Result<Value, tokio_postgres::Error> {
+    let client = pool.get().await.expect("пул отдал соединение");
+    let with_origin: std::collections::HashSet<String> = client
+        .query(
+            "SELECT table_name FROM information_schema.columns
+              WHERE column_name = 'origin' AND table_name LIKE 'project_%'",
+            &[],
+        )
+        .await?
+        .iter()
+        .map(|r| r.get::<_, String>(0))
+        .collect();
+    let mut out = Vec::new();
+    let mut total = 0usize;
+    let mut inner = Vec::new();
+    for (name, kind) in &kinds.0 {
+        let Some((table, id_col, _)) = crate::kinds::table_of(name) else { continue };
+        if !with_origin.contains(table) {
+            continue;
+        }
+        if kind.is_inner() {
+            inner.push(name.clone());
+            continue;
+        }
+        let rows = client
+            .query(
+                &format!("SELECT {id_col} FROM {table} WHERE project_id = $1 AND origin = 'declared' ORDER BY 1"),
+                &[&project],
+            )
+            .await?;
+        if rows.is_empty() {
+            continue;
+        }
+        let ids: Vec<String> = rows.iter().map(|r| r.get::<_, String>(0)).collect();
+        total += ids.len();
+        out.push(json!({ "kind": name, "count": ids.len(), "ids": ids }));
+    }
+    Ok(json!({
+        "declared": total,
+        "kinds": out,
+        "innerSkipped": inner,
+        "means": "объявлено дверью, документа нет: `get` по такому имени откажет, \
+                  а перечень вида его покажет. Написать — `document-add`, снять — `<вид>-add drop=true`.",
+    }))
+}
+
 /// Пункты готовности без способа проверки — разбивкой по владельцам.
 ///
 /// Их у myack тысяча шестьсот девяносто пять из тысячи семисот незнаний: почти

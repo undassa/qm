@@ -333,7 +333,26 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize)
     let tx = client.transaction().await?;
     tx.execute("DELETE FROM project_decision_links WHERE project_id = $1", &[&project]).await?;
     tx.execute("DELETE FROM project_decision_alternatives WHERE project_id = $1 AND origin = 'projected'", &[&project]).await?;
+    // Альтернативы адресуются решением и порядком, и объявленные тем же решением
+    // сталкиваются так же. Уходят они ЦЕЛИКОМ по своему решению: половина
+    // объявленная, половина из документа — это перечень, которого никто не писал.
+    {
+        let ids: Vec<String> = alternatives.iter().map(|(id, _)| id.clone()).collect();
+        tx.execute("DELETE FROM project_decision_alternatives WHERE project_id = $1 AND decision_id = ANY($2)",
+                   &[&project, &ids]).await?;
+    }
     tx.execute("DELETE FROM project_decisions WHERE project_id = $1 AND origin = 'projected'", &[&project]).await?;
+    // ОБЪЯВЛЕННОЕ ТЕМ ЖЕ ИМЕНЕМ ПОГЛОЩАЕТСЯ ДОКУМЕНТОМ. Чистка снимала только
+    // строки происхождения `projected`, а объявленная дверью оставалась — и
+    // вставка документа с тем же именем падала на первичном ключе. Пересборка
+    // обрывалась целиком, гейт продолжал отдавать числа по недособранным
+    // проекциям, и час уходил на ложные находки.
+    //
+    // Документ — полнее объявления: все колонки, которые заполняет дверь, он
+    // считает сам. Побеждает он.
+    let ids: Vec<String> = decisions.iter().map(|d| d.0.clone()).collect();
+    tx.execute("DELETE FROM project_decisions WHERE project_id = $1 AND id = ANY($2)",
+               &[&project, &ids]).await?;
     for (id, number, title, kind, name, status, status_text, date, deciders, context, decision, consequences, waiver) in &decisions {
         tx.execute(
             "INSERT INTO project_decisions(project_id, id, number, title, entity_kind, entity_name,
