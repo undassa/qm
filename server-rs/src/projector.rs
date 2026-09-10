@@ -1442,6 +1442,12 @@ ALTER TABLE project_sensor_spec ADD COLUMN IF NOT EXISTS how text NOT NULL DEFAU
 -- пустым. Заголовок теперь просто текст, который можно переписать; адресует
 -- пункт `id`.
 ALTER TABLE gate_item ADD COLUMN IF NOT EXISTS id text NOT NULL DEFAULT '';
+-- ИСПОЛНЯЕТСЯ ЛИ ПРОБА. `null` — не проверяли; `false` — проба есть, но она не
+-- запрос, и пункт не роняли НИ РАЗУ. Зелёное у такого пункта не значит ничего,
+-- и молчать об этом нельзя: гейт для того и написан, чтобы не было зелёного,
+-- которое никто не проверял.
+ALTER TABLE gate_item ADD COLUMN IF NOT EXISTS probe_ok boolean;
+ALTER TABLE project_gates ADD COLUMN IF NOT EXISTS probe_ok boolean;
 ALTER TABLE project_gates ADD COLUMN IF NOT EXISTS id text NOT NULL DEFAULT '';
 ALTER TABLE gate_item_waiver ADD COLUMN IF NOT EXISTS id text NOT NULL DEFAULT '';
 CREATE UNIQUE INDEX IF NOT EXISTS gate_item_by_id ON gate_item (phase, id) WHERE id <> '';
@@ -2818,7 +2824,7 @@ pub async fn gate(pool: &Pool, project: &str, phase: Option<&str>) -> Result<Val
            // было нельзя: имена восстанавливались сопоставлением заголовков
            // вручную, а запросов не видел никто. Гейт, который нельзя прочесть,
            // нельзя и проверить.
-            "SELECT phase, item, kind, result, checked_at, why, id, query, probe, owner
+            "SELECT phase, item, kind, result, checked_at, why, id, query, probe, owner, probe_ok
                FROM project_gates
               WHERE project_id = $1 AND ($2 = '' OR phase = $2)
               ORDER BY phase, id, item",
@@ -2881,6 +2887,9 @@ pub async fn gate(pool: &Pool, project: &str, phase: Option<&str>) -> Result<Val
             m.insert("owner".into(), json!(r.get::<_, Option<String>>(9).unwrap_or_default()));
 
             m.insert("phase".into(), json!(phase));
+            // «Пробу не проверяли» и «проба не роняет» — разное, и оба не
+            // «зелёное»: пункт, который ни разу не уронили, никто не проверял.
+            m.insert("probeRuns".into(), json!(r.get::<_, Option<bool>>(10)));
 
         }
         let slot = checked_at.entry(phase.clone()).or_insert(at);
@@ -6788,6 +6797,9 @@ pub async fn gate_selftest(pool: &Pool, project: &str) -> Result<Value, tokio_po
         .await?;
 
     let (mut alive, mut broken, mut undeclared) = (Vec::new(), Vec::new(), Vec::new());
+    // Самотест ЗАПИСЫВАЕТ приговор пробе: «ни разу не роняли» должен видеть
+    // всякий, кто смотрит гейт, а не только тот, кто позвал самотест.
+    let mut verdict: Vec<(String, String, bool)> = Vec::new();
     for r in &items {
         let (phase, item): (String, String) = (r.get(0), r.get(1));
         let query: Option<String> = r.get(2);
@@ -6821,12 +6833,34 @@ pub async fn gate_selftest(pool: &Pool, project: &str) -> Result<Value, tokio_po
         };
         tx.rollback().await?;
         match saw {
-            Ok((was, became)) if became != was => alive.push(json!({ "phase": phase, "item": item,
-                "was": was.len(), "became": became.len() })),
-            Ok((was, _)) => broken.push(json!({ "phase": phase, "item": item,
-                "why": format!("на подсаженном нарушении ответ пункта не изменился: те же {} строк, слово в слово", was.len()) })),
-            Err(why) => broken.push(json!({ "phase": phase, "item": item, "why": why })),
+            Ok((was, became)) if became != was => {
+                verdict.push((phase.clone(), item.clone(), true));
+                alive.push(json!({ "phase": phase, "item": item,
+                    "was": was.len(), "became": became.len() }));
+            }
+            Ok((was, _)) => {
+                verdict.push((phase.clone(), item.clone(), false));
+                broken.push(json!({ "phase": phase, "item": item,
+                    "why": format!("на подсаженном нарушении ответ пункта не изменился: те же {} строк, слово в слово", was.len()) }));
+            }
+            Err(why) => {
+                verdict.push((phase.clone(), item.clone(), false));
+                broken.push(json!({ "phase": phase, "item": item, "why": why }));
+            }
         }
+    }
+
+    // Приговор записывается: «ни разу не роняли» должен видеть всякий, кто
+    // смотрит гейт, а не только тот, кто позвал самотест.
+    for (phase, id, ok) in &verdict {
+        client
+            .execute("UPDATE gate_item SET probe_ok = $3 WHERE phase = $1 AND id = $2",
+                     &[phase, id, ok])
+            .await?;
+        client
+            .execute("UPDATE project_gates SET probe_ok = $3 WHERE phase = $1 AND id = $2",
+                     &[phase, id, ok])
+            .await?;
     }
 
     Ok(json!({
@@ -7293,9 +7327,11 @@ pub async fn set_gate_item(
     //
     // Проверяется подготовкой запроса, а не исполнением: подготовка ловит и
     // разбор, и несуществующую таблицу, и не пишет ни строки.
+    let mut probe_runs: Option<bool> = None;
     if let Some(p) = probe {
         let text = p.trim();
         if !text.is_empty() {
+            probe_runs = Some(true);
             if let Err(e) = client.prepare(text).await {
                 return Ok(json!({
                     "status": "probe_not_a_query",
@@ -7335,12 +7371,13 @@ pub async fn set_gate_item(
     let probe = probe.map(|p| p.to_owned()).unwrap_or(had.2);
     let n = client
         .execute(
-            "INSERT INTO gate_item (phase, id, item, kind, query, owner, probe)
-             VALUES ($1, $2, $7, $3, $4, $5, $6)
+            "INSERT INTO gate_item (phase, id, item, kind, query, owner, probe, probe_ok)
+             VALUES ($1, $2, $7, $3, $4, $5, $6, $8)
              ON CONFLICT (phase, id) WHERE id <> ''
                DO UPDATE SET item = EXCLUDED.item, kind = EXCLUDED.kind, query = EXCLUDED.query,
-                             owner = EXCLUDED.owner, probe = EXCLUDED.probe",
-            &[&phase, &id, &kind, &query, &owner, &probe, &title],
+                             owner = EXCLUDED.owner, probe = EXCLUDED.probe,
+                             probe_ok = EXCLUDED.probe_ok",
+            &[&phase, &id, &kind, &query, &owner, &probe, &title, &probe_runs],
         )
         .await?;
     if !why.is_empty() {

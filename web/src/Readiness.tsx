@@ -21,6 +21,10 @@ interface Item {
   item: string;
   kind: string;
   computed: string;
+  /** Роняли ли пункт пробой. `false` — не роняли ни разу, и зелёное у него ничего не значит. */
+  probeRuns?: boolean | null;
+  probe?: string;
+  id?: string;
   violations?: number;
   detail?: string[];
   why?: string;
@@ -346,6 +350,11 @@ function ItemList({
               <span className="item-dot" aria-hidden="true" />
               <span className="item-t">{i.item}</span>
               <span className="item-s">
+                {/* Пункт, который ни разу не уронили, зелёным быть не может:
+                    его никто не проверял. Слово «пройден» без этой оговорки
+                    обещает проверку, которой не было. */}
+                {i.probeRuns === false ? <b className="never" title="пробу не удалось исполнить: правило ни разу не роняли">не роняли</b> : null}
+                {i.probeRuns === false ? " · " : null}
                 {WORD[i.computed] ?? i.computed}
                 {(i.violations ?? 0) > 0 ? <b> · {i.violations}</b> : null}
                 {(i.excepted ?? 0) > 0 ? <em> · {i.excepted} с причиной</em> : null}
@@ -354,6 +363,13 @@ function ItemList({
             </button>
             {isOpen ? (
               <div className="item-body">
+                {i.probeRuns === false ? (
+                  <p className="item-why never-why">
+                    Пробу этого пункта исполнить нельзя — она записана прозой, а не запросом. Значит
+                    правило не роняли ни разу, и его зелёное ничего не доказывает.
+                    {i.probe ? <> Что записано: <code>{i.probe}</code></> : null}
+                  </p>
+                ) : null}
                 {i.means ? <p className="item-why">{i.means}</p> : null}
                 {i.why && !i.means ? <p className="item-why">{i.why}</p> : null}
                 {has ? (
