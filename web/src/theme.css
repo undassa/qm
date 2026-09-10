@@ -3701,3 +3701,18 @@ button.chain-card:disabled { cursor: default; opacity: .55; }
 .pipe-t { font-size: 13px; }
 .pipe-s { font-size: 12px; color: var(--dim); }
 .pipe-u { font-size: 11.5px; color: var(--accent, #d8a657); white-space: nowrap; }
+/*
+ * Имя в находке — ссылка. Путь от красного пункта до документа шёл через память
+ * и поиск руками; теперь это один щелчок, и вид имени определяет не таблица
+ * приставок в коде, а тот же поиск, что у палитры.
+ */
+.found {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--accent, #d8a657);
+  border-bottom: 1px dotted color-mix(in srgb, var(--accent, #d8a657) 55%, transparent);
+  cursor: pointer;
+}
+.found:hover { border-bottom-style: solid; }

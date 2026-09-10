@@ -1,6 +1,6 @@
 import type React from "react";
 import { useEffect, useState } from "react";
-import { loadProjects, type Project } from "./api";
+import { loadProjects, tool, type Project } from "./api";
 import { chooseProject } from "./project-address";
 import { ProjectPicker } from "./Projects";
 import { Entities } from "./Entities";
@@ -10,6 +10,20 @@ import { Rules } from "./Rules";
 import { Users } from "./Users";
 import { Readiness } from "./Readiness";
 import { Palette, type Jump } from "./Palette";
+
+/**
+ * Обстановка вида: то, что раздел получает от приложения.
+ *
+ * Реестр разделов — константа модуля, и состояния приложения ему не видно.
+ * Передавать по доводу на каждую нужду значит менять подпись всякий раз, как
+ * разделу понадобится ещё одна; один объект меняется дополнением поля.
+ */
+interface Ctx {
+  /** Что попросили открыть — палитрой или ссылкой. */
+  want: Jump | null;
+  /** Найти имя и открыть его: тем же взвешенным поиском, что и палитра. */
+  onFind: (q: string) => void;
+}
 import { Process } from "./Process";
 import { Tasks } from "./Tasks";
 import { Gates } from "./Gates";
@@ -31,8 +45,8 @@ import { Unknown } from "./Unknown";
  * 523 варианта, не показанных нигде), **доказательство** (чем закрыто каждое
  * требование) и **вопросы** (чем закрыт каждый).
  */
-const PAGES: { page: string; title: string; note: string; view: (id: string, want: Jump | null) => React.JSX.Element }[] = [
-  { page: "where", title: "Готовность", note: "фазы и гейты", view: (id) => <Readiness projectId={id} /> },
+const PAGES: { page: string; title: string; note: string; view: (id: string, ctx: Ctx) => React.JSX.Element }[] = [
+  { page: "where", title: "Готовность", note: "фазы и гейты", view: (id, ctx) => <Readiness projectId={id} onFind={ctx.onFind} /> },
   { page: "tasks", title: "Задачи", note: "конвейер", view: (id) => <Tasks projectId={id} /> },
   { page: "unknown", title: "Не знаем", note: "пробелы", view: (id) => <Unknown projectId={id} /> },
   // Раздел — это тип ресурса, а не папка: у требования свои колонки, свои
@@ -40,7 +54,7 @@ const PAGES: { page: string; title: string; note: string; view: (id: string, wan
   { page: "rules", title: "Правила", note: "конституция", view: (id) => <Rules projectId={id} /> },
   { page: "requirements", title: "Требования", note: "и доказательства", view: (id) => <Requirements projectId={id} /> },
   { page: "users", title: "Пользователь", note: "путь и истории", view: (id) => <Users projectId={id} /> },
-  { page: "read", title: "Документы", note: "читать", view: (id, want) => <Reader projectId={id} want={want} /> },
+  { page: "read", title: "Документы", note: "читать", view: (id, ctx) => <Reader projectId={id} want={ctx.want} /> },
   { page: "decisions", title: "Архитектура", note: "и отвергнутое", view: (id) => <Decisions projectId={id} /> },
   { page: "proof", title: "Доказательство", note: "чем закрыто", view: (id) => <Proof projectId={id} /> },
   { page: "questions", title: "Вопросы", note: "чем закрыт каждый", view: (id) => <Questions projectId={id} /> },
@@ -111,6 +125,22 @@ export function App(): React.JSX.Element {
     return () => window.removeEventListener("keydown", key);
   }, []);
 
+  // Найти имя и открыть его: тот же взвешенный поиск, что у палитры. Раздел,
+  // нашедший виновника, не обязан знать, какому виду тот принадлежит.
+  const find = (q: string): void => {
+    if (!project) return;
+    void tool<{ hits: { kind: string; name: string }[] }>(project.projectId, "search", { query: q, limit: 5 })
+      .then((d) => {
+        const hit = (d.hits ?? [])[0];
+        if (!hit) return;
+        setPage("read");
+        go({ page: "read" });
+        setJump({ page: "read", kind: hit.kind, id: hit.name });
+      })
+      .catch(() => undefined);
+  };
+  const ctx = { want: jump, onFind: find };
+
   const view = PAGES.find((p) => p.page === page) ?? PAGES[0]!;
 
   return (
@@ -138,7 +168,7 @@ export function App(): React.JSX.Element {
         ))}
       </nav>
 
-      <main className="main">{project ? view.view(project.projectId, jump) : <p className="empty">Выбираю проект…</p>}</main>
+      <main className="main">{project ? view.view(project.projectId, ctx) : <p className="empty">Выбираю проект…</p>}</main>
 
       {pal && project ? (
         <Palette

@@ -98,7 +98,13 @@ function tally(g?: Gate): { passed: number; failed: number; other: number; total
   return { passed, failed, other, total: items.length, violations };
 }
 
-export function Readiness({ projectId }: { projectId: string }): React.JSX.Element {
+export function Readiness({
+  projectId,
+  onFind,
+}: {
+  projectId: string;
+  onFind?: (q: string) => void;
+}): React.JSX.Element {
   const [open, setOpen] = useState<string | null>(null);
   const [shown, setShown] = useState<string | null>(null);
 
@@ -249,7 +255,7 @@ export function Readiness({ projectId }: { projectId: string }): React.JSX.Eleme
         {chosenPhase ? `${chosenPhase.phase} · ${chosenPhase.title}` : chosen}
         {chosenPhase?.gate ? <span className="pick-g">гейт {chosenPhase.gate}</span> : null}
       </h2>
-      <ItemList gate={chosenGate} shown={shown} onShow={setShown} />
+      <ItemList gate={chosenGate} shown={shown} onShow={setShown} onFind={onFind} />
 
       {/* ── Ступени лестницы, относящиеся к этой стороне ────────────────── */}
       <Ladder steps={steps} at={next?.at?.ord} />
@@ -284,7 +290,7 @@ export function Readiness({ projectId }: { projectId: string }): React.JSX.Eleme
             </span>
           </h2>
           {g.title ? <p className="lede">{g.title}</p> : null}
-          <ItemList gate={g} shown={shown} onShow={setShown} />
+          <ItemList gate={g} shown={shown} onShow={setShown} onFind={onFind} />
         </section>
       ))}
     </>
@@ -296,10 +302,12 @@ function ItemList({
   gate,
   shown,
   onShow,
+  onFind,
 }: {
   gate: Gate | undefined;
   shown: string | null;
   onShow: (v: string | null) => void;
+  onFind?: (q: string) => void;
 }): React.JSX.Element {
   const [showAll, setShowAll] = useState(false);
   if (!gate) return <p className="empty">У этой фазы гейта нет.</p>;
@@ -351,7 +359,9 @@ function ItemList({
                 {has ? (
                   <ul className="item-finds">
                     {(i.detail ?? []).slice(0, 40).map((d, n) => (
-                      <li key={n}>{d}</li>
+                      <li key={n}>
+                        <Found text={String(d)} onFind={onFind} />
+                      </li>
                     ))}
                     {(i.detail ?? []).length > 40 ? (
                       <li className="holds-more">…и ещё {(i.detail ?? []).length - 40}</li>
@@ -418,4 +428,38 @@ function Ladder({ steps, at }: { steps: Step[]; at: number | undefined }): React
       )}
     </section>
   );
+}
+
+/**
+ * Находка со ссылками на названные в ней сущности.
+ *
+ * Находка называет виновника именем: `US-ESC-06`, `FR-SHF-04`, `M0-T12`. До сих
+ * пор это был просто текст, и путь от красного пункта до документа шёл через
+ * память и поиск руками.
+ *
+ * Какому ВИДУ принадлежит имя, здесь не решается. Приставка `US-` значит
+ * историю только потому, что так договорился этот набор; другой договорится
+ * иначе, и зашитая сюда таблица приставок стала бы умолчанием в коде — тем
+ * самым, которого мы избегаем везде. Поэтому щелчок ищет имя тем же взвешенным
+ * поиском, что и палитра: точное имя перевешивает всё остальное.
+ */
+const NAMED = /\b([A-Z][A-Z0-9]{0,7}(?:-[A-Z0-9]{1,9}){1,3})\b/g;
+
+function Found({ text, onFind }: { text: string; onFind?: (q: string) => void }): React.JSX.Element {
+  if (!onFind) return <>{text}</>;
+  const parts: React.ReactNode[] = [];
+  let at = 0;
+  for (const m of text.matchAll(NAMED)) {
+    const i = m.index ?? 0;
+    if (i > at) parts.push(text.slice(at, i));
+    const name = m[1] as string;
+    parts.push(
+      <button key={`${i}-${name}`} type="button" className="found" onClick={() => onFind(name)}>
+        {name}
+      </button>,
+    );
+    at = i + name.length;
+  }
+  if (at < text.length) parts.push(text.slice(at));
+  return <>{parts}</>;
 }
