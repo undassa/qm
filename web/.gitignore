@@ -2,5 +2,7 @@
 node_modules/
 dist/
 # Съёмка и щупы: инструмент разработки, не часть приложения.
-shot.mjs
-probe*.mjs
+/shot.mjs
+/walk.mjs
+/crop.mjs
+/probe*.mjs
