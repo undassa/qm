@@ -8051,6 +8051,95 @@ pub async fn measure_process(
 /// Ответ несёт время замера и признак `stale`: набор мог измениться секунду
 /// назад, и работник ещё считает. Агент, попавший в этот промежуток, обязан
 /// узнать об этом словом, а не получить прошлое положение как нынешнее.
+/// Лестница ЦЕЛИКОМ, с состоянием каждой ступени.
+///
+/// `process-state` отдавал вопрос, способ-род, владельца и сторону — и **ни
+/// запроса, ни пробы, ни вычисленного состояния, ни числа нарушений**. То есть
+/// ступень нельзя было ни просмотреть, ни сверить, ни починить, не имея прямого
+/// доступа к базе.
+///
+/// Это дословно тот дефект, который у пункта гейта закрыт: пункт отдаёт `id`,
+/// `query`, `probe`, `exceptionKey`, `probeRuns`. Лестница того же не получила,
+/// и расхождение двух ручек об одном предмете — ступень 4 говорит «пройдена»,
+/// `plan` говорит «пять ненаписанных» — разрешалось чтением кода, а не вопросом
+/// к харнесу.
+///
+/// Состояние СЧИТАЕТСЯ ЗДЕСЬ, тем же единственным исполнителем, что у гейта.
+/// Второй записи о нём не заводится: она разошлась бы с первой.
+///
+/// Условная ступень отвечает `skipped` с причиной. Пропуск — не «пройдено»:
+/// слить их значило бы посчитать невыполненное выполненным.
+pub async fn process_state(
+    pool: &Pool,
+    project: &str,
+    process: &str,
+) -> Result<Value, tokio_postgres::Error> {
+    let client = pool.get().await.expect("пул отдал соединение");
+    let rows = client
+        .query(
+            "SELECT ord, question, method_kind, method, when_query, when_why,
+                    owner_kind, owner, touches, probe
+               FROM harness_process_step
+              WHERE set_name = 'godzy' AND process = $1 ORDER BY ord",
+            &[&process],
+        )
+        .await?;
+    let mut out = Vec::new();
+    for r in &rows {
+        let ord: i32 = r.get(0);
+        let method_kind: String = r.get(2);
+        let method: String = r.get(3);
+        let when_query: String = r.get(4);
+        let when_why: String = r.get(5);
+        let probe: String = r.get(9);
+
+        // Проба ступени — тот же вопрос, что у пункта гейта: роняли ли её. Пустая
+        // проба и непроверяемая — разное, и `null` здесь значит «пробы нет»,
+        // а не «не роняется».
+        let probe_runs: Option<bool> = if probe.trim().is_empty() {
+            None
+        } else {
+            Some(client.prepare(probe.trim()).await.is_ok())
+        };
+
+        let mut skipped = false;
+        if !when_query.trim().is_empty() {
+            skipped = match client.query(when_query.as_str(), &[&project]).await {
+                Ok(found) => found.is_empty(),
+                Err(_) => false,
+            };
+        }
+        let verdict = if skipped {
+            None
+        } else {
+            Some(execute_method(&client, project, &method_kind, &method).await)
+        };
+        out.push(json!({
+            "ord": ord,
+            "question": r.get::<_, String>(1),
+            "methodKind": method_kind,
+            "method": method,
+            "probe": probe,
+            "probeRuns": probe_runs,
+            "whenQuery": when_query,
+            "whenWhy": when_why,
+            "ownerKind": r.get::<_, String>(6),
+            "owner": r.get::<_, String>(7),
+            "touches": r.get::<_, String>(8),
+            "computed": match &verdict { Some(v) => v.state, None => "skipped" },
+            "violations": verdict.as_ref().map(|v| v.violations),
+            "detail": verdict.as_ref().map(|v| v.detail.clone()),
+            "why": match &verdict { Some(v) => v.why.clone(), None => when_why },
+        }));
+    }
+    Ok(json!({
+        "process": process,
+        "steps": out,
+        "means": "состояние ступени считается ТЕМ ЖЕ исполнителем, что у пункта гейта; \
+                  `skipped` — условие ступени не выполнено, и это не «пройдено»",
+    }))
+}
+
 pub async fn next_step(pool: &Pool, project: &str, process: &str) -> Result<Value, tokio_postgres::Error> {
     let client = pool.get().await.expect("пул отдал соединение");
     let row = client
