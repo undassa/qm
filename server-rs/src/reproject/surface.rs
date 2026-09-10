@@ -250,6 +250,28 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize,
         )
         .await?;
     }
+    // Тело экрана — из секции его же документа, названной его именем. Без
+    // текста экран выпадал из каскада «связь обновилась — вопрос переоткрыт»,
+    // хотя описание есть у всех 69.
+    tx.execute(
+        "UPDATE project_screens s SET spec = coalesce(z.тело,'')
+           FROM (SELECT sc.id, sc.project_id,
+                        (SELECT string_agg(b.raw, E'\n' ORDER BY b.ord)
+                           FROM project_document_blocks b
+                          WHERE b.project_id = sec.project_id AND b.entity_kind = sec.entity_kind
+                            AND b.entity_name = sec.entity_name
+                            AND b.ord > sec.ord AND b.ord <= sec.last_block
+                            AND b.kind NOT IN ('heading','blank')) тело
+                   FROM project_screens sc
+                   JOIN LATERAL (SELECT * FROM project_document_sections d
+                                  WHERE d.project_id = sc.project_id AND d.entity_kind = 'screen'
+                                    AND d.title LIKE sc.id || '%' LIMIT 1) sec ON true
+                  WHERE sc.project_id = $1) z
+          WHERE z.project_id = s.project_id AND z.id = s.id",
+        &[&project],
+    )
+    .await?;
+
     // Требования экрана: раскрытый перечень поля «Требования». Без этой связи
     // правило «задача, чьи требования видны человеку, называет экраны» отвечало
     // бы нулём при шестидесяти восьми экранах — то есть молчало бы.

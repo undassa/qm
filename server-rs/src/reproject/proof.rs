@@ -335,6 +335,21 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize)
         &[&project],
     )
     .await?;
+    // КОГДА ТЕКСТ СУЩНОСТИ ПОЯВИЛСЯ — считается ОДИН РАЗ здесь, а не при
+    // каждом чтении вида. Обход идёт по `entity_text`, то есть новый род
+    // сущности попадает сюда сам, стоит ему появиться в том виде.
+    tx.execute("DELETE FROM entity_text_since WHERE project_id = $1", &[&project]).await?;
+    tx.execute(
+        "INSERT INTO entity_text_since (project_id, kind, id, since)
+         SELECT e.project_id, e.kind, e.id,
+                (SELECT min(v.written_at) FROM project_document_revisions v
+                  WHERE v.project_id = e.project_id AND v.entity_kind = e.entity_kind
+                    AND v.entity_name = e.entity_name AND v.content LIKE '%' || e.text || '%')
+           FROM entity_text e WHERE e.project_id = $1
+         ON CONFLICT DO NOTHING",
+        &[&project],
+    )
+    .await?;
     tx.commit().await?;
     Ok((requirements.len(), checks.len(), needs.len()))
 }

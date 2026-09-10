@@ -1743,6 +1743,27 @@ ALTER TABLE project_requirement_sources ADD COLUMN IF NOT EXISTS origin text NOT
 --
 -- Даты берутся из истории самого документа — первая ревизия и последняя, — и
 -- ложатся колонками сущности, а не выводятся при каждом чтении.
+-- ТЕЛО ЭКРАНА КОЛОНКОЙ. Экран четвёртый по зависимости — на него ссылаются 23
+-- рода документов, 1290 связей, — и он выпадал из каскада: `purpose` пуст у
+-- всех 69, а `title` слишком короток, чтобы найтись в ревизии осмысленно.
+--
+-- Описание при этом ЕСТЬ у всех 69: секция своего документа, названная именем
+-- экрана, тело в среднем 2104 знака. Считать её видом при каждом чтении дорого
+-- — кладётся колонкой.
+ALTER TABLE project_screens ADD COLUMN IF NOT EXISTS spec text NOT NULL DEFAULT '';
+
+-- КОГДА ТЕКСТ СУЩНОСТИ ПОЯВИЛСЯ — таблицей, а не поиском при каждом чтении.
+-- Сверка «связь обновилась после ответа» искала `min(written_at)` с `LIKE` по
+-- телу сущности; на одних требованиях это стоило 860 мс, а с решениями (1635
+-- знаков) и экранами (2115) выросло до 5,5 секунды. Правило гоняется на каждом
+-- замере гейта — столько платить нельзя.
+CREATE TABLE IF NOT EXISTS entity_text_since (
+    project_id text   NOT NULL,
+    kind       text   NOT NULL,
+    id         text   NOT NULL,
+    since      bigint,
+    PRIMARY KEY (project_id, kind, id)
+);
 ALTER TABLE project_questions ADD COLUMN IF NOT EXISTS created_at bigint;
 ALTER TABLE project_questions ADD COLUMN IF NOT EXISTS updated_at bigint;
 
@@ -1787,6 +1808,7 @@ CREATE TABLE IF NOT EXISTS project_milestone_links (
 -- рукой мимо DDL, пережил первую пересборку и убил вторую, а ошибка пришла
 -- словом «db error» — тем самым, которое сегодня уже стоило трёх попыток.
 DROP VIEW IF EXISTS question_live;
+DROP VIEW IF EXISTS entity_text;
 DROP VIEW IF EXISTS named_id_role;
 CREATE OR REPLACE VIEW named_id_role AS
 SELECT n.project_id, n.entity_kind, n.entity_name, n.said_id, n.caveated,
@@ -1819,6 +1841,26 @@ SELECT n.project_id, n.entity_kind, n.entity_name, n.said_id, n.caveated,
         LIMIT 1
   ) src ON true;
 
+-- ТЕКСТ СУЩНОСТИ, с которым можно сверить ревизию. Виды взяты не по вкусу, а
+-- по замеру различимости: у проверки `spec` 90 знаков в среднем и ни одной
+-- короче двадцати, у решения `decision` — 1635, у потребности `text` — 72.
+--
+-- ЭКРАН И ИСТОРИЯ НЕ ВЗЯТЫ, и это названо вслух: у экрана `purpose` пуст у
+-- всех 69 строк, у истории заголовок в среднем 31 знак и у восемнадцати
+-- короче двадцати — такой найдётся в любой ревизии, и каждое совпадение было
+-- бы случайным. Молча пропустить их значило бы отчитаться тишиной.
+CREATE OR REPLACE VIEW entity_text AS
+       SELECT project_id, id, 'requirement' AS kind, entity_kind, entity_name, text
+         FROM project_requirements WHERE text <> ''
+ UNION ALL SELECT project_id, id, 'screen',   entity_kind, entity_name, spec
+         FROM project_screens      WHERE spec <> ''
+ UNION ALL SELECT project_id, id, 'check',    entity_kind, entity_name, spec
+         FROM project_checks       WHERE spec <> ''
+ UNION ALL SELECT project_id, id, 'need',     entity_kind, entity_name, text
+         FROM project_needs        WHERE text <> ''
+ UNION ALL SELECT project_id, id, 'decision', entity_kind, entity_name, decision
+         FROM project_decisions    WHERE decision <> '';
+
 -- ЖИВОЕ СОСТОЯНИЕ ВОПРОСА. Закрытым он остаётся, только пока ни одна его
 -- связь не обновилась после него: изменилось требование — вопрос переоткрыт,
 -- и гейт, который его читает, краснеет сам. Состояние СЛЕДУЕТ из связей, а не
@@ -1846,12 +1888,10 @@ SELECT q.project_id, q.id, q.number, q.title, q.state, q.created_at, q.updated_a
   LEFT JOIN LATERAL (
        SELECT n.said_id AS треб, поя.когда
          FROM named_id_role n
-         JOIN project_requirements r
-           ON r.project_id = n.project_id AND r.id = n.said_id AND r.text <> ''
+         JOIN entity_text r ON r.project_id = n.project_id AND r.id = n.said_id
          CROSS JOIN LATERAL (
-              SELECT min(v.written_at) AS когда FROM project_document_revisions v
-               WHERE v.project_id = r.project_id AND v.entity_kind = r.entity_kind
-                 AND v.entity_name = r.entity_name AND v.content LIKE '%' || r.text || '%') поя
+              SELECT t.since AS когда FROM entity_text_since t
+               WHERE t.project_id = r.project_id AND t.kind = r.kind AND t.id = r.id) поя
         WHERE n.project_id = q.project_id AND n.entity_kind = 'question' AND n.entity_name = q.id
           -- Дата ответа — ЛУЧШАЯ ИЗ ДВУХ: поле «Закрыт» там, где оно есть (оно
           -- старше переноса), иначе история документа. И сравнение ПО ДНЮ:
