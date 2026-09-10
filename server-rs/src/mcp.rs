@@ -543,6 +543,12 @@ impl Mcp {
                 "blame": s("harness · corpus"), "fixedBy": s("чем это чинится — обязательно"),
                 "why": s("довод"), "drop": json!({"type":"boolean"}) },
                 "required": ["rule", "entityId", "blame", "fixedBy"] } }));
+        tools.push(json!({ "name": "field-column-alias", "description": "поле контракта и колонка схемы — одно под разными именами; читается всеми правилами имён разом",
+            "inputSchema": { "type": "object", "properties": { "schema": s("схема контракта, например Absence"),
+                "field": s("поле схемы, например from"), "table": s("таблица, например absences"),
+                "column": s("колонка, например starts_at"), "why": s("почему имена разные — обязательно"),
+                "drop": json!({"type":"boolean"}) },
+                "required": ["schema", "field", "table", "column", "why"] } }));
         tools.push(json!({ "name": "doors", "description": "какой вопрос какой дверью закрывается: поиск по дверям словами вопроса",
             "inputSchema": { "type": "object", "properties": { "q": s("вопрос словами: «кто ссылается на требование», «что сейчас держит»"),
                 "limit": json!({"type":"integer","description":"сколько дверей назвать, по умолчанию 8"}) } } }));
@@ -566,7 +572,7 @@ impl Mcp {
     const WRITES: &[&str] = &[
         "put", "put-section", "rm", "document-add", "reparse", "reproject", "sweep",
         "task-state-push", "code-facts-push", "skills-push", "preflight-push", "worktree-push",
-        "ceiling-set", "blame-set", "frozen-tree-set", "scheme-term-set", "orphans-purge", "surface-source-add", "sensor-spec-add", "agent-set", "donor-add", "guard-add", "gate-sign", "gate-item-set", "method-set", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "step-selftest", "version-close", "phase-gate-set", "exception-set",
+        "ceiling-set", "blame-set", "field-column-alias", "frozen-tree-set", "scheme-term-set", "orphans-purge", "surface-source-add", "sensor-spec-add", "agent-set", "donor-add", "guard-add", "gate-sign", "gate-item-set", "method-set", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "step-selftest", "version-close", "phase-gate-set", "exception-set",
         "author-set", "screen-area-set", "skill-set", "version-freeze",
         "links-rewrite", "links-retarget",
     ];
@@ -612,7 +618,7 @@ impl Mcp {
         const RESERVED: &[&str] = &[
             "method-set", "gate-item-set", "question-holders", "preflight-push", "worktree-push",
             "sensor-specs", "scheme-terms", "frozen-trees", "addresses-declared", "tree-declared", "donors", "skills-push", "skills", "agents", "code-facts-push", "code-facts", "summary", "links-of", "retired-terms", "order", "gate-measure", "gate-item-waive", "gate-selftest", "gate-sign", "links-rewrite", "links-retarget", "reparse", "screen-area-set", "skill-set", "skills-paths", "version-freeze", "version-delta", "generated-check", "principal-allow", "principals", "author-set", "authors", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "step-selftest", "version-close", "phase-gate-set", "exception-set", "next-step", "process-state", "statuses", "task-status", "status-anomaly", "pipeline", "waves", "phases", "coverage", "blocks", "history", "at-revision", "process-history", "progress",
-            "kinds", "kinds-due", "readiness-gaps", "declared-unwritten", "blame-set", "doors", "sections", "section", "backlinks", "search", "put",
+            "kinds", "kinds-due", "readiness-gaps", "declared-unwritten", "blame-set", "doors", "field-column-alias", "sections", "section", "backlinks", "search", "put",
             "put-section", "rm", "document-add", "reproject", "sweep", "gate", "next-task", "blockers", "events",
             "norm-versions", "measurements", "plan", "readiness", "requirements-of",
             "tasks-of", "preflight-queue", "claims", "exceptions",
@@ -870,6 +876,15 @@ impl Mcp {
             //
             // Три жалобы «такой ручки нет» были написаны за одну ночь, и все три
             // оказались о существующих дверях.
+            "field-column-alias" => {
+                let g = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("");
+                match crate::projector::set_field_alias(&self.pool, p, g("schema"), g("field"),
+                        g("table"), g("column"), g("why"), &self.author,
+                        args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
+                    Ok(v) => ok(v),
+                    Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
+                }
+            }
             "doors" => {
                 let q = args.get("q").and_then(|v| v.as_str()).unwrap_or("").trim().to_lowercase();
                 let limit = num(args, "limit").unwrap_or(8).clamp(1, 60) as usize;
@@ -2392,30 +2407,9 @@ impl Mcp {
             }
             "exceptions" => {
                 let rule = args.get("rule").and_then(|v| v.as_str()).unwrap_or("");
-                let rows = client
-                    .query(
-                        "SELECT e.rule, e.entity_kind, e.entity_id, e.reason, e.decided_by,
-                                EXISTS (SELECT 1 FROM project_story_requirements sr
-                                         WHERE sr.project_id = e.project_id AND sr.story_id = e.entity_id)
-                           FROM rule_exception e
-                          WHERE e.project_id = $1 AND ($2 = '' OR e.rule = $2)
-                          ORDER BY e.rule, e.entity_id",
-                        &[p, &rule],
-                    )
+                crate::projector::exceptions_with_holes(&self.pool, p, rule)
                     .await
-                    .map_err(|e| Miss::Db(e.to_string()))?;
-                let items: Vec<Value> = rows
-                    .iter()
-                    .map(|r| json!({
-                        "rule": r.get::<_, String>(0), "kind": r.get::<_, String>(1),
-                        "id": r.get::<_, String>(2), "reason": r.get::<_, String>(3),
-                        "declaredIn": r.get::<_, String>(4),
-                        // Дыры уже нет, а исключение стоит: его пора снять.
-                        "holeGone": r.get::<_, bool>(5),
-                    }))
-                    .collect();
-                let stale = items.iter().filter(|i| i["holeGone"] == json!(true)).count();
-                Ok(json!({ "exceptions": items, "count": items.len(), "toRetire": stale }))
+                    .map_err(|e| Miss::Db(crate::projector::db_says(&e)))
             }
             "plan" => {
                 let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");

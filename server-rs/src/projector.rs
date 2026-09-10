@@ -1014,6 +1014,27 @@ CREATE TABLE IF NOT EXISTS finding_blame (
 -- разные беды и чинятся разным — завести кормильца либо вернуть умолкшего, — а
 -- пункт называл первую в обоих случаях. Слово, называющее не тот случай, шлёт
 -- читателя не туда.
+-- ПЕРЕИМЕНОВАННАЯ ПАРА «ПОЛЕ ↔ КОЛОНКА» — ОДНА ЗАПИСЬ, а не побег на каждое
+-- правило. `absences.starts_at` в контракте зовётся `Absence.from`, и причина не
+-- косметическая: `from` — зарезервированное слово SQL, колонкой его не назвать.
+--
+-- Одна пара стоила ШЕСТИ побегов в трёх правилах, и все шесть говорили одно и то
+-- же. Хуже: заведение операции `POST /absences` подорожало на два побега, ничего
+-- не изменив по существу, — `mandatory-input` начал спрашивать таблицу ровно в
+-- тот момент, когда у неё появился писатель.
+--
+-- Причина пишется ОДИН раз и в одном месте: размазанная по шести, она разойдётся
+-- на первой же правке.
+CREATE TABLE IF NOT EXISTS field_column_alias (
+  project_id text NOT NULL,
+  schema_name text NOT NULL,
+  field text NOT NULL,
+  table_name text NOT NULL,
+  column_name text NOT NULL,
+  why text NOT NULL DEFAULT '',
+  decided_by text NOT NULL DEFAULT '',
+  PRIMARY KEY (project_id, schema_name, field));
+
 CREATE OR REPLACE FUNCTION fact_gap(p text, f text) RETURNS text AS $г$
   SELECT CASE WHEN EXISTS (SELECT 1 FROM fact_push WHERE project_id = p AND fact = f)
               THEN 'подавал и ПРОТУХ'
@@ -3063,6 +3084,23 @@ pub async fn gate(pool: &Pool, project: &str, phase: Option<&str>) -> Result<Val
             m.insert("owner".into(), json!(r.get::<_, Option<String>>(9).unwrap_or_default()));
 
             m.insert("phase".into(), json!(phase));
+            // ВЕРДИКТ ОДНИМ СЛОВОМ. Состояние у пункта было — `computed`, — но
+            // рядом лежало `violations`, и всякий подсчёт вида «красный, если
+            // нарушений больше нуля» клал `unknown` в зелёные: у него
+            // `violations` равно `null`. Пункт при этом честен и называет
+            // причину словами; правило «незнание называется словом» исполнялось
+            // ВНУТРИ пункта и терялось на выходе.
+            //
+            // Три значения и никаких больше: сложить «неизвестно» с зелёным
+            // теперь можно только нарочно.
+            m.insert(
+                "verdict".into(),
+                json!(match m.get("computed").and_then(|v| v.as_str()).unwrap_or("") {
+                    "passed" => "green",
+                    "failed" => "red",
+                    _ => "unknown",
+                }),
+            );
             // «Пробу не проверяли» и «проба не роняет» — разное, и оба не
             // «зелёное»: пункт, который ни разу не уронили, никто не проверял.
             m.insert("probeRuns".into(), json!(r.get::<_, Option<bool>>(10)));
@@ -6011,6 +6049,139 @@ pub async fn declare_sensor_spec(
 ///
 /// ВНУТРЕННИЕ виды сюда не идут: у проверки и требования своего документа не
 /// бывает, и «не написано» у них — не пробел, а устройство.
+/// Побеги вместе с ответом «дыра ещё есть?».
+///
+/// Прежде `holeGone` спрашивал: «является ли `entity_id` историей, у которой
+/// есть требования». Для правила «история без требования» это верно; для
+/// остальных пятнадцати семейств вопрос бессмысленный — у побега
+/// `column-input`/`absences.synced_at` спрашивалось, не стала ли колонка
+/// историей. Ответ всегда `false`, и `toRetire` был структурно ноль: 207 побегов
+/// из 211 получали ответ на чужой вопрос.
+///
+/// Побег с причиной, которая перестала быть правдой, — та же дыра, только её
+/// никто не перечитает: причина написана, выглядит убедительно, и ровно поэтому
+/// её не проверяют.
+///
+/// Считается ТЕМ ЖЕ ЗАПРОСОМ, что и сам пункт. Запрос исключения ОТСЕИВАЕТ, и
+/// потому побеги правила снимаются в транзакции, запрос исполняется, транзакция
+/// откатывается: вернулась находка — дыра на месте.
+///
+/// Правило без запроса отвечает `null`, а не `false`: «не знаем» и «дыра есть» —
+/// разное, и путать их значит скрывать устаревшие побеги под видом действующих.
+/// Объявить, что поле контракта и колонка схемы — одно и то же под разными
+/// именами.
+///
+/// Причина обязательна: пара без неё неотличима от опечатки, и снять её потом
+/// будет нечем — ровно та беда, от которой заведена сама запись.
+pub async fn set_field_alias(
+    pool: &Pool, project: &str, schema: &str, field: &str, table: &str, column: &str,
+    why: &str, decided_by: &str, drop_it: bool,
+) -> Result<Value, tokio_postgres::Error> {
+    let client = pool.get().await.expect("пул отдал соединение");
+    if drop_it {
+        let gone = client
+            .execute("DELETE FROM field_column_alias WHERE project_id = $1 AND schema_name = $2 AND field = $3",
+                     &[&project, &schema, &field]).await?;
+        return Ok(json!({ "status": if gone > 0 { "dropped" } else { "not_found" } }));
+    }
+    if [schema, field, table, column].iter().any(|v| v.trim().is_empty()) {
+        return Ok(json!({ "status": "incomplete",
+            "why": "пара называется целиком: схема, поле, таблица, колонка" }));
+    }
+    if why.trim().is_empty() {
+        return Ok(json!({ "status": "no_why",
+            "why": "не сказано, ПОЧЕМУ имена разные. Пара без причины неотличима от опечатки, \
+                    и снять её потом будет нечем." }));
+    }
+    client.execute(
+        "INSERT INTO field_column_alias (project_id, schema_name, field, table_name, column_name, why, decided_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)
+         ON CONFLICT (project_id, schema_name, field) DO UPDATE SET table_name = EXCLUDED.table_name,
+           column_name = EXCLUDED.column_name, why = EXCLUDED.why, decided_by = EXCLUDED.decided_by",
+        &[&project, &schema, &field, &table, &column, &why, &decided_by]).await?;
+    Ok(json!({ "status": "declared", "pair": format!("{schema}.{field} ↔ {table}.{column}"),
+               "means": "пара читается ВСЕМИ правилами имён разом: побега на каждое больше не нужно" }))
+}
+
+pub async fn exceptions_with_holes(
+    pool: &Pool,
+    project: &str,
+    rule: &str,
+) -> Result<Value, tokio_postgres::Error> {
+    let mut client = pool.get().await.expect("пул отдал соединение");
+    let rows = client
+        .query(
+            "SELECT e.rule, e.entity_kind, e.entity_id, e.reason, e.decided_by
+               FROM rule_exception e
+              WHERE e.project_id = $1 AND ($2 = '' OR e.rule = $2)
+              ORDER BY e.rule, e.entity_id",
+            &[&project, &rule],
+        )
+        .await?;
+    // Запросы пунктов — по одному на семейство, а не на побег: побегов двести с
+    // лишним, семейств шестнадцать.
+    let mut queries: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for r in client
+        .query("SELECT id, query FROM gate_item WHERE query IS NOT NULL AND query <> ''", &[])
+        .await?
+        .iter()
+    {
+        queries.insert(r.get(0), r.get(1));
+    }
+    let families: std::collections::BTreeSet<String> =
+        rows.iter().map(|r| r.get::<_, String>(0)).collect();
+    // Находки семейства БЕЗ побегов: что правило сказало бы, если бы их не было.
+    let mut found: std::collections::HashMap<String, Option<Vec<String>>> =
+        std::collections::HashMap::new();
+    for f in &families {
+        let Some(sql) = queries.get(f) else {
+            found.insert(f.clone(), None);
+            continue;
+        };
+        let tx = client.transaction().await?;
+        let seen = match tx
+            .execute("DELETE FROM rule_exception WHERE project_id = $1 AND rule = $2", &[&project, f])
+            .await
+        {
+            Ok(_) => match tx.query(sql.as_str(), &[&project]).await {
+                Ok(rs) => Some(
+                    rs.iter().map(|r| r.try_get::<_, String>(0).unwrap_or_default()).collect(),
+                ),
+                Err(_) => None,
+            },
+            Err(_) => None,
+        };
+        tx.rollback().await?;
+        found.insert(f.clone(), seen);
+    }
+    let items: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            let f: String = r.get(0);
+            let id: String = r.get(2);
+            // Находка НАЧИНАЕТСЯ с того, кем она названа: `violator` берёт то же
+            // первое слово, и составной ключ стоит в начале строки целиком.
+            let hole = found.get(&f).map(|seen| {
+                seen.as_ref().map(|d| !d.iter().any(|x| x.starts_with(&id) || x.contains(&id)))
+            });
+            json!({
+                "rule": f, "kind": r.get::<_, String>(1), "id": id,
+                "reason": r.get::<_, String>(3), "declaredIn": r.get::<_, String>(4),
+                // Дыры уже нет, а побег стоит: его пора снять. `null` — правило
+                // не читается, и судить нечем.
+                "holeGone": hole.flatten(),
+            })
+        })
+        .collect();
+    let stale = items.iter().filter(|i| i["holeGone"] == json!(true)).count();
+    let unknown = items.iter().filter(|i| i["holeGone"] == Value::Null).count();
+    Ok(json!({
+        "exceptions": items, "count": items.len(), "toRetire": stale, "unjudged": unknown,
+        "means": "устаревшим считается побег, чья находка ВЕРНУЛАСЬ БЫ, сними его: \
+                  правило исполняется без побегов своего семейства и откатывается",
+    }))
+}
+
 pub async fn declared_unwritten(
     pool: &Pool,
     kinds: &crate::kinds::Kinds,
