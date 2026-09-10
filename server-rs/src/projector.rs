@@ -999,6 +999,26 @@ CREATE TABLE IF NOT EXISTS finding_blame (
 -- Пустой `project_id` — ОБЩИЙ слой. Раздавать сто семнадцать слов по владельцам
 -- не нужно: они и есть общее объявление, а проект переопределяет ту роль, где
 -- его форма своя.
+-- СВЕЖЕСТЬ ФАКТА. Пункты спрашивали «подавал ли КОГДА-НИБУДЬ» — `NOT EXISTS
+-- (SELECT 1 FROM fact_push …)`, — и датчик, подававший однажды и переставший,
+-- держал свой пункт зелёным на замороженных данных сколько угодно долго.
+--
+-- Это разворот доктрины ровно там, где она сформулирована. «Не подавал — значит
+-- неизвестно, а не зелёно» защищает от датчика, который не подавал НИ РАЗУ, и
+-- ничего не говорит про тот, что подавал и умолк. Второй опаснее: у него есть
+-- данные, и они выглядят измеренными.
+--
+-- Срок объявляется набором (`sensor.stale_after_ms`). Не объявлен — свежесть не
+-- судится: выдумывать срок за набор значило бы краснеть по своему усмотрению.
+CREATE OR REPLACE FUNCTION fact_fresh(p text, f text) RETURNS boolean AS $ф$
+  SELECT CASE
+    WHEN NOT EXISTS (SELECT 1 FROM fact_push WHERE project_id = p AND fact = f) THEN false
+    WHEN (SELECT s.stale_after_ms FROM sensor s WHERE s.project_id = p AND s.fact = f) IS NULL THEN true
+    ELSE (SELECT max(fp.at) FROM fact_push fp WHERE fp.project_id = p AND fp.fact = f)
+         > (extract(epoch from now()) * 1000)::bigint
+           - (SELECT s.stale_after_ms FROM sensor s WHERE s.project_id = p AND s.fact = f)
+  END
+$ф$ LANGUAGE sql STABLE;
 ALTER TABLE scheme_term ADD COLUMN IF NOT EXISTS project_id text NOT NULL DEFAULT '';
 ALTER TABLE scheme_term DROP CONSTRAINT IF EXISTS scheme_term_pkey;
 ALTER TABLE scheme_term ADD PRIMARY KEY (project_id, role, value);
@@ -5012,14 +5032,29 @@ pub async fn declare_milestone_detail(
         // убирается только запросом мимо сервера, и сервер перестаёт быть
         // единственной дверью — а значит, снятое где-то останется.
         if drop_it {
+            // СНИМАЕТСЯ ТЕМ ЖЕ КЛЮЧОМ, КАКИМ ОБЪЯВЛЯЛОСЬ. Прежде снятие читало
+            // `what` — поле, которое при объявлении значит совсем другое, «что
+            // делается». Объявив `requirement=FR-11`, снять его тем же доводом
+            // было нельзя: дверь отвечала `not_found` про строку, которая есть.
+            // Узнать ключ можно было только открыв исходник.
+            //
+            // `what` принимается и дальше: им снимали, пока это был единственный
+            // способ, и ломать записанное незачем.
+            let req = if requirement.trim().is_empty() { what } else { requirement };
+            let g = if gate.trim().is_empty() { what } else { gate };
             let mut gone = 0u64;
-            gone += client
-                .execute("DELETE FROM project_milestone_requirements WHERE project_id = $1 AND milestone_id = $2 AND requirement_id = $3", &[&project, &milestone, &what])
-                .await?;
-            gone += client
-                .execute("DELETE FROM project_milestone_gates WHERE project_id = $1 AND milestone_id = $2 AND gate = $3", &[&project, &milestone, &what])
-                .await?;
-            return Ok(json!({ "status": if gone > 0 { "dropped" } else { "not_found" } }));
+            if !req.trim().is_empty() {
+                gone += client
+                    .execute("DELETE FROM project_milestone_requirements WHERE project_id = $1 AND milestone_id = $2 AND requirement_id = $3", &[&project, &milestone, &req])
+                    .await?;
+            }
+            if !g.trim().is_empty() {
+                gone += client
+                    .execute("DELETE FROM project_milestone_gates WHERE project_id = $1 AND milestone_id = $2 AND gate = $3", &[&project, &milestone, &g])
+                    .await?;
+            }
+            return Ok(json!({ "status": if gone > 0 { "dropped" } else { "not_found" },
+                              "by": if requirement.trim().is_empty() && gate.trim().is_empty() { "what" } else { "requirement/gate" } }));
         }
     if !what.trim().is_empty() || !blocked_by.trim().is_empty() || !closed.trim().is_empty() {
         client.execute(
@@ -6619,7 +6654,23 @@ pub async fn declare_sensor(
         let n = client
             .execute("DELETE FROM sensor WHERE project_id = $1 AND fact = $2", &[&project, &fact])
             .await?;
-        return Ok(json!({ "status": if n > 0 { "dropped" } else { "not_found" }, "fact": fact }));
+        // СНИМАЕТСЯ И ЗАПИСЬ О ПОДАЧЕ. Датчик, подавший факт однажды, оставался
+        // в `sensors.undeclared` навсегда: спецификация снята, объявление снято,
+        // факты стёрты — а он висит. Убрать его можно было только запросом в
+        // базу мимо сервера, то есть никак.
+        //
+        // Цена: «подаёт, но никем не объявлен» переставало быть находкой — в
+        // перечне копился мусор от проб. А проба ровно то, чем выясняют, как
+        // датчик именует факт.
+        let pushed = client
+            .execute("DELETE FROM fact_push WHERE project_id = $1 AND fact = $2", &[&project, &fact])
+            .await?;
+        let facts = client
+            .execute("DELETE FROM code_fact WHERE project_id = $1 AND kind = $2", &[&project, &fact])
+            .await?;
+        return Ok(json!({ "status": if n + pushed + facts > 0 { "dropped" } else { "not_found" },
+                          "fact": fact, "declaration": n, "pushRecord": pushed, "facts": facts,
+                          "means": "снято ВСЁ о роде: объявление, запись о подаче и поданные факты" }));
     }
     if fact.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "датчик без имени факта не объявляется" }));

@@ -60,7 +60,7 @@ pub async fn locate(
     let name = if k.single { "" } else { id.unwrap_or_default() };
     // Образец имени применяется и здесь: без него вид отдаёт то, чего не
     // называет его же перечень.
-    if !k.single && !matches_id(k, name) {
+    if !k.single && !matches_id_of(pool, project, kind, k, name).await {
         return Err(Miss::NoEntity(kind.to_owned(), name.to_owned()));
     }
     let client = pool.get().await.expect("пул отдал соединение");
@@ -300,4 +300,39 @@ pub fn matches_id(k: &crate::kinds::Kind, id: &str) -> bool {
         Some(pattern) => regex::Regex::new(pattern).map(|re| re.is_match(id)).unwrap_or(true),
         None => true,
     }
+}
+
+/// Образец имени вида — С УЧЁТОМ СЛОВА НАБОРА.
+///
+/// Раскладка видов объявлена ОДНА на все наборы, и образец имени вопроса в ней
+/// `^Q-\d+$`. `tot-ade` зовёт свои вопросы `OQ-01…OQ-80`: перечень их отдавал,
+/// а `question id=OQ-01` отказывал — ни один другой вид так себя не ведёт.
+/// Скилл ответов начинает работу словами «посмотри на открытые вопросы» и на
+/// первом же шаге получал отказ.
+///
+/// Слово даёт набор: роль `id.<вид>` в словаре схемы. Не объявлена — образец
+/// раскладки, как и было.
+pub async fn matches_id_of(
+    pool: &Pool,
+    project: &str,
+    kind: &str,
+    k: &crate::kinds::Kind,
+    id: &str,
+) -> bool {
+    let client = pool.get().await.expect("пул отдал соединение");
+    let own = client
+        .query(
+            "SELECT value FROM scheme($1) WHERE role = $2",
+            &[&project, &format!("id.{kind}")],
+        )
+        .await
+        .unwrap_or_default();
+    if own.is_empty() {
+        return matches_id(k, id);
+    }
+    own.iter().any(|r| {
+        regex::Regex::new(&r.get::<_, String>(0))
+            .map(|re| re.is_match(id))
+            .unwrap_or(false)
+    })
 }
