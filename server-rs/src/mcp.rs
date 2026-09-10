@@ -52,6 +52,39 @@ fn refusal(m: Miss) -> Value {
 ///
 /// Тот же разряд, что был у `drop`: там строка `"true"` не совпадала с булевым
 /// `true`, и шесть дверей молча писали вместо того, чтобы удалять.
+/// Список, приехавший ЛИБО массивом (MCP), ЛИБО строкой с массивом внутри (CLI).
+///
+/// `mh call holds='["a","b"]'` кладёт в аргумент строку: `as_array()` отдаёт
+/// None, список молча становится пустым, и дверь проверяет пустоту вместо
+/// названного. На пробе это выглядело отказом «ничего не держит» — правильным
+/// словом о неверном предмете. Тот же род, что чинил `num()`.
+/// То же для массива ОБЪЕКТОВ: `facts`, `verdicts`, `skills`, `open`, `under`,
+/// `states`. Из CLI они приезжают строкой и молча становились пустыми — а
+/// пустая подача читается как «сказано, что ничего нет».
+fn rows(args: &Value, key: &str) -> Vec<Value> {
+    match args.get(key) {
+        Some(Value::String(t)) => serde_json::from_str::<Value>(t).ok()
+            .and_then(|v| v.as_array().cloned()).unwrap_or_default(),
+        Some(v) => v.as_array().cloned().unwrap_or_default(),
+        None => Vec::new(),
+    }
+}
+
+fn list(args: &Value, key: &str) -> Vec<String> {
+    let свой;
+    let v = match args.get(key) {
+        Some(Value::String(t)) => match serde_json::from_str::<Value>(t) {
+            Ok(p) if p.is_array() => { свой = p; &свой }
+            // Одиночное имя без скобок — список из одного.
+            _ => return if t.trim().is_empty() { Vec::new() } else { vec![t.clone()] },
+        },
+        Some(v) => v,
+        None => return Vec::new(),
+    };
+    v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+     .unwrap_or_default()
+}
+
 fn num(args: &Value, key: &str) -> Option<i64> {
     match args.get(key) {
         Some(Value::Number(n)) => n.as_i64(),
@@ -554,6 +587,12 @@ impl Mcp {
             "inputSchema": { "type": "object", "properties": { "kind": s("имя вида"),
                 "required": json!({"type":"boolean"}), "why": s("почему обязателен — обязательно при required=true") },
                 "required": ["kind"] } }));
+        tools.push(json!({ "name": "kind-projection", "description": "объявить, чем вид становится в наборе: своя таблица, держатель чужих сущностей, проза",
+            "inputSchema": { "type": "object", "properties": { "kind": s("имя вида"),
+                "projection": s("done · container · due · prose · render · provenance"),
+                "holds": json!({"type":"array","items":{"type":"string"},
+                    "description":"для container: таблицы, где лежат его сущности — проверяются по entity_kind"}) },
+                "required": ["kind", "projection"] } }));
         tools.push(json!({ "name": "holders", "description": "объявленные держатели инварианта: требование и путь",
             "inputSchema": { "type": "object", "properties": {} } }));
         tools.push(json!({ "name": "column-server-filled", "description": "колонку заполняет сервер, и названо чем: правила входа её больше не спрашивают",
@@ -597,7 +636,7 @@ impl Mcp {
     const WRITES: &[&str] = &[
         "put", "put-section", "rm", "document-add", "reparse", "reproject", "sweep",
         "task-state-push", "code-facts-push", "skills-push", "preflight-push", "worktree-push",
-        "ceiling-set", "blame-set", "derived-copy-set", "field-column-alias", "column-server-filled", "counts-sync", "kind-required", "frozen-tree-set", "scheme-term-set", "orphans-purge", "surface-source-add", "sensor-spec-add", "agent-set", "donor-add", "guard-add", "gate-sign", "gate-item-set", "method-set", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "step-selftest", "version-close", "phase-gate-set", "exception-set",
+        "ceiling-set", "blame-set", "derived-copy-set", "field-column-alias", "column-server-filled", "counts-sync", "kind-required", "kind-projection", "frozen-tree-set", "scheme-term-set", "orphans-purge", "surface-source-add", "sensor-spec-add", "agent-set", "donor-add", "guard-add", "gate-sign", "gate-item-set", "method-set", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "step-selftest", "version-close", "phase-gate-set", "exception-set",
         "author-set", "screen-area-set", "skill-set", "version-freeze",
         "links-rewrite", "links-retarget",
     ];
@@ -643,7 +682,7 @@ impl Mcp {
         const RESERVED: &[&str] = &[
             "method-set", "gate-item-set", "question-holders", "preflight-push", "worktree-push",
             "sensor-specs", "scheme-terms", "frozen-trees", "addresses-declared", "tree-declared", "donors", "skills-push", "skills", "agents", "code-facts-push", "code-facts", "summary", "links-of", "retired-terms", "order", "gate-measure", "gate-item-waive", "gate-selftest", "gate-sign", "links-rewrite", "links-retarget", "reparse", "screen-area-set", "skill-set", "skills-paths", "version-freeze", "version-delta", "generated-check", "principal-allow", "principals", "author-set", "authors", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "step-selftest", "version-close", "phase-gate-set", "exception-set", "next-step", "process-state", "statuses", "task-status", "status-anomaly", "pipeline", "waves", "phases", "coverage", "blocks", "history", "at-revision", "process-history", "progress",
-            "kinds", "kinds-due", "readiness-gaps", "declared-unwritten", "blame-set", "doors", "derived-copy-set", "field-column-alias", "column-server-filled", "holders", "counts-sync", "kind-required", "sections", "section", "backlinks", "search", "put",
+            "kinds", "kinds-due", "readiness-gaps", "declared-unwritten", "blame-set", "doors", "derived-copy-set", "field-column-alias", "column-server-filled", "holders", "counts-sync", "kind-required", "kind-projection", "sections", "section", "backlinks", "search", "put",
             "put-section", "rm", "document-add", "reproject", "sweep", "gate", "next-task", "blockers", "events",
             "norm-versions", "measurements", "plan", "readiness", "requirements-of",
             "tasks-of", "preflight-queue", "claims", "exceptions",
@@ -685,9 +724,10 @@ impl Mcp {
 
         match name {
             "kinds" => {
+                let реестр = match self.живой_реестр().await { Ok(k) => k, Err(e) => return refusal(e) };
                 let mut out = Vec::new();
-                for (kind, k) in &self.kinds.0 {
-                    let count = match entities::ids(&self.pool, &self.kinds, p, kind).await {
+                for (kind, k) in &реестр.0 {
+                    let count = match entities::ids(&self.pool, &реестр, p, kind).await {
                         Ok(l) => json!(l.len()),
                         Err(Miss::Unprojected(_)) => Value::Null,
                         Err(e) => return refusal(e),
@@ -708,7 +748,8 @@ impl Mcp {
                         "requiredWhy": k.required_why.clone().unwrap_or_default(),
                         "idPattern": k.id.clone().unwrap_or_default(),
                         "nameIs": k.name_is.clone().unwrap_or_default(),
-                        "projection": k.projection.clone().unwrap_or_default()
+                        "projection": k.projection.clone().unwrap_or_default(),
+                        "holds": k.holds.clone().unwrap_or_default()
                     }));
                 }
                 ok(json!({ "kinds": out }))
@@ -766,9 +807,7 @@ impl Mcp {
                     .duration_since(std::time::SystemTime::UNIX_EPOCH)
                     .map(|d| d.as_millis() as i64)
                     .unwrap_or(0);
-                let states: Vec<(String, String, String)> = args
-                    .get("states")
-                    .and_then(|v| v.as_array())
+                let states: Vec<(String, String, String)> = Some(rows(&args, "states"))
                     .map(|list| {
                         list.iter()
                             .filter_map(|it| {
@@ -923,6 +962,14 @@ impl Mcp {
                     Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
                 }
             }
+            "kind-projection" => {
+                let holds = list(&args, "holds");
+                match crate::projector::set_kind_projection(&self.pool, kind_arg,
+                        args.get("projection").and_then(|v| v.as_str()).unwrap_or(""), &holds).await {
+                    Ok(v) => ok(v),
+                    Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
+                }
+            }
             "holders" => match crate::projector::holders(&self.pool, p).await {
                 Ok(v) => ok(v),
                 Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
@@ -1067,8 +1114,7 @@ impl Mcp {
             },
             "code-facts-push" => {
                 let fact_kind = args.get("kind").and_then(|v| v.as_str()).unwrap_or("").to_owned();
-                let list: Vec<(String, String)> = args
-                    .get("facts").and_then(|v| v.as_array())
+                let list: Vec<(String, String)> = Some(rows(&args, "facts"))
                     .map(|l| l.iter().filter_map(|it| Some((
                         it.get("name")?.as_str()?.to_owned(),
                         it.get("detail").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
@@ -1111,8 +1157,7 @@ impl Mcp {
             }
             "skills-push" => {
                 let set_name = args.get("set").and_then(|v| v.as_str()).unwrap_or("godzy").to_owned();
-                let list: Vec<(String, String, String)> = args
-                    .get("skills").and_then(|v| v.as_array())
+                let list: Vec<(String, String, String)> = Some(rows(&args, "skills"))
                     .map(|l| l.iter().filter_map(|it| Some((
                         it.get("name")?.as_str()?.to_owned(),
                         it.get("description").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
@@ -1159,8 +1204,7 @@ impl Mcp {
                         "body": r.get::<_, String>(6) })).collect::<Vec<_>>() }))
             }
             "preflight-push" => {
-                let list: Vec<(String, i64, i64, String, i32, String)> = args
-                    .get("verdicts").and_then(|v| v.as_array())
+                let list: Vec<(String, i64, i64, String, i32, String)> = Some(rows(&args, "verdicts"))
                     .map(|l| l.iter().filter_map(|it| Some((
                         it.get("task")?.as_str()?.to_owned(),
                         num(it, "at").unwrap_or(0),
@@ -1192,8 +1236,7 @@ impl Mcp {
             "worktree-push" => {
                 // Пустая подача здесь ЗАКОННА: ни одного открытого дерева — это
                 // ответ, а не молчание. Поэтому отдельного отказа нет.
-                let list: Vec<(String, String, i64)> = args
-                    .get("open").and_then(|v| v.as_array())
+                let list: Vec<(String, String, i64)> = Some(rows(&args, "open"))
                     .map(|l| l.iter().filter_map(|it| Some((
                         it.get("task")?.as_str()?.to_owned(),
                         it.get("branch").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
@@ -1974,8 +2017,7 @@ impl Mcp {
                 let by = args.get("signedBy").and_then(|v| v.as_str()).unwrap_or("");
                 let wording = args.get("wording").and_then(|v| v.as_str()).unwrap_or("");
                 let note = args.get("note").and_then(|v| v.as_str()).unwrap_or("");
-                let docs: Vec<(String, String)> = args
-                    .get("under").and_then(|v| v.as_array())
+                let docs: Vec<(String, String)> = Some(rows(&args, "under"))
                     .map(|l| l.iter().filter_map(|it| Some((
                         it.get("kind")?.as_str()?.to_owned(),
                         it.get("id").and_then(|v| v.as_str()).unwrap_or("").to_owned()))).collect())
@@ -2301,6 +2343,18 @@ impl Mcp {
     }
 
     /// Конвейер пересборки: до-проход → предметные проекции → после-проход.
+    /// Реестр видов ИЗ БАЗЫ, а не слепок на момент старта.
+    ///
+    /// `kind-projection` и `kind-required` пишут в `kind_layout`, а ручки
+    /// отвечали из памяти: дверь говорила «объявлено», `kinds-due` продолжала
+    /// звать вид необъявленным. Двадцать два объявления не были видны ни одной
+    /// ручкой — запись прошла, ответ остался прежним, и отличить это от отказа
+    /// было нечем. Разбор документов по-прежнему идёт по слепку: он меняет
+    /// поведение проекции, и его смена — перезапуск.
+    async fn живой_реестр(&self) -> Result<crate::kinds::Kinds, Miss> {
+        crate::kinds::Kinds::from_db(&self.pool).await.map_err(Miss::Db)
+    }
+
     async fn projections(&self) -> Result<Value, Miss> {
         // `e.to_string()` у ошибки Postgres — слова «db error» и ничего больше:
         // причина лежит в источнике, и её показывает `db_says`. Пересборка,
@@ -2535,9 +2589,10 @@ impl Mcp {
             // Три состояния различаются и не смешиваются: положено и разложено;
             // положено и не разложено; не объявлено вовсе — дефект плана.
             _ => {
+                let реестр = match self.живой_реестр().await { Ok(k) => k, Err(e) => return Err(e) };
                 let mut due = Vec::new();
                 let mut undeclared = Vec::new();
-                for (kind, k) in &self.kinds.0 {
+                for (kind, k) in &реестр.0 {
                     match k.projection.as_deref() {
                         // «Много ли документов» спрашивалось через `at.is_none()` — «нет
                         // одного адреса». У семи одиночных видов адреса и так не

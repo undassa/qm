@@ -6385,6 +6385,109 @@ pub async fn set_kind_required(
                "means": "минимальный набор объявлен один раз и общий для всех проектов" }))
 }
 
+/// Объявить, ЧЕМ вид становится в наборе.
+///
+/// Словарь: `done` — у вида своя предметная таблица; `container` — документ
+/// держит сущности ДРУГИХ видов, и они лежат в названных таблицах; `due` —
+/// таблица положена и не разложена; `prose` — рассуждение, предметом не
+/// становится; `render`; `provenance`.
+///
+/// Слова `container` не было, и шестнадцать видов стояли «не объявлено» —
+/// среди них `srs`, из которого набор берёт 509 требований и 227 проверок
+/// КАЖДЫМ замером. Дыра была в словаре, а не в машине: сказать правду о них
+/// было нечем, и ручка звала дефектом плана то, что работает.
+///
+/// Для `container` названные таблицы ПРОВЕРЯЮТСЯ по связи `entity_kind`.
+/// Вид, объявленный держателем того, чего в таблицах нет, — это пустота,
+/// только подписанная; она читается как знание. Дверь отказывает.
+pub async fn set_kind_projection(
+    pool: &Pool, kind: &str, projection: &str, holds: &[String],
+) -> Result<Value, tokio_postgres::Error> {
+    let client = pool.get().await.expect("пул отдал соединение");
+    if kind.trim().is_empty() {
+        return Ok(json!({ "status": "nameless", "why": "вид без имени не объявляется" }));
+    }
+    const СЛОВАРЬ: [&str; 6] = ["done", "container", "due", "prose", "render", "provenance"];
+    if !СЛОВАРЬ.contains(&projection) {
+        return Ok(json!({ "status": "unknown_word", "word": projection,
+            "vocabulary": СЛОВАРЬ,
+            "why": "проекция объявляется словом из словаря: новое слово не поймут ни ручки, \
+                    ни правила, и вид останется невидимым при живой записи" }));
+    }
+    if client
+        .query_opt("SELECT 1 FROM kind_layout WHERE name = $1", &[&kind])
+        .await?
+        .is_none()
+    {
+        return Ok(json!({ "status": "no_kind", "kind": kind,
+            "why": "вид не объявлен в раскладке: сперва заводится вид, потом его проекция" }));
+    }
+
+    // Держатель без содержимого — отказ. Проверяется КАЖДАЯ названная таблица.
+    let mut держит = Vec::new();
+    // `done` и `container` — оба УТВЕРЖДЕНИЯ ПРО ТАБЛИЦЫ, и проверяются одинаково.
+    // Проверять только контейнер значило бы верить `done` на слово: `red-task`
+    // стоял `due` при живой таблице, и заметить это было нечем.
+    let про_таблицы = matches!(projection, "container" | "done");
+    if про_таблицы {
+        if holds.is_empty() {
+            return Ok(json!({ "status": "holds_nothing", "kind": kind,
+                "projection": projection,
+                "why": "слово утверждает, что вид ложится в таблицы. В какие — не сказано, \
+                        и проверить объявление нечем" }));
+        }
+        for table in holds {
+            // Имя таблицы в запрос подставляется, поэтому берётся только то,
+            // что схема подтвердила: чужого имени сюда не попадёт.
+            if client
+                .query_opt(
+                    "SELECT 1 FROM information_schema.columns
+                      WHERE table_schema = 'public' AND table_name = $1
+                        AND column_name = 'entity_kind'",
+                    &[table],
+                )
+                .await?
+                .is_none()
+            {
+                return Ok(json!({ "status": "no_such_holder", "table": table,
+                    "why": "такой таблицы нет, либо она не связана с документом колонкой \
+                            `entity_kind`: связь держится записью, а не прозой" }));
+            }
+            let n: i64 = client
+                .query_one(
+                    &format!("SELECT count(*) FROM {table} WHERE entity_kind = $1"),
+                    &[&kind],
+                )
+                .await?
+                .get(0);
+            if n == 0 {
+                return Ok(json!({ "status": "holds_nothing_here", "kind": kind, "table": table,
+                    "why": "ни одной строки этого вида в названной таблице: объявление \
+                            описывает то, чего набор не делает" }));
+            }
+            держит.push(json!({ "table": table, "rows": n }));
+        }
+    } else if !holds.is_empty() {
+        return Ok(json!({ "status": "holds_without_container", "kind": kind,
+            "projection": projection,
+            "why": "таблицы называют только `done` и `container`: прочие слова \
+                    как раз и говорят, что предметом вид не становится" }));
+    }
+
+    let список = json!(holds);
+    client
+        .execute(
+            "UPDATE kind_layout
+                SET spec = spec || jsonb_build_object('projection', $2::text, 'holds', $3::jsonb)
+              WHERE name = $1",
+            &[&kind, &projection, &список],
+        )
+        .await?;
+    Ok(json!({ "status": "declared", "kind": kind, "projection": projection,
+               "holds": держит,
+               "means": "объявление ОБЩЕЕ: чем вид становится — одно для всех проектов" }))
+}
+
 pub async fn holders(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
     let client = pool.get().await.expect("пул отдал соединение");
     let rows = client

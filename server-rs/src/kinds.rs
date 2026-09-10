@@ -24,6 +24,11 @@ pub struct Kind {
     /// `render` · `provenance`. Пусто — не объявлено, и это третье состояние.
     #[serde(default)]
     pub projection: Option<String>,
+    /// Таблицы, в которые ложатся сущности этого вида. Проверяются дверью по
+    /// связи `entity_kind`: объявление, которого не подтверждают строки, — та
+    /// же пустота, только подписанная.
+    #[serde(default)]
+    pub holds: Option<Vec<String>>,
     /// Образец имени: `^Q-\d+$`. Применяется и на чтении, и на перечислении.
     #[serde(default)]
     pub id: Option<String>,

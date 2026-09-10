@@ -1,0 +1,26 @@
+app = "mh-admin"
+primary_region = "sjc"
+
+[env]
+  MH_DEPLOYMENT_ID = "mh-v2:personal:acme:mh"
+  PORT = "8080"
+  CORE_API_URL = "http://mh-core.internal:8080"
+  CORE_ORG_ID = "acme"
+  ADMIN_BASE_PATH = "/admin"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "2gb"
+
+kill_signal = "SIGTERM"
+kill_timeout = "10s"
+
+[checks]
+  [checks.health]
+    type = "http"
+    port = 8080
+    method = "get"
+    path = "/healthz"
+    interval = "15s"
+    timeout = "2s"
+    grace_period = "10s"

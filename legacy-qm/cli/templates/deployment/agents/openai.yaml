@@ -1,0 +1,4 @@
+interface:
+  display_name: "Deploy MH"
+  short_description: "Deploy and onboard MH in your cloud"
+  default_prompt: "Use $deploy-mh to deploy this repository into my AWS or Fly.io account."
