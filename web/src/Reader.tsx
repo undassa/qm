@@ -238,7 +238,7 @@ export function Reader({
             <button
               type="button"
               key={k.kind}
-              className={`rk${kind?.kind === k.kind ? " on" : ""}`}
+              className={`rk${kind?.kind === k.kind ? " on" : ""}${k.count === 0 ? " none" : ""}`}
               onClick={() => setKind(k)}
             >
               <span>{k.kind}</span>
@@ -399,7 +399,12 @@ export function Reader({
                           const [k, ...rest] = l.from.split(" ");
                           const target = kinds.find((x) => x.kind === k);
                           if (!target) return;
+                          // Уход по обратной ссылке — такой же уход, как по
+                          // прямой: без следа читатель теряет то, ради чего
+                          // смотрел, кто на это ссылается.
+                          if (kind) setTrail((t) => [...t, { kind, id }]);
                           setKind(target);
+                          void loadIds(projectId, target.kind).then(setIds).catch(() => setIds([]));
                           const name = rest.join(" ");
                           setTimeout(() => show(target, name || undefined), 0);
                         }}
