@@ -457,6 +457,322 @@ pub fn tables_of(text: &str) -> Vec<Table> {
     out
 }
 
+/// Схема — это `CREATE TABLE` ПЛЮС всё, что доехало `ALTER`-ами.
+///
+/// Датчик читал только `CREATE TABLE`, и колонка, приехавшая
+/// `ALTER TABLE … ADD COLUMN`, для него не существовала. Прямое следствие:
+/// аддитивная миграция не могла закрыть НИ ОДНУ находку состава — а «миграции
+/// аддитивны» у myack записано правилом (`data-model.md` §1bis). Колонку
+/// `signals.service_id` пришлось вписывать в исходный `CREATE TABLE` вместо
+/// новой миграции, иначе обещание контракта осталось бы без машинной опоры.
+///
+/// Снятая `DROP COLUMN` колонка уходит: считать её присутствующей значит
+/// обещать вход, которого нет.
+///
+/// Тексты берутся В ПОРЯДКЕ миграций — иначе `ALTER` мог бы прийти прежде
+/// таблицы, которую правит.
+pub fn schema_of(texts: &[String]) -> Vec<Table> {
+    let mut out: Vec<Table> = Vec::new();
+    for text in texts {
+        for t in tables_of(text) {
+            match out.iter_mut().find(|x| x.name == t.name) {
+                Some(had) => {
+                    for c in t.cols {
+                        if !had.cols.iter().any(|x| x.name == c.name) {
+                            had.cols.push(c);
+                        }
+                    }
+                }
+                None => out.push(t),
+            }
+        }
+        for (table, add, drop) in alters_of(text) {
+            let Some(had) = out.iter_mut().find(|x| x.name == table) else { continue };
+            if let Some(c) = add {
+                match had.cols.iter_mut().find(|x| x.name == c.name) {
+                    Some(x) => *x = c,
+                    None => had.cols.push(c),
+                }
+            }
+            if let Some(name) = drop {
+                had.cols.retain(|x| x.name != name);
+            }
+        }
+    }
+    out
+}
+
+/// Правки таблицы: `(таблица, добавленная колонка, снятое имя)`.
+///
+/// Одна команда `ALTER` несёт несколько действий через запятую, и каждое —
+/// своя строка ответа.
+pub fn alters_of(text: &str) -> Vec<(String, Option<Column>, Option<String>)> {
+    let no_comments: String = text
+        .split('\n')
+        .map(|l| match l.find("--") {
+            Some(p) => &l[..p],
+            None => l,
+        })
+        .collect::<Vec<&str>>()
+        .join("\n");
+    let head = regex::Regex::new(r"(?is)ALTER TABLE\s+(?:IF EXISTS\s+)?(?:ONLY\s+)?([a-z][a-z0-9_]*)\s+([^;]*);")
+        .expect("образец правки таблицы");
+    let add = regex::Regex::new(
+        r"(?i)^ADD (?:COLUMN )?(?:IF NOT EXISTS )?([a-z][a-z0-9_]*) (text|integer|bigint|bigserial|serial|smallint|boolean|jsonb|json|uuid|date|numeric|timestamptz|timestamp|timetz|time|interval|inet|bytea|real|double)\b(.*)$",
+    )
+    .expect("образец добавленной колонки");
+    let drop = regex::Regex::new(r"(?i)^DROP (?:COLUMN )?(?:IF EXISTS )?([a-z][a-z0-9_]*)")
+        .expect("образец снятой колонки");
+    let mut out = Vec::new();
+    for m in head.captures_iter(&no_comments) {
+        let table = m[1].to_owned();
+        // Действия режутся запятой ВЕРХНЕГО уровня: внутри `CHECK (…)` и
+        // `DEFAULT (…)` запятая своя и действие бы разорвала.
+        let mut acts = Vec::new();
+        let mut cur = String::new();
+        let mut d = 0i32;
+        for ch in m[2].chars() {
+            match ch {
+                '(' => d += 1,
+                ')' => d -= 1,
+                _ => {}
+            }
+            if ch == ',' && d == 0 {
+                acts.push(std::mem::take(&mut cur));
+            } else {
+                cur.push(ch);
+            }
+        }
+        acts.push(cur);
+        for a in &acts {
+            let t: String = a.split_whitespace().collect::<Vec<&str>>().join(" ");
+            if let Some(c) = add.captures(&t) {
+                out.push((
+                    table.clone(),
+                    Some(Column {
+                        name: c[1].to_owned(),
+                        not_null: c[3].to_uppercase().contains("NOT NULL"),
+                        has_default: c[3].to_uppercase().contains("DEFAULT"),
+                        primary_key: c[3].to_uppercase().contains("PRIMARY KEY"),
+                    }),
+                    None,
+                ));
+            } else if let Some(c) = drop.captures(&t) {
+                // `DROP CONSTRAINT` — не колонка, и снимать по нему нечего.
+                if !t.to_uppercase().starts_with("DROP CONSTRAINT") {
+                    out.push((table.clone(), None, Some(c[1].to_owned())));
+                }
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod правки {
+    use super::schema_of;
+
+    const CREATE: &str = "CREATE TABLE signals (id text NOT NULL, at timestamptz);";
+
+    #[test]
+    fn колонка_приехавшая_alter_ом_существует() {
+        let t = schema_of(&[CREATE.into(),
+                            "ALTER TABLE signals ADD COLUMN service_id text NOT NULL;".into()]);
+        let cols: Vec<&str> = t[0].cols.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(cols, vec!["id", "at", "service_id"], "{cols:?}");
+        assert!(t[0].cols[2].not_null, "NOT NULL потерян");
+    }
+
+    #[test]
+    fn if_not_exists_и_без_слова_column() {
+        let t = schema_of(&[CREATE.into(),
+                            "ALTER TABLE IF EXISTS signals ADD IF NOT EXISTS note text;".into()]);
+        assert!(t[0].cols.iter().any(|c| c.name == "note"), "{:?}",
+                t[0].cols.iter().map(|c| &c.name).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn снятая_колонка_уходит() {
+        let t = schema_of(&[CREATE.into(), "ALTER TABLE signals DROP COLUMN at;".into()]);
+        assert!(!t[0].cols.iter().any(|c| c.name == "at"), "снятая колонка осталась");
+    }
+
+    #[test]
+    fn несколько_действий_одной_командой() {
+        let t = schema_of(&[CREATE.into(),
+            "ALTER TABLE signals ADD COLUMN a text DEFAULT 'x', ADD COLUMN b integer, DROP COLUMN at;".into()]);
+        let cols: Vec<&str> = t[0].cols.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(cols, vec!["id", "a", "b"], "{cols:?}");
+    }
+
+    #[test]
+    fn ограничение_снятое_alter_ом_колонку_не_трогает() {
+        let t = schema_of(&[CREATE.into(),
+                            "ALTER TABLE signals DROP CONSTRAINT signals_at_check;".into()]);
+        assert!(t[0].cols.iter().any(|c| c.name == "at"), "ограничение съело колонку");
+    }
+
+    #[test]
+    fn правка_неизвестной_таблицы_ничего_не_заводит() {
+        let t = schema_of(&[CREATE.into(), "ALTER TABLE чужая ADD COLUMN x text;".into()]);
+        assert_eq!(t.len(), 1, "завелась таблица, которой не создавали");
+    }
+}
+
+/// Имена параметров адреса — и объявленных на месте, и объявленных ССЫЛКОЙ.
+///
+/// Обходчик брал только узлы с полем `in`, а `$ref` его не имеет:
+/// `- $ref: "#/components/parameters/PostmortemId"` — тот же параметр, но для
+/// датчика его не существовало. Отсюда `postmortem_actions.postmortem_id` и ещё
+/// четыре родительских ключа выглядели колонками `NOT NULL`, которые нечем
+/// заполнить, — хотя контракт объявляет их прямо.
+///
+/// Ссылка на СХЕМУ сюда не попадает: у неё нет двойника в
+/// `components/parameters`, и поиск возвращает пусто.
+pub fn path_params(item: &Value, doc: &Value) -> Vec<String> {
+    fn walk(node: &Value, doc: &Value, out: &mut Vec<String>) {
+        match node {
+            Value::Array(a) => a.iter().for_each(|x| walk(x, doc, out)),
+            Value::Object(o) => {
+                if o.get("in").is_some() {
+                    if let Some(n) = o.get("name").and_then(|n| n.as_str()) {
+                        out.push(n.to_owned());
+                    }
+                }
+                if let Some(r) = o.get("$ref").and_then(|r| r.as_str()) {
+                    if let Some(key) = r.rsplit('/').next() {
+                        if let Some(n) = doc
+                            .get("components")
+                            .and_then(|c| c.get("parameters"))
+                            .and_then(|p| p.get(key))
+                            .and_then(|p| p.get("name"))
+                            .and_then(|n| n.as_str())
+                        {
+                            out.push(n.to_owned());
+                        }
+                    }
+                }
+                o.values().for_each(|v| walk(v, doc, out));
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(item, doc, &mut out);
+    out
+}
+
+#[cfg(test)]
+mod параметры {
+    use super::path_params;
+    use serde_json::json;
+
+    fn контракт() -> serde_json::Value {
+        json!({ "components": { "parameters": {
+            "PostmortemId": { "name": "postmortem_id", "in": "path" } } } })
+    }
+
+    #[test]
+    fn объявленный_на_месте_виден() {
+        let item = json!({ "parameters": [{ "name": "block_id", "in": "path" }] });
+        assert_eq!(path_params(&item, &контракт()), vec!["block_id"]);
+    }
+
+    #[test]
+    fn объявленный_ссылкой_виден() {
+        let item = json!({ "parameters": [{ "$ref": "#/components/parameters/PostmortemId" }] });
+        assert_eq!(path_params(&item, &контракт()), vec!["postmortem_id"]);
+    }
+
+    #[test]
+    fn ссылка_на_схему_параметром_не_становится() {
+        let item = json!({ "post": { "requestBody": { "content": { "application/json": {
+            "schema": { "$ref": "#/components/schemas/PostmortemBlockInput" } } } } } });
+        assert!(path_params(&item, &контракт()).is_empty());
+    }
+
+    #[test]
+    fn неизвестная_ссылка_ничего_не_даёт() {
+        let item = json!({ "parameters": [{ "$ref": "#/components/parameters/НетТакого" }] });
+        assert!(path_params(&item, &контракт()).is_empty());
+    }
+}
+
+/// Достаётся ли параметр отрезка пути этой таблице.
+///
+/// Отрезок сверялся С ИМЕНЕМ таблицы, и параметр доставался только ей. У
+/// дочерней коллекции родительский ключ так не доставался НИКОМУ:
+/// `/postmortems/{postmortem_id}/actions` отдавал `postmortem_id` таблице
+/// `postmortems`, а нужен он `postmortem_actions.postmortem_id` — колонке
+/// `NOT NULL`, которая иначе выглядит не заполняемой ничем.
+///
+/// Дочерняя — та, чьё имя начинается с ОСНОВЫ отрезка и подчёркивания:
+/// `postmortems` → `postmortem_actions`, `postmortem_blocks`. Подчёркивание
+/// обязательно, иначе `posts` затянул бы `postmortems`.
+pub fn segment_owns(segment: &str, table: &str) -> bool {
+    if segment == table {
+        return true;
+    }
+    // Множественное число по-английски снимается тремя способами, и какой из
+    // них верен, знает только слово: `postmortems` → `postmortem`,
+    // `policies` → `policy`, `boxes` → `box`. Годится ЛЮБАЯ основа, потому что
+    // подчёркивание всё равно требуется: `policie_` не совпадёт ни с чем, а
+    // `policy_versions` совпадёт с `policy_`.
+    let mut stems = vec![segment.to_owned()];
+    if let Some(base) = segment.strip_suffix("ies") {
+        stems.push(format!("{base}y"));
+    }
+    if let Some(base) = segment.strip_suffix("es") {
+        stems.push(base.to_owned());
+    }
+    if let Some(base) = segment.strip_suffix('s') {
+        stems.push(base.to_owned());
+    }
+    // Основа короче трёх букв ничего не различает и раздала бы входы наугад.
+    stems
+        .iter()
+        .any(|st| st.chars().count() >= 3 && table.starts_with(&format!("{st}_")))
+}
+
+#[cfg(test)]
+mod отрезок {
+    use super::segment_owns;
+
+    #[test]
+    fn своя_таблица() {
+        assert!(segment_owns("postmortems", "postmortems"));
+    }
+
+    #[test]
+    fn дочерняя_коллекция_получает_родительский_ключ() {
+        assert!(segment_owns("postmortems", "postmortem_actions"));
+        assert!(segment_owns("postmortems", "postmortem_blocks"));
+    }
+
+    #[test]
+    fn чужая_таблица_с_общей_приставкой_не_получает() {
+        // `posts` и `postmortems` — разные вещи, и подчёркивание их разводит.
+        assert!(!segment_owns("posts", "postmortems"));
+    }
+
+    #[test]
+    fn соседняя_таблица_не_получает() {
+        assert!(!segment_owns("postmortems", "monitors"));
+    }
+
+    #[test]
+    fn множественное_на_ies_даёт_основу_на_y() {
+        // `/policies/{policy_id}/versions` — ключ нужен `policy_versions`.
+        assert!(segment_owns("policies", "policy_versions"));
+        assert!(segment_owns("policies", "policy_test_runs"));
+    }
+
+    #[test]
+    fn короткая_основа_не_раздаёт() {
+        assert!(!segment_owns("as", "a_b"));
+    }
+}
+
 fn snake_name(s: &str) -> String {
     snake(s)
 }
@@ -606,27 +922,17 @@ pub fn contract_vs_schema(
     let mut params_of: Vec<(String, String)> = Vec::new();
     if let Some(paths) = doc.get("paths").and_then(|p| p.as_object()) {
         for (path, ops) in paths {
-            let mut here = Vec::new();
-            fn walk(node: &Value, out: &mut Vec<String>) {
-                match node {
-                    Value::Array(a) => a.iter().for_each(|x| walk(x, out)),
-                    Value::Object(o) => {
-                        if o.get("in").is_some() {
-                            if let Some(n) = o.get("name").and_then(|n| n.as_str()) {
-                                out.push(n.to_owned());
-                            }
-                        }
-                        o.values().for_each(|v| walk(v, out));
-                    }
-                    _ => {}
-                }
-            }
-            walk(ops, &mut here);
+            let here = path_params(ops, doc);
             for seg in path.split('/') {
                 let t = seg.trim_matches(|c| c == '{' || c == '}');
-                if tables.iter().any(|x| x.name == t) {
+                // Отрезок обязан НАЗЫВАТЬ таблицу: иначе всякое слово в адресе
+                // раздавало бы входы по совпадению приставки.
+                if !tables.iter().any(|x| x.name == t) {
+                    continue;
+                }
+                for tab in tables.iter().filter(|x| segment_owns(t, &x.name)) {
                     for n in &here {
-                        params_of.push((t.to_owned(), n.clone()));
+                        params_of.push((tab.name.clone(), n.clone()));
                     }
                 }
             }

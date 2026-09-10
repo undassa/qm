@@ -622,16 +622,20 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
         // выглядит зелёным ровно потому, что ему нечего сказать.
         if how == "contract-vs-schema" {
             let mut doc = serde_json::Value::Null;
-            let mut tables = Vec::new();
+            // Схема собирается ЦЕЛИКОМ и по порядку: `CREATE TABLE` плюс всё,
+            // что доехало `ALTER`-ами. Список отсортирован, а миграции нумерованы,
+            // так что порядок имён — он же порядок применения.
+            let mut sql: Vec<String> = Vec::new();
             for f in &files {
                 let short = f.strip_prefix(&format!("{root}/")).unwrap_or(f).to_owned();
                 let Ok(text) = std::fs::read_to_string(f) else { continue };
                 if short.ends_with(".yaml") || short.ends_with(".yml") {
                     doc = crate::yaml::parse(&text);
                 } else if short.ends_with(".sql") {
-                    tables.extend(crate::repo_corpus::tables_of(&text));
+                    sql.push(text);
                 }
             }
+            let tables = crate::repo_corpus::schema_of(&sql);
             let schemas = doc
                 .get("components")
                 .and_then(|c| c.get("schemas"))
@@ -692,12 +696,13 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
             let pairs = crate::repo_corpus::pair(&enums, &checks, &forced);
             // Тем же проходом — значения без пути: они опираются на ту же пару,
             // и считать их отдельно значило бы завести вторую правду о паре.
-            let checks_tables: Vec<crate::repo_corpus::Table> = files
-                .iter()
-                .filter(|f| f.ends_with(".sql"))
-                .filter_map(|f| std::fs::read_to_string(f).ok())
-                .flat_map(|t| crate::repo_corpus::tables_of(&t))
-                .collect();
+            let checks_tables: Vec<crate::repo_corpus::Table> = crate::repo_corpus::schema_of(
+                &files
+                    .iter()
+                    .filter(|f| f.ends_with(".sql"))
+                    .filter_map(|f| std::fs::read_to_string(f).ok())
+                    .collect::<Vec<String>>(),
+            );
             let contract_enums = files
                 .iter()
                 .filter(|f| f.ends_with(".yaml") || f.ends_with(".yml"))
