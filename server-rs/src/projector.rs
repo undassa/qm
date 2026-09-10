@@ -3012,6 +3012,20 @@ pub async fn gate(pool: &Pool, project: &str, phase: Option<&str>) -> Result<Val
     // всё-таки посчиталось. Они отдаются вместе со словом о том, что доверять
     // им нельзя, — и это слово стоит первым.
     let stale = last_reproject(pool, project).await.filter(|(ok, _, _)| !*ok);
+    // ПРОТУХШИЙ ДАТЧИК — НЕ НАХОДКА, А НЕПРОГНАННЫЙ `mh sense`. Первый запуск
+    // после смены бинарника даёт пригоршню краснот «датчик подавал и ПРОТУХ», и
+    // человек, не знающий этого, идёт их чинить. Само поведение верное — но
+    // сказать, чем оно лечится, обязан тот, кто его показывает.
+    let stale_sensors: Vec<String> = client
+        .query(
+            "SELECT s.fact FROM sensor s
+              WHERE s.project_id = $1 AND NOT fact_fresh($1, s.fact) ORDER BY s.fact",
+            &[&project],
+        )
+        .await?
+        .iter()
+        .map(|r| r.get::<_, String>(0))
+        .collect();
     // ЧИТАЕТСЯ сохранённое, а не считается заново. Замер делает `measure_gates`,
     // и делает его при изменении набора; страница показывает результат и время,
     // когда он получен. Непосчитанный пункт называется непосчитанным.
@@ -3212,6 +3226,18 @@ pub async fn gate(pool: &Pool, project: &str, phase: Option<&str>) -> Result<Val
             "checkedAt": checked,
         }));
     }
+    // Пригоршня краснот «датчик подавал и ПРОТУХ» — не находки, а непрогнанный
+    // `mh sense`. Числа отдаются как есть, но чем это лечится, сказано рядом.
+    let sensors_note = if stale_sensors.is_empty() {
+        Value::Null
+    } else {
+        json!({
+            "facts": stale_sensors,
+            "why": "эти роды фактов не свежи, и пункты, читающие их, красны НЕ ПО НАХОДКЕ, \
+                    а потому что мерить сейчас нечем. Прогоните `mh sense` — после него \
+                    останутся только настоящие.",
+        })
+    };
     match stale {
         Some((_, why, at)) => Ok(json!({
             "gates": out,
@@ -3223,8 +3249,9 @@ pub async fn gate(pool: &Pool, project: &str, phase: Option<&str>) -> Result<Val
                  недособранным проекциям и могут значить не то. Прогоните `reproject` и `rebuild`."
             ),
             "staleAt": at,
+            "staleSensors": sensors_note,
         })),
-        None => Ok(json!({ "gates": out })),
+        None => Ok(json!({ "gates": out, "staleSensors": sensors_note })),
     }
 }
 
@@ -6040,9 +6067,9 @@ pub async fn declare_sensor_spec(
     }
     // Незнакомый род прежде молча становился `extract`: датчик объявляли одним,
     // он снимал другое и говорил «снято». Отказ называет допустимые роды.
-    const KINDS: [&str; 15] = ["extract", "files", "secret-fields", "declared-paths", "lines",
+    const KINDS: [&str; 16] = ["extract", "files", "secret-fields", "declared-paths", "lines",
                               "domain-vs-check", "contract-vs-schema", "contract-ops", "contract-body", "declared-lines", "contract-marks", "contract-head", "frozen-tree",
-                              "task-trailers", "holder-stub"];
+                              "task-trailers", "holder-stub", "file-matches"];
     let how = if how.trim().is_empty() { "extract" } else { how };
     if !KINDS.contains(&how) {
         return Ok(json!({ "status": "unknown_how", "how": how,

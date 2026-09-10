@@ -457,35 +457,10 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
                         "detail": "держатель назван, а файла нет в дереве" }));
                     continue;
                 };
-                let body: Vec<&str> = text
-                    .lines()
-                    .filter(|l| !l.trim_start().starts_with("//") && !l.trim().is_empty())
-                    .collect();
-                let elements = body.iter().filter(|l| {
-                    let t = l.trim_start();
-                    t.starts_with("fn ") || t.starts_with("pub fn ") || t.starts_with("struct ")
-                        || t.starts_with("pub struct ") || t.starts_with("enum ")
-                        || t.starts_with("pub enum ") || t.starts_with("impl ")
-                }).count();
-                // Требование помянуто ТОЛЬКО шапкой: имя стоит в `//!` и нигде
-                // больше. Шапка объясняет модуль, но ничего не держит.
-                let in_header = text.lines()
-                    .filter(|l| l.trim_start().starts_with("//!"))
-                    .any(|l| l.contains(&req));
-                let elsewhere = body.iter().any(|l| l.contains(&req));
-                let todo = body.iter().filter(|l| l.contains("todo!") || l.contains("unimplemented!")).count();
-                let form = if elements == 0 {
-                    Some("файл без единого элемента".to_owned())
-                } else if in_header && !elsewhere {
-                    Some("требование помянуто только шапкой модуля `//!`".to_owned())
-                } else if todo > 0 {
-                    Some(format!("тело не написано: {todo} раз `todo!`"))
-                } else {
-                    None
-                };
-                if let Some(f) = form {
-                    facts.push(json!({ "name": format!("{req} → {path}"),
-                        "detail": format!("держатель — заглушка: {f}") }));
+                match holder_verdict(&text, &req) {
+                    Some(form) => facts.push(json!({ "name": format!("{req} → {path}"),
+                        "detail": format!("держатель — заглушка: {form}") })),
+                    None => {}
                 }
             }
             let (out, _) = door.call("code-facts-push", &json!({ "kind": fact, "facts": facts }))?;
@@ -864,7 +839,22 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
                 }
                 continue;
             }
+            // ФАЙЛ, В КОТОРОМ ЧТО-ТО НАЙДЕНО, — один факт на файл, а не на строку.
+            // Датчик `db-test-file` объявлен и спрашивается живым пунктом `G3`, а
+            // подать его было нечем: пункт держался на подаче двухдневной
+            // давности и говорил «неизвестно», едва она протухала.
+            //
+            // От `lines` отличается тем, что находок ровно столько, сколько
+            // файлов: правило считает ФАЙЛЫ, и сто строк одного файла сказали бы
+            // «сто интеграционных проверок» там, где она одна.
             let Ok(text) = std::fs::read_to_string(f) else { continue };
+            if how == "file-matches" {
+                let hit = regex::Regex::new(re).ok().map(|r| r.is_match(&text)).unwrap_or(false);
+                if !re.is_empty() && hit && seen.insert(short.clone()) {
+                    names.push((short.clone(), spec["note"].as_str().unwrap_or("совпало").to_owned()));
+                }
+                continue;
+            }
             if how == "lines" {
                 // Построчный датчик: имя факта — путь и НОМЕР строки, пояснение —
                 // сама строка. Оговорки («это донор», «отменено») правилом не
@@ -1269,4 +1259,183 @@ pub fn install(door: &Door, into: &str) -> Result<Value, String> {
         "unchanged": same,
         "why": "источник один — сервер; копий в репозитории не остаётся, и отставать нечему",
     }))
+}
+
+/// Настоящий ли держатель: разбор ПОЭЛЕМЕНТНО, а не по файлу.
+///
+/// Первая редакция решала не тот вопрос дважды.
+///
+/// `"///".starts_with("//")` — истина, и докблоки выпадали из тела вместе с
+/// обычными комментариями. А в этом наборе докблок — ЕДИНСТВЕННЫЙ способ назвать
+/// требование в коде: так написан весь домен, так же говорит и правило,
+/// вводящее держателя. Семь находок из восьми получали вердикт «помянуто только
+/// шапкой модуля», который просто неверен.
+///
+/// `todo!` считался по ВСЕМУ файлу, а правило говорит «ЭЛЕМЕНТ ПОД ИМЕНЕМ, чьё
+/// тело — `todo!`». Разница решающая: порядок этого проекта — проверки до кода,
+/// и пока идёт фаза тестов, файл с проверкой ОБЯЗАН содержать `todo!` — это и
+/// есть её краснота. Прошли ровно те держатели, у которых проверка лежит в
+/// отдельном файле: правило требовало раскладки, которой не требует ни один
+/// документ набора.
+///
+/// Проверка заглушкой не бывает: держатель держится типом ИЛИ проверкой, и
+/// элемент под `#[test]`, назвавший требование, — законный держатель, даже если
+/// в соседней функции стоит `todo!`.
+///
+/// `None` — держатель настоящий.
+fn holder_verdict(text: &str, req: &str) -> Option<String> {
+    #[derive(Default)]
+    struct Элемент {
+        docs: String,
+        attrs: String,
+        body: String,
+    }
+    let mut elements: Vec<Элемент> = Vec::new();
+    let mut cur = Элемент::default();
+    let mut depth = 0i32;
+    let mut inside = false;
+    for line in text.lines() {
+        let t = line.trim_start();
+        if !inside {
+            // Докблок и пометки копятся ПЕРЕД элементом и принадлежат ему.
+            if t.starts_with("///") || t.starts_with("/**") || t.starts_with("*") {
+                cur.docs.push_str(line);
+                cur.docs.push('\n');
+                continue;
+            }
+            if t.starts_with("#[") {
+                cur.attrs.push_str(line);
+                cur.attrs.push('\n');
+                continue;
+            }
+            // Шапка модуля объясняет файл и НИЧЕГО не держит.
+            if t.starts_with("//!") || t.starts_with("//") || t.is_empty() {
+                continue;
+            }
+            // КОНТЕЙНЕР НЕ ЭЛЕМЕНТ. `impl`, `mod`, `trait` держат в себе другие
+            // элементы, и приняв их за один, разбор проглатывал чужой `todo!`:
+            // метод с настоящим телом получал вердикт «тело не написано», потому
+            // что где-то в том же блоке стоял `todo!` соседа. Спускаемся внутрь,
+            // а докблок контейнера ничего не держит — он объясняет блок.
+            let container = ["impl ", "impl<", "mod ", "pub mod ", "trait ", "pub trait "];
+            if container.iter().any(|h| t.starts_with(h)) {
+                cur = Элемент::default();
+                continue;
+            }
+            let head = ["fn ", "pub fn ", "struct ", "pub struct ", "enum ", "pub enum ",
+                        "type ", "pub type ", "const ", "static ",
+                        "async fn ", "pub async fn ", "pub(crate) fn "];
+            if head.iter().any(|h| t.starts_with(h)) {
+                inside = true;
+                depth = 0;
+            } else {
+                cur = Элемент::default();
+                continue;
+            }
+        }
+        cur.body.push_str(line);
+        cur.body.push('\n');
+        depth += line.matches('{').count() as i32 - line.matches('}').count() as i32;
+        // Элемент без тела (`type`, `const`, объявление в трейте) кончается точкой
+        // с запятой на нулевой глубине.
+        if inside && (depth <= 0 && (line.contains('}') || line.trim_end().ends_with(';'))) {
+            elements.push(std::mem::take(&mut cur));
+            inside = false;
+        }
+    }
+    if inside {
+        elements.push(cur);
+    }
+    let named: Vec<&Элемент> = elements
+        .iter()
+        .filter(|e| e.docs.contains(req) || e.body.contains(req))
+        .collect();
+    if elements.is_empty() {
+        return Some("файл без единого элемента".to_owned());
+    }
+    if named.is_empty() {
+        // ФОРМ ТРИ, И ВСЕ ТРИ НАЗВАНЫ ПРАВИЛОМ: файл без элементов; требование,
+        // названное только шапкой; элемент, чьё тело — `todo!`.
+        //
+        // «Имени нет в файле вовсе» — четвёртая, и правило её не объявляло.
+        // Это слабость самого объявления держателя, а не заглушка, и судить её
+        // здесь значило бы завести проверку, которой никто не просил.
+        if text.lines().any(|l| l.trim_start().starts_with("//!") && l.contains(req)) {
+            return Some("требование помянуто только шапкой модуля `//!`".to_owned());
+        }
+        return None;
+    }
+    // Проверка заглушкой не бывает.
+    if named.iter().any(|e| e.attrs.contains("#[test]") || e.attrs.contains("#[tokio::test]")) {
+        return None;
+    }
+    if named.iter().all(|e| e.body.contains("todo!") || e.body.contains("unimplemented!")) {
+        return Some(format!(
+            "тело не написано: все {} элементов, назвавших требование, — `todo!`",
+            named.len()
+        ));
+    }
+    None
+}
+
+#[cfg(test)]
+mod держатель {
+    use super::holder_verdict;
+
+    /// Порядок этого проекта — проверки до кода: пока идёт фаза тестов, файл с
+    /// проверкой ОБЯЗАН содержать `todo!`, и это её краснота, а не заглушка.
+    const С_ПРОВЕРКОЙ: &str = r#"
+//! Доставка.
+
+/// `TC-ESC-07` (`FR-ESC-06`) — намерение и попытка это разные записи.
+#[test]
+fn an_intent_and_an_attempt_are_two_records() {
+    assert!(true);
+}
+
+/// Соседняя функция, кода ещё нет.
+pub fn attempt() -> u8 {
+    todo!("TC-ESC-09")
+}
+"#;
+
+    const БЕЗ_ПРОВЕРКИ: &str = r#"
+//! Доставка.
+
+/// Здесь держится `FR-ESC-06`.
+pub fn attempt() -> u8 {
+    todo!("TC-ESC-09")
+}
+"#;
+
+    const ТОЛЬКО_ШАПКА: &str = r#"
+//! `FR-ESC-06` — намерение и попытка разные записи.
+
+pub fn unrelated() -> u8 { 1 }
+"#;
+
+    #[test]
+    fn докблок_при_проверке_держит() {
+        assert_eq!(holder_verdict(С_ПРОВЕРКОЙ, "FR-ESC-06"), None,
+                   "проверка заглушкой не бывает, а чужой `todo!` рядом ничего не значит");
+    }
+
+    #[test]
+    fn тот_же_файл_без_проверки_красен() {
+        assert!(holder_verdict(БЕЗ_ПРОВЕРКИ, "FR-ESC-06").is_some());
+    }
+
+    #[test]
+    fn шапка_модуля_ничего_не_держит() {
+        let v = holder_verdict(ТОЛЬКО_ШАПКА, "FR-ESC-06");
+        assert!(v.as_deref().map(|s| s.contains("шапкой")).unwrap_or(false), "{v:?}");
+    }
+
+    #[test]
+    fn докблок_не_выпадает_вместе_с_комментарием() {
+        // Первая редакция роняла `///` фильтром `starts_with("//")`, и требование,
+        // названное докблоком, считалось не названным нигде.
+        let v = holder_verdict(С_ПРОВЕРКОЙ, "FR-ESC-06");
+        assert!(v.is_none(), "докблок снова не читается: {v:?}");
+    }
 }
