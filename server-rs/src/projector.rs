@@ -6671,6 +6671,103 @@ pub async fn tree(
     }))
 }
 
+/// Что документа уже живёт в таблицах, а что держит только текст.
+///
+/// Разворот модели — «таблица источник, документ сборка» — упирается в один
+/// вопрос: что потеряется, если текст убрать. Отвечать на него мнением нельзя,
+/// поэтому дверь считает по РАЗДЕЛАМ, а не по документу целиком: в одном
+/// документе половина разделов воспроизводима, половина — рассуждение, и
+/// среднее по нему врёт про обе.
+///
+/// Блок относится к САМОМУ ВНУТРЕННЕМУ разделу: у родителя `last_block`
+/// накрывает и детей, и по нему абзац ребёнка засчитался бы дважды.
+pub async fn document_coverage(
+    pool: &Pool, project: &str, kind: &str, name: &str,
+) -> Result<Value, tokio_postgres::Error> {
+    let client = pool.get().await.expect("пул отдал соединение");
+    if client
+        .query_opt(
+            "SELECT 1 FROM project_documents WHERE project_id = $1 AND entity_kind = $2 AND entity_name = $3",
+            &[&project, &kind, &name],
+        )
+        .await?
+        .is_none()
+    {
+        return Ok(json!({ "status": "no_document", "kind": kind, "name": name,
+            "why": "такого документа в наборе нет: сверять сборку не с чем" }));
+    }
+    let rows = client
+        .query(
+            "WITH блок AS (
+                 SELECT b.ord, b.kind AS вид, length(b.raw) AS байт,
+                        (SELECT max(s.ord) FROM project_document_sections s
+                          WHERE s.project_id = b.project_id AND s.entity_kind = b.entity_kind
+                            AND s.entity_name = b.entity_name AND s.ord <= b.ord) AS раздел
+                   FROM project_document_blocks b
+                  WHERE b.project_id = $1 AND b.entity_kind = $2 AND b.entity_name = $3
+                    AND b.kind <> 'blank'),
+             строка AS (
+                 SELECT section_ord FROM project_requirements
+                  WHERE project_id = $1 AND entity_kind = $2 AND entity_name = $3
+                 UNION ALL SELECT section_ord FROM project_checks
+                  WHERE project_id = $1 AND entity_kind = $2 AND entity_name = $3
+                 UNION ALL SELECT section_ord FROM project_terms
+                  WHERE project_id = $1 AND entity_kind = $2 AND entity_name = $3
+                 UNION ALL SELECT section_ord FROM project_needs
+                  WHERE project_id = $1 AND entity_kind = $2 AND entity_name = $3
+                 UNION ALL SELECT section_ord FROM project_risks
+                  WHERE project_id = $1 AND entity_kind = $2 AND entity_name = $3)
+             SELECT s.ord, s.title, s.level,
+                    coalesce((SELECT count(*) FROM строка r WHERE r.section_ord = s.ord), 0)::bigint AS строк,
+                    coalesce((SELECT count(*) FROM блок b WHERE b.раздел = s.ord AND b.вид = 'table'), 0)::bigint,
+                    coalesce((SELECT count(*) FROM блок b WHERE b.раздел = s.ord AND b.вид NOT IN ('table','heading')), 0)::bigint,
+                    coalesce((SELECT sum(b.байт) FROM блок b WHERE b.раздел = s.ord AND b.вид NOT IN ('table','heading')), 0)::bigint,
+                    EXISTS (SELECT 1 FROM project_document_sections c
+                             WHERE c.project_id = s.project_id AND c.entity_kind = s.entity_kind
+                               AND c.entity_name = s.entity_name AND c.parent_ord = s.ord)
+               FROM project_document_sections s
+              WHERE s.project_id = $1 AND s.entity_kind = $2 AND s.entity_name = $3
+              ORDER BY s.ord",
+            &[&project, &kind, &name],
+        )
+        .await?;
+
+    let (mut в_таблице, mut только_текст, mut смешано, mut пусто) = (0, 0, 0, 0);
+    let mut прозы_байт: i64 = 0;
+    let mut разделы = Vec::new();
+    for r in &rows {
+        let строк: i64 = r.get(3);
+        let прозы: i64 = r.get(5);
+        let байт: i64 = r.get(6);
+        let родитель: bool = r.get(7);
+        // Родительский заголовок без своего текста — не потеря и не находка:
+        // он вернётся сам, когда соберутся дети.
+        let вердикт = match (строк > 0, прозы > 0, родитель) {
+            (true, false, _) => { в_таблице += 1; "воспроизводится из таблицы" }
+            (true, true, _) => { смешано += 1; прозы_байт += байт; "часть в таблице, часть только текстом" }
+            (false, true, _) => { только_текст += 1; прозы_байт += байт; "только текст" }
+            (false, false, true) => { пусто += 1; "заголовок-родитель: соберётся из детей" }
+            (false, false, false) => { пусто += 1; "пусто" }
+        };
+        разделы.push(json!({
+            "ord": r.get::<_, i32>(0), "title": r.get::<_, String>(1),
+            "level": r.get::<_, i32>(2),
+            "rows": строк, "tables": r.get::<_, i64>(4), "prose": прозы, "bytes": байт,
+            "verdict": вердикт,
+        }));
+    }
+    Ok(json!({
+        "kind": kind, "name": name,
+        "sections": rows.len(),
+        "fromTable": в_таблице, "textOnly": только_текст, "mixed": смешано, "empty": пусто,
+        "proseBytes": прозы_байт,
+        "bySection": разделы,
+        "means": "«только текст» и «часть только текстом» — это и есть то, что \
+                  потеряется, если убрать текст. Считано по разделам: среднее \
+                  по документу врёт про обе половины",
+    }))
+}
+
 pub async fn holders(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
     let client = pool.get().await.expect("пул отдал соединение");
     let rows = client
