@@ -5442,6 +5442,119 @@ pub async fn declare_story_detail(
     Ok(json!({ "status": "declared", "story": story }))
 }
 
+/// Объявить, что история несёт требование.
+///
+/// Правило `story-has-requirement` читает `project_story_requirements`, а
+/// заполнить эту таблицу через сервер было нечем: `story-add` знает имя,
+/// заголовок и область, `story-detail-add` — персону и экран, двери про
+/// требование не было ни одной. У `tot-ade` все семнадцать историй несут
+/// строку «**Требования:** …», связь есть в документе и нет в колонках, и
+/// закрыть пункт правдой было невозможно — только отменой.
+///
+/// Обе стороны ПРОВЕРЯЮТСЯ: связь на несуществующее — подписанная пустота,
+/// и читается она как знание.
+pub async fn declare_story_requirement(
+    pool: &Pool, project: &str, story: &str, requirement: &str, drop_it: bool,
+) -> Result<Value, tokio_postgres::Error> {
+    let client = pool.get().await.expect("пул отдал соединение");
+    if story.trim().is_empty() || requirement.trim().is_empty() {
+        return Ok(json!({ "status": "empty",
+            "why": "связь объявляется двумя сторонами: история и требование" }));
+    }
+    if drop_it {
+        let gone = client
+            .execute(
+                "DELETE FROM project_story_requirements
+                  WHERE project_id = $1 AND story_id = $2 AND requirement_id = $3",
+                &[&project, &story, &requirement],
+            )
+            .await?;
+        return Ok(json!({ "status": if gone > 0 { "dropped" } else { "not_found" },
+                          "story": story, "requirement": requirement }));
+    }
+    if client
+        .query_opt("SELECT 1 FROM project_stories WHERE project_id = $1 AND id = $2",
+                   &[&project, &story])
+        .await?
+        .is_none()
+    {
+        return Ok(json!({ "status": "no_story", "story": story,
+            "why": "истории с таким именем в наборе нет: связь описывала бы то, чего нет" }));
+    }
+    if client
+        .query_opt("SELECT 1 FROM project_requirements WHERE project_id = $1 AND id = $2",
+                   &[&project, &requirement])
+        .await?
+        .is_none()
+    {
+        return Ok(json!({ "status": "no_requirement", "requirement": requirement,
+            "why": "требования с таким именем в наборе нет" }));
+    }
+    let n = client
+        .execute(
+            "INSERT INTO project_story_requirements (project_id, story_id, requirement_id)
+             VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
+            &[&project, &story, &requirement],
+        )
+        .await?;
+    Ok(json!({ "status": if n > 0 { "declared" } else { "already" },
+               "story": story, "requirement": requirement }))
+}
+
+/// Объявить, что фича несёт историю.
+///
+/// Правило `feature-matches-stories` читает `project_feature_stories`. У
+/// `tot-ade` эту связь не говорит НИ ОДНА сторона: обход пятидесяти фич не
+/// нашёл ни одного имени истории, обратной строки «**Фича:**» нет ни в одной
+/// из семнадцати. Там пункт красен по делу — и закрыть его было нечем.
+pub async fn declare_feature_story(
+    pool: &Pool, project: &str, feature: &str, story: &str, drop_it: bool,
+) -> Result<Value, tokio_postgres::Error> {
+    let client = pool.get().await.expect("пул отдал соединение");
+    if feature.trim().is_empty() || story.trim().is_empty() {
+        return Ok(json!({ "status": "empty",
+            "why": "связь объявляется двумя сторонами: фича и история" }));
+    }
+    if drop_it {
+        let gone = client
+            .execute(
+                "DELETE FROM project_feature_stories
+                  WHERE project_id = $1 AND feature_id = $2 AND story_id = $3",
+                &[&project, &feature, &story],
+            )
+            .await?;
+        return Ok(json!({ "status": if gone > 0 { "dropped" } else { "not_found" },
+                          "feature": feature, "story": story }));
+    }
+    if client
+        .query_opt("SELECT 1 FROM project_features WHERE project_id = $1 AND id = $2",
+                   &[&project, &feature])
+        .await?
+        .is_none()
+    {
+        return Ok(json!({ "status": "no_feature", "feature": feature,
+            "why": "фичи с таким именем в наборе нет" }));
+    }
+    if client
+        .query_opt("SELECT 1 FROM project_stories WHERE project_id = $1 AND id = $2",
+                   &[&project, &story])
+        .await?
+        .is_none()
+    {
+        return Ok(json!({ "status": "no_story", "story": story,
+            "why": "истории с таким именем в наборе нет" }));
+    }
+    let n = client
+        .execute(
+            "INSERT INTO project_feature_stories (project_id, feature_id, story_id)
+             VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
+            &[&project, &feature, &story],
+        )
+        .await?;
+    Ok(json!({ "status": if n > 0 { "declared" } else { "already" },
+               "feature": feature, "story": story }))
+}
+
 pub async fn declare_feature_link(
     pool: &Pool, project: &str, feature: &str, requirement: &str, article: i32,
     drop_it: bool,
