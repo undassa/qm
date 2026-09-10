@@ -3809,6 +3809,14 @@ pub async fn push_preflight(
     pool: &Pool,
     project: &str,
     verdicts: &[(String, i64, i64, String, i32, String)],
+    // Стирать ли ЧУЖОЕ. Подача была полной, а частичной формы не было вовсе — и
+    // первый же, кто предполётил не весь план сразу, стирал остальное: тринадцать
+    // свежих вердиктов сносили сто восемь прежних. Источник, откуда прежние
+    // приехали, снесён, и восстановить было бы неоткуда.
+    //
+    // Теперь по умолчанию подача СЛИВАЕТСЯ: добавляет и заменяет по имени
+    // задачи. Полное стирание осталось — но его надо сказать вслух.
+    replace_all: bool,
     actor: &str,
 ) -> Result<Value, tokio_postgres::Error> {
     let mut client = pool.get().await.expect("пул отдал соединение");
@@ -3817,7 +3825,17 @@ pub async fn push_preflight(
         .query_one("SELECT count(*) FROM preflight_verdict WHERE project_id = $1", &[&project])
         .await?
         .get::<_, i64>(0);
-    tx.execute("DELETE FROM preflight_verdict WHERE project_id = $1", &[&project]).await?;
+    if replace_all {
+        tx.execute("DELETE FROM preflight_verdict WHERE project_id = $1", &[&project]).await?;
+    } else {
+        // Снимается ровно то, что подаётся заново: остальное чужое и остаётся.
+        let names: Vec<String> = verdicts.iter().map(|v| v.0.clone()).collect();
+        tx.execute(
+            "DELETE FROM preflight_verdict WHERE project_id = $1 AND task_id = ANY($2)",
+            &[&project, &names],
+        )
+        .await?;
+    }
     let mut written = 0u64;
     let mut refused: Vec<Value> = Vec::new();
     let mut stale: Vec<Value> = Vec::new();
@@ -3887,8 +3905,18 @@ pub async fn push_preflight(
         &[&project, &now_ms(), &actor, &(written as i32)],
     )
     .await?;
+    // Итог считается ДО фиксации, той же транзакцией: после неё соединение уже
+    // отдано, и вопрос к нему — вопрос в никуда.
+    let now_total = tx
+        .query_one("SELECT count(*) FROM preflight_verdict WHERE project_id = $1", &[&project])
+        .await?
+        .get::<_, i64>(0);
     tx.commit().await?;
-    Ok(json!({ "was": before, "now": written, "refused": refused.len(), "refusedTasks": refused,
+    Ok(json!({ "was": before, "written": written, "now": now_total,
+               "kept": now_total - written as i64,
+               "mode": if replace_all { "полная замена: чужие вердикты сняты" }
+                       else { "слияние: подано своё, чужое на месте" },
+               "refused": refused.len(), "refusedTasks": refused,
                "staleOnArrival": stale.len(), "stale": stale }))
 }
 

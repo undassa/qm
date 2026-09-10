@@ -489,11 +489,11 @@ impl Mcp {
                 "skills": { "type": "array", "description": "[{name, description, body}]", "items": { "type": "object" } },
                 "dry": s("true — только сверка: что разошлось, ничего не записывая") },
                 "required": ["skills"] } }));
-        tools.push(json!({ "name": "preflight-push", "description": "принять вердикты предполёта из истории репозитория; подача полная",
+        tools.push(json!({ "name": "preflight-push", "description": "принять вердикты предполёта: подача СЛИВАЕТСЯ — добавляет и заменяет по имени задачи, чужое остаётся; полное стирание — `clear`",
             "inputSchema": { "type": "object", "properties": {
                 "verdicts": { "type": "array", "description": "[{task, at, taskRevision, verdict, findings, body}]",
                               "items": { "type": "object" } },
-                "clear": json!({"type":"boolean","description":"пустая подача — ответ: снять все вердикты"}) },
+                "clear": json!({"type":"boolean","description":"снять ВСЕ прежние вердикты, а не только поданные заново"}) },
                 "required": ["verdicts"] } }));
         tools.push(json!({ "name": "worktree-push", "description": "принять открытые рабочие деревья — статус «в работе»; подача полная, пустая законна",
             "inputSchema": { "type": "object", "properties": {
@@ -1161,9 +1161,13 @@ impl Mcp {
                                  ответ — сказать явно: clear:=true" }],
                         "isError": true });
                 }
-                match crate::projector::push_preflight(&self.pool, p, &list, &self.author).await {
+                match crate::projector::push_preflight(&self.pool, p, &list,
+                        args.get("clear").map(|v| v == "true" || v == true).unwrap_or(false),
+                        &self.author).await {
                     Ok(v) => ok(v),
-                    Err(e) => refusal(Miss::Db(e.to_string())),
+                    // `e.to_string()` у клиентской ошибки — «db error», и причина
+                    // теряется. Соседние двери зовут `db_says`, эта звала иначе.
+                    Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
                 }
             }
             "worktree-push" => {
