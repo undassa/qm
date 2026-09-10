@@ -134,6 +134,48 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize,
         }
         out
     };
+
+    // ПРОЧИЕ ПЕРЕЧНИ ЭТАПА — проверки, истории, экраны. Читаются теми же
+    // объявленными маркерами, что и требования, и ложатся в одну таблицу с
+    // колонкой рода. Отбора по приставке имени здесь НЕТ: что за сущность,
+    // говорит маркер блока, а не форма имени — иначе пришлось бы зашить
+    // `TC-`, `US-`, `SCR-` рядом с уже зашитым `FR-`.
+    let milestone_links: Vec<(String, String, String)> = {
+        let client = pool.get().await.expect("пул отдал соединение");
+        let rows = client
+            .query(
+                "SELECT entity_name, content FROM project_documents
+                  WHERE project_id = $1 AND entity_kind = 'milestone'",
+                &[&project],
+            )
+            .await?;
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for (role, род) in [
+            ("marker.milestone-checks", "check"),
+            ("marker.milestone-stories", "story"),
+            ("marker.milestone-screens", "screen"),
+        ] {
+            let Some(marker) = terms.one(role) else { continue };
+            for r in &rows {
+                let milestone: String = r.get(0);
+                let content: String = r.get(1);
+                let Some(block) = content.split(marker).nth(1) else { continue };
+                let block = block.split("</details>").next().unwrap_or("");
+                for line in block.lines() {
+                    if super::runs::gone(line) {
+                        continue;
+                    }
+                    for name in super::ids::expand(line) {
+                        if seen.insert(format!("{milestone} {род} {name}")) {
+                            out.push((milestone.clone(), род.to_owned(), name));
+                        }
+                    }
+                }
+            }
+        }
+        out
+    };
     // Какому выпуску принадлежит этап, говорит сам выпуск: его документ
     // перечисляет этапы таблицей, первой колонкой. Прежде это читалось из
     // каталога, в котором лежал файл.
@@ -287,6 +329,16 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize,
                                                 exempt, target_dir)
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
             &[&project, task, ord, dir, leaf, is_path, exempt, target],
+        )
+        .await?;
+    }
+    tx.execute("DELETE FROM project_milestone_links WHERE project_id = $1 AND origin = 'projected'",
+               &[&project]).await?;
+    for (milestone, род, target) in &milestone_links {
+        tx.execute(
+            "INSERT INTO project_milestone_links(project_id, milestone_id, kind, target, origin)
+             VALUES ($1,$2,$3,$4,'projected') ON CONFLICT DO NOTHING",
+            &[&project, milestone, род, target],
         )
         .await?;
     }

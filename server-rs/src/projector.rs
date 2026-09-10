@@ -1734,6 +1734,28 @@ ALTER TABLE project_checks ADD COLUMN IF NOT EXISTS section_ord integer;
 -- бы объявленное дверью.
 ALTER TABLE project_requirement_sources ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'declared';
 
+-- ПЕРЕЧНИ ЭТАПА. Документ этапа несёт четыре списка — «Требования (6)»,
+-- «Истории (6)», «Экраны (10)», «Проверки (27)» — и сам говорит рядом: «все
+-- ссылки списками, потому что этап проверяется по ним». Дом был только у
+-- первого: 372 имени проверок и 213 имён историй жили одним лишь разбором,
+-- таблицы `milestone × check` не существовало вовсе.
+--
+-- Одна таблица, «что» — колонка. Три новые (`milestone_checks`,
+-- `milestone_stories`, `milestone_screens`) разошлись бы между собой, а пар
+-- «вид → вид» в наборе замерено 132: по таблице на пару набор не удержит.
+--
+-- `project_milestone_requirements` НЕ переносится сюда намеренно: её читают
+-- правила, и у неё свой инвариант — требование принадлежит ровно одному
+-- этапу. Переезд ради стройности стоил бы переписывания работающих правил.
+CREATE TABLE IF NOT EXISTS project_milestone_links (
+    project_id   text NOT NULL,
+    milestone_id text NOT NULL,
+    kind         text NOT NULL,
+    target       text NOT NULL,
+    origin       text NOT NULL DEFAULT 'projected',
+    PRIMARY KEY (project_id, milestone_id, kind, target)
+);
+
 -- РОЛЬ связи: определяет документ сущность или только называет её.
 --
 -- Связь знала «ui-spec называет SCR-SHELL-01», но не знала, задаёт он экран
@@ -8172,7 +8194,13 @@ pub async fn step_selftest(pool: &Pool, project: &str, process: &str) -> Result<
             Err(e) => Err(format!("запрос ступени не исполнился: {e}")),
             Ok(before) => match tx.execute(probe.as_str(), &[&project]).await {
                 Err(e) => Err(format!("проба не исполнилась: {}", db_says(&e))),
-                Ok(0) => Err("проба ничего не подсадила".to_owned()),
+                // ЧИСЛО СТРОК ДО ПОДСАДКИ — В ОТЧЁТ. Дважды за сессию самотест
+                // назвал сломанным пункт, который через минуту оказался цел, и
+                // отличить «проба неверна» от «подсаживать было не во что»
+                // отчёт не давал: причину искали руками и не нашли.
+                Ok(0) => Err(format!(
+                    "проба ничего не подсадила; запрос пункта до пробы вернул {} строк",
+                    before.len())),
                 Ok(_) => match answer_of(&tx, &method, project).await {
                     Ok(after) => Ok((before, after)),
                     Err(e) => Err(format!("запрос ступени не исполнился после подсадки: {e}")),
@@ -8425,7 +8453,13 @@ pub async fn gate_selftest(pool: &Pool, project: &str) -> Result<Value, tokio_po
             Err(e) => Err(format!("запрос пункта не исполнился: {e}")),
             Ok(before) => match tx.execute(probe.as_str(), &[&project]).await {
                 Err(e) => Err(format!("проба не исполнилась: {}", db_says(&e))),
-                Ok(0) => Err("проба ничего не подсадила".to_owned()),
+                // ЧИСЛО СТРОК ДО ПОДСАДКИ — В ОТЧЁТ. Дважды за сессию самотест
+                // назвал сломанным пункт, который через минуту оказался цел, и
+                // отличить «проба неверна» от «подсаживать было не во что»
+                // отчёт не давал: причину искали руками и не нашли.
+                Ok(0) => Err(format!(
+                    "проба ничего не подсадила; запрос пункта до пробы вернул {} строк",
+                    before.len())),
                 Ok(_) => match answer_of(&tx, &sql, project).await {
                     Ok(after) => Ok((before, after)),
                     Err(e) => Err(format!("запрос пункта не исполнился после подсадки: {e}")),
