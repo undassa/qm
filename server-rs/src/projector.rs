@@ -1586,6 +1586,16 @@ ALTER TABLE gate_item ADD COLUMN IF NOT EXISTS id text NOT NULL DEFAULT '';
 -- и молчать об этом нельзя: гейт для того и написан, чтобы не было зелёного,
 -- которое никто не проверял.
 ALTER TABLE gate_item ADD COLUMN IF NOT EXISTS probe_ok boolean;
+-- НАД ЧЕМ ПУНКТ МЕРЯЕТ. Правило, у которого предмет ИСЧЕЗ, отчитывалось
+-- тишиной: строк нет — нарушений нет — пункт зелен и пропал из перечня
+-- непройденных. Счёт при этом улучшался, и гейт зеленел от того, что мерить
+-- стало нечего.
+--
+-- Ровно тот класс, против которого в наборе написано «пустой список вместо
+-- ответа врёт», — и он сработал на самом харнесе: сто пятьдесят четыре нарушения
+-- ушли молча, когда из плана пропали красные задачи.
+ALTER TABLE gate_item ADD COLUMN IF NOT EXISTS subject_query text NOT NULL DEFAULT '';
+ALTER TABLE gate_item ADD COLUMN IF NOT EXISTS subject_why text NOT NULL DEFAULT '';
 ALTER TABLE project_gates ADD COLUMN IF NOT EXISTS probe_ok boolean;
 ALTER TABLE project_gates ADD COLUMN IF NOT EXISTS id text NOT NULL DEFAULT '';
 ALTER TABLE gate_item_waiver ADD COLUMN IF NOT EXISTS id text NOT NULL DEFAULT '';
@@ -2799,7 +2809,8 @@ pub async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, tokio_po
     // вопрос «можно ли идти дальше», и ответ не должен зависеть от того, кто как
     // завёл проверки у себя.
     let rows = client
-        .query("SELECT phase, item, kind, query, why, owner, id FROM gate_item ORDER BY phase, id", &[])
+        .query("SELECT phase, item, kind, query, why, owner, id, subject_query, subject_why
+                  FROM gate_item ORDER BY phase, id", &[])
         .await?;
     let waived: std::collections::HashSet<(String, String)> = client
         .query("SELECT phase, id FROM gate_item_waiver WHERE project_id = $1", &[&project])
@@ -2832,7 +2843,30 @@ pub async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, tokio_po
                     "why": why_waived.get(&(phase.clone(), id.clone())).cloned().unwrap_or_default(),
                     "means": r.get::<_, String>(4) })
         } else {
-            measure_item(&client, project, &phase, &item, &kind, query.as_deref(), r).await?
+            // ПРЕДМЕТ СПРАШИВАЕТСЯ ПЕРВЫМ. Пункт, у которого мерить стало нечего,
+            // отвечал зелёным и пропадал из перечня непройденных — счёт при этом
+            // улучшался. Пусто в предмете — «неизвестно» со своим словом.
+            let subject: String = r.get(7);
+            let empty = if subject.trim().is_empty() {
+                false
+            } else {
+                match client.query(subject.as_str(), &[&project]).await {
+                    Ok(rows) => rows.is_empty(),
+                    // Запрос предмета, который не исполнился, — не «предмет пуст».
+                    Err(_) => false,
+                }
+            };
+            if empty {
+                let w: String = r.get(8);
+                json!({ "item": item, "kind": kind, "computed": "unknown",
+                        "violations": 0, "detail": [],
+                        "why": if w.trim().is_empty() {
+                            "предмет пункта пуст: мерить нечего, и это не «пройдено»".to_owned()
+                        } else { w },
+                        "means": r.get::<_, String>(4) })
+            } else {
+                measure_item(&client, project, &phase, &item, &kind, query.as_deref(), r).await?
+            }
         };
         let computed = entry["computed"].as_str().unwrap_or("unknown");
         // В колонке `state` живут только четыре слова — так объявлено ограничением
@@ -8313,6 +8347,9 @@ pub async fn set_gate_item(
     owner: Option<&str>,
     probe: Option<&str>,
     why: &str,
+    // Над чем пункт меряет. Пусто в ответе — «неизвестно», а не «пройдено».
+    subject: Option<&str>,
+    subject_why: Option<&str>,
     drop_it: bool,
 ) -> Result<Value, tokio_postgres::Error> {
     let mut client = pool.get().await.expect("пул отдал соединение");
@@ -8461,13 +8498,17 @@ pub async fn set_gate_item(
     let probe = probe_text;
     let n = client
         .execute(
-            "INSERT INTO gate_item (phase, id, item, kind, query, owner, probe, probe_ok)
-             VALUES ($1, $2, $7, $3, $4, $5, $6, $8)
+            "INSERT INTO gate_item (phase, id, item, kind, query, owner, probe, probe_ok,
+                                    subject_query, subject_why)
+             VALUES ($1, $2, $7, $3, $4, $5, $6, $8, coalesce($9, ''), coalesce($10, ''))
              ON CONFLICT (phase, id) WHERE id <> ''
                DO UPDATE SET item = EXCLUDED.item, kind = EXCLUDED.kind, query = EXCLUDED.query,
                              owner = EXCLUDED.owner, probe = EXCLUDED.probe,
-                             probe_ok = EXCLUDED.probe_ok",
-            &[&phase, &id, &kind, &query, &owner, &probe, &title, &probe_runs],
+                             probe_ok = EXCLUDED.probe_ok,
+                             subject_query = coalesce($9, gate_item.subject_query),
+                             subject_why = coalesce($10, gate_item.subject_why)",
+            &[&phase, &id, &kind, &query, &owner, &probe, &title, &probe_runs,
+              &subject, &subject_why],
         )
         .await?;
     if !why.is_empty() {

@@ -170,7 +170,37 @@ async fn main() {
         match reproject::reproject(&app.pool, &project).await {
             Ok(v) => {
                 projector::note_reproject(&app.pool, &project, true, "").await;
-                println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+                // ПАРА, А НЕ ПОЛОВИНА. Пересборка снимает из плана красные задачи
+                // и состояния — их кладёт СБОРКА, и между двумя командами база
+                // неполна. Дверь `mh call reproject` делает обе половины и всегда
+                // делала; подкоманда останавливалась на первой и печатала успех.
+                //
+                // Стоило дня: красные задачи «исчезли», пункт, читающий их,
+                // замолчал, и гейт от этого позеленел.
+                //
+                // Половина — по явному слову, и она говорит, чем это кончится.
+                let half = std::env::args().any(|a| a == "--half");
+                let after = if half {
+                    serde_json::json!({
+                        "warning": "СДЕЛАНА ПОЛОВИНА. В плане сейчас нет красных задач и \
+                                    состояний: их кладёт `mh-server rebuild`. Пока он не \
+                                    прогнан, всё прочитанное соврёт.",
+                    })
+                } else {
+                    if let Err(e) = projector::rebuild_before(&app.pool, &project).await {
+                        eprintln!("подготовка сборки не прошла: {}", projector::db_says(&e));
+                        std::process::exit(1);
+                    }
+                    match projector::rebuild(&app.pool, &project).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            eprintln!("сборка не прошла: {}", projector::db_says(&e));
+                            std::process::exit(1);
+                        }
+                    }
+                };
+                println!("{}", serde_json::to_string_pretty(
+                    &serde_json::json!({ "reproject": v, "rebuild": after })).unwrap_or_default());
             }
             Err(e) => {
                 let said = projector::db_says(&e);

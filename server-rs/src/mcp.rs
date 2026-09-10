@@ -505,6 +505,8 @@ impl Mcp {
                 "itemKind": s("query · command · signed"), "query": s("запрос для вида query"),
                 "owner": s("кто подписывает, для вида signed"),
                 "probe": s("запрос, подсаживающий нарушение — им самотест роняет пункт"),
+                "subject": s("запрос ПРЕДМЕТА пункта: пусто в ответе — «неизвестно», а не «пройдено»"),
+                "subjectWhy": s("чем объяснить пустой предмет"),
                 "why": s("почему способа нет — для рода unknown"),
                 "drop": json!({"type":"boolean","description":"снять пункт вместе с его замерами"}) }, "required": ["phase", "id", "itemKind"] } }));
         tools.push(json!({ "name": "ceiling-set", "description": "объявить потолок долга правила: сколько находок сегодня терпимо и почему; держит не долг, а его рост",
@@ -2151,7 +2153,10 @@ impl Mcp {
                         "пункт гейта без фазы или без имени не заводится: `id` адресует пункт, `item` его объясняет".into()));
                 }
                 match crate::projector::set_gate_item(&self.pool, p, phase, id, item, gk, query, owner,
-                                                      probe, why, args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
+                                                      probe, why,
+                                                      args.get("subject").and_then(|v| v.as_str()),
+                                                      args.get("subjectWhy").and_then(|v| v.as_str()),
+                                                      args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
                 }
