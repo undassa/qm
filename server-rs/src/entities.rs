@@ -173,6 +173,125 @@ pub fn without_body(mut v: Value) -> Value {
     v
 }
 
+/// Мета связей сущности: чем она связана и как разложена.
+///
+/// Сущность отдавалась ТЕКСТОМ либо СТРОКОЙ — и ни одной связи. Двадцать шесть
+/// тысяч записей связей лежали в таблицах, а метод о них молчал: чтобы узнать,
+/// на что опирается требование, надо было ЗНАТЬ про `links-of` и `backlinks` и
+/// позвать их отдельно. Знание, которого нет у того, кто спрашивает впервые.
+///
+/// Здесь — счёт, а не содержимое: перечень в двести имён забил бы ответ. Счёт
+/// говорит, что связи ЕСТЬ и сколько их; за именами идут в названную дверь.
+async fn relations_of(
+    pool: &Pool,
+    project: &str,
+    kind: &str,
+    id: &str,
+    owner_kind: &str,
+    owner_name: &str,
+    // Внутренняя сущность живёт строкой в чужом документе, и разделы с именами
+    // принадлежат ЕМУ. Отдать их как свои значило бы приписать требованию
+    // четыреста имён, которых оно не называет, — весь `srs` разом.
+    inner: bool,
+) -> Value {
+    let client = pool.get().await.expect("пул отдал соединение");
+    let mut out = serde_json::Map::new();
+
+    // Связи по видам — тем же перечнем, что отдаёт `links-of`: вторая правда о
+    // связях разошлась бы с первой.
+    if !id.is_empty() {
+        if let Ok(v) = crate::projector::links_of(pool, project, kind, id).await {
+            if let Some(sets) = v.get("sets").and_then(|s| s.as_object()) {
+                let counted: serde_json::Map<String, Value> = sets
+                    .iter()
+                    .filter(|(_, v)| v.as_array().map(|a| !a.is_empty()).unwrap_or(false))
+                    .map(|(k, v)| (k.clone(), json!(v.as_array().map(|a| a.len()).unwrap_or(0))))
+                    .collect();
+                if !counted.is_empty() {
+                    out.insert("links".into(), Value::Object(counted));
+                    out.insert("linksBy".into(), json!(format!("mh call links-of kind={kind} id={id}")));
+                }
+            }
+        }
+    }
+
+    // Кто ссылается сюда.
+    if let Ok(rows) = client
+        .query(
+            "SELECT count(*) FROM project_document_links l
+              WHERE l.project_id = $1 AND l.target_kind = $2 AND l.target_name = $3",
+            &[&project, &owner_kind, &owner_name],
+        )
+        .await
+    {
+        if let Some(r) = rows.first() {
+            let n: i64 = r.get(0);
+            if n > 0 {
+                out.insert("backlinks".into(), json!(n));
+                out.insert(
+                    "backlinksBy".into(),
+                    json!(format!("mh call backlinks kind={owner_kind} id={owner_name}")),
+                );
+            }
+        }
+    }
+
+    // Как документ разложен: разделы и блоки — мета структуры, а не текста.
+    if let Ok(rows) = client
+        .query(
+            "SELECT (SELECT count(*) FROM project_document_sections s
+                      WHERE s.project_id = $1 AND s.entity_kind = $2 AND s.entity_name = $3),
+                    (SELECT count(*) FROM project_document_blocks b
+                      WHERE b.project_id = $1 AND b.entity_kind = $2 AND b.entity_name = $3),
+                    (SELECT count(*) FROM project_document_fields f
+                      WHERE f.project_id = $1 AND f.entity_kind = $2 AND f.entity_name = $3)",
+            &[&project, &owner_kind, &owner_name],
+        )
+        .await
+    {
+        if let Some(r) = rows.first() {
+            let (sec, blk, fld): (i64, i64, i64) = (r.get(0), r.get(1), r.get(2));
+            if sec + blk + fld > 0 {
+                out.insert(
+                    "parts".into(),
+                    json!({ "sections": sec, "blocks": blk, "fields": fld,
+                            "of": if inner { format!("{owner_kind} {owner_name}") } else { String::new() },
+                            "why": if inner {
+                                "это разбор ДОКУМЕНТА-ХОЗЯИНА: у внутренней сущности своего документа нет"
+                            } else { "" },
+                            "by": format!("mh call sections kind={owner_kind} id={owner_name}") }),
+                );
+            }
+        }
+    }
+
+    // Имена, которые сущность НАЗЫВАЕТ: связь, выведенная разбором, а не прозой.
+    if let Ok(rows) = client
+        .query(
+            "SELECT count(*) FROM project_named_id n
+              WHERE n.project_id = $1 AND n.entity_kind = $2 AND n.entity_name = $3",
+            &[&project, &owner_kind, &owner_name],
+        )
+        .await
+    {
+        if let Some(r) = rows.first() {
+            let n: i64 = r.get(0);
+            if n > 0 {
+                out.insert("names".into(), json!(n));
+                if inner {
+                    out.insert("namesOf".into(), json!(format!("{owner_kind} {owner_name}")));
+                }
+            }
+        }
+    }
+
+    if out.is_empty() {
+        Value::Null
+    } else {
+        Value::Object(out)
+    }
+}
+
 pub async fn entity(pool: &Pool, kinds: &Kinds, project: &str, kind: &str, id: Option<&str>) -> Result<Value, Miss> {
     let Some(k) = kinds.get(kind) else {
         return Err(Miss::NoKind(kind.to_owned()));
@@ -202,7 +321,12 @@ pub async fn entity(pool: &Pool, kinds: &Kinds, project: &str, kind: &str, id: O
             map.remove("project_id");
             map.remove("path");
         }
-        return Ok(json!({ "kind": kind, "id": id, "entity": row }));
+        // Внутренняя сущность живёт строкой в чужом документе — связи считаются
+        // по нему же: у неё своего документа нет.
+        let (ok, oi) = Box::pin(locate(pool, kinds, project, kind, Some(id))).await
+            .unwrap_or_else(|_| (String::new(), String::new()));
+        let rel = relations_of(pool, project, kind, id, &ok, &oi, true).await;
+        return Ok(json!({ "kind": kind, "id": id, "entity": row, "relations": rel }));
     }
 
     let (owner_kind, owner_name) = locate(pool, kinds, project, kind, id).await?;
@@ -232,10 +356,12 @@ pub async fn entity(pool: &Pool, kinds: &Kinds, project: &str, kind: &str, id: O
             "why": "запись не разметкой: отдаётся описанием, а не текстом",
         }));
     }
+    let rel = relations_of(pool, project, kind, id.unwrap_or(""), &owner_kind, &owner_name, false).await;
     Ok(json!({
         "kind": kind,
         "id": id.unwrap_or(kind),
         "content": content,
+        "relations": rel,
         "revision": row.get::<_, i64>(1),
         "updatedAt": row.get::<_, i64>(2),
         "updatedBy": row.get::<_, String>(3),
