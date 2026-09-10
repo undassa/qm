@@ -8,7 +8,7 @@ import { Reader } from "./Reader";
 import { Requirements } from "./Requirements";
 import { Rules } from "./Rules";
 import { Users } from "./Users";
-import { Where } from "./Where";
+import { Readiness } from "./Readiness";
 import { Process } from "./Process";
 import { Tasks } from "./Tasks";
 import { Gates } from "./Gates";
@@ -32,10 +32,8 @@ import { Unknown } from "./Unknown";
  * требование) и **вопросы** (чем закрыт каждый).
  */
 const PAGES: { page: string; title: string; note: string; view: (id: string) => React.JSX.Element }[] = [
-  { page: "where", title: "Где мы", note: "процесс", view: (id) => <Where projectId={id} /> },
-  { page: "process", title: "Ступени", note: "лестница", view: (id) => <Process projectId={id} /> },
+  { page: "where", title: "Готовность", note: "фазы и гейты", view: (id) => <Readiness projectId={id} /> },
   { page: "tasks", title: "Задачи", note: "конвейер", view: (id) => <Tasks projectId={id} /> },
-  { page: "gates", title: "Гейты", note: "вычислено", view: (id) => <Gates projectId={id} /> },
   { page: "unknown", title: "Не знаем", note: "пробелы", view: (id) => <Unknown projectId={id} /> },
   // Раздел — это тип ресурса, а не папка: у требования свои колонки, свои
   // фильтры и свои дыры, и общей таблицей документов их не показать.

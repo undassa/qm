@@ -95,14 +95,20 @@ export function Reader({ projectId }: { projectId: string }): React.JSX.Element 
     void loadEntityByName(projectId, k.kind, name, true)
       .then(setEntity)
       .catch((e: unknown) => setFailed(String(e)));
-    void loadSections(projectId, k.kind, name)
-      .then((all) => {
-        setSections(all);
-        // Документ без заголовков разделить нечем — он и есть один раздел.
-        if (!all.length) void read(k.kind, name ?? "", "");
-        else if (all[0]) void read(k.kind, name ?? "", all[0].anchor);
-      })
-      .catch(() => setSections([]));
+    // ВНУТРЕННИЙ вид разделов НЕ ИМЕЕТ. Проверка `TC-BUS-04` — строка таблицы
+    // внутри `test-cases`, и спросить у неё разделы значит получить разделы
+    // КОНТЕЙНЕРА: все триста шестьдесят проверок открывались одним и тем же
+    // документом в 58 КБ, отличаясь только заголовком в списке слева.
+    if (k.shape === "inner") setSections([]);
+    else
+      void loadSections(projectId, k.kind, name)
+        .then((all) => {
+          setSections(all);
+          // Документ без заголовков разделить нечем — он и есть один раздел.
+          if (!all.length) void read(k.kind, name ?? "", "");
+          else if (all[0]) void read(k.kind, name ?? "", all[0].anchor);
+        })
+        .catch(() => setSections([]));
     void loadBacklinks(projectId, k.kind, name)
       .then((d) => setLinks(d.backlinks))
       .catch(() => setLinks([]));
@@ -282,16 +288,10 @@ export function Reader({ projectId }: { projectId: string }): React.JSX.Element 
                 // Документ без заголовков: делить нечего, показывается целиком.
                 <Blocks blocks={body.get("")!} />
               ) : entity.entity ? (
-                // Внутренняя сущность — строка предметной таблицы: у неё нет
-                // текста, и подставлять его неоткуда.
-                <dl className="ent-row">
-                  {Object.entries(entity.entity).map(([field, value]) => (
-                    <div key={field}>
-                      <dt>{field}</dt>
-                      <dd>{String(value ?? "")}</dd>
-                    </div>
-                  ))}
-                </dl>
+                // Внутренняя сущность — строка предметной таблицы: текста у неё нет,
+                // и подставлять его неоткуда. Зато есть место, где она записана, и
+                // оно называется: без него строка висит в воздухе.
+                <Row row={entity.entity as Record<string, unknown>} />
               ) : (
                 <p className="empty">{(entity as { why?: string }).why ?? "Текста нет."}</p>
               )}
@@ -336,5 +336,42 @@ export function Reader({ projectId }: { projectId: string }): React.JSX.Element 
 
       <Provenance source="project_documents и разбор его разделов" computed="оглавление и обратные ссылки" />
     </>
+  );
+}
+
+/**
+ * Строка предметной таблицы: поля крупно, место записи — отдельной строкой.
+ *
+ * `entity_kind` и `entity_name` — не данные строки, а её АДРЕС: где она
+ * записана. В общем списке полей они читались как ещё два поля со странными
+ * именами, и «где это лежит» приходилось выводить самому.
+ *
+ * Пустые поля названы, но не показаны значениями: «поля нет» и «поле пустое» —
+ * разное, и молчание про второе читается как первое.
+ */
+function Row({ row }: { row: Record<string, unknown> }): React.JSX.Element {
+  const where = String(row["entity_kind"] ?? "");
+  const whereName = String(row["entity_name"] ?? "");
+  const skip = new Set(["entity_kind", "entity_name"]);
+  const fields = Object.entries(row).filter(([k, v]) => !skip.has(k) && String(v ?? "").trim() !== "");
+  const empty = Object.entries(row).filter(([k, v]) => !skip.has(k) && String(v ?? "").trim() === "");
+  return (
+    <div className="row-view">
+      {where ? (
+        <p className="row-where">
+          записано в <b>{where}</b>
+          {whereName ? <> · {whereName}</> : null}
+        </p>
+      ) : null}
+      <dl className="ent-row">
+        {fields.map(([field, value]) => (
+          <div key={field}>
+            <dt>{field}</dt>
+            <dd>{String(value ?? "")}</dd>
+          </div>
+        ))}
+      </dl>
+      {empty.length > 0 ? <p className="row-empty">пусто: {empty.map(([k]) => k).join(" · ")}</p> : null}
+    </div>
   );
 }
