@@ -1752,18 +1752,25 @@ ALTER TABLE project_requirement_sources ADD COLUMN IF NOT EXISTS origin text NOT
 -- — кладётся колонкой.
 ALTER TABLE project_screens ADD COLUMN IF NOT EXISTS spec text NOT NULL DEFAULT '';
 
--- КОГДА ТЕКСТ СУЩНОСТИ ПОЯВИЛСЯ — таблицей, а не поиском при каждом чтении.
--- Сверка «связь обновилась после ответа» искала `min(written_at)` с `LIKE` по
--- телу сущности; на одних требованиях это стоило 860 мс, а с решениями (1635
--- знаков) и экранами (2115) выросло до 5,5 секунды. Правило гоняется на каждом
--- замере гейта — столько платить нельзя.
-CREATE TABLE IF NOT EXISTS entity_text_since (
+-- КОГДА СТРОКА СУЩНОСТИ МЕНЯЛАСЬ. Прежде это искалось по ревизиям: самая
+-- ранняя запись документа, где текст стоит дословно. Стоило 5,5 секунды при
+-- каждом замере гейта, требовало «различимого» текста и потому выбрасывало
+-- истории с короткими заголовками.
+--
+-- Помнить проще, чем восстанавливать. Пересборка сверяет отпечаток текста с
+-- прошлым: совпал — дата держится, разошёлся — ставится новая. Никакого
+-- поиска по истории, и любой род сущности годится без разбора, различим его
+-- текст или нет.
+CREATE TABLE IF NOT EXISTS entity_stamp (
     project_id text   NOT NULL,
     kind       text   NOT NULL,
     id         text   NOT NULL,
-    since      bigint,
+    text_hash  text   NOT NULL,
+    created_at bigint NOT NULL,
+    updated_at bigint NOT NULL,
     PRIMARY KEY (project_id, kind, id)
 );
+
 ALTER TABLE project_questions ADD COLUMN IF NOT EXISTS created_at bigint;
 ALTER TABLE project_questions ADD COLUMN IF NOT EXISTS updated_at bigint;
 
@@ -1808,7 +1815,7 @@ CREATE TABLE IF NOT EXISTS project_milestone_links (
 -- рукой мимо DDL, пережил первую пересборку и убил вторую, а ошибка пришла
 -- словом «db error» — тем самым, которое сегодня уже стоило трёх попыток.
 DROP VIEW IF EXISTS question_live;
-DROP VIEW IF EXISTS entity_text;
+DROP VIEW IF EXISTS entity_row;
 DROP VIEW IF EXISTS named_id_role;
 CREATE OR REPLACE VIEW named_id_role AS
 SELECT n.project_id, n.entity_kind, n.entity_name, n.said_id, n.caveated,
@@ -1841,25 +1848,27 @@ SELECT n.project_id, n.entity_kind, n.entity_name, n.said_id, n.caveated,
         LIMIT 1
   ) src ON true;
 
--- ТЕКСТ СУЩНОСТИ, с которым можно сверить ревизию. Виды взяты не по вкусу, а
--- по замеру различимости: у проверки `spec` 90 знаков в среднем и ни одной
--- короче двадцати, у решения `decision` — 1635, у потребности `text` — 72.
+-- ЗАПИСЬ СУЩНОСТИ ЦЕЛИКОМ. Одно требование — одна запись; отпечаток берётся с
+-- неё всей, а не с одного поля: правка области, приоритета или признака
+-- «удовлетворено» — такая же правка требования, как правка его текста.
 --
--- ЭКРАН И ИСТОРИЯ НЕ ВЗЯТЫ, и это названо вслух: у экрана `purpose` пуст у
--- всех 69 строк, у истории заголовок в среднем 31 знак и у восемнадцати
--- короче двадцати — такой найдётся в любой ревизии, и каждое совпадение было
--- бы случайным. Молча пропустить их значило бы отчитаться тишиной.
-CREATE OR REPLACE VIEW entity_text AS
-       SELECT project_id, id, 'requirement' AS kind, entity_kind, entity_name, text
-         FROM project_requirements WHERE text <> ''
- UNION ALL SELECT project_id, id, 'screen',   entity_kind, entity_name, spec
-         FROM project_screens      WHERE spec <> ''
- UNION ALL SELECT project_id, id, 'check',    entity_kind, entity_name, spec
-         FROM project_checks       WHERE spec <> ''
- UNION ALL SELECT project_id, id, 'need',     entity_kind, entity_name, text
-         FROM project_needs        WHERE text <> ''
- UNION ALL SELECT project_id, id, 'decision', entity_kind, entity_name, decision
-         FROM project_decisions    WHERE decision <> '';
+-- Прежде здесь стоял отбор «видов с различимым текстом», и он выбрасывал
+-- историю с коротким заголовком и экран без описания. Отбор больше не нужен.
+--
+-- `origin` исключён: он про то, ОТКУДА запись, а не что в ней.
+CREATE OR REPLACE VIEW entity_row AS
+       SELECT project_id, 'requirement' AS kind, id, entity_kind, entity_name,
+              (to_jsonb(r.*) - 'project_id' - 'origin')::text AS body FROM project_requirements r
+ UNION ALL SELECT project_id, 'check', id, entity_kind, entity_name,
+              (to_jsonb(c.*) - 'project_id' - 'origin')::text FROM project_checks c
+ UNION ALL SELECT project_id, 'need', id, entity_kind, entity_name,
+              (to_jsonb(n.*) - 'project_id')::text FROM project_needs n
+ UNION ALL SELECT project_id, 'decision', id, entity_kind, entity_name,
+              (to_jsonb(d.*) - 'project_id' - 'origin')::text FROM project_decisions d
+ UNION ALL SELECT project_id, 'screen', id, entity_kind, entity_name,
+              (to_jsonb(s.*) - 'project_id' - 'origin')::text FROM project_screens s
+ UNION ALL SELECT project_id, 'story', id, entity_kind, entity_name,
+              (to_jsonb(t.*) - 'project_id' - 'origin')::text FROM project_stories t;
 
 -- ЖИВОЕ СОСТОЯНИЕ ВОПРОСА. Закрытым он остаётся, только пока ни одна его
 -- связь не обновилась после него: изменилось требование — вопрос переоткрыт,
@@ -1888,9 +1897,9 @@ SELECT q.project_id, q.id, q.number, q.title, q.state, q.created_at, q.updated_a
   LEFT JOIN LATERAL (
        SELECT n.said_id AS треб, поя.когда
          FROM named_id_role n
-         JOIN entity_text r ON r.project_id = n.project_id AND r.id = n.said_id
+         JOIN entity_row r ON r.project_id = n.project_id AND r.id = n.said_id
          CROSS JOIN LATERAL (
-              SELECT t.since AS когда FROM entity_text_since t
+              SELECT t.updated_at AS когда FROM entity_stamp t
                WHERE t.project_id = r.project_id AND t.kind = r.kind AND t.id = r.id) поя
         WHERE n.project_id = q.project_id AND n.entity_kind = 'question' AND n.entity_name = q.id
           -- Дата ответа — ЛУЧШАЯ ИЗ ДВУХ: поле «Закрыт» там, где оно есть (оно
@@ -3914,7 +3923,7 @@ pub async fn set_method(
 }
 
 /// Сейчас в миллисекундах — время подачи, а не время события.
-fn now_ms() -> i64 {
+pub fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::SystemTime::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)

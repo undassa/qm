@@ -335,19 +335,33 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize)
         &[&project],
     )
     .await?;
-    // КОГДА ТЕКСТ СУЩНОСТИ ПОЯВИЛСЯ — считается ОДИН РАЗ здесь, а не при
-    // каждом чтении вида. Обход идёт по `entity_text`, то есть новый род
-    // сущности попадает сюда сам, стоит ему появиться в том виде.
-    tx.execute("DELETE FROM entity_text_since WHERE project_id = $1", &[&project]).await?;
+    // ОТМЕТКА ИЗМЕНЕНИЯ. Отпечаток записи сверяется с прошлым: совпал — дата
+    // держится, разошёлся — ставится новая.
+    //
+    // ПЕРВАЯ отметка берёт САМУЮ РАННЮЮ известную дату — первую ревизию
+    // документа-источника, а не «сейчас» и не его текущую дату.
+    //
+    // Мерено дважды: с «сейчас» каскад дал 213 переоткрытых вопросов, с
+    // текущей датой документа — 210, и все они враньё. Причина простая: в
+    // `srs` 306 требований, документ переписывается целиком, и его дата
+    // ничего не говорит об отдельной записи. Ранняя дата честна: она значит
+    // «правок этой записи мы не видели», а это и есть правда о наборе,
+    // который приехал переносом.
     tx.execute(
-        "INSERT INTO entity_text_since (project_id, kind, id, since)
-         SELECT e.project_id, e.kind, e.id,
-                (SELECT min(v.written_at) FROM project_document_revisions v
-                  WHERE v.project_id = e.project_id AND v.entity_kind = e.entity_kind
-                    AND v.entity_name = e.entity_name AND v.content LIKE '%' || e.text || '%')
-           FROM entity_text e WHERE e.project_id = $1
-         ON CONFLICT DO NOTHING",
-        &[&project],
+        "INSERT INTO entity_stamp (project_id, kind, id, text_hash, created_at, updated_at)
+         SELECT e.project_id, e.kind, e.id, md5(e.body),
+                coalesce(перв.когда, $2), coalesce(перв.когда, $2)
+           FROM entity_row e
+           LEFT JOIN LATERAL (
+                SELECT min(v.written_at) AS когда FROM project_document_revisions v
+                 WHERE v.project_id = e.project_id AND v.entity_kind = e.entity_kind
+                   AND v.entity_name = e.entity_name) перв ON true
+          WHERE e.project_id = $1
+         ON CONFLICT (project_id, kind, id) DO UPDATE
+            SET updated_at = CASE WHEN entity_stamp.text_hash <> EXCLUDED.text_hash
+                                  THEN $2 ELSE entity_stamp.updated_at END,
+                text_hash  = EXCLUDED.text_hash",
+        &[&project, &crate::projector::now_ms()],
     )
     .await?;
     tx.commit().await?;
