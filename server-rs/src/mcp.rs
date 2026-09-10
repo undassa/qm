@@ -122,6 +122,8 @@ impl Mcp {
             "inputSchema": { "type": "object", "properties": { "kind": s("вид"), "id": s("имя"), "limit": json!({"type":"integer"}) }, "required": ["kind"] } }));
         tools.push(json!({ "name": "at-revision", "description": "текст сущности, каким он был на названной правке",
             "inputSchema": { "type": "object", "properties": { "kind": s("вид"), "id": s("имя"), "revision": json!({"type":"integer"}) }, "required": ["kind", "revision"] } }));
+        tools.push(json!({ "name": "readiness-gaps", "description": "пункты готовности без способа проверки — разбивкой по виду владельца и чем это закрывается",
+            "inputSchema": { "type": "object", "properties": {} } }));
         tools.push(json!({ "name": "coverage", "description": "какие документы не достаются ни одним видом и какие достаются двумя",
             "inputSchema": { "type": "object", "properties": {} } }));
         tools.push(json!({ "name": "phases", "description": "цепочка фаз с полной картиной: документы, гейт и задачи каждой фазы порознь",
@@ -575,7 +577,7 @@ impl Mcp {
         const RESERVED: &[&str] = &[
             "method-set", "gate-item-set", "question-holders", "preflight-push", "worktree-push",
             "sensor-specs", "scheme-terms", "frozen-trees", "addresses-declared", "tree-declared", "donors", "skills-push", "skills", "agents", "code-facts-push", "code-facts", "summary", "links-of", "retired-terms", "order", "gate-measure", "gate-item-waive", "gate-selftest", "gate-sign", "links-rewrite", "links-retarget", "reparse", "screen-area-set", "skill-set", "skills-paths", "version-freeze", "version-delta", "generated-check", "principal-allow", "principals", "author-set", "authors", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "step-selftest", "version-close", "phase-gate-set", "exception-set", "next-step", "process-state", "statuses", "task-status", "status-anomaly", "pipeline", "waves", "phases", "coverage", "blocks", "history", "at-revision", "process-history", "progress",
-            "kinds", "kinds-due", "sections", "section", "backlinks", "search", "put",
+            "kinds", "kinds-due", "readiness-gaps", "sections", "section", "backlinks", "search", "put",
             "put-section", "rm", "document-add", "reproject", "sweep", "gate", "next-task", "blockers", "events",
             "norm-versions", "measurements", "plan", "readiness", "requirements-of",
             "tasks-of", "preflight-queue", "claims", "exceptions",
@@ -810,6 +812,10 @@ impl Mcp {
                     }
                 }
                 Err(e) => refusal(e),
+            },
+            "readiness-gaps" => match crate::projector::readiness_gaps(&self.pool, p).await {
+                Ok(v) => ok(v),
+                Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
             },
             "coverage" => match crate::projector::coverage(&self.pool, &self.kinds, p).await {
                 Ok(v) => ok(v),

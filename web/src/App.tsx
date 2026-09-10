@@ -49,7 +49,7 @@ import { Unknown } from "./Unknown";
 const PAGES: { page: string; title: string; note: string; view: (id: string, ctx: Ctx) => React.JSX.Element }[] = [
   { page: "where", title: "Готовность", note: "фазы и гейты", view: (id, ctx) => <Readiness projectId={id} onFind={ctx.onFind} /> },
   { page: "tasks", title: "Задачи", note: "конвейер", view: (id) => <Tasks projectId={id} /> },
-  { page: "unknown", title: "Не знаем", note: "пробелы", view: (id) => <Unknown projectId={id} /> },
+  { page: "unknown", title: "Не знаем", note: "пробелы", view: (id, ctx) => <Unknown projectId={id} onFind={ctx.onFind} /> },
   // Раздел — это тип ресурса, а не папка: у требования свои колонки, свои
   // фильтры и свои дыры, и общей таблицей документов их не показать.
   { page: "rules", title: "Правила", note: "конституция", view: (id, ctx) => <Rules projectId={id} onFind={ctx.onFind} /> },

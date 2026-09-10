@@ -3831,3 +3831,51 @@ button.chain-card:disabled { cursor: default; opacity: .55; }
   color: var(--ink, inherit);
 }
 .tabs input[type="search"]::placeholder { color: var(--muted, var(--dim)); }
+
+/* ─── чего мы не знаем ────────────────────────────────────────────────── */
+.u-kinds { list-style: none; margin: 14px 0 0; padding: 0; max-width: var(--measure); }
+.u-kind { border-bottom: 1px solid var(--line); }
+.u-head {
+  display: grid;
+  grid-template-columns: 68px minmax(0, 1fr) 220px 14px;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  padding: 11px 4px;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  text-align: left;
+  color: inherit;
+}
+.u-head:hover { background: color-mix(in srgb, var(--line) 30%, transparent); }
+.u-n {
+  font-family: var(--mono, monospace);
+  font-size: 17px;
+  text-align: right;
+  color: var(--bad, #c25b5b);
+}
+.u-t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/*
+ * Размер рода незнания — полоской. Плоский список врал соразмерностью: тысяча
+ * семьсот пунктов стояли строкой рядом с двумя, и глаз читал две равные беды.
+ */
+.u-bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.u-fill { display: block; height: 100%; background: var(--bad, #c25b5b); }
+.u-caret { color: var(--dim); font-size: 11px; }
+.u-open { padding: 2px 4px 20px 86px; }
+.u-says { color: var(--dim); font-size: 13px; max-width: 78ch; margin: 0 0 8px; }
+.u-closes { font-size: 13px; margin: 0 0 14px; }
+.u-k {
+  font-size: 10.5px;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  color: var(--dim);
+  margin-right: 8px;
+}
+.u-part { margin-bottom: 16px; }
+.u-part .u-k { display: block; margin: 0 0 7px; }
+.u-list { margin: 0; padding-left: 18px; font-size: 13px; }
+.u-list li { margin: 3px 0; color: var(--dim); }
+.u-list b { color: var(--ink, inherit); }
+.u-tab { max-width: 620px; }

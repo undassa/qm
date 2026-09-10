@@ -5704,6 +5704,53 @@ pub async fn declare_sensor_spec(
     Ok(json!({ "status": "declared", "fact": fact, "reads": reads, "how": how }))
 }
 
+/// Пункты готовности без способа проверки — разбивкой по владельцам.
+///
+/// Их у myack тысяча шестьсот девяносто пять из тысячи семисот незнаний: почти
+/// всё, чего проект о себе не знает, — это одно и то же. Плоский список из
+/// двадцати строк, где эта тысяча стоит одной, врёт соразмерностью: глаз читает
+/// двадцать равных бед вместо одной большой и девятнадцати мелких.
+///
+/// Разбивка идёт по ВИДУ ВЛАДЕЛЬЦА: пункт живёт строкой внутри задачи, вопроса
+/// или документа приёмки, и чинится он там же. «Тысяча шестьсот» не говорит, с
+/// чего начать; «тысяча пятьсот восемьдесят два у задач» — говорит.
+pub async fn readiness_gaps(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
+    let client = pool.get().await.expect("пул отдал соединение");
+    let rows = client
+        .query(
+            "SELECT owner_kind, count(*)::bigint,
+                    count(*) FILTER (WHERE method_kind = 'unknown')::bigint,
+                    count(DISTINCT owner_id)::bigint
+               FROM readiness_item
+              WHERE project_id = $1
+              GROUP BY owner_kind
+              ORDER BY count(*) FILTER (WHERE method_kind = 'unknown') DESC, owner_kind",
+            &[&project],
+        )
+        .await?;
+    let by: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            json!({
+                "ownerKind": r.get::<_, String>(0),
+                "items": r.get::<_, i64>(1),
+                "withoutMethod": r.get::<_, i64>(2),
+                "owners": r.get::<_, i64>(3),
+            })
+        })
+        .collect();
+    let total: i64 = by.iter().map(|x| x["items"].as_i64().unwrap_or(0)).sum();
+    let bare: i64 = by.iter().map(|x| x["withoutMethod"].as_i64().unwrap_or(0)).sum();
+    Ok(json!({
+        "items": total,
+        "withoutMethod": bare,
+        "byOwner": by,
+        // Дверь названа здесь, а не в интерфейсе: чем закрывается пробел, знает
+        // сервер. Интерфейс, знающий имя двери, — вторая запись о том же.
+        "closedBy": "method-set",
+    }))
+}
+
 /// Объявить потолок долга: сколько находок правила сегодня терпимо и почему.
 ///
 /// Гейт, краснеющий в день, когда его завели, назавтра выключают. Потолок даёт
