@@ -1122,6 +1122,19 @@ impl Mcp {
                 Ok(v) => ok(v),
                 Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
             },
+            // ИМЯ ЗАНЯТО ДВЕРЬЮ, И ДОКУМЕНТ ИМ ПЕРЕКРЫТ. Вид `coverage` — тоже
+            // `coverage`, и `mh call coverage` отдавал разбор покрытия вместо
+            // документа, а причина отказа называла ключ, из которого не
+            // следовало, что делать.
+            //
+            // Разбор остаётся ответом по умолчанию — его зовут чаще, — но
+            // поданное имя означает документ, как у всякой другой двери.
+            "coverage" if id.is_some() => {
+                match entities::entity(&self.pool, &self.kinds, p, "coverage", id).await {
+                    Ok(v) => ok(v),
+                    Err(e) => refusal(e),
+                }
+            }
             "coverage" => match crate::projector::coverage(&self.pool, &self.kinds, p).await {
                 Ok(v) => ok(v),
                 Err(e) => refusal(Miss::Db(e.to_string())),
@@ -2584,7 +2597,12 @@ impl Mcp {
                 // строк ради семнадцати адресов — не измерение, а склад.
                 let rows = client
                     .query(
-                        "SELECT DISTINCT x[1] AS path, x[3] AS line
+                        // КТО НАЗВАЛ АДРЕС — в ответе. Без этого свой адрес не
+                        // отличить от чужого: у `tot-ade` 40 адресов из 112
+                        // пришли из справки о соседнем продукте, гейт это
+                        // видел, а дверь не отвечала.
+                        "SELECT DISTINCT x[1] AS path, x[3] AS line,
+                                d.entity_kind, d.entity_name
                            FROM project_documents d
                            CROSS JOIN LATERAL regexp_matches(d.content,
                              '`([A-Za-z0-9_./-]+[.](rs|sql|ts|tsx|yaml|toml)):([0-9]+)`', 'g') AS x
@@ -2596,9 +2614,12 @@ impl Mcp {
                     .map_err(|e| Miss::Db(e.to_string()))?;
                 let out: Vec<Value> = rows
                     .iter()
-                    .map(|r| json!({ "path": r.get::<_, String>(0), "line": r.get::<_, String>(1) }))
+                    .map(|r| json!({ "path": r.get::<_, String>(0), "line": r.get::<_, String>(1),
+                                     "kind": r.get::<_, String>(2), "name": r.get::<_, String>(3) }))
                     .collect();
-                Ok(json!({ "count": out.len(), "addresses": out }))
+                Ok(json!({ "count": out.len(), "addresses": out,
+                           "means": "`kind`/`name` — кто адрес назвал: адрес внутри справки \
+                                     о соседнем продукте указывает в ЕГО дерево, а не в наше" }))
             }
             "tree-declared" => {
                 // Объявленное дерево — таблица «Путь | Состояние» в предмете
