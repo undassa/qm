@@ -3464,3 +3464,32 @@ table.rows td.n.hole { color: var(--warn); font-weight: 600; }
   margin: 0 0 14px;
 }
 .row-empty { font-size: 12px; color: var(--dim); font-family: var(--mono, monospace); margin-top: 12px; }
+/*
+ * Ссылка внутрь набора отличается от внешней: внешняя уводит из приложения,
+ * внутренняя открывает соседний документ здесь же. Одинаковый вид у них означал
+ * бы, что читатель не знает, куда попадёт.
+ */
+.md a.go, .bl-p a.go, td a.go, li a.go {
+  color: var(--accent, #d8a657);
+  text-decoration: none;
+  border-bottom: 1px dotted color-mix(in srgb, var(--accent, #d8a657) 55%, transparent);
+  cursor: pointer;
+}
+.md a.go:hover, .bl-p a.go:hover, td a.go:hover, li a.go:hover {
+  border-bottom-style: solid;
+}
+.trail-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--dim);
+  font: inherit;
+  font-size: 12.5px;
+  padding: 4px 10px;
+  margin-bottom: 12px;
+  cursor: pointer;
+}
+.trail-back:hover { color: var(--ink, inherit); border-color: var(--accent, #d8a657); }

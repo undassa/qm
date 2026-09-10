@@ -55,6 +55,14 @@ export function Reader({ projectId }: { projectId: string }): React.JSX.Element 
   const [body, setBody] = useState<Map<string, DocBlock[]>>(new Map());
   const [links, setLinks] = useState<Backlink[]>([]);
   const [failed, setFailed] = useState("");
+  /**
+   * След перехода: куда щёлкали, оттуда можно вернуться.
+   *
+   * Переход по ссылке без возврата хуже отсутствия перехода: читатель уходит на
+   * соседний документ и теряет то, ради чего читал. Кнопка браузера здесь не
+   * помогает — адрес не менялся.
+   */
+  const [trail, setTrail] = useState<{ kind: KindRow; id: string }[]>([]);
 
   useEffect(() => {
     if (!projectId) return;
@@ -112,6 +120,34 @@ export function Reader({ projectId }: { projectId: string }): React.JSX.Element 
     void loadBacklinks(projectId, k.kind, name)
       .then((d) => setLinks(d.backlinks))
       .catch(() => setLinks([]));
+  }
+
+  /**
+   * Переход по ссылке внутрь набора.
+   *
+   * Ссылки вида `decision:ADR-0138` разметка теперь отдаёт якорем с видом и
+   * именем в данных. Ловим их здесь, у общего предка: вешать обработчик на
+   * каждый абзац значило бы вешать его на тысячу абзацев.
+   *
+   * Ссылка на вид, которого в наборе нет, НЕ гасится молча: щёлкнувший должен
+   * узнать, что документ обещает несуществующее, — это находка, а не пустота.
+   */
+  function follow(e: React.MouseEvent<HTMLElement>): void {
+    const a = (e.target as HTMLElement).closest("a.go") as HTMLAnchorElement | null;
+    if (!a) return;
+    e.preventDefault();
+    const want = a.dataset["kind"] ?? "";
+    const name = a.dataset["id"] ?? "";
+    const row = (kinds ?? []).find((k) => k.kind === want);
+    if (!row) {
+      setFailed(`ссылка ведёт в вид «${want}», которого в наборе нет`);
+      return;
+    }
+    if (kind) setTrail((t) => [...t, { kind, id }]);
+    setKind(row);
+    void loadIds(projectId, row.kind).then(setIds).catch(() => setIds([]));
+    show(row, name);
+    document.querySelector(".reader-doc")?.scrollIntoView({ block: "start", behavior: "smooth" });
   }
 
   /** Блоки раздела — собственные: вложенные подразделы открываются своими строками. */
@@ -215,7 +251,24 @@ export function Reader({ projectId }: { projectId: string }): React.JSX.Element 
         </div>
         )}
 
-        <article className="reader-doc">
+        <article className="reader-doc" onClick={follow}>
+              {trail.length > 0 ? (
+                <button
+                  type="button"
+                  className="trail-back"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    const last = trail[trail.length - 1];
+                    if (!last) return;
+                    setTrail((t) => t.slice(0, -1));
+                    setKind(last.kind);
+                    void loadIds(projectId, last.kind.kind).then(setIds).catch(() => setIds([]));
+                    show(last.kind, last.id);
+                  }}
+                >
+                  ← назад к {trail[trail.length - 1]?.id || trail[trail.length - 1]?.kind.kind}
+                </button>
+              ) : null}
           {failed ? (
             <p className="empty">
               Не читается: <code>{failed}</code>

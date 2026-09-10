@@ -36,6 +36,28 @@ export function safeHref(raw: string): string | null {
 }
 
 /**
+ * Ссылка ВНУТРЬ набора: `decision:ADR-0138`, `question:Q-372`, `task:M0-T12`.
+ *
+ * Таких ссылок в наборе больше девятисот, и до сих пор все они рисовались
+ * простым текстом: `safeHref` пропускал только `http`, а остальное считал
+ * «адресом, которого приложение не отдаёт». Приложение отдаёт — это его
+ * собственные сущности; не отдавал их только разборщик разметки.
+ *
+ * Имя вида и имя сущности проверяются образцом: подставить сюда что угодно
+ * значило бы завести переход в никуда, а он хуже отсутствия перехода — по
+ * нему щёлкают.
+ */
+const INNER = /^([a-z][a-z0-9-]{1,30}):([A-Za-z0-9][A-Za-z0-9_.\/-]{0,80})$/;
+
+export function innerHref(raw: string): { kind: string; id: string } | null {
+  const m = INNER.exec(raw.trim());
+  if (!m || !m[1] || !m[2]) return null;
+  // `http`, `https`, `mailto` — не виды набора, и притворяться ими нельзя.
+  if (["http", "https", "mailto", "ftp", "data", "javascript"].includes(m[1])) return null;
+  return { kind: m[1], id: m[2] };
+}
+
+/**
  * Метка вынутого кода. Внутри неё ничто не разметка — потому код и вынимается
  * первым. Метка стоит на NUL, которого в тексте после экранирования нет: пробел
  * вокруг числа меткой быть не может, иначе число из прозы («статья 12»)
@@ -54,7 +76,13 @@ export function inline(text: string): string {
 
   out = out.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, label: string, href: string) => {
     const safe = safeHref(href);
-    return safe ? `<a href="${safe}" target="_blank" rel="noreferrer noopener">${label}</a>` : label;
+    if (safe) return `<a href="${safe}" target="_blank" rel="noreferrer noopener">${label}</a>`;
+    const inner = innerHref(href);
+    if (inner)
+      return `<a class="go" href="?page=read&kind=${encodeURIComponent(inner.kind)}&id=${encodeURIComponent(
+        inner.id,
+      )}" data-kind="${escapeHtml(inner.kind)}" data-id="${escapeHtml(inner.id)}">${label}</a>`;
+    return label;
   });
   out = out.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
   out = out.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<i>$2</i>");
