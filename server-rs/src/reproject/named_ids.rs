@@ -7,6 +7,12 @@
 //! Раскрывается перечень тем же раскрывателем, что и везде: `FR-SIT-04, 07, 09`
 //! — три имени, а не одно. Строка с оговоркой («удалено», «прежнее имя»)
 //! называет имя ради истории, и это законно; оговорка помечается колонкой.
+//!
+//! ГДЕ имя названо — тоже колонка. Имя первой ячейкой строки таблицы документ
+//! объявляет СВОИМ: так перечисляют состав. То же имя в прозе («тот же принцип,
+//! что у `FR-SIG-10`») — ссылка на чужое, и считать их одним значит спрашивать с
+//! документа за чужой состав. Различать это по тексту в запросе нельзя: строка
+//! документа до запроса не доезжает.
 
 use deadpool_postgres::Pool;
 use regex::Regex;
@@ -31,9 +37,10 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
         let low = text.to_lowercase();
         low_caveats.iter().any(|c| low.contains(c.as_str()))
     };
-    let mut rows: Vec<(String, String, String, bool, bool)> = Vec::new();
+    let mut rows: Vec<(String, String, String, bool, bool, bool)> = Vec::new();
     let mut hidden: Vec<(String, String, String, String)> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut seen_hidden = std::collections::HashSet::new();
     for d in &docs {
         let kind: String = d.get(0);
         let name: String = d.get(1);
@@ -56,18 +63,27 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
             let есть_имя = !super::ids::plain(line).is_empty();
             for n in super::ids::hidden_numbers(line).into_iter().filter(|_| есть_имя) {
                 let key = format!("{kind}\u{1}{name}\u{1}голое {n}");
-                if seen.insert(key) {
+                if seen_hidden.insert(key) {
                     hidden.push((kind.clone(), name.clone(), n, line.trim().chars().take(90).collect::<String>()));
                 }
             }
             // Две формы одной строки: написанное целиком и раскрытое из
             // перечня. Правило указателя читает первую, правило покрытия — обе.
             let written = super::ids::plain(line);
+            let heading = super::ids::heading_cell(line);
             for id in super::ids::expand(line) {
                 let from_range = !written.contains(&id);
+                let heads_row = heading.contains(&id);
                 let key = format!("{kind}\u{1}{name}\u{1}{id}");
-                if seen.insert(key) {
-                    rows.push((kind.clone(), name.clone(), id, caveated, from_range));
+                match seen.get(&key) {
+                    // Имя, названное документом дважды — прозой и таблицей, —
+                    // названо и таблицей. Брать первое попавшееся значило бы
+                    // терять состав из-за порядка строк в файле.
+                    Some(&i) => { if heads_row { rows[i].5 = true } }
+                    None => {
+                        seen.insert(key, rows.len());
+                        rows.push((kind.clone(), name.clone(), id, caveated, from_range, heads_row));
+                    }
                 }
             }
         }
@@ -158,16 +174,17 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
     tx.execute("DELETE FROM project_named_id WHERE project_id = $1", &[&project]).await?;
     for chunk in rows.chunks(BATCH) {
         let mut sql = String::from(
-            "INSERT INTO project_named_id(project_id, entity_kind, entity_name, said_id, caveated, from_range) VALUES ",
+            "INSERT INTO project_named_id(project_id, entity_kind, entity_name, said_id, caveated, from_range, heads_row) VALUES ",
         );
         let mut args: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = vec![&project];
-        for (i, (kind, name, id, caveated, from_range)) in chunk.iter().enumerate() {
+        for (i, (kind, name, id, caveated, from_range, heads_row)) in chunk.iter().enumerate() {
             if i > 0 {
                 sql.push(',');
             }
-            let b = i * 5 + 2;
-            sql.push_str(&format!("($1,${},${},${},${},${})", b, b + 1, b + 2, b + 3, b + 4));
-            args.extend([kind as &(dyn tokio_postgres::types::ToSql + Sync), name, id, caveated, from_range]);
+            let b = i * 6 + 2;
+            sql.push_str(&format!("($1,${},${},${},${},${},${})", b, b + 1, b + 2, b + 3, b + 4, b + 5));
+            args.extend([kind as &(dyn tokio_postgres::types::ToSql + Sync), name, id, caveated,
+                         from_range, heads_row]);
         }
         sql.push_str(" ON CONFLICT DO NOTHING");
         tx.execute(sql.as_str(), &args).await?;

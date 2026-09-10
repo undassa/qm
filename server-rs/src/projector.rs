@@ -1525,6 +1525,7 @@ ALTER TABLE project_traceability_said ADD COLUMN IF NOT EXISTS is_total boolean 
 -- восемнадцать экранов. Для покрытия это имя названо, для указателя — нет:
 -- указатель обязан написать имя, а перечень вправе его сократить.
 ALTER TABLE project_named_id ADD COLUMN IF NOT EXISTS from_range boolean NOT NULL DEFAULT false;
+ALTER TABLE project_named_id ADD COLUMN IF NOT EXISTS heads_row boolean NOT NULL DEFAULT false;
 -- На чём держится отмена пункта: род факта, который обязан оставаться ПУСТЫМ.
 -- Отмена «у проекта нет sqlx» верна, пока датчик sqlx ничего не подаёт; появился
 -- хоть один факт — довод отмены исчез. Без этой колонки отмена живёт прозой и
@@ -7473,7 +7474,7 @@ pub async fn set_gate_item(
     why: &str,
     drop_it: bool,
 ) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+    let mut client = pool.get().await.expect("пул отдал соединение");
     // Снятие пункта — той же ручкой. Без него пункт, оказавшийся неверным,
     // снимался бы только запросом в базу мимо сервера; замеры снятого пункта
     // уходят вместе с ним, иначе гейт продолжал бы считать его непройденным.
@@ -7495,30 +7496,35 @@ pub async fn set_gate_item(
     //
     // Проверяется подготовкой запроса, а не исполнением: подготовка ловит и
     // разбор, и несуществующую таблицу, и не пишет ни строки.
-    let mut probe_runs: Option<bool> = None;
-    if let Some(p) = probe {
-        let text = p.trim();
-        if !text.is_empty() {
-            probe_runs = Some(true);
-            if let Err(e) = client.prepare(text).await {
-                return Ok(json!({
-                    "status": "probe_not_a_query",
-                    "why": format!(
-                        "проба не разбирается как запрос, и таким пунктом нельзя уронить правило: {}. \
-                         Проба — это ЗАПРОС, подсаживающий нарушение, а не описание того, что надо сделать.",
-                        db_says(&e)
-                    ),
-                    "probe": text,
-                }));
-            }
-        }
-    }
     // Не переданное берётся у существующей строки: объявить пробу, не повторяя
     // запрос, — обычное дело, а вставляемая строка проверяется целиком, и
     // `query IS NULL` при `kind='query'` не проходит по правилу таблицы.
     // Заголовок не переданный — берётся у существующей строки: правка запроса
     // не должна требовать повторять текст, а пустой заголовок сделал бы пункт
     // безымянным в глазах человека.
+    // Имя АДРЕСУЕТ пункт — так сказано в самой двери. Но ключ таблицы —
+    // (фаза, имя), и вызов с чужой фазой заводил ВТОРОЙ пункт под тем же именем:
+    // правило раздваивалось, старое оставалось считать, новое стояло пустым, и
+    // ни в одном ответе это не было видно. Проверено на себе: правка
+    // `section-link-resolves` с `phase=G2` вместо `corpus` завела двойника.
+    //
+    // Переезд пункта в другую фазу — снять и завести, двумя явными вызовами.
+    if !drop_it {
+        let elsewhere = client
+            .query("SELECT phase FROM gate_item WHERE id = $1 AND phase <> $2", &[&id, &phase])
+            .await?;
+        if let Some(r) = elsewhere.first() {
+            let there: String = r.get(0);
+            return Ok(json!({
+                "status": "wrong_phase",
+                "why": format!(
+                    "пункт `{id}` уже объявлен в фазе `{there}`, а вызов пришёл с `{phase}`. \
+                     Имя адресует пункт: заводить его второй раз под другой фазой значит \
+                     раздвоить правило. Правьте в `{there}` либо снимите пункт и заведите заново."),
+                "id": id, "declaredIn": there, "asked": phase,
+            }));
+        }
+    }
     let was = client
         .query(
             "SELECT query, owner, probe, item FROM gate_item WHERE phase = $1 AND id = $2",
@@ -7529,6 +7535,46 @@ pub async fn set_gate_item(
         Some(r) => (r.get(0), r.get(1), r.get(2), r.get(3)),
         None => (None, None, String::new(), String::new()),
     };
+    // Проба проверяется ПОСЛЕ подстановки прежней, и отметка ставится той пробе,
+    // которая в строке останется. Прежде отметка бралась только у переданной, и
+    // правка одного запроса гасила `probe_ok` у нетронутой пробы в NULL — пункт
+    // становился «неизвестно, исполняется ли», ничем это не заслужив.
+    //
+    // Отказ — только на ПЕРЕДАННУЮ пробу. Унаследованная, которая не разбирается,
+    // — уже стоящая беда, и запрещать из-за неё правку запроса значит запирать
+    // пункт в том виде, в котором он сломан.
+    // Проба ИСПОЛНЯЕТСЯ, а не разбирается. Разбор пропускает пробу, которая
+    // споткнётся о первое же правило таблицы: собственная проба этого пункта
+    // разобралась и упала на `project_requirements_kind_check` — то есть дверь
+    // сказала «принято», а уронить пункт этой пробой было нельзя.
+    //
+    // Исполнение — в транзакции с откатом, ровно как в самотесте: набор после
+    // объявления пункта обязан остаться тем же, чем был.
+    //
+    // Ноль подсаженных строк — тот же отказ. Проба, ничего не подсадившая, не
+    // роняет ничего, и самотест назовёт такой пункт сломанным; узнать об этом у
+    // двери лучше, чем через сто десять пунктов самотеста.
+    let probe_text = probe.map(|p| p.to_owned()).unwrap_or_else(|| had.2.clone());
+    let mut probe_runs: Option<bool> = None;
+    if !probe_text.trim().is_empty() {
+        let text = probe_text.trim().to_owned();
+        let tx = client.transaction().await?;
+        let ran = tx.execute(text.as_str(), &[&project]).await;
+        tx.rollback().await?;
+        let why = match &ran {
+            Err(e) => Some(format!(
+                "проба не исполнилась, и уронить ею правило нельзя: {}. \
+                 Проба — это ЗАПРОС, ПОДСАЖИВАЮЩИЙ нарушение, а не описание того, что надо сделать.",
+                db_says(e))),
+            Ok(0) => Some(
+                "проба исполнилась и не подсадила ни строки: уронить ею правило нельзя".to_owned()),
+            Ok(_) => None,
+        };
+        probe_runs = Some(why.is_none());
+        if let (Some(why), Some(_)) = (why, probe) {
+            return Ok(json!({ "status": "probe_does_not_plant", "why": why, "probe": text }));
+        }
+    }
     let title = if title.trim().is_empty() { had.3.clone() } else { title.to_owned() };
     if id.trim().is_empty() {
         return Ok(json!({ "status": "nameless",
@@ -7536,7 +7582,7 @@ pub async fn set_gate_item(
     }
     let query = query.map(|q| q.to_owned()).or(had.0);
     let owner = owner.map(|o| o.to_owned()).or(had.1);
-    let probe = probe.map(|p| p.to_owned()).unwrap_or(had.2);
+    let probe = probe_text;
     let n = client
         .execute(
             "INSERT INTO gate_item (phase, id, item, kind, query, owner, probe, probe_ok)
