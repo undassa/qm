@@ -118,7 +118,9 @@ export function Users({ projectId }: { projectId: string }): React.JSX.Element {
                 <div className="phase-spellings">
                   {[...new Set(list.map((s) => String(s["phase"])))].slice(0, 4).join(" · ")}
                 </div>
-                {list.map((s) => (
+                {/* Колонка рисует часть: сто историй в одной колонке — это
+                    экран за экраном мимо соседних, и сравнить их становится нельзя. */}
+                {list.slice(0, 24).map((s) => (
                   <button
                     type="button"
                     key={s.id}
@@ -134,6 +136,7 @@ export function Users({ projectId }: { projectId: string }): React.JSX.Element {
                     </span>
                   </button>
                 ))}
+                {list.length > 24 ? <div className="col-more">ещё {list.length - 24} — сузьте персоной</div> : null}
               </section>
             ))}
           </div>

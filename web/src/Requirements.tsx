@@ -4,6 +4,7 @@ import { loadLinks, loadSummary, type LinkItem, type SummaryRow } from "./api";
 import { Live } from "./Live";
 import { useLive } from "./live";
 import { Provenance } from "./Provenance";
+import { useLimit } from "./More";
 
 /**
  * Раздел требований: что я обязан сделать, чем это доказано и откуда взялось.
@@ -68,6 +69,13 @@ export function Requirements({ projectId }: { projectId: string }): React.JSX.El
         (!q || r.id.toLowerCase().includes(q) || String(r["title"]).toLowerCase().includes(q)),
     );
   }, [rows, area, prio, shape, hole, query]);
+
+  // Триста строк — десять тысяч точек по высоте: искать в них прокруткой
+  // нельзя. Показывается часть, число скрытых называется.
+  //
+  // Хук стоит ДО ранних возвратов: React считает хуки по порядку, и хук после
+  // `return` исчезает на первой же отрисовке без данных — раздел падал целиком.
+  const { limit, more } = useLimit(shown.length);
 
   if (failed) return <p className="empty">Не читается: <code>{failed}</code></p>;
   if (!rows) return <p className="empty">Читаю требования…</p>;
@@ -134,7 +142,7 @@ export function Requirements({ projectId }: { projectId: string }): React.JSX.El
               </tr>
             </thead>
             <tbody>
-              {shown.slice(0, 400).map((r) => (
+              {shown.slice(0, limit).map((r) => (
                 <tr
                   key={r.id}
                   className={`row${chosen?.id === r.id ? " on" : ""}`}
@@ -151,7 +159,7 @@ export function Requirements({ projectId }: { projectId: string }): React.JSX.El
               ))}
             </tbody>
           </table>
-          {shown.length > 400 ? <p className="side-note">ещё {shown.length - 400} — сузьте отбор</p> : null}
+          {more}
         </div>
 
         {chosen ? (

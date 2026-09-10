@@ -16,7 +16,7 @@ export function Questions({ projectId }: { projectId: string }): React.JSX.Eleme
   const rows = live.data;
   const [chosenId, setChosenId] = useState<string>("");
   const [body, setBody] = useState<string | null>(null);
-  const [only, setOnly] = useState<"all" | "unsaid" | "open">("all");
+  const [only, setOnly] = useState<"all" | "unsaid" | "open">("open");
   const chosen = (rows ?? []).find((r) => r.id === chosenId) ?? null;
 
   useEffect(() => {
@@ -34,6 +34,9 @@ export function Questions({ projectId }: { projectId: string }): React.JSX.Eleme
     only === "all" ? true
     : only === "open" ? String(r["state"] ?? "") === "open"
     : String(r["answerState"] ?? r["answer_state"] ?? "") === "unsaid");
+  // Есть ли гейт хоть у одного показанного: пустая колонка во всех трёхстах
+  // семидесяти строках — обещание сведений, которых нет.
+  const anyGate = shown.some((r) => String(r["gate"] ?? "").trim() !== "");
 
   return (
     <>
@@ -55,7 +58,14 @@ export function Questions({ projectId }: { projectId: string }): React.JSX.Eleme
 
       <div className="split">
         <table className="rows">
-          <thead><tr><th>Вопрос</th><th>Состояние</th><th>Ответ</th><th>Гейт</th></tr></thead>
+          <thead>
+            <tr>
+              <th>Вопрос</th>
+              <th>Состояние</th>
+              <th>Ответ</th>
+              {anyGate ? <th>Гейт</th> : null}
+            </tr>
+          </thead>
           <tbody>
             {shown.map((r) => {
               const answer = String(r["answerState"] ?? r["answer_state"] ?? "");
@@ -66,7 +76,7 @@ export function Questions({ projectId }: { projectId: string }): React.JSX.Eleme
                   <td className={answer === "unsaid" ? "warn" : ""}>
                     {answer === "answered" ? "объявлен" : answer === "searched" ? "искали, не нашли" : "не сказано"}
                   </td>
-                  <td>{String(r["gate"] ?? "")}</td>
+                  {anyGate ? <td>{String(r["gate"] ?? "")}</td> : null}
                 </tr>
               );
             })}
