@@ -6772,13 +6772,44 @@ pub async fn set_kind_projection(
                     "why": "такой таблицы нет, либо она не связана с документом колонкой \
                             `entity_kind`: связь держится записью, а не прозой" }));
             }
-            let n: i64 = client
+            let mut n: i64 = client
                 .query_one(
                     &format!("SELECT count(*) FROM {table} WHERE entity_kind = $1"),
                     &[&kind],
                 )
                 .await?
                 .get(0);
+            // ВНУТРЕННИЙ ВИД ПОМЕЧЕН НЕ СОБОЙ. Записи требования лежат в
+            // `project_requirements`, но `entity_kind` у них — `srs`: это
+            // контейнер, из которого их вынули. Проверять их именем вида
+            // значит требовать невозможного, и дверь отказывала `requirement`
+            // при 306 живых записях.
+            //
+            // Второй способ так же строг: образец имени, объявленный самим
+            // видом. Пустой перечень им не пройдёт.
+            if n == 0 {
+                if let Some(обр) = client
+                    .query_opt("SELECT spec->>'id' FROM kind_layout WHERE name = $1", &[&kind])
+                    .await?
+                    .and_then(|r| r.get::<_, Option<String>>(0))
+                {
+                    let есть: bool = client
+                        .query_one(
+                            "SELECT EXISTS (SELECT 1 FROM information_schema.columns
+                                             WHERE table_schema='public' AND table_name=$1
+                                               AND column_name='id')",
+                            &[table],
+                        )
+                        .await?
+                        .get(0);
+                    if есть {
+                        n = client
+                            .query_one(&format!("SELECT count(*) FROM {table} WHERE id ~ $1"), &[&обр])
+                            .await?
+                            .get(0);
+                    }
+                }
+            }
             if n == 0 {
                 return Ok(json!({ "status": "holds_nothing_here", "kind": kind, "table": table,
                     "why": "ни одной строки этого вида в названной таблице: объявление \
@@ -7022,6 +7053,95 @@ pub async fn document_coverage(
                   потеряется, если убрать текст. Считано по разделам: среднее \
                   по документу врёт про обе половины",
     }))
+}
+
+/// Объявить, переоткрывается ли вид при правке того, на что он опирается.
+///
+/// Вопрос, закрытый по требованию, которое потом изменили, закрыт по памяти:
+/// его ответ говорил о тексте, которого больше нет. Задача, сделавшая
+/// изменённое требование, тоже не сделана. А вот РЕШЕНИЕ так не работает —
+/// оно датированная запись о выборе, и не становится непринятым оттого, что
+/// требование переписали; его отменяют отдельным решением, а не пересборкой.
+///
+/// Поэтому «переоткрывается» — объявление, а не догадка машины.
+///
+/// Проверяется возможность: у вида должна быть предметная таблица с колонкой
+/// состояния. Объявить переоткрываемым то, у чего состояния нет, — подписать
+/// намерение, которое никогда не исполнится.
+pub async fn set_kind_reopens(
+    pool: &Pool, kind: &str, reopens: bool, why: &str,
+) -> Result<Value, tokio_postgres::Error> {
+    let client = pool.get().await.expect("пул отдал соединение");
+    if kind.trim().is_empty() {
+        return Ok(json!({ "status": "nameless", "why": "вид без имени не объявляется" }));
+    }
+    if why.trim().is_empty() {
+        return Ok(json!({ "status": "no_why", "kind": kind,
+            "why": "не сказано, ПОЧЕМУ. Переоткрытие — это отмена чужой работы по расписанию, \
+                    и оспорить его потом будет нечем" }));
+    }
+    let Some(spec) = client
+        .query_opt("SELECT spec FROM kind_layout WHERE name = $1", &[&kind])
+        .await?
+    else {
+        return Ok(json!({ "status": "no_kind", "kind": kind,
+            "why": "вид не объявлен в раскладке" }));
+    };
+    // Состояние ищется в таблицах, которые вид объявил своими: `holds` уже
+    // назван и проверен дверью проекции — второго перечня заводить не надо.
+    let spec: Value = spec.get(0);
+    let holds: Vec<String> = spec
+        .get("holds")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    if reopens {
+        if holds.is_empty() {
+            return Ok(json!({ "status": "no_tables", "kind": kind,
+                "why": "вид не назвал таблиц (`kind-projection ... holds`): искать состояние негде" }));
+        }
+        let mut где = Vec::new();
+        for table in &holds {
+            let есть: bool = client
+                .query_one(
+                    "SELECT EXISTS (SELECT 1 FROM information_schema.columns
+                                     WHERE table_schema = 'public' AND table_name = $1
+                                       AND column_name IN ('state','status','closed','satisfied'))",
+                    &[table],
+                )
+                .await?
+                .get(0);
+            if есть {
+                где.push(table.clone());
+            }
+        }
+        if где.is_empty() {
+            return Ok(json!({ "status": "no_state", "kind": kind, "tables": holds,
+                "why": "ни в одной таблице вида нет колонки состояния (`state`, `status`, \
+                        `closed`, `satisfied`): переоткрывать нечего" }));
+        }
+        client
+            .execute(
+                "UPDATE kind_layout SET spec = spec || jsonb_build_object('reopens', true,
+                                                                          'reopens-why', $2::text)
+                  WHERE name = $1",
+                &[&kind, &why],
+            )
+            .await?;
+        return Ok(json!({ "status": "declared", "kind": kind, "reopens": true,
+                          "stateIn": где,
+                          "means": "объявление ОБЩЕЕ: чем вид становится при правке связей — \
+                                    одно для всех проектов" }));
+    }
+    client
+        .execute(
+            "UPDATE kind_layout SET spec = spec || jsonb_build_object('reopens', false,
+                                                                      'reopens-why', $2::text)
+              WHERE name = $1",
+            &[&kind, &why],
+        )
+        .await?;
+    Ok(json!({ "status": "declared", "kind": kind, "reopens": false }))
 }
 
 pub async fn holders(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
