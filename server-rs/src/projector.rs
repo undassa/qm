@@ -2242,6 +2242,16 @@ pub async fn rebuild(pool: &Pool, project: &str) -> Result<Value, tokio_postgres
                 'SELECT count(*) FROM project_documents WHERE project_id = $1
                    AND entity_kind IN ($$decision$$, $$decision-template$$)',
                 'считано по файлам вместе с шаблоном; записей решений на одну меньше', 'decision'),
+               -- «Подсистемы» считаются по РАЗНЫМ множествам у разных
+               -- документов: у требований — свои области, у проверок — свои, и
+               -- совпадение их чисел ничего не доказывает. Предмет объявлен
+               -- каждому свой.
+               ($1, 'srs.md', 'areas',
+                'SELECT count(DISTINCT area) FROM project_requirements WHERE project_id = $1 AND area <> $$$$',
+                '', 'srs'),
+               ($1, 'test-cases.md', 'areas',
+                'SELECT count(DISTINCT area) FROM project_checks WHERE project_id = $1 AND area <> $$$$',
+                '', 'test-cases'),
                ($1, 'test-cases.md', 'checks',
                 'SELECT count(*) FROM project_checks WHERE project_id = $1', '', 'test-cases')
              ON CONFLICT DO NOTHING",
