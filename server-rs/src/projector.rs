@@ -2813,10 +2813,16 @@ pub async fn gate(pool: &Pool, project: &str, phase: Option<&str>) -> Result<Val
     // когда он получен. Непосчитанный пункт называется непосчитанным.
     let rows = client
         .query(
-            "SELECT phase, item, kind, result, checked_at, why FROM project_gates
+           // Правило отдаётся ЦЕЛИКОМ: имя, запрос, проба, владелец. Прежде ответ
+           // нёс только замер, и починить пункт, не имея прямого доступа к базе,
+           // было нельзя: имена восстанавливались сопоставлением заголовков
+           // вручную, а запросов не видел никто. Гейт, который нельзя прочесть,
+           // нельзя и проверить.
+            "SELECT phase, item, kind, result, checked_at, why, id, query, probe, owner
+               FROM project_gates
               WHERE project_id = $1 AND ($2 = '' OR phase = $2)
-              ORDER BY phase, item",
-            &[&project, &phase.unwrap_or("")],
+              ORDER BY phase, id, item",
+               &[&project, &phase.unwrap_or("")],
         )
         .await?;
 
@@ -2854,11 +2860,29 @@ pub async fn gate(pool: &Pool, project: &str, phase: Option<&str>) -> Result<Val
         let why_col: String = r.get(5);
         // Пустой замер — не «пройден» и не «провален». Он значит, что пункт ещё
         // ни разу не мерили, и сказать это надо словом.
-        let entry = stored.unwrap_or_else(|| {
+        let mut entry = stored.unwrap_or_else(|| {
             json!({ "item": item, "kind": kind, "computed": "unknown",
                     "why": "ещё не мерили: пересчёт с заведения пункта не запускался",
                     "means": why_col })
         });
+
+        // Само правило — рядом с замером. Отдельной ручкой это было бы вторым
+
+        // местом, где надо помнить имя пункта; здесь оно там же, где число.
+
+        if let Some(m) = entry.as_object_mut() {
+
+            m.insert("id".into(), json!(r.get::<_, Option<String>>(6).unwrap_or_default()));
+
+            m.insert("query".into(), json!(r.get::<_, Option<String>>(7).unwrap_or_default()));
+
+            m.insert("probe".into(), json!(r.get::<_, Option<String>>(8).unwrap_or_default()));
+
+            m.insert("owner".into(), json!(r.get::<_, Option<String>>(9).unwrap_or_default()));
+
+            m.insert("phase".into(), json!(phase));
+
+        }
         let slot = checked_at.entry(phase.clone()).or_insert(at);
         // У гейта одно время замера — самое старое из его пунктов. Показывать
         // самое свежее значило бы прикрыть непосчитанный пункт посчитанным.
