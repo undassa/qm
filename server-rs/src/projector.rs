@@ -1472,6 +1472,20 @@ ALTER TABLE project_sensor_spec ADD COLUMN IF NOT EXISTS allow text NOT NULL DEF
 --
 -- Красным становится и счёт НИЖЕ потолка: долг погасили, а потолок не опустили —
 -- значит завтра он молча вырастет обратно, и никто не заметит.
+-- КОГДА ПЕРЕСБОРКА ПОСЛЕДНИЙ РАЗ УДАЛАСЬ, и чем упала, если упала.
+--
+-- Гейт читает СОХРАНЁННЫЙ замер. Пересборка, упавшая на полпути, оставляет
+-- проекции недособранными, а гейт продолжает отдавать прежние числа — уверенно
+-- и неверно. Так был потерян час на тридцать одну ложную находку: `reproject`
+-- ответил «duplicate key», а гейт этого не знал.
+--
+-- Одна строка на проект: важно последнее состояние, а не журнал.
+CREATE TABLE IF NOT EXISTS reproject_state (
+  project_id text PRIMARY KEY,
+  at bigint NOT NULL,
+  ok boolean NOT NULL,
+  why text NOT NULL DEFAULT '');
+
 CREATE TABLE IF NOT EXISTS rule_ceiling (
   project_id text NOT NULL,
   rule text NOT NULL,
@@ -2814,6 +2828,14 @@ async fn measure_item(
 
 pub async fn gate(pool: &Pool, project: &str, phase: Option<&str>) -> Result<Value, tokio_postgres::Error> {
     let client = pool.get().await.expect("пул отдал соединение");
+    // ПЕРЕСБОРКА, УПАВШАЯ НА ПОЛПУТИ, оставляет проекции недособранными. Замер
+    // по ним посчитан, лежит и читается как настоящий: гейт отвечал числами,
+    // которые не значили ничего, и час ушёл на тридцать одну ложную находку.
+    //
+    // Числа при этом НЕ ПРЯЧУТСЯ: спрятать их значило бы потерять и то, что
+    // всё-таки посчиталось. Они отдаются вместе со словом о том, что доверять
+    // им нельзя, — и это слово стоит первым.
+    let stale = last_reproject(pool, project).await.filter(|(ok, _, _)| !*ok);
     // ЧИТАЕТСЯ сохранённое, а не считается заново. Замер делает `measure_gates`,
     // и делает его при изменении набора; страница показывает результат и время,
     // когда он получен. Непосчитанный пункт называется непосчитанным.
@@ -2950,7 +2972,20 @@ pub async fn gate(pool: &Pool, project: &str, phase: Option<&str>) -> Result<Val
             "checkedAt": checked,
         }));
     }
-    Ok(json!({ "gates": out }))
+    match stale {
+        Some((_, why, at)) => Ok(json!({
+            "gates": out,
+            // Слово стоит ПЕРВЫМ и не прячет числа: спрятать их значило бы
+            // потерять и то, что всё-таки посчиталось.
+            "stale": true,
+            "why": format!(
+                "последняя пересборка не удалась ({why}); показанные числа посчитаны по \
+                 недособранным проекциям и могут значить не то. Прогоните `reproject` и `rebuild`."
+            ),
+            "staleAt": at,
+        })),
+        None => Ok(json!({ "gates": out })),
+    }
 }
 
 /// Сверка заявленного числа с фактом — но сперва сказав, что именно считается.
@@ -5782,6 +5817,37 @@ pub async fn readiness_gaps(pool: &Pool, project: &str) -> Result<Value, tokio_p
         // сервер. Интерфейс, знающий имя двери, — вторая запись о том же.
         "closedBy": "method-set",
     }))
+}
+
+/// Записать исход пересборки: удалась или упала и чем.
+///
+/// Пишется ВСЕГДА, а не только при удаче: молчание об упавшей пересборке
+/// неотличимо от её отсутствия, и гейт продолжает отдавать прежние числа.
+pub async fn note_reproject(pool: &Pool, project: &str, ok: bool, why: &str) {
+    let Ok(client) = pool.get().await else { return };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    // Отказ записать отказ — не повод уронить работу: пересборка уже случилась,
+    // и её исход важнее, чем запись о нём.
+    let _ = client
+        .execute(
+            "INSERT INTO reproject_state (project_id, at, ok, why) VALUES ($1,$2,$3,$4)
+             ON CONFLICT (project_id) DO UPDATE SET at = EXCLUDED.at, ok = EXCLUDED.ok, why = EXCLUDED.why",
+            &[&project, &now, &ok, &why],
+        )
+        .await;
+}
+
+/// Что известно о последней пересборке: `None` — не пересобирали ни разу.
+pub async fn last_reproject(pool: &Pool, project: &str) -> Option<(bool, String, i64)> {
+    let client = pool.get().await.ok()?;
+    let row = client
+        .query_opt("SELECT ok, why, at FROM reproject_state WHERE project_id = $1", &[&project])
+        .await
+        .ok()??;
+    Some((row.get(0), row.get(1), row.get(2)))
 }
 
 /// Объявить потолок долга: сколько находок правила сегодня терпимо и почему.

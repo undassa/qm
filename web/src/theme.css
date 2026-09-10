@@ -3929,3 +3929,4 @@ button.chain-card:disabled { cursor: default; opacity: .55; }
 .item-s .never { color: var(--accent, #d8a657); }
 .never-why { color: var(--accent, #d8a657) !important; }
 .never-why code { color: inherit; opacity: .8; }
+.stale { max-width: var(--measure); margin: 12px 0 4px; }

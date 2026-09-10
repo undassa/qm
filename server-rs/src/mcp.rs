@@ -2067,9 +2067,20 @@ impl Mcp {
             .map_err(say("сверка до пересборки"))?;
         let ms_before = t.elapsed().as_millis() as u64;
         let t = std::time::Instant::now();
-        let subject = crate::reproject::reproject(&self.pool, &self.project)
-            .await
-            .map_err(say("пересборка сущностей"))?;
+        // Исход пересборки ЗАПИСЫВАЕТСЯ. Упавшая на полпути оставляет проекции
+        // недособранными, а гейт продолжает отдавать прежние числа — уверенно и
+        // неверно; так был потерян час на тридцать одну ложную находку.
+        let subject = match crate::reproject::reproject(&self.pool, &self.project).await {
+            Ok(v) => {
+                crate::projector::note_reproject(&self.pool, &self.project, true, "").await;
+                v
+            }
+            Err(e) => {
+                let said = crate::projector::db_says(&e);
+                crate::projector::note_reproject(&self.pool, &self.project, false, &said).await;
+                return Err(say("пересборка сущностей")(e));
+            }
+        };
         let ms_subject = t.elapsed().as_millis() as u64;
         let t = std::time::Instant::now();
         let after = crate::projector::rebuild(&self.pool, &self.project)

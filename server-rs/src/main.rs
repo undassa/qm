@@ -165,10 +165,17 @@ async fn main() {
             eprintln!("mh-server reproject: не задан MH_PROJECT — пересобирать нечего");
             std::process::exit(2);
         }
+        // Исход записывается и здесь: подкоманда — та же пересборка, и упавшая
+        // она оставляет те же недособранные проекции.
         match reproject::reproject(&app.pool, &project).await {
-            Ok(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default()),
+            Ok(v) => {
+                projector::note_reproject(&app.pool, &project, true, "").await;
+                println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+            }
             Err(e) => {
-                eprintln!("пересборка не прошла: {}", projector::db_says(&e));
+                let said = projector::db_says(&e);
+                projector::note_reproject(&app.pool, &project, false, &said).await;
+                eprintln!("пересборка не прошла: {said}");
                 std::process::exit(1);
             }
         }

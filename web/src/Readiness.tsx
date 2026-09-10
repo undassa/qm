@@ -115,7 +115,7 @@ export function Readiness({
   const live = useLive(
     () =>
       Promise.all([
-        tool<{ gates: Gate[] }>(projectId, "gate"),
+        tool<{ gates: Gate[]; stale?: boolean; why?: string }>(projectId, "gate"),
         tool<{ phases: Phase[] }>(projectId, "phases"),
         tool<{ steps: Step[] }>(projectId, "process-state"),
         tool<NextStep>(projectId, "next-step"),
@@ -123,6 +123,8 @@ export function Readiness({
         tool<{ pipeline: Step2[] }>(projectId, "pipeline"),
       ]).then(([g, p, s, n, pr, pi]) => ({
         gates: g.gates ?? [],
+        stale: g.stale === true,
+        staleWhy: g.why ?? "",
         phases: p.phases ?? [],
         steps: s.steps ?? [],
         next: n,
@@ -133,7 +135,7 @@ export function Readiness({
   );
 
   if (!live.data) return <p className="empty">Считаю готовность…</p>;
-  const { gates, phases, steps, next, tiles, pipeline } = live.data;
+  const { gates, phases, steps, next, tiles, pipeline, stale, staleWhy } = live.data;
   const byGate = new Map(gates.map((g) => [g.gate, g]));
 
   // Фаза, на которой стоим, — ПЕРВАЯ, чей гейт не пройден. Не «текущая по
@@ -163,6 +165,11 @@ export function Readiness({
           {allViolations > 0 ? <> · <b className="bad-n">{allViolations}</b> нарушений</> : null}
         </span>
       </div>
+
+      {/* Числа, посчитанные по недособранным проекциям, читаются как настоящие.
+          Слово об этом стоит ПЕРЕД ними и не прячет их: спрятать значило бы
+          потерять и то, что всё-таки посчиталось. */}
+      {stale ? <p className="side-note warn stale">{staleWhy}</p> : null}
 
       {/* ── Полоса фаз ──────────────────────────────────────────────────── */}
       <div className="rail">
