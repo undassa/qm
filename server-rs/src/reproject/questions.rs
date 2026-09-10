@@ -159,16 +159,32 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
     let ids: Vec<String> = out.iter().map(|q| q.0.clone()).collect();
     tx.execute("DELETE FROM project_questions WHERE project_id = $1 AND id = ANY($2)",
                &[&project, &ids]).await?;
+    // ДАТЫ ИЗ ИСТОРИИ ДОКУМЕНТА, а не из прозы. Поле «Закрыт» у 290 вопросов
+    // из 373 — прочерк: даты потеряли при переносе из реестра. История же
+    // знает и первую запись, и последнюю, и знает про все.
+    let даты: std::collections::HashMap<String, (i64, i64)> = tx
+        .query(
+            "SELECT entity_name, min(written_at), max(written_at)
+               FROM project_document_revisions
+              WHERE project_id = $1 AND entity_kind = 'question'
+              GROUP BY entity_name",
+            &[&project],
+        )
+        .await?
+        .iter()
+        .map(|r| (r.get::<_, String>(0), (r.get::<_, i64>(1), r.get::<_, i64>(2))))
+        .collect();
     for (id, number, title, kind, name, state, text, gate, opened, closed, has_answer, answer) in &out {
         // `has_answer` остаётся: он о ЗАГОЛОВКЕ и нужен, чтобы видеть расхождение
         // поля с текстом. Судит же `answer_state` — объявленное поле.
         tx.execute(
             "INSERT INTO project_questions(project_id, id, number, title, entity_kind, entity_name,
                                            state, state_text, gate, opened_at, closed_at, has_answer,
-                                           answer_state, answer)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
+                                           answer_state, answer, created_at, updated_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
             &[&project, id, number, title, kind, name, state, text, gate, opened, closed, has_answer,
-              &answer.0, &answer.1],
+              &answer.0, &answer.1,
+              &даты.get(id).map(|d| d.0), &даты.get(id).map(|d| d.1)],
         )
         .await?;
     }

@@ -1734,6 +1734,18 @@ ALTER TABLE project_checks ADD COLUMN IF NOT EXISTS section_ord integer;
 -- бы объявленное дверью.
 ALTER TABLE project_requirement_sources ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'declared';
 
+-- ДАТЫ ВОПРОСА — КОЛОНКАМИ. `opened_at` и `closed_at` были текстом, взятым из
+-- прозы, и у 290 закрытых вопросов из 373 дата закрытия — прочерк: её
+-- потеряли при переносе из реестра («закрыт (перенесён из реестра)»).
+--
+-- Пока даты нет, правило «закрытый вопрос переоткрывается, если связь
+-- обновлена после него» применить не к чему: сравнивать не с чем.
+--
+-- Даты берутся из истории самого документа — первая ревизия и последняя, — и
+-- ложатся колонками сущности, а не выводятся при каждом чтении.
+ALTER TABLE project_questions ADD COLUMN IF NOT EXISTS created_at bigint;
+ALTER TABLE project_questions ADD COLUMN IF NOT EXISTS updated_at bigint;
+
 -- ПЕРЕЧНИ ЭТАПА. Документ этапа несёт четыре списка — «Требования (6)»,
 -- «Истории (6)», «Экраны (10)», «Проверки (27)» — и сам говорит рядом: «все
 -- ссылки списками, потому что этап проверяется по ним». Дом был только у
@@ -1770,6 +1782,11 @@ CREATE TABLE IF NOT EXISTS project_milestone_links (
 -- 830 при четырёх настоящих, потому что 824 имени раскрыты из диапазона
 -- («TC-STP-01…14», где существует не каждый). Слово, называющее законное
 -- состояние дефектом, дороже отсутствия слова: по нему чинят несломанное.
+-- Порядок обязателен: `question_live` СТОИТ НА `named_id_role`, и снос
+-- нижнего без верхнего роняет сервер на старте. Так и вышло: вид, заведённый
+-- рукой мимо DDL, пережил первую пересборку и убил вторую, а ошибка пришла
+-- словом «db error» — тем самым, которое сегодня уже стоило трёх попыток.
+DROP VIEW IF EXISTS question_live;
 DROP VIEW IF EXISTS named_id_role;
 CREATE OR REPLACE VIEW named_id_role AS
 SELECT n.project_id, n.entity_kind, n.entity_name, n.said_id, n.caveated,
@@ -1801,6 +1818,49 @@ SELECT n.project_id, n.entity_kind, n.entity_name, n.said_id, n.caveated,
          WHERE t.project_id = n.project_id AND t.id = n.said_id
         LIMIT 1
   ) src ON true;
+
+-- ЖИВОЕ СОСТОЯНИЕ ВОПРОСА. Закрытым он остаётся, только пока ни одна его
+-- связь не обновилась после него: изменилось требование — вопрос переоткрыт,
+-- и гейт, который его читает, краснеет сам. Состояние СЛЕДУЕТ из связей, а не
+-- объявляется.
+--
+-- Сравнение идёт с `updated_at` вопроса, а не с полем «Закрыт»: у 290 из 373
+-- закрытых оно прочерк — даты потеряли при переносе из реестра. История
+-- документа знает дату у всех.
+CREATE OR REPLACE VIEW question_live AS
+SELECT q.project_id, q.id, q.number, q.title, q.state, q.created_at, q.updated_at,
+       св.треб AS stale_link, св.когда AS link_changed,
+       CASE WHEN q.state = 'open'      THEN 'open'
+            WHEN q.updated_at IS NULL AND q.closed_at = '' THEN q.state
+            WHEN св.треб IS NOT NULL   THEN 'reopened'
+            ELSE q.state END AS live_state,
+       CASE WHEN q.state <> 'open' AND q.updated_at IS NULL AND q.closed_at = ''
+              THEN 'когда вопрос писали в последний раз — неизвестно: сверить связи не с чем'
+            WHEN св.треб IS NOT NULL
+              THEN 'связь ' || св.треб || ' обновлена '
+                   || to_char(to_timestamp(св.когда/1000),'YYYY-MM-DD')
+                   || ', а вопрос стоял с '
+                   || coalesce(nullif(q.closed_at,''), to_char(to_timestamp(q.updated_at/1000),'YYYY-MM-DD'))
+            ELSE '' END AS why
+  FROM project_questions q
+  LEFT JOIN LATERAL (
+       SELECT n.said_id AS треб, поя.когда
+         FROM named_id_role n
+         JOIN project_requirements r
+           ON r.project_id = n.project_id AND r.id = n.said_id AND r.text <> ''
+         CROSS JOIN LATERAL (
+              SELECT min(v.written_at) AS когда FROM project_document_revisions v
+               WHERE v.project_id = r.project_id AND v.entity_kind = r.entity_kind
+                 AND v.entity_name = r.entity_name AND v.content LIKE '%' || r.text || '%') поя
+        WHERE n.project_id = q.project_id AND n.entity_kind = 'question' AND n.entity_name = q.id
+          -- Дата ответа — ЛУЧШАЯ ИЗ ДВУХ: поле «Закрыт» там, где оно есть (оно
+          -- старше переноса), иначе история документа. И сравнение ПО ДНЮ:
+          -- по миллисекундам первичный импорт засчитывался изменением, и все
+          -- 29 «переоткрытых» оказались записанными в один день с требованием.
+          AND поя.когда IS NOT NULL
+          AND to_timestamp(поя.когда/1000)::date
+              > coalesce(nullif(q.closed_at,'')::date, to_timestamp(q.updated_at/1000)::date)
+        ORDER BY поя.когда DESC LIMIT 1) св ON true;
 -- Заявленное число и объявленный предмет связываются ТОЖДЕСТВОМ ДОКУМЕНТА, а не
 -- совпадением строк: «constitution:» и «constitution.md» — одно и то же, и
 -- строковое равенство их не сводило ни разу.
