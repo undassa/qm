@@ -3716,3 +3716,12 @@ button.chain-card:disabled { cursor: default; opacity: .55; }
   cursor: pointer;
 }
 .found:hover { border-bottom-style: solid; }
+/* ─── проекты рядом ───────────────────────────────────────────────────── */
+.tog { max-width: var(--measure); }
+.tog th:nth-child(n + 3), .tog .tog-c { text-align: center; width: 132px; }
+.tog-g { font-family: var(--mono, monospace); font-size: 11.5px; color: var(--dim); width: 62px; }
+.tog-c { font-family: var(--mono, monospace); }
+.tog-c.ok { color: var(--ok, #6ea86e); }
+.tog-c.bad { color: var(--bad, #c25b5b); }
+.tog-c.dim { color: var(--dim); }
+.tog-c i { font-style: normal; opacity: .75; font-size: 11px; }

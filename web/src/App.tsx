@@ -10,6 +10,7 @@ import { Rules } from "./Rules";
 import { Users } from "./Users";
 import { Readiness } from "./Readiness";
 import { Palette, type Jump } from "./Palette";
+import { Together } from "./Together";
 
 /**
  * Обстановка вида: то, что раздел получает от приложения.
@@ -59,6 +60,9 @@ const PAGES: { page: string; title: string; note: string; view: (id: string, ctx
   { page: "proof", title: "Доказательство", note: "чем закрыто", view: (id) => <Proof projectId={id} /> },
   { page: "questions", title: "Вопросы", note: "чем закрыт каждый", view: (id) => <Questions projectId={id} /> },
   { page: "entities", title: "Сущности", note: "виды", view: (id) => <Entities projectId={id} /> },
+  // Раздел БЕЗ проекта: он про то, что у проектов общее. `projectId` ему не
+  // нужен — он спрашивает всех.
+  { page: "together", title: "Вместе", note: "проекты рядом", view: () => <Together /> },
 ];
 
 /**
