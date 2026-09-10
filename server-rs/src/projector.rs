@@ -967,6 +967,26 @@ ALTER TABLE harness_process_step ADD COLUMN IF NOT EXISTS work_run text NOT NULL
 -- проходится, когда плана нет ВОВСЕ: пустой перечень отвечает «нарушений нет», и
 -- лестница объявляет пройденным то, чего не смотрела. Предмет объявляется, а не
 -- подразумевается: пусто — «нечем мерить», и это третье состояние.
+-- ЧЕЙ ПРЕДМЕТ СПОРА. У пункта гейта было две двери: отменить весь пункт с
+-- причиной и объявить побег одной сущности. Ни одна не выражает того, что бывает
+-- чаще всего: правило верное, набор в порядке, НЕ ЧИТАЕТ СЕРВЕР. Отменить пункт
+-- — похоронить настоящую находку вместе со слепотой; оставить как есть — считать
+-- проект неготовым по причине, которая от проекта не зависит.
+--
+-- Находка при этом ОСТАЁТСЯ КРАСНОЙ. Это не побег: счёт разделяется, а не
+-- уменьшается, и «одиннадцать нарушений» перестаёт быть одним числом.
+--
+-- `fixed_by` обязателен: признак без указания, чем это чинится, — жалоба, а не
+-- запись.
+CREATE TABLE IF NOT EXISTS finding_blame (
+  project_id text NOT NULL,
+  rule text NOT NULL,
+  entity_id text NOT NULL,
+  blame text NOT NULL CHECK (blame IN ('harness', 'corpus')),
+  fixed_by text NOT NULL,
+  why text NOT NULL DEFAULT '',
+  decided_by text NOT NULL DEFAULT '',
+  PRIMARY KEY (project_id, rule, entity_id));
 ALTER TABLE harness_process_step ADD COLUMN IF NOT EXISTS subject_query text NOT NULL DEFAULT '';
 ALTER TABLE harness_process_step ADD COLUMN IF NOT EXISTS subject_why text NOT NULL DEFAULT '';
 
@@ -2911,6 +2931,27 @@ pub async fn gate(pool: &Pool, project: &str, phase: Option<&str>) -> Result<Val
         )
         .await?;
 
+    // Признаки «чей предмет спора» — ОДНИМ запросом на весь гейт, а не по
+    // запросу на пункт: пунктов сто одиннадцать.
+    let blame_of: std::collections::HashMap<String, Vec<(String, String, String)>> = {
+        let rows = client
+            .query(
+                "SELECT rule, entity_id, blame, fixed_by FROM finding_blame WHERE project_id = $1",
+                &[&project],
+            )
+            .await?;
+        let mut m: std::collections::HashMap<String, Vec<(String, String, String)>> =
+            std::collections::HashMap::new();
+        for r in &rows {
+            m.entry(r.get::<_, String>(0)).or_default().push((
+                r.get::<_, String>(1),
+                r.get::<_, String>(2),
+                r.get::<_, String>(3),
+            ));
+        }
+        m
+    };
+
     // Сам гейт: формулировка из плана и нужна ли ему подпись.
     let heads = client
         .query(
@@ -2977,6 +3018,24 @@ pub async fn gate(pool: &Pool, project: &str, phase: Option<&str>) -> Result<Val
                 "exceptionKey".into(),
                 json!(q.as_deref().and_then(exception_key)),
             );
+            // ЧЕЙ ПРЕДМЕТ СПОРА. Находка остаётся красной, но счёт разделён:
+            // «одиннадцать нарушений» смешивало своё с чужим, и по одному числу
+            // нельзя было решить, работа это набора или слепота сервера.
+            let rule = r.get::<_, String>(6);
+            if let Some(b) = blame_of.get(&rule) {
+                m.insert("blamed".into(), json!(b.len()));
+                m.insert(
+                    "blamedOn".into(),
+                    json!(b.iter().map(|(e, bl, fx)| json!({
+                        "entityId": e, "blame": bl, "fixedBy": fx
+                    })).collect::<Vec<_>>()),
+                );
+                let mine = (r.get::<_, Option<Value>>(3)
+                    .and_then(|v| v.get("violations").and_then(|n| n.as_i64()))
+                    .unwrap_or(0) as usize)
+                    .saturating_sub(b.iter().filter(|(_, bl, _)| bl == "harness").count());
+                m.insert("violationsOurs".into(), json!(mine));
+            }
 
         }
         let slot = checked_at.entry(phase.clone()).or_insert(at);
@@ -8283,6 +8342,69 @@ async fn subject_empty(
         // тогда сам способ, и его отказ будет виден своим словом.
         Err(_) => false,
     }
+}
+
+/// Объявить, ЧЕЙ предмет спора у находки.
+///
+/// Находка остаётся красной: признак делит счёт, а не уменьшает его. `fixedBy`
+/// обязателен — признак без указания, чем это чинится, ничем не отличается от
+/// жалобы, и следующий проход запишет её заново.
+pub async fn set_blame(
+    pool: &Pool,
+    project: &str,
+    rule: &str,
+    entity_id: &str,
+    blame: &str,
+    fixed_by: &str,
+    why: &str,
+    decided_by: &str,
+    drop_it: bool,
+) -> Result<Value, tokio_postgres::Error> {
+    let client = pool.get().await.expect("пул отдал соединение");
+    if drop_it {
+        let gone = client
+            .execute(
+                "DELETE FROM finding_blame WHERE project_id = $1 AND rule = $2 AND entity_id = $3",
+                &[&project, &rule, &entity_id],
+            )
+            .await?;
+        return Ok(json!({ "status": if gone > 0 { "dropped" } else { "not_found" } }));
+    }
+    if rule.trim().is_empty() || entity_id.trim().is_empty() {
+        return Ok(json!({ "status": "nameless",
+                          "why": "признак ставится НАХОДКЕ: нужны правило и ключ, которым она адресуется" }));
+    }
+    if !matches!(blame, "harness" | "corpus") {
+        return Ok(json!({ "status": "unknown_blame", "why":
+            "чей предмет спора — `harness` (не читает сервер) либо `corpus` (работа набора)" }));
+    }
+    if fixed_by.trim().is_empty() {
+        return Ok(json!({ "status": "no_fix", "why":
+            "не сказано, чем это чинится. Признак без этого — жалоба: находка останется \
+             красной, а следующий проход запишет её заново, не зная, что с ней делали." }));
+    }
+    // Правило обязано СУЩЕСТВОВАТЬ. Признак, поставленный правилу, которого нет,
+    // не увидит никто, а выглядеть будет как объявленный.
+    let known: i64 = client
+        .query_one("SELECT count(*) FROM gate_item WHERE id = $1", &[&rule])
+        .await?
+        .get(0);
+    if known == 0 {
+        return Ok(json!({ "status": "no_rule",
+                          "why": format!("пункта гейта «{rule}» нет: признак ставить некому") }));
+    }
+    client
+        .execute(
+            "INSERT INTO finding_blame (project_id, rule, entity_id, blame, fixed_by, why, decided_by)
+             VALUES ($1,$2,$3,$4,$5,$6,$7)
+             ON CONFLICT (project_id, rule, entity_id) DO UPDATE SET blame = EXCLUDED.blame,
+               fixed_by = EXCLUDED.fixed_by, why = EXCLUDED.why, decided_by = EXCLUDED.decided_by",
+            &[&project, &rule, &entity_id, &blame, &fixed_by, &why, &decided_by],
+        )
+        .await?;
+    Ok(json!({ "status": "declared", "rule": rule, "entityId": entity_id, "blame": blame,
+               "fixedBy": fixed_by,
+               "means": "находка остаётся красной: счёт разделён, а не уменьшен" }))
 }
 
 pub async fn process_state(
