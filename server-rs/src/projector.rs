@@ -1704,6 +1704,11 @@ ALTER TABLE project_traceability_said ADD COLUMN IF NOT EXISTS is_total boolean 
 -- указатель обязан написать имя, а перечень вправе его сократить.
 ALTER TABLE project_named_id ADD COLUMN IF NOT EXISTS from_range boolean NOT NULL DEFAULT false;
 ALTER TABLE project_named_id ADD COLUMN IF NOT EXISTS heads_row boolean NOT NULL DEFAULT false;
+-- ГДЕ ИМЕННО документ назвал имя. Связь была на уровне документа: `ui-spec`
+-- называет `SCR-SHELL-01`, а ui-spec — 40 КБ и 26 секций. Спросить у экрана,
+-- какая секция его задаёт, было нечем. Секция — ord блока-заголовка, тот же,
+-- каким она лежит в `project_document_sections`.
+ALTER TABLE project_named_id ADD COLUMN IF NOT EXISTS section_ord integer;
 -- Заявленное число и объявленный предмет связываются ТОЖДЕСТВОМ ДОКУМЕНТА, а не
 -- совпадением строк: «constitution:» и «constitution.md» — одно и то же, и
 -- строковое равенство их не сводило ни разу.

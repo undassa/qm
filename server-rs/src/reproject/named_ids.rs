@@ -37,7 +37,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
         let low = text.to_lowercase();
         low_caveats.iter().any(|c| low.contains(c.as_str()))
     };
-    let mut rows: Vec<(String, String, String, bool, bool, bool)> = Vec::new();
+    let mut rows: Vec<(String, String, String, bool, bool, bool, Option<i32>)> = Vec::new();
     let mut hidden: Vec<(String, String, String, String)> = Vec::new();
     let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut seen_hidden = std::collections::HashSet::new();
@@ -49,12 +49,20 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
         // зачёркивание, и оговорённый ЗАГОЛОВОК — он накрывает свой раздел до
         // следующего заголовка того же уровня. Читать только строку значит
         // требовать оговорки в каждой строке раздела «Что удалено».
+        // Обход по БЛОКАМ, а не по строкам: блок знает свой `ord`, а ord
+        // блока-заголовка и есть ord его секции — тот же, каким она лежит в
+        // `project_document_sections`. Без этого связь остаётся на уровне
+        // документа: «ui-spec называет SCR-SHELL-01» при сорока килобайтах и
+        // двадцати шести секциях.
+        let разбор = crate::parse::parse_document(&content);
         let mut section_caveat = false;
-        for line in content.lines() {
-            let t = line.trim_start();
-            if t.starts_with('#') {
-                section_caveat = says_caveat(t);
+        let mut секция: Option<i32> = None;
+        for блок in &разбор.blocks {
+            if блок.kind == "heading" {
+                секция = Some(блок.ord);
+                section_caveat = says_caveat(&блок.raw);
             }
+            for line in блок.raw.lines() {
             let caveated = section_caveat || line.contains("~~") || says_caveat(line);
             // Голое число, оставшееся в строке-перечне: запись прячет имя
             // формой, которой раскрыватель не знает. Строка обязана СОДЕРЖАТЬ
@@ -82,9 +90,10 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
                     Some(&i) => { if heads_row { rows[i].5 = true } }
                     None => {
                         seen.insert(key, rows.len());
-                        rows.push((kind.clone(), name.clone(), id, caveated, from_range, heads_row));
+                        rows.push((kind.clone(), name.clone(), id, caveated, from_range, heads_row, секция));
                     }
                 }
+            }
             }
         }
     }
@@ -174,17 +183,17 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
     tx.execute("DELETE FROM project_named_id WHERE project_id = $1", &[&project]).await?;
     for chunk in rows.chunks(BATCH) {
         let mut sql = String::from(
-            "INSERT INTO project_named_id(project_id, entity_kind, entity_name, said_id, caveated, from_range, heads_row) VALUES ",
+            "INSERT INTO project_named_id(project_id, entity_kind, entity_name, said_id, caveated, from_range, heads_row, section_ord) VALUES ",
         );
         let mut args: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = vec![&project];
-        for (i, (kind, name, id, caveated, from_range, heads_row)) in chunk.iter().enumerate() {
+        for (i, (kind, name, id, caveated, from_range, heads_row, секция)) in chunk.iter().enumerate() {
             if i > 0 {
                 sql.push(',');
             }
-            let b = i * 6 + 2;
-            sql.push_str(&format!("($1,${},${},${},${},${},${})", b, b + 1, b + 2, b + 3, b + 4, b + 5));
+            let b = i * 7 + 2;
+            sql.push_str(&format!("($1,${},${},${},${},${},${},${})", b, b + 1, b + 2, b + 3, b + 4, b + 5, b + 6));
             args.extend([kind as &(dyn tokio_postgres::types::ToSql + Sync), name, id, caveated,
-                         from_range, heads_row]);
+                         from_range, heads_row, секция]);
         }
         sql.push_str(" ON CONFLICT DO NOTHING");
         tx.execute(sql.as_str(), &args).await?;

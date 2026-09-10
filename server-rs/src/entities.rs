@@ -292,6 +292,55 @@ async fn relations_of(
     }
 }
 
+/// ГДЕ сущность названа: документ, секция и её заголовок.
+///
+/// Обратная сторона `names`: та считает, КОГО сущность называет. Спросить у
+/// экрана, какая секция его задаёт, было нечем — связь стояла на уровне
+/// документа, а `ui-spec` это сорок килобайт и двадцать шесть секций. Ответ
+/// выводится соединением таблиц, а не поиском подстроки в прозе.
+async fn сказано_в(pool: &Pool, project: &str, id: &str) -> Value {
+    let Ok(client) = pool.get().await else { return Value::Null };
+    let Ok(rows) = client
+        .query(
+            "SELECT n.entity_kind, n.entity_name, s.ord, s.title, n.caveated
+               FROM project_named_id n
+               LEFT JOIN project_document_sections s
+                 ON s.project_id = n.project_id AND s.entity_kind = n.entity_kind
+                AND s.entity_name = n.entity_name AND s.ord = n.section_ord
+              WHERE n.project_id = $1 AND n.said_id = $2
+              ORDER BY n.entity_kind, n.entity_name, s.ord",
+            &[&project, &id],
+        )
+        .await
+    else {
+        return Value::Null;
+    };
+    if rows.is_empty() {
+        return Value::Null;
+    }
+    let всего = rows.len();
+    let места: Vec<Value> = rows
+        .iter()
+        .take(40)
+        .map(|r| {
+            let kind: String = r.get(0);
+            let name: String = r.get(1);
+            let ord: Option<i32> = r.get(2);
+            let title: Option<String> = r.get(3);
+            json!({
+                "kind": kind, "name": name,
+                "section": ord,
+                "title": title.unwrap_or_default(),
+                "caveated": r.get::<_, bool>(4),
+                "by": format!("mh call section kind={} id={} ord={}", kind, name,
+                              ord.map(|o| o.to_string()).unwrap_or_default()),
+            })
+        })
+        .collect();
+    json!({ "count": всего, "where": места,
+            "means": if всего > 40 { "показаны первые сорок" } else { "" } })
+}
+
 pub async fn entity(pool: &Pool, kinds: &Kinds, project: &str, kind: &str, id: Option<&str>) -> Result<Value, Miss> {
     let Some(k) = kinds.get(kind) else {
         return Err(Miss::NoKind(kind.to_owned()));
@@ -326,7 +375,8 @@ pub async fn entity(pool: &Pool, kinds: &Kinds, project: &str, kind: &str, id: O
         let (ok, oi) = Box::pin(locate(pool, kinds, project, kind, Some(id))).await
             .unwrap_or_else(|_| (String::new(), String::new()));
         let rel = relations_of(pool, project, kind, id, &ok, &oi, true).await;
-        return Ok(json!({ "kind": kind, "id": id, "entity": row, "relations": rel }));
+        return Ok(json!({ "kind": kind, "id": id, "entity": row, "relations": rel,
+                          "saidIn": сказано_в(pool, project, id).await }));
     }
 
     let (owner_kind, owner_name) = locate(pool, kinds, project, kind, id).await?;
@@ -362,6 +412,7 @@ pub async fn entity(pool: &Pool, kinds: &Kinds, project: &str, kind: &str, id: O
         "id": id.unwrap_or(kind),
         "content": content,
         "relations": rel,
+        "saidIn": сказано_в(pool, project, id.unwrap_or(&owner_name)).await,
         "revision": row.get::<_, i64>(1),
         "updatedAt": row.get::<_, i64>(2),
         "updatedBy": row.get::<_, String>(3),
