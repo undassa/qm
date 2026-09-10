@@ -418,6 +418,57 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
         // Замороженное дерево: хэш каталога у git и его чистота. Донора
         // заморозили решением, и всякое его движение — либо правка того, что
         // править нельзя, либо незакоммиченный мусор, который однажды уедет.
+        // СОСТОЯНИЯ ЗАДАЧ ИЗ ЗАКРЫВАЮЩИХ ТРЕЙЛЕРОВ. Дверь `task-state-push`
+        // описана словами «принять состояния, ВЫВЕДЕННЫЕ ХАРНЕСОМ из закрывающих
+        // трейлеров», а выводить их было некому: среди двадцати восьми видов
+        // фактов состояний задач не было.
+        //
+        // Цена измерена: в истории myack девяносто девять трейлеров, в проекции
+        // лежало тридцать четыре. `next-task` отказывал «барьер красной фазы
+        // держит» и называл шестьдесят пять имён, закрытых месяц назад; доска
+        // при этом говорила «Закрыто 82 из 82» — документ был прав, а проекция
+        // нет, ровно наоборот тому, ради чего состояние из документа и вынесли.
+        //
+        // Образец трейлера ОБЪЯВЛЕН спецификацией, а не зашит: как набор
+        // помечает закрытие, знает набор.
+        if how == "task-trailers" {
+            let log = std::process::Command::new("git")
+                .args(["-C", &root, "log", "--all", "--pretty=%H%x00%B%x01"])
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .unwrap_or_default();
+            let rex = regex::Regex::new(re).map_err(|e| format!("{fact}: образец трейлера не разбирается: {e}"))?;
+            // Состояние берётся у САМОГО СВЕЖЕГО коммита, назвавшего задачу:
+            // `git log` идёт от новых к старым, и первый ответ — последнее слово.
+            let mut seen: std::collections::HashSet<String> = Default::default();
+            let mut states: Vec<Value> = Vec::new();
+            for entry in log.split('\u{1}') {
+                let mut parts = entry.splitn(2, '\u{0}');
+                let commit = parts.next().unwrap_or("").trim().to_owned();
+                let body = parts.next().unwrap_or("");
+                for c in rex.captures_iter(body) {
+                    let id = c.get(1).map(|m| m.as_str().trim().to_owned()).unwrap_or_default();
+                    let state = c.get(2).map(|m| m.as_str().trim().to_owned())
+                        .unwrap_or_else(|| "closed".to_owned());
+                    if id.is_empty() || !seen.insert(id.clone()) {
+                        continue;
+                    }
+                    states.push(json!({ "id": id, "state": state, "commit": commit }));
+                }
+            }
+            if states.is_empty() {
+                return Err(format!(
+                    "{fact}: закрывающих трейлеров в истории нет ни одного. Пустая подача \
+                     стёрла бы состояния, выведенные прежде, — это отказ, а не ноль."
+                ));
+            }
+            let (out, _) = door.call("task-state-push", &json!({ "states": states }))?;
+            done.push(json!({ "fact": fact, "files": 0, "found": states.len(),
+                              "was": out["was"], "now": out["now"] }));
+            continue;
+        }
+
         if how == "frozen-tree" {
             let (declared, _) = door.call("frozen-trees", &json!({}))?;
             let empty4 = Vec::new();

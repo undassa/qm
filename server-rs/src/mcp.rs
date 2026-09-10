@@ -338,7 +338,7 @@ impl Mcp {
         tools.push(json!({ "name": "sensor-spec-add", "description": "объявить датчик: где искать, чем вынимать, как назвать факт",
             "inputSchema": { "type": "object", "properties": { "skip": s("строка, которую датчик не считает находкой — образец"), "allow": s("места, где правило не действует — образцы пути через пробел"), "fact": s("род факта"),
                 "reads": s("что читать: backend/**/*.rs"), "extract": s("образец: пустой — факт о самом файле"),
-                "note": s("зачем"), "how": s("extract · files · secret-fields · declared-paths · lines · domain-vs-check · contract-vs-schema"), "drop": json!({"type":"boolean"}) }, "required": ["fact"] } }));
+                "note": s("зачем"), "how": s("extract · files · secret-fields · declared-paths · lines · domain-vs-check · contract-vs-schema · task-trailers"), "drop": json!({"type":"boolean"}) }, "required": ["fact"] } }));
         tools.push(json!({ "name": "sensor-specs", "description": "чем снимать факты: объявленные датчики",
             "inputSchema": { "type": "object", "properties": {} } }));
         tools.push(json!({ "name": "donors", "description": "донорские деревья и сторожа: что здесь не наше и чем это держится",

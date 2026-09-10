@@ -6040,8 +6040,9 @@ pub async fn declare_sensor_spec(
     }
     // Незнакомый род прежде молча становился `extract`: датчик объявляли одним,
     // он снимал другое и говорил «снято». Отказ называет допустимые роды.
-    const KINDS: [&str; 13] = ["extract", "files", "secret-fields", "declared-paths", "lines",
-                              "domain-vs-check", "contract-vs-schema", "contract-ops", "contract-body", "declared-lines", "contract-marks", "contract-head", "frozen-tree"];
+    const KINDS: [&str; 14] = ["extract", "files", "secret-fields", "declared-paths", "lines",
+                              "domain-vs-check", "contract-vs-schema", "contract-ops", "contract-body", "declared-lines", "contract-marks", "contract-head", "frozen-tree",
+                              "task-trailers"];
     let how = if how.trim().is_empty() { "extract" } else { how };
     if !KINDS.contains(&how) {
         return Ok(json!({ "status": "unknown_how", "how": how,
