@@ -431,6 +431,69 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
         //
         // Образец трейлера ОБЪЯВЛЕН спецификацией, а не зашит: как набор
         // помечает закрытие, знает набор.
+        // ДЕРЖАТЕЛЬ НЕ МОЖЕТ БЫТЬ ЗАГЛУШКОЙ, и это проверяет машина, а не
+        // внимание. Правило `requirement-lands-on-surface` спрашивает «назван ли
+        // держатель», а не «настоящий ли он»: разбор объявил одиннадцать
+        // инвариантов держащимися, ревью открыло адреса и нашло, что СЕМЬ из
+        // одиннадцати — заглушки. Счёт недоделанного был занижен вдвое.
+        //
+        // Три формы заглушки, и все три названы набором:
+        //   пусто    — в файле нет ни одного элемента;
+        //   шапка    — требование помянуто только шапкой модуля `//!`;
+        //   `todo!`  — тело элемента не написано.
+        if how == "holder-stub" {
+            let (declared, _) = door.call("holders", &json!({}))?;
+            let empty5 = Vec::new();
+            let mut facts: Vec<Value> = Vec::new();
+            for h in declared["holders"].as_array().unwrap_or(&empty5) {
+                let req = h["requirement"].as_str().unwrap_or("").to_owned();
+                let path = h["path"].as_str().unwrap_or("").trim().to_owned();
+                if path.is_empty() {
+                    continue;
+                }
+                let full = format!("{root}/{path}");
+                let Ok(text) = std::fs::read_to_string(&full) else {
+                    facts.push(json!({ "name": format!("{req} → {path}"),
+                        "detail": "держатель назван, а файла нет в дереве" }));
+                    continue;
+                };
+                let body: Vec<&str> = text
+                    .lines()
+                    .filter(|l| !l.trim_start().starts_with("//") && !l.trim().is_empty())
+                    .collect();
+                let elements = body.iter().filter(|l| {
+                    let t = l.trim_start();
+                    t.starts_with("fn ") || t.starts_with("pub fn ") || t.starts_with("struct ")
+                        || t.starts_with("pub struct ") || t.starts_with("enum ")
+                        || t.starts_with("pub enum ") || t.starts_with("impl ")
+                }).count();
+                // Требование помянуто ТОЛЬКО шапкой: имя стоит в `//!` и нигде
+                // больше. Шапка объясняет модуль, но ничего не держит.
+                let in_header = text.lines()
+                    .filter(|l| l.trim_start().starts_with("//!"))
+                    .any(|l| l.contains(&req));
+                let elsewhere = body.iter().any(|l| l.contains(&req));
+                let todo = body.iter().filter(|l| l.contains("todo!") || l.contains("unimplemented!")).count();
+                let form = if elements == 0 {
+                    Some("файл без единого элемента".to_owned())
+                } else if in_header && !elsewhere {
+                    Some("требование помянуто только шапкой модуля `//!`".to_owned())
+                } else if todo > 0 {
+                    Some(format!("тело не написано: {todo} раз `todo!`"))
+                } else {
+                    None
+                };
+                if let Some(f) = form {
+                    facts.push(json!({ "name": format!("{req} → {path}"),
+                        "detail": format!("держатель — заглушка: {f}") }));
+                }
+            }
+            let (out, _) = door.call("code-facts-push", &json!({ "kind": fact, "facts": facts }))?;
+            done.push(json!({ "fact": fact, "files": declared["holders"].as_array().map(|a| a.len()).unwrap_or(0),
+                              "found": facts.len(), "was": out["was"], "now": out["now"] }));
+            continue;
+        }
+
         if how == "task-trailers" {
             let log = std::process::Command::new("git")
                 .args(["-C", &root, "log", "--all", "--pretty=%H%x00%B%x01"])

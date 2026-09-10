@@ -6040,9 +6040,9 @@ pub async fn declare_sensor_spec(
     }
     // Незнакомый род прежде молча становился `extract`: датчик объявляли одним,
     // он снимал другое и говорил «снято». Отказ называет допустимые роды.
-    const KINDS: [&str; 14] = ["extract", "files", "secret-fields", "declared-paths", "lines",
+    const KINDS: [&str; 15] = ["extract", "files", "secret-fields", "declared-paths", "lines",
                               "domain-vs-check", "contract-vs-schema", "contract-ops", "contract-body", "declared-lines", "contract-marks", "contract-head", "frozen-tree",
-                              "task-trailers"];
+                              "task-trailers", "holder-stub"];
     let how = if how.trim().is_empty() { "extract" } else { how };
     if !KINDS.contains(&how) {
         return Ok(json!({ "status": "unknown_how", "how": how,
@@ -6097,6 +6097,23 @@ pub async fn declare_sensor_spec(
 /// Причина обязательна: пара без неё неотличима от опечатки, и снять её потом
 /// будет нечем — ровно та беда, от которой заведена сама запись.
 /// Объявить, что колонку заполняет сервер, и назвать ЧЕМ.
+/// Объявленные держатели инварианта: требование и путь.
+///
+/// Нужны датчику: судить, настоящий ли держатель, можно только прочитав файл, а
+/// файл есть у клиента, не у сервера.
+pub async fn holders(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
+    let client = pool.get().await.expect("пул отдал соединение");
+    let rows = client
+        .query(
+            "SELECT requirement_id, path FROM project_requirement_holder
+              WHERE project_id = $1 ORDER BY requirement_id, path",
+            &[&project],
+        )
+        .await?;
+    Ok(json!({ "holders": rows.iter().map(|r| json!({
+        "requirement": r.get::<_, String>(0), "path": r.get::<_, String>(1) })).collect::<Vec<_>>() }))
+}
+
 pub async fn set_server_filled(
     pool: &Pool, project: &str, table: &str, column: &str, by: &str, why: &str,
     decided_by: &str, drop_it: bool,
@@ -8106,6 +8123,21 @@ pub async fn set_gate_item(
     // Отказ — только на ПЕРЕДАННУЮ пробу. Унаследованная, которая не разбирается,
     // — уже стоящая беда, и запрещать из-за неё правку запроса значит запирать
     // пункт в том виде, в котором он сломан.
+    // ВЛАДЕЛЕЦ БЫВАЕТ ТОЛЬКО У ПОДПИСНОГО ПУНКТА — так сказано правилом самой
+    // таблицы замеров. Дверь этого не знала и принимала владельца у запросного:
+    // пункт заводился, а ЗАМЕР ВСЕГО ГЕЙТА падал на первичной записи. Одна
+    // невнимательная строка роняла счёт целиком, и связь между ней и отказом
+    // приходилось искать глазами.
+    if owner.map(|o| !o.trim().is_empty()).unwrap_or(false) && kind != "signed" {
+        return Ok(json!({
+            "status": "owner_without_signature",
+            "why": format!(
+                "владелец бывает только у подписного пункта, а этот — «{kind}». \
+                 Запросный пункт судит запрос, и подписывать его некому; \
+                 с владельцем замер всего гейта откажет на правиле таблицы."),
+        }));
+    }
+
     // ЗАПРОС ТОЖЕ ОБЯЗАН РАЗБИРАТЬСЯ. Дверь проверяла пробу и принимала любой
     // запрос: пункт с непарным запросом молча отвечал «мерить нечем», и узнать
     // об этом можно было только самотестом. Поймано на себе — подстановка
