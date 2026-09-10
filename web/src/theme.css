@@ -3660,3 +3660,44 @@ button.chain-card:disabled { cursor: default; opacity: .55; }
  * стоять вровень с живыми ему незачем: щёлкнув, человек получит пустоту.
  */
 .rk.none { opacity: .45; }
+
+/* ─── полоса плиток ───────────────────────────────────────────────────── */
+.tilestrip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px;
+  max-width: var(--measure);
+  margin: 0 0 18px;
+}
+.ts { padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; }
+.ts-t { font-size: 11px; letter-spacing: .07em; text-transform: uppercase; color: var(--dim); }
+.ts-n { margin: 5px 0 6px; font-family: var(--mono, monospace); }
+.ts-n b { font-size: 19px; }
+.ts-n span { font-size: 11.5px; color: var(--dim); margin-left: 5px; }
+.ts-bar { display: flex; height: 5px; border-radius: 3px; overflow: hidden; background: var(--line); }
+.ts-done { background: var(--ok, #6ea86e); }
+.ts-open { background: var(--line); }
+/*
+ * «Не отвечается» — штриховка, а не третий цвет. Ровная заливка встала бы в
+ * один ряд с «сделано» и «открыто», а это не третья доля работы: это доля, про
+ * которую нельзя сказать ничего.
+ */
+.ts-unk { background: repeating-linear-gradient(45deg, var(--accent, #d8a657) 0 3px, transparent 3px 6px); }
+.ts-s { margin-top: 6px; font-size: 11.5px; color: var(--dim); font-family: var(--mono, monospace); }
+.ts-s em { font-style: normal; color: var(--accent, #d8a657); }
+
+/* ─── конвейер задач ──────────────────────────────────────────────────── */
+.pipe { max-width: var(--measure); }
+.pipe-rows { list-style: none; margin: 0; padding: 0; }
+.pipe-row {
+  display: grid;
+  grid-template-columns: 58px 168px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: baseline;
+  padding: 7px 4px;
+  border-bottom: 1px solid var(--line);
+}
+.pipe-n { font-family: var(--mono, monospace); font-size: 15px; text-align: right; }
+.pipe-t { font-size: 13px; }
+.pipe-s { font-size: 12px; color: var(--dim); }
+.pipe-u { font-size: 11.5px; color: var(--accent, #d8a657); white-space: nowrap; }

@@ -16,7 +16,6 @@ import { Gates } from "./Gates";
 import { Decisions } from "./Decisions";
 import { Proof } from "./Proof";
 import { Questions } from "./Questions";
-import { Movement } from "./Movement";
 import { Unknown } from "./Unknown";
 
 /**
@@ -42,7 +41,6 @@ const PAGES: { page: string; title: string; note: string; view: (id: string, wan
   { page: "requirements", title: "Требования", note: "и доказательства", view: (id) => <Requirements projectId={id} /> },
   { page: "users", title: "Пользователь", note: "путь и истории", view: (id) => <Users projectId={id} /> },
   { page: "read", title: "Документы", note: "читать", view: (id, want) => <Reader projectId={id} want={want} /> },
-  { page: "movement", title: "Движение", note: "куда дошли", view: (id) => <Movement projectId={id} /> },
   { page: "decisions", title: "Архитектура", note: "и отвергнутое", view: (id) => <Decisions projectId={id} /> },
   { page: "proof", title: "Доказательство", note: "чем закрыто", view: (id) => <Proof projectId={id} /> },
   { page: "questions", title: "Вопросы", note: "чем закрыт каждый", view: (id) => <Questions projectId={id} /> },

@@ -51,6 +51,20 @@ interface Step {
   touches?: string;
   why?: string;
 }
+interface Tile {
+  tile: string;
+  done: number;
+  open: number;
+  unknown: number;
+  percent?: number;
+  says?: string;
+}
+interface Step2 {
+  status: string;
+  title?: string;
+  reached?: number;
+  unknown?: number;
+}
 interface NextStep {
   at?: { ord?: number; question?: string; detail?: string[]; run?: string; owner?: string; side?: string } | null;
   says?: string;
@@ -95,17 +109,21 @@ export function Readiness({ projectId }: { projectId: string }): React.JSX.Eleme
         tool<{ phases: Phase[] }>(projectId, "phases"),
         tool<{ steps: Step[] }>(projectId, "process-state"),
         tool<NextStep>(projectId, "next-step"),
-      ]).then(([g, p, s, n]) => ({
+        tool<{ tiles: Tile[] }>(projectId, "progress"),
+        tool<{ pipeline: Step2[] }>(projectId, "pipeline"),
+      ]).then(([g, p, s, n, pr, pi]) => ({
         gates: g.gates ?? [],
         phases: p.phases ?? [],
         steps: s.steps ?? [],
         next: n,
+        tiles: pr.tiles ?? [],
+        pipeline: pi.pipeline ?? [],
       })),
     [projectId],
   );
 
   if (!live.data) return <p className="empty">Считаю готовность…</p>;
-  const { gates, phases, steps, next } = live.data;
+  const { gates, phases, steps, next, tiles, pipeline } = live.data;
   const byGate = new Map(gates.map((g) => [g.gate, g]));
 
   // Фаза, на которой стоим, — ПЕРВАЯ, чей гейт не пройден. Не «текущая по
@@ -171,6 +189,31 @@ export function Readiness({ projectId }: { projectId: string }): React.JSX.Eleme
         })}
       </div>
 
+      {/* ── Сколько прошли — три числа, никогда одно ────────────────────── */}
+      {tiles.length > 0 ? (
+        <div className="tilestrip">
+          {tiles.map((t) => (
+            <div key={t.tile} className="ts">
+              <div className="ts-t">{t.tile}</div>
+              <div className="ts-n">
+                <b>{t.done}</b>
+                <span>из {t.done + t.open + t.unknown}</span>
+              </div>
+              {/* Три числа, и третье — «не отвечается». Сложить его в любую
+                  сторону значит соврать в успокаивающую. */}
+              <div className="ts-bar" title={`${t.done} сделано · ${t.open} открыто · ${t.unknown} не отвечается`}>
+                <span className="ts-done" style={{ flexGrow: t.done || 0.001 }} />
+                <span className="ts-open" style={{ flexGrow: t.open || 0.001 }} />
+                <span className="ts-unk" style={{ flexGrow: t.unknown || 0.001 }} />
+              </div>
+              <div className="ts-s">
+                {t.unknown > 0 ? <em>{t.unknown} не отвечается</em> : t.says ?? `${t.percent ?? 0} %`}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
       {/* ── Что держит прямо сейчас ─────────────────────────────────────── */}
       {next?.at ? (
         <section className="holds">
@@ -210,6 +253,26 @@ export function Readiness({ projectId }: { projectId: string }): React.JSX.Eleme
 
       {/* ── Ступени лестницы, относящиеся к этой стороне ────────────────── */}
       <Ladder steps={steps} at={next?.at?.ord} />
+
+      {/* ── Конвейер задач ──────────────────────────────────────────────── */}
+      {pipeline.length > 0 ? (
+        <section className="pipe">
+          <h2 className="pick-h">
+            Конвейер задач
+            <span className="pick-g">каждая ступень — своё доказательство, а не отметка</span>
+          </h2>
+          <ol className="pipe-rows">
+            {pipeline.map((s2, n) => (
+              <li key={`${s2.status}-${n}`} className="pipe-row">
+                <span className="pipe-n">{s2.reached ?? 0}</span>
+                <span className="pipe-t">{s2.status}</span>
+                <span className="pipe-s">{s2.title ?? ""}</span>
+                {(s2.unknown ?? 0) > 0 ? <span className="pipe-u">{s2.unknown} не отвечается</span> : null}
+              </li>
+            ))}
+          </ol>
+        </section>
+      ) : null}
 
       {/* ── Гейт без фазы ───────────────────────────────────────────────── */}
       {loose.map((g) => (
