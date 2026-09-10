@@ -3725,3 +3725,55 @@ button.chain-card:disabled { cursor: default; opacity: .55; }
 .tog-c.bad { color: var(--bad, #c25b5b); }
 .tog-c.dim { color: var(--dim); }
 .tog-c i { font-style: normal; opacity: .75; font-size: 11px; }
+
+/* ─── правила: статья строкой, вес полоской ───────────────────────────── */
+.arts { list-style: none; margin: 10px 0 0; padding: 0; max-width: var(--measure); }
+.art-row { border-bottom: 1px solid var(--line); }
+.art-head {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) 76px 84px 42px 14px;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 9px 4px;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  text-align: left;
+  color: inherit;
+}
+.art-head:hover { background: color-mix(in srgb, var(--line) 30%, transparent); }
+.art-num { font-family: var(--mono, monospace); font-size: 12px; color: var(--dim); text-align: right; }
+.art-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.art-area { font-family: var(--mono, monospace); font-size: 11px; color: var(--dim); }
+/*
+ * Вес — ПОЛОСКОЙ. Статья с восемью десятками ссылок и статья с одной стояли
+ * одинаковыми числами в колонке, а разница между ними — это разница между
+ * правилом, которым живут, и правилом, о котором забыли.
+ */
+.art-w { height: 5px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.art-fill { display: block; height: 100%; background: var(--accent, #d8a657); }
+.art-n { font-family: var(--mono, monospace); font-size: 12px; color: var(--dim); text-align: right; }
+.art-caret { color: var(--dim); font-size: 11px; }
+.art-row.dead .art-num,
+.art-row.dead .art-title { color: var(--dim); }
+.art-row.dead .art-n { color: var(--bad, #c25b5b); }
+.art-open { padding: 4px 4px 18px 46px; }
+.art-text { max-width: 82ch; }
+.art-cited { margin-top: 14px; }
+.art-k { font-size: 11px; letter-spacing: .09em; text-transform: uppercase; color: var(--dim); margin-bottom: 7px; }
+.art-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.art-chip {
+  font-family: var(--mono, monospace);
+  font-size: 11.5px;
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: none;
+  color: var(--dim);
+  cursor: pointer;
+}
+.art-chip:hover { color: var(--accent, #d8a657); border-color: var(--accent, #d8a657); }
+.art-chip.off { cursor: default; text-decoration: line-through; opacity: .7; }
+.retired { max-width: var(--measure); margin-top: 26px; }
+.tabs .rows-search { flex: 1 1 260px; max-width: 420px; }

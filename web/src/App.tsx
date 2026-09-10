@@ -52,7 +52,7 @@ const PAGES: { page: string; title: string; note: string; view: (id: string, ctx
   { page: "unknown", title: "Не знаем", note: "пробелы", view: (id) => <Unknown projectId={id} /> },
   // Раздел — это тип ресурса, а не папка: у требования свои колонки, свои
   // фильтры и свои дыры, и общей таблицей документов их не показать.
-  { page: "rules", title: "Правила", note: "конституция", view: (id) => <Rules projectId={id} /> },
+  { page: "rules", title: "Правила", note: "конституция", view: (id, ctx) => <Rules projectId={id} onFind={ctx.onFind} /> },
   { page: "requirements", title: "Требования", note: "и доказательства", view: (id) => <Requirements projectId={id} /> },
   { page: "users", title: "Пользователь", note: "путь и истории", view: (id) => <Users projectId={id} /> },
   { page: "read", title: "Документы", note: "читать", view: (id, ctx) => <Reader projectId={id} want={ctx.want} /> },
