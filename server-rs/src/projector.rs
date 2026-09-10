@@ -6255,6 +6255,35 @@ pub async fn counts_sync(
     }))
 }
 
+/// Объявить вид обязательным для проекта — или снять это.
+///
+/// Объявление ОБЩЕЕ: минимальный набор документов один для всех, как гейты,
+/// фазы и лестница.
+pub async fn set_kind_required(
+    pool: &Pool, kind: &str, required: bool, why: &str,
+) -> Result<Value, tokio_postgres::Error> {
+    let client = pool.get().await.expect("пул отдал соединение");
+    if kind.trim().is_empty() {
+        return Ok(json!({ "status": "nameless", "why": "вид без имени не объявляется" }));
+    }
+    if required && why.trim().is_empty() {
+        return Ok(json!({ "status": "no_why", "why":
+            "не сказано, ПОЧЕМУ вид обязателен. Обязательность без довода нечем оспорить, \
+             и снять её потом будет не за что." }));
+    }
+    let n = client
+        .execute(
+            "UPDATE kind_layout SET spec = spec || jsonb_build_object('required', $2::boolean,
+                                                                      'required-why', $3::text)
+              WHERE name = $1",
+            &[&kind, &required, &why],
+        )
+        .await?;
+    Ok(json!({ "status": if n > 0 { "declared" } else { "no_kind" }, "kind": kind,
+               "required": required,
+               "means": "минимальный набор объявлен один раз и общий для всех проектов" }))
+}
+
 pub async fn holders(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
     let client = pool.get().await.expect("пул отдал соединение");
     let rows = client
