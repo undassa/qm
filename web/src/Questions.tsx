@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { loadEntityByName, loadSummary } from "./api";
 import { Live } from "./Live";
 import { useLive } from "./live";
+import { EntityDrawer } from "./EntityDrawer";
 
 /**
  * Вопросы: чем закрыт каждый.
@@ -11,7 +12,7 @@ import { useLive } from "./live";
  * не нашли** · **не сказано ничего**. Закрытый вопрос, о котором не сказано
  * ничего, закрыт по памяти — через месяц никто не назовёт, чем.
  */
-export function Questions({ projectId }: { projectId: string }): React.JSX.Element {
+export function Questions({ projectId, onFind }: { projectId: string; onFind?: (q: string) => void }): React.JSX.Element {
   const live = useLive(() => loadSummary(projectId, "question").then((d) => d.rows), [projectId]);
   const rows = live.data;
   const [chosenId, setChosenId] = useState<string>("");
@@ -40,21 +41,29 @@ export function Questions({ projectId }: { projectId: string }): React.JSX.Eleme
 
   return (
     <>
-      <Live at={live.at} again={live.again} />
-      <header className="head">
-        <h1>Вопросы</h1>
-        <p className="note">
-          Всего {rows.length} · открытых <b>{open}</b> · закрытых, о чьём ответе не сказано ничего — <b>{unsaid}</b>.
-          Последнее не «нет ответа», а «ответ не объявлен»: это разные вещи.
-        </p>
-        <div className="tabs">
-          {(["all", "open", "unsaid"] as const).map((k) => (
-            <button key={k} type="button" className={only === k ? "on" : ""} onClick={() => setOnly(k)}>
-              {k === "all" ? "все" : k === "open" ? "открытые" : "без объявленного ответа"}
-            </button>
-          ))}
+      <div className="head">
+        <div>
+          <h1>Вопросы</h1>
+          <div className="prov">чем закрыт каждый</div>
         </div>
-      </header>
+        <span className="prov">
+          <Live at={live.at} again={live.again} /> <b>{rows.length}</b> всего · открытых{" "}
+          <b className={open > 0 ? "bad-n" : ""}>{open}</b> · без объявленного ответа{" "}
+          <b className={unsaid > 0 ? "bad-n" : ""}>{unsaid}</b>
+        </span>
+      </div>
+
+      <p className="lede">
+        «Закрыт, о чьём ответе не сказано ничего» — не «нет ответа», а «ответ не объявлен»: это разные вещи.
+      </p>
+
+      <div className="tabs">
+        {(["open", "unsaid", "all"] as const).map((k) => (
+          <button key={k} type="button" className={only === k ? "on" : ""} onClick={() => setOnly(k)}>
+            {k === "all" ? "все" : k === "open" ? "открытые" : "без объявленного ответа"}
+          </button>
+        ))}
+      </div>
 
       <div className="split">
         <table className="rows">
@@ -96,6 +105,17 @@ export function Questions({ projectId }: { projectId: string }): React.JSX.Eleme
           )}
         </aside>
       </div>
+    {chosen ? (
+      <EntityDrawer
+        projectId={projectId}
+        kind="question"
+        id={chosen.id}
+        title={`Вопрос ${chosen.id}`}
+        subtitle={String(chosen["title"] ?? "")}
+        onClose={() => setChosenId("")}
+        onFind={onFind}
+      />
+    ) : null}
     </>
   );
 }

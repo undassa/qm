@@ -4,6 +4,7 @@ import { loadLinks, loadSummary, type LinkItem, type SummaryRow } from "./api";
 import { Provenance } from "./Provenance";
 import { Live } from "./Live";
 import { useLive } from "./live";
+import { EntityDrawer } from "./EntityDrawer";
 
 /**
  * Пользователь: путь, истории, области, экраны.
@@ -26,7 +27,7 @@ function phaseOf(raw: string): string {
   return m ? m[1]! : NO_PHASE;
 }
 
-export function Users({ projectId }: { projectId: string }): React.JSX.Element {
+export function Users({ projectId, onFind }: { projectId: string; onFind?: (q: string) => void }): React.JSX.Element {
   const live = useLive(
     () => Promise.all([loadSummary(projectId, "story"), loadSummary(projectId, "feature")])
             .then(([s, f]) => ({ stories: s.rows, features: f.rows })),
@@ -206,6 +207,17 @@ export function Users({ projectId }: { projectId: string }): React.JSX.Element {
         source="project_stories, project_features, связи требований и экранов"
         computed="колонка пути — по ведущему номеру фазы; сколько разных написаний за ней, сказано числом"
       />
+    {chosen ? (
+      <EntityDrawer
+        projectId={projectId}
+        kind="story"
+        id={chosen.id}
+        title={`История ${chosen.id}`}
+        subtitle={String(chosen["title"] ?? "")}
+        onClose={() => setChosenId("")}
+        onFind={onFind}
+      />
+    ) : null}
     </>
   );
 }

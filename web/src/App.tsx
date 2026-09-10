@@ -54,11 +54,11 @@ const PAGES: { page: string; title: string; note: string; view: (id: string, ctx
   // фильтры и свои дыры, и общей таблицей документов их не показать.
   { page: "rules", title: "Правила", note: "конституция", view: (id, ctx) => <Rules projectId={id} onFind={ctx.onFind} /> },
   { page: "requirements", title: "Требования", note: "и доказательства", view: (id) => <Requirements projectId={id} /> },
-  { page: "users", title: "Пользователь", note: "путь и истории", view: (id) => <Users projectId={id} /> },
+  { page: "users", title: "Пользователь", note: "путь и истории", view: (id, ctx) => <Users projectId={id} onFind={ctx.onFind} /> },
   { page: "read", title: "Документы", note: "читать", view: (id, ctx) => <Reader projectId={id} want={ctx.want} /> },
   { page: "decisions", title: "Архитектура", note: "и отвергнутое", view: (id) => <Decisions projectId={id} /> },
   { page: "proof", title: "Доказательство", note: "чем закрыто", view: (id) => <Proof projectId={id} /> },
-  { page: "questions", title: "Вопросы", note: "чем закрыт каждый", view: (id) => <Questions projectId={id} /> },
+  { page: "questions", title: "Вопросы", note: "чем закрыт каждый", view: (id, ctx) => <Questions projectId={id} onFind={ctx.onFind} /> },
   { page: "entities", title: "Сущности", note: "виды", view: (id) => <Entities projectId={id} /> },
   // Раздел БЕЗ проекта: он про то, что у проектов общее. `projectId` ему не
   // нужен — он спрашивает всех.

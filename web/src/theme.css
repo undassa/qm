@@ -3172,14 +3172,28 @@ button.chip.on span {
 .split.open { grid-template-columns: minmax(0, 1fr) 340px; }
 .scroll-x { overflow-x: auto; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); }
 table.rows { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+/*
+ * Ячейки дышат. Было по шесть точек по вертикали и по десять по горизонтали:
+ * строки в двадцать шесть точек читаются как сплошная сетка, глаз не находит
+ * начала строки и сбивается на соседнюю. Обзор плотных интерфейсов сходится на
+ * тридцати шести — сорока для таких таблиц, и это не про красоту: строка ниже
+ * этого перестаёт быть строкой.
+ */
 table.rows th {
   text-align: left; font-family: var(--mono); font-size: 10px; text-transform: uppercase;
-  letter-spacing: 0.06em; color: var(--muted); font-weight: 500; padding: 8px 10px;
+  letter-spacing: 0.06em; color: var(--muted); font-weight: 500; padding: 9px 14px;
   border-bottom: 1px solid var(--line-soft); white-space: nowrap; position: sticky; top: 0;
   background: var(--panel-2);
 }
+/*
+ * Крайние ячейки выровнены с остальной страницей, а не прижаты к рамке:
+ * заголовок раздела, проза и первая колонка таблицы обязаны начинаться на одной
+ * вертикали, иначе таблица выглядит вставленной из чужого места.
+ */
+table.rows th:first-child, table.rows td:first-child { padding-left: 4px; }
+table.rows th:last-child, table.rows td:last-child { padding-right: 4px; }
 table.rows th.n, table.rows td.n { text-align: right; font-variant-numeric: tabular-nums; }
-table.rows td { padding: 6px 10px; border-bottom: 1px solid var(--line-soft); }
+table.rows td { padding: 10px 14px; border-bottom: 1px solid var(--line-soft); vertical-align: baseline; }
 table.rows tr.row { cursor: pointer; }
 table.rows tr.row:hover td { background: var(--panel-2); }
 table.rows tr.row.on td { background: color-mix(in srgb, var(--ready) 10%, var(--panel)); }
