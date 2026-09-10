@@ -2477,9 +2477,24 @@ impl Mcp {
             .await
             .map_err(say("сверка выведенного"))?;
         let ms_generated = t.elapsed().as_millis() as u64;
+        // ЗАМЕР ГЕЙТОВ — ЧАСТЬЮ ПЕРЕСБОРКИ, а не отдельной командой. Дверь
+        // гейта отдаёт СОХРАНЁННОЕ, и это правильно: считать 124 пункта на
+        // каждое чтение дорого. Но сохранённое должно быть свежим.
+        //
+        // Пока замера здесь не было, каскад работал вхолостую: отметки
+        // пересчитывались, переоткрытия появлялись, а гейт отвечал вчерашним.
+        // Целую сессию я списывал это на «замер до синхронизации» и объяснял
+        // неверно — кэш был не отставанием, а тишиной.
+        let t = std::time::Instant::now();
+        let gates = crate::projector::measure_gates(&self.pool, &self.project)
+            .await
+            .map_err(say("замер гейтов"))?;
+        let ms_gates = t.elapsed().as_millis() as u64;
         Ok(json!({ "before": before, "subject": subject, "after": after, "generated": generated,
+                   "gates": gates,
                    "мс": { "сверка до": ms_before, "сущности": ms_subject,
-                           "проекции": ms_after, "выведенное": ms_generated } }))
+                           "проекции": ms_after, "выведенное": ms_generated,
+                           "гейты": ms_gates } }))
     }
 
     /// Запросы к таблицам этого сервера.
