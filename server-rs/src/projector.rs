@@ -8739,11 +8739,20 @@ async fn compute_next_step(
                 passed.push(ord);
                 continue;
             }
+            // НЕОТВЕЧАЕМАЯ СТУПЕНЬ НЕ БЫВАЕТ ТЕКУЩЕЙ. Прежде ручка говорила
+            // одновременно «вот твоя ступень» и «мерить её нечем»: агент, верящий
+            // первому, шёл делать работу, про которую вторая половина ответа
+            // сказала, что её сделать нельзя.
+            //
+            // Она остаётся в `unanswerable` со своей причиной — прятать её
+            // нельзя, — но текущей работой не объявляется.
             "unknown" | "unsigned" | "stale" => {
-                unanswerable.push(json!({ "ord": ord, "why": verdict.why, "question": question }));
+                unanswerable.push(json!({ "ord": ord, "why": verdict.why, "question": question,
+                                          "owner": owner, "touches": touches }));
                 if touches == "corpus" {
                     corpus_open = true;
                 }
+                continue;
             }
             _ => {
                 if touches == "corpus" {
@@ -8840,8 +8849,15 @@ async fn compute_next_step(
         // Поэтому рядом стоит счёт: сколько ступеней выполнено из скольких.
         // Два числа отвечают на два разных вопроса, и ни одно не выдаёт себя за
         // другое.
+        // НОМЕР СТУПЕНИ ЧИТАЕТСЯ КАК ПОЗИЦИЯ, А ОН ЕЮ НЕ ЯВЛЯЕТСЯ. `passed`
+        // несплошной — пятая, седьмая и восьмая могут быть пройдены при текущей
+        // четвёртой, — а `at.ord` рядом с `of: 13` читается как «4 из 13», и
+        // читается так всеми. Поэтому рядом едет счёт, который номером не
+        // притворяется: выполнено, неотвечаемо, осталось.
         "progress": json!({
             "met": passed.len(),
+            "unanswerable": unanswerable.len(),
+            "left": total_steps.saturating_sub(passed.len() + skipped.len() + unanswerable.len()),
             "of": total_steps,
             "skipped": skipped.len(),
             "why": "номер ступени — самая ранняя невыполненная, а не мера пройденного",
@@ -8888,7 +8904,45 @@ pub async fn measure_process(
                 &[&project],
             )
             .await?;
+        // СТАДИЯ ПЕРВОЙ СТРОКОЙ. На вопрос «где мы» отвечает фаза и состояние её
+        // гейта, а не номер ступени: порядок ступеней хорош для «что делать
+        // дальше», а «где мы» он отвечает не о том. Прежде `phases` знал и
+        // печатал, `next-step` молчал — две ручки об одном проекте в одну
+        // секунду.
+        let stage = client
+            .query_opt(
+                "SELECT ph.id, ph.title, ph.gate,
+                        (SELECT count(*) FROM project_gates g
+                          WHERE g.project_id = $1 AND g.phase = ph.gate
+                            AND g.result->>'computed' = 'failed') AS красных,
+                        (SELECT coalesce(sum(g.violations), 0) FROM project_gates g
+                          WHERE g.project_id = $1 AND g.phase = ph.gate
+                            AND g.result->>'computed' = 'failed') AS нарушений
+                   FROM phase ph
+                  WHERE ph.ord = (SELECT min(p2.ord) FROM phase p2
+                                   WHERE EXISTS (SELECT 1 FROM project_gates x
+                                                  WHERE x.project_id = $1 AND x.phase = p2.gate
+                                                    AND x.result->>'computed' <> 'passed'))",
+                &[&project],
+            )
+            .await?;
         if let Some(o) = answer.as_object_mut() {
+            o.insert(
+                "stage".into(),
+                match &stage {
+                    Some(r) => json!({
+                        "phase": r.get::<_, String>(0),
+                        "title": r.get::<_, String>(1),
+                        "gate": r.get::<_, String>(2),
+                        "gateState": if r.get::<_, i64>(3) > 0 { "failed" } else { "open" },
+                        "redItems": r.get::<_, i64>(3),
+                        "violations": r.get::<_, i64>(4),
+                        "why": "это ответ на «где мы». Ступень ниже — ответ на «что делать дальше», \
+                                и порядок у неё свой",
+                    }),
+                    None => json!({ "why": "все фазы пройдены: гейт не держит ни одна" }),
+                },
+            );
             o.insert(
                 "redGate".into(),
                 if rows.is_empty() {

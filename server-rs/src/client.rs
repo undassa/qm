@@ -452,15 +452,13 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
                     continue;
                 }
                 let full = format!("{root}/{path}");
-                let Ok(text) = std::fs::read_to_string(&full) else {
+                // Файл читается ЗДЕСЬ, судит `holder_verdict`: «пути нет» — такая
+                // же форма заглушки, как пустой файл, и решать её надо там же,
+                // где решаются остальные три, иначе проверить её будет негде.
+                let text = std::fs::read_to_string(&full).ok();
+                if let Some(form) = holder_verdict(text.as_deref(), &req) {
                     facts.push(json!({ "name": format!("{req} → {path}"),
-                        "detail": "держатель назван, а файла нет в дереве" }));
-                    continue;
-                };
-                match holder_verdict(&text, &req) {
-                    Some(form) => facts.push(json!({ "name": format!("{req} → {path}"),
-                        "detail": format!("держатель — заглушка: {form}") })),
-                    None => {}
+                        "detail": format!("держатель — заглушка: {form}") }));
                 }
             }
             let (out, _) = door.call("code-facts-push", &json!({ "kind": fact, "facts": facts }))?;
@@ -1283,7 +1281,13 @@ pub fn install(door: &Door, into: &str) -> Result<Value, String> {
 /// в соседней функции стоит `todo!`.
 ///
 /// `None` — держатель настоящий.
-fn holder_verdict(text: &str, req: &str) -> Option<String> {
+fn holder_verdict(text: Option<&str>, req: &str) -> Option<String> {
+    // ПУТИ НЕТ — самая дешёвая форма и самая частая: держатель объявлен, а файла
+    // в дереве нет. Прежде она решалась в стороне от остальных трёх, и проверить
+    // её было негде.
+    let Some(text) = text else {
+        return Some("пути нет: держатель объявлен, а файла в дереве не существует".to_owned());
+    };
     #[derive(Default)]
     struct Элемент {
         docs: String,
@@ -1416,26 +1420,39 @@ pub fn unrelated() -> u8 { 1 }
 
     #[test]
     fn докблок_при_проверке_держит() {
-        assert_eq!(holder_verdict(С_ПРОВЕРКОЙ, "FR-ESC-06"), None,
+        assert_eq!(holder_verdict(Some(С_ПРОВЕРКОЙ), "FR-ESC-06"), None,
                    "проверка заглушкой не бывает, а чужой `todo!` рядом ничего не значит");
     }
 
     #[test]
     fn тот_же_файл_без_проверки_красен() {
-        assert!(holder_verdict(БЕЗ_ПРОВЕРКИ, "FR-ESC-06").is_some());
+        assert!(holder_verdict(Some(БЕЗ_ПРОВЕРКИ), "FR-ESC-06").is_some());
     }
 
     #[test]
     fn шапка_модуля_ничего_не_держит() {
-        let v = holder_verdict(ТОЛЬКО_ШАПКА, "FR-ESC-06");
+        let v = holder_verdict(Some(ТОЛЬКО_ШАПКА), "FR-ESC-06");
         assert!(v.as_deref().map(|s| s.contains("шапкой")).unwrap_or(false), "{v:?}");
+    }
+
+    #[test]
+    fn пути_нет_это_заглушка() {
+        // Проба из просьбы: держатель на `crates/tot-nowhere/src/lib.rs`.
+        let v = holder_verdict(None, "FR-116");
+        assert!(v.as_deref().map(|s| s.contains("пути нет")).unwrap_or(false), "{v:?}");
+    }
+
+    #[test]
+    fn пустой_файл_это_заглушка() {
+        let v = holder_verdict(Some("//! Только шапка.\n"), "FR-116");
+        assert!(v.is_some(), "файл без единого элемента прошёл");
     }
 
     #[test]
     fn докблок_не_выпадает_вместе_с_комментарием() {
         // Первая редакция роняла `///` фильтром `starts_with("//")`, и требование,
         // названное докблоком, считалось не названным нигде.
-        let v = holder_verdict(С_ПРОВЕРКОЙ, "FR-ESC-06");
+        let v = holder_verdict(Some(С_ПРОВЕРКОЙ), "FR-ESC-06");
         assert!(v.is_none(), "докблок снова не читается: {v:?}");
     }
 }
