@@ -189,7 +189,28 @@ pub struct Pair {
     pub detail: String,
 }
 
-pub fn pair(enums: &[Enum], checks: &[CheckSet], forced: &[(&str, &str)]) -> Vec<Pair> {
+/// Закрыто ли множество `CHECK` СЛОВАРЁМ КОНТРАКТА.
+///
+/// Тот же довод, которым пользуется `check_values_without_path`: множество,
+/// пересекающееся со словарём по значениям, и есть этот словарь. Вынесено в одно
+/// место, чтобы два правила одного датчика не расходились в том, что считают
+/// источником, — а они расходились, и цена была восемь исключений.
+pub fn covered_by_contract(s: &CheckSet, contract: &[(String, Vec<String>)]) -> Option<String> {
+    for (name, vals) in contract {
+        let common = vals.iter().filter(|v| s.values.contains(v)).count();
+        if common >= 2 || (common == 1 && s.values.len() == 1) {
+            return Some(name.clone());
+        }
+    }
+    None
+}
+
+pub fn pair(
+    enums: &[Enum],
+    checks: &[CheckSet],
+    contract: &[(String, Vec<String>)],
+    forced: &[(&str, &str)],
+) -> Vec<Pair> {
     let inter = |a: &[String], b: &[String]| -> Vec<String> {
         a.iter().filter(|x| b.contains(x)).cloned().collect()
     };
@@ -281,12 +302,61 @@ pub fn pair(enums: &[Enum], checks: &[CheckSet], forced: &[(&str, &str)]) -> Vec
         if paired_set.contains(&s.at.as_str()) {
             continue;
         }
+        // ИСТОЧНИКОМ БЫВАЕТ И КОНТРАКТ. Правило принимало один источник —
+        // перечисление домена, — а сосед по тому же датчику принимал два. На
+        // восьми находках из девяти словарь стоял в контракте ДОСЛОВНО тем же
+        // составом, и врезки миграций называли контракт источником своими
+        // словами. Завести перечисление в домене ради правила значило бы
+        // поставить второе место для одного слова и мёртвый тип.
+        if let Some(schema) = covered_by_contract(s, contract) {
+            out.push(Pair {
+                name: format!("{} ↔ {}", schema, s.at),
+                detail: format!("сходятся со словарём контракта, значений {}", s.values.len()),
+            });
+            continue;
+        }
         out.push(Pair {
             name: s.at.clone(),
-            detail: format!("множество CHECK без перечисления домена ({})", s.file),
+            detail: format!("множество CHECK без перечисления домена и без словаря контракта ({})",
+                            s.file),
         });
     }
     out
+}
+
+#[cfg(test)]
+mod источник {
+    use super::{covered_by_contract, CheckSet};
+
+    fn множество(values: &[&str]) -> CheckSet {
+        CheckSet {
+            at: "signal_sources.kind".into(),
+            values: values.iter().map(|v| (*v).to_owned()).collect(),
+            file: "0003.sql".into(),
+        }
+    }
+
+    #[test]
+    fn словарь_контракта_закрывает_множество() {
+        let c = vec![("Source.kind".to_owned(),
+                      vec!["push".to_owned(), "pull".to_owned(), "manual".to_owned()])];
+        assert_eq!(covered_by_contract(&множество(&["push", "pull", "manual"]), &c).as_deref(),
+                   Some("Source.kind"));
+    }
+
+    #[test]
+    fn чужой_словарь_не_закрывает() {
+        let c = vec![("Role.kind".to_owned(), vec!["owner".to_owned(), "member".to_owned()])];
+        assert!(covered_by_contract(&множество(&["push", "pull", "manual"]), &c).is_none());
+    }
+
+    #[test]
+    fn одно_значение_совпадает_только_с_одиночным_множеством() {
+        let c = vec![("Source.kind".to_owned(), vec!["push".to_owned(), "x".to_owned()])];
+        // Одно общее значение из трёх — совпадение, а не словарь.
+        assert!(covered_by_contract(&множество(&["push", "pull", "manual"]), &c).is_none());
+        assert!(covered_by_contract(&множество(&["push"]), &c).is_some());
+    }
 }
 
 #[cfg(test)]
@@ -344,7 +414,7 @@ CREATE TABLE IF NOT EXISTS escalation_executions (
     fn divergence_is_named_in_both_directions() {
         let e = enums_of(RS, "x.rs");
         let c = checks_of(SQL, "0001.sql");
-        let p = pair(&e, &c, &[]);
+        let p = pair(&e, &c, &[], &[]);
         let drift = p.iter().find(|x| x.name.contains('↔')).expect("пара нашлась");
         assert!(drift.detail.contains("только в схеме stopped"), "вышло: {}", drift.detail);
     }
@@ -1258,7 +1328,7 @@ pub fn check_values_without_path(
 ) -> Vec<Pair> {
     // Пара «перечисление ↔ множество» уже считается: берём её же, чтобы два
     // правила не расходились в том, что с чем спарено.
-    let paired = pair(enums, checks, forced);
+    let paired = pair(enums, checks, contract, forced);
     let mut out = Vec::new();
     for s in checks {
         let mut paths: std::collections::HashSet<&str> = Default::default();

@@ -693,7 +693,13 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
                 .filter_map(|p| p.split_once('='))
                 .map(|(a, b)| (a.trim(), b.trim()))
                 .collect();
-            let pairs = crate::repo_corpus::pair(&enums, &checks, &forced);
+            let contract_enums_early = files
+                .iter()
+                .filter(|f| f.ends_with(".yaml") || f.ends_with(".yml"))
+                .filter_map(|f| std::fs::read_to_string(f).ok())
+                .map(|t| crate::repo_corpus::contract_enums(&crate::yaml::parse(&t)))
+                .fold(Vec::new(), |mut a, b| { a.extend(b); a });
+            let pairs = crate::repo_corpus::pair(&enums, &checks, &contract_enums_early, &forced);
             // Тем же проходом — значения без пути: они опираются на ту же пару,
             // и считать их отдельно значило бы завести вторую правду о паре.
             let checks_tables: Vec<crate::repo_corpus::Table> = crate::repo_corpus::schema_of(
