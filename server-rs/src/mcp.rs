@@ -592,6 +592,19 @@ impl Mcp {
                 };
             }
         }
+        // ИМЯ РУЧКИ, СОВПАВШЕЕ С ИМЕНЕМ ВИДА, разрешается доводом `kind`.
+        //
+        // Три вида зовутся так же, как разборные ручки: `coverage`, `claims`,
+        // `goals`. `mh call coverage` отдавала разбор, а документ того же имени
+        // достать было нечем: какой из двух ответов придёт, решал список в коде,
+        // и спросить об этом было негде. Теперь `kind=coverage` значит «мне
+        // документ», и это работает у любого имени, а не только у столкнувшихся.
+        if args.get("kind").and_then(|v| v.as_str()) == Some(name) && self.kinds.get(name).is_some() {
+            return match entities::entity(&self.pool, &self.kinds, p, name, id).await {
+                Ok(v) => ok(v),
+                Err(e) => refusal(e),
+            };
+        }
         if !reserved && self.kinds.get(name).is_some() {
             return match entities::entity(&self.pool, &self.kinds, p, name, id).await {
                 Ok(v) if args.get("brief").map(|b| b == "true" || b == true).unwrap_or(false) => {
