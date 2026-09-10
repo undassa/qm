@@ -3,6 +3,7 @@ import { useState } from "react";
 import { loadSummary } from "./api";
 import { Live } from "./Live";
 import { useLive } from "./live";
+import { Chain } from "./Chain";
 
 /**
  * Доказательство: чем закрыто каждое требование.
@@ -16,12 +17,16 @@ export function Proof({ projectId }: { projectId: string }): React.JSX.Element {
   const rows = live.data;
   const [only, setOnly] = useState<"all" | "bare">("bare");
   const [query, setQuery] = useState("");
+  /** Имена, выбранные щелчком по схеме: показывается ровно этот десяток. */
+  const [picked, setPicked] = useState<string[] | null>(null);
 
   if (!rows) return <p className="empty">Читаю требования…</p>;
   const bare = rows.filter((r) => Number(r["checks"] ?? 0) === 0);
   const q = query.trim().toLowerCase();
-  const shown = (only === "bare" ? bare : rows)
-    .filter((r) => !q || r.id.toLowerCase().includes(q) || String(r.title).toLowerCase().includes(q));
+  const base = picked ? rows.filter((r) => picked.includes(r.id)) : only === "bare" ? bare : rows;
+  const shown = base.filter(
+    (r) => !q || r.id.toLowerCase().includes(q) || String(r.title).toLowerCase().includes(q),
+  );
 
   return (
     <>
@@ -33,11 +38,18 @@ export function Proof({ projectId }: { projectId: string }): React.JSX.Element {
           Требование без проверки ничем не закрыто, и зелёное на нём значит лишь, что никто не смотрел.
         </p>
         <div className="tabs">
-          <button type="button" className={only === "bare" ? "on" : ""} onClick={() => setOnly("bare")}>без проверок</button>
-          <button type="button" className={only === "all" ? "on" : ""} onClick={() => setOnly("all")}>все</button>
+          <button type="button" className={only === "bare" ? "on" : ""} onClick={() => { setOnly("bare"); setPicked(null); }}>без проверок</button>
+          <button type="button" className={only === "all" ? "on" : ""} onClick={() => { setOnly("all"); setPicked(null); }}>все</button>
         </div>
         <input type="search" placeholder="имя или текст" value={query} onChange={(e) => setQuery(e.target.value)} />
       </header>
+
+      <Chain rows={rows} onPick={(ids) => setPicked(ids)} />
+      {picked ? (
+        <button type="button" className="fold" onClick={() => setPicked(null)}>
+          ✕ показаны {picked.length} выбранных схемой — снять отбор
+        </button>
+      ) : null}
 
       <table className="rows">
         <thead><tr><th>Требование</th><th>Вид</th><th>Проверок</th><th>Историй</th><th>Задач</th><th>Потребностей</th></tr></thead>
