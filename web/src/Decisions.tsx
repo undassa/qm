@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { loadEntityByName, loadLinks, loadSummary, type LinkItem } from "./api";
 import { Live } from "./Live";
 import { useLive } from "./live";
+import { useLimit } from "./More";
 
 /**
  * Архитектура: решения и то, что они ОТВЕРГЛИ.
@@ -34,9 +35,18 @@ export function Decisions({ projectId }: { projectId: string }): React.JSX.Eleme
       .catch(() => setLinks({}));
   }, [projectId, chosenId]);
 
-  if (!rows) return <p className="empty">Читаю решения…</p>;
   const q = query.trim().toLowerCase();
-  const shown = rows.filter((r) => !q || r.id.toLowerCase().includes(q) || String(r.title).toLowerCase().includes(q));
+  const shown = (rows ?? []).filter(
+    (r) => !q || r.id.toLowerCase().includes(q) || String(r.title).toLowerCase().includes(q),
+  );
+  // Сто семьдесят одно решение — почти шесть тысяч точек по высоте.
+  // Показывается часть, скрытое называется числом.
+  //
+  // Хук стоит ДО раннего возврата: React считает хуки по порядку, и хук за
+  // `return` исчезает на первой отрисовке без данных — раздел падает целиком.
+  const { limit, more } = useLimit(shown.length);
+
+  if (!rows) return <p className="empty">Читаю решения…</p>;
   const noAlternatives = rows.filter((r) => Number(r["alternatives"] ?? 0) === 0).length;
 
   return (
@@ -57,7 +67,7 @@ export function Decisions({ projectId }: { projectId: string }): React.JSX.Eleme
             <tr><th>Решение</th><th>Состояние</th><th>Отвергнуто</th><th>Связей</th></tr>
           </thead>
           <tbody>
-            {shown.map((r) => (
+            {shown.slice(0, limit).map((r) => (
               <tr key={r.id} className={r.id === chosenId ? "on" : ""} onClick={() => setChosenId(r.id)}>
                 <td><code>{r.id}</code> {String(r.title)}</td>
                 <td>{String(r["status"] ?? "")}</td>
@@ -67,6 +77,7 @@ export function Decisions({ projectId }: { projectId: string }): React.JSX.Eleme
             ))}
           </tbody>
         </table>
+        {more}
 
         <aside className="panel">
           {!chosen ? (
@@ -92,6 +103,8 @@ export function Decisions({ projectId }: { projectId: string }): React.JSX.Eleme
       </div>
     </>
   );
+  // Сто семьдесят одно решение — почти шесть тысяч точек по высоте.
+  // Показывается часть, скрытое называется числом.
 }
 
 /**
