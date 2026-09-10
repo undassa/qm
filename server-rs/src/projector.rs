@@ -6539,6 +6539,126 @@ pub async fn set_kind_projection(
                "means": "объявление ОБЩЕЕ: чем вид становится — одно для всех проектов" }))
 }
 
+/// Дерево связанного: от одного документа — всё, что с ним связано, по записям.
+///
+/// Замысел набора: сущности лежат по своим таблицам, а документы из них
+/// собираются. `srs` — не текст про требования, это 306 требований. Значит от
+/// любого документа можно дойти до всех связанных, и ходить надо по записям.
+///
+/// Ребро строится так: документ А называет имя, у имени есть определяющий
+/// документ Б — значит А зависит от Б. Роль здесь обязательна: без неё Б был
+/// бы любым из двадцати говорящих, а не тем одним, где имя написано.
+///
+/// Замер на `myack`: от `srs` первый уровень — `strs` через 77 потребностей и
+/// `test-cases` через 19 проверок; второй — сорок документов.
+pub async fn tree(
+    pool: &Pool, project: &str, kind: &str, name: &str, depth: i32,
+) -> Result<Value, tokio_postgres::Error> {
+    let client = pool.get().await.expect("пул отдал соединение");
+    // Глубина ограничена: на четвёртом шаге обход накрывает почти весь набор, и
+    // ответ «связано всё» не отвечает ни на один вопрос.
+    let depth = depth.clamp(1, 4);
+    if client
+        .query_opt(
+            "SELECT 1 FROM project_documents WHERE project_id = $1 AND entity_kind = $2 AND entity_name = $3",
+            &[&project, &kind, &name],
+        )
+        .await?
+        .is_none()
+    {
+        return Ok(json!({ "status": "no_document", "kind": kind, "name": name,
+            "why": "такого документа в наборе нет: дерево строится от записи, а не от имени" }));
+    }
+    let rows = client
+        .query(
+            "WITH RECURSIVE шаг AS (
+                 SELECT $2::text AS kind, $3::text AS name, 0 AS depth,
+                        ARRAY[$2 || '/' || $3] AS путь,
+                        ''::text AS parent_kind, ''::text AS parent_name
+                 UNION ALL
+                 SELECT b.entity_kind, b.entity_name, s.depth + 1,
+                        s.путь || (b.entity_kind || '/' || b.entity_name),
+                        s.kind, s.name
+                   FROM шаг s
+                   JOIN named_id_role a
+                     ON a.project_id = $1 AND a.entity_kind = s.kind AND a.entity_name = s.name
+                   JOIN named_id_role b
+                     ON b.project_id = $1 AND b.said_id = a.said_id AND b.role = 'defines'
+                  WHERE s.depth < $4
+                    AND NOT ((b.entity_kind || '/' || b.entity_name) = ANY(s.путь)))
+             SELECT kind, name, min(depth) AS depth,
+                    (array_agg(parent_kind ORDER BY depth))[1] AS parent_kind,
+                    (array_agg(parent_name ORDER BY depth))[1] AS parent_name
+               FROM шаг GROUP BY kind, name ORDER BY min(depth), kind, name",
+            &[&project, &kind, &name, &depth],
+        )
+        .await?;
+
+    // Чем ребро держится: имена, из-за которых родитель дошёл до ребёнка.
+    // Без них ответ «srs связан с strs» ничего не даёт: связь надо открыть.
+    let через = client
+        .query(
+            "SELECT a.entity_kind, a.entity_name, b.entity_kind, b.entity_name,
+                    count(DISTINCT a.said_id)::bigint, (array_agg(DISTINCT a.said_id))[1:3]
+               FROM named_id_role a
+               JOIN named_id_role b
+                 ON b.project_id = a.project_id AND b.said_id = a.said_id AND b.role = 'defines'
+              WHERE a.project_id = $1
+                AND (b.entity_kind, b.entity_name) IS DISTINCT FROM (a.entity_kind, a.entity_name)
+              GROUP BY 1, 2, 3, 4",
+            &[&project],
+        )
+        .await?;
+    let mut ребро: std::collections::HashMap<(String, String, String, String), (i64, Vec<String>)> =
+        std::collections::HashMap::new();
+    for r in &через {
+        ребро.insert(
+            (r.get(0), r.get(1), r.get(2), r.get(3)),
+            (r.get(4), r.get::<_, Vec<String>>(5)),
+        );
+    }
+
+    // Сборка в дерево: у каждого узла записан родитель, которым до него дошли
+    // ПЕРВЫМ — самым коротким путём. Документ, до которого ведёт двадцать
+    // дорог, стоит в ответе один раз.
+    let mut дети: std::collections::HashMap<(String, String), Vec<Value>> =
+        std::collections::HashMap::new();
+    let mut узлов = 0usize;
+    for r in rows.iter().rev() {
+        let (k, n): (String, String) = (r.get(0), r.get(1));
+        let d: i32 = r.get(2);
+        if d == 0 {
+            continue;
+        }
+        узлов += 1;
+        let (pk, pn): (String, String) = (r.get(3), r.get(4));
+        let (сколько, примеры) = ребро
+            .get(&(pk.clone(), pn.clone(), k.clone(), n.clone()))
+            .cloned()
+            .unwrap_or((0, Vec::new()));
+        let свои = дети.remove(&(k.clone(), n.clone())).unwrap_or_default();
+        let mut узел = serde_json::Map::new();
+        узел.insert("kind".into(), json!(k));
+        узел.insert("name".into(), json!(n));
+        узел.insert("depth".into(), json!(d));
+        узел.insert("via".into(), json!(сколько));
+        узел.insert("names".into(), json!(примеры));
+        узел.insert("by".into(), json!(format!("mh call {k} id={n}")));
+        if !свои.is_empty() {
+            узел.insert("children".into(), json!(свои));
+        }
+        дети.entry((pk, pn)).or_default().push(Value::Object(узел));
+    }
+    Ok(json!({
+        "root": { "kind": kind, "name": name },
+        "depth": depth,
+        "documents": узлов,
+        "tree": дети.remove(&(kind.to_owned(), name.to_owned())).unwrap_or_default(),
+        "means": "ребро: этот документ называет имя, которое написано в том. \
+                  Связь по записям, глубина ограничена четырьмя шагами",
+    }))
+}
+
 pub async fn holders(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
     let client = pool.get().await.expect("пул отдал соединение");
     let rows = client

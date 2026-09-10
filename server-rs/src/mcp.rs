@@ -593,6 +593,11 @@ impl Mcp {
                 "holds": json!({"type":"array","items":{"type":"string"},
                     "description":"для container: таблицы, где лежат его сущности — проверяются по entity_kind"}) },
                 "required": ["kind", "projection"] } }));
+        tools.push(json!({ "name": "tree", "description": "дерево связанного: от одного документа всё, с чем он связан, по записям связей",
+            "inputSchema": { "type": "object", "properties": { "kind": s("вид документа, например srs"),
+                "name": s("имя документа; у одиночного вида пусто"),
+                "depth": json!({"type":"integer","description":"глубина обхода, 1..4; по умолчанию 2"}) },
+                "required": ["kind"] } }));
         tools.push(json!({ "name": "holders", "description": "объявленные держатели инварианта: требование и путь",
             "inputSchema": { "type": "object", "properties": {} } }));
         tools.push(json!({ "name": "column-server-filled", "description": "колонку заполняет сервер, и названо чем: правила входа её больше не спрашивают",
@@ -682,7 +687,7 @@ impl Mcp {
         const RESERVED: &[&str] = &[
             "method-set", "gate-item-set", "question-holders", "preflight-push", "worktree-push",
             "sensor-specs", "scheme-terms", "frozen-trees", "addresses-declared", "tree-declared", "donors", "skills-push", "skills", "agents", "code-facts-push", "code-facts", "summary", "links-of", "retired-terms", "order", "gate-measure", "gate-item-waive", "gate-selftest", "gate-sign", "links-rewrite", "links-retarget", "reparse", "screen-area-set", "skill-set", "skills-paths", "version-freeze", "version-delta", "generated-check", "principal-allow", "principals", "author-set", "authors", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "step-selftest", "version-close", "phase-gate-set", "exception-set", "next-step", "process-state", "statuses", "task-status", "status-anomaly", "pipeline", "waves", "phases", "coverage", "blocks", "history", "at-revision", "process-history", "progress",
-            "kinds", "kinds-due", "readiness-gaps", "declared-unwritten", "blame-set", "doors", "derived-copy-set", "field-column-alias", "column-server-filled", "holders", "counts-sync", "kind-required", "kind-projection", "sections", "section", "backlinks", "search", "put",
+            "kinds", "kinds-due", "readiness-gaps", "declared-unwritten", "blame-set", "doors", "derived-copy-set", "field-column-alias", "column-server-filled", "holders", "counts-sync", "kind-required", "kind-projection", "tree", "sections", "section", "backlinks", "search", "put",
             "put-section", "rm", "document-add", "reproject", "sweep", "gate", "next-task", "blockers", "events",
             "norm-versions", "measurements", "plan", "readiness", "requirements-of",
             "tasks-of", "preflight-queue", "claims", "exceptions",
@@ -966,6 +971,15 @@ impl Mcp {
                 let holds = list(&args, "holds");
                 match crate::projector::set_kind_projection(&self.pool, kind_arg,
                         args.get("projection").and_then(|v| v.as_str()).unwrap_or(""), &holds).await {
+                    Ok(v) => ok(v),
+                    Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
+                }
+            }
+            "tree" => {
+                let name = args.get("name").and_then(|v| v.as_str())
+                    .or(id).unwrap_or("");
+                match crate::projector::tree(&self.pool, p, kind_arg, name,
+                        num(&args, "depth").unwrap_or(2) as i32).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
                 }
