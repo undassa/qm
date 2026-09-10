@@ -1594,6 +1594,11 @@ ALTER TABLE gate_item ADD COLUMN IF NOT EXISTS probe_ok boolean;
 -- Ровно тот класс, против которого в наборе написано «пустой список вместо
 -- ответа врёт», — и он сработал на самом харнесе: сто пятьдесят четыре нарушения
 -- ушли молча, когда из плана пропали красные задачи.
+-- ПРОГОН ВЕРСИИ. Прогоны раскладывались по имени: задачные и этапные, а всё
+-- прочее уходило в `_ => continue` БЕЗ ЕДИНОГО СЛОВА. Документ `run` с именем
+-- `v1` не появлялся в наборе, ошибки не было, счётчик не менялся — тот же род
+-- молчания, который вычищен из подачи фактов.
+ALTER TABLE project_runs_log ADD COLUMN IF NOT EXISTS is_version boolean NOT NULL DEFAULT false;
 ALTER TABLE gate_item ADD COLUMN IF NOT EXISTS subject_query text NOT NULL DEFAULT '';
 ALTER TABLE gate_item ADD COLUMN IF NOT EXISTS subject_why text NOT NULL DEFAULT '';
 ALTER TABLE project_gates ADD COLUMN IF NOT EXISTS probe_ok boolean;

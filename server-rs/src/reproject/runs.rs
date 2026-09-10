@@ -14,6 +14,9 @@ use std::collections::{HashMap, HashSet};
 /// (`60-runs/v1/M0/M0-T1.md`), а каталог говорил то же, что этап.
 static RUN_OF_TASK: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^([MV]\d+)-T[0-9a-z]+$").expect("образец прогона задачи"));
+/// Прогон ВЕРСИИ: тем же образцом, каким объявлен вид `version`.
+static RUN_OF_VERSION: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^(v\d+)$").expect("образец прогона версии"));
 static RUN_OF_MILESTONE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^([MV]\d+)$").expect("образец прогона этапа"));
 /// Заголовки разделов хранятся без разметки, поэтому обратных кавычек в них нет.
@@ -170,16 +173,25 @@ pub async fn project(
         }
     }
 
-    let mut runs: Vec<(String, String, String, String, String, String, bool, bool, i32)> = Vec::new();
+    let mut runs: Vec<(String, String, String, String, String, String, bool, bool, i32, bool)> = Vec::new();
     for e in &named {
         if e.0 != "run" {
             continue;
         }
         let task = RUN_OF_TASK.captures(&e.1);
         let milestone = if task.is_some() { None } else { RUN_OF_MILESTONE.captures(&e.1) };
-        let (id, milestone_id, is_milestone) = match (&task, &milestone) {
-            (Some(t), _) => (e.1.clone(), t[1].to_owned(), false),
-            (None, Some(m)) => (e.1.clone(), m[1].to_owned(), true),
+        let ver = if task.is_some() || milestone.is_some() { None } else { RUN_OF_VERSION.captures(&e.1) };
+        let (id, milestone_id, is_milestone, is_version) = match (&task, &milestone, &ver) {
+            (Some(t), _, _) => (e.1.clone(), t[1].to_owned(), false, false),
+            (None, Some(m), _) => (e.1.clone(), m[1].to_owned(), true, false),
+            // Прогон ВЕРСИИ: этап у него не один, и графа этапа остаётся пустой.
+            (None, None, Some(_)) => (e.1.clone(), String::new(), false, true),
+            // НЕ ПОДОШЛО НИ ПОДО ЧТО — это находка, а не пустое место. Документ
+            // заведён и пропущен; молчание здесь неотличимо от «его не писали».
+            // НЕ ПОДОШЛО НИ ПОДО ЧТО — документ заведён и в набор не попал.
+            // Ловит это правило `run-name-known`: сравнивает документы прогонов с
+            // тем, что легло в набор, и называет разницу. Счётчик внутри
+            // проекции знал бы это молча.
             _ => continue,
         };
         let version = milestone_version.get(&milestone_id).cloned().unwrap_or_default();
@@ -194,6 +206,7 @@ pub async fn project(
             is_milestone,
             list.iter().any(|t| t.trim() == LEFT_OPEN),
             list.len() as i32,
+            is_version,
         ));
     }
 
@@ -230,12 +243,13 @@ pub async fn project(
         .await?;
     }
     tx.execute("DELETE FROM project_runs_log WHERE project_id = $1", &[&project]).await?;
-    for (id, title, kind, name, version, milestone, is_milestone, left_open, sections) in &runs {
+    for (id, title, kind, name, version, milestone, is_milestone, left_open, sections, is_version) in &runs {
         tx.execute(
             "INSERT INTO project_runs_log(project_id, id, title, entity_kind, entity_name, version,
-                                          milestone, is_milestone, left_open, sections)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
-            &[&project, id, title, kind, name, version, milestone, is_milestone, left_open, sections],
+                                          milestone, is_milestone, left_open, sections, is_version)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+            &[&project, id, title, kind, name, version, milestone, is_milestone, left_open, sections,
+              is_version],
         )
         .await?;
     }
