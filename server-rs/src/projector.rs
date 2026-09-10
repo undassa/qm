@@ -7222,6 +7222,139 @@ pub async fn set_kind_reopens(
     Ok(json!({ "status": "declared", "kind": kind, "reopens": false }))
 }
 
+/// Переименовать сущность во ВСЁМ наборе.
+///
+/// Имена приехали переносом, и часть приехала не в том формате: у `tot-ade`
+/// 353 сущности зовутся не по общему образцу — `OQ-01` вместо `Q-01`, `UI-01`
+/// вместо `FR-UI-01`. Живут они в двух документах, а УПОМИНАЮТСЯ в 427: руками
+/// такое не правят, а мимо сервера — тем более.
+///
+/// Сухой ход по умолчанию: сперва показывается, что изменится, и только по
+/// `apply` пишется. Ревизия документа сохраняется, как при всякой правке.
+///
+/// Новое имя проверяется ОБЩИМ образцом вида, а не проектным: переименование
+/// ради того и делается, чтобы расхождение ушло.
+pub async fn rename_entity(
+    pool: &Pool, project: &str, kind: &str, from: &str, to: &str, apply: bool,
+) -> Result<Value, tokio_postgres::Error> {
+    let client = pool.get().await.expect("пул отдал соединение");
+    if from.trim().is_empty() || to.trim().is_empty() {
+        return Ok(json!({ "status": "empty", "why": "нужны оба имени: старое и новое" }));
+    }
+    if from == to {
+        return Ok(json!({ "status": "same", "why": "имена совпадают: переименовывать нечего" }));
+    }
+    let Some(образец) = client
+        .query_opt("SELECT spec->>'id' FROM kind_layout WHERE name = $1", &[&kind])
+        .await?
+        .and_then(|r| r.get::<_, Option<String>>(0))
+    else {
+        return Ok(json!({ "status": "no_pattern", "kind": kind,
+            "why": "у вида не объявлен образец имени: сверить новое имя не с чем" }));
+    };
+    let подходит: bool = client
+        .query_one("SELECT $1 ~ $2", &[&to, &образец])
+        .await?
+        .get(0);
+    if !подходит {
+        return Ok(json!({ "status": "not_by_pattern", "to": to, "pattern": образец,
+            "why": "новое имя не следует общему образцу вида: переименование ради того и \
+                    делается, чтобы расхождение ушло, а не переехало" }));
+    }
+    // Занятое имя — молчаливая склейка двух сущностей в одну. Отказ.
+    let занято: i64 = client
+        .query_one(
+            "SELECT count(*) FROM project_named_id WHERE project_id = $1 AND said_id = $2",
+            &[&project, &to],
+        )
+        .await?
+        .get(0);
+    if занято > 0 {
+        return Ok(json!({ "status": "taken", "to": to, "mentions": занято,
+            "why": "новое имя уже встречается в наборе: переименование склеило бы две \
+                    сущности в одну, и заметить это было бы нечем" }));
+    }
+
+    let образец_слова = format!("\\m{}\\M", regex_escape(from));
+    let затронуто = client
+        .query(
+            "SELECT entity_kind, entity_name,
+                    ((length(content) - length(regexp_replace(content, $2, '', 'g')))
+                      / greatest(length($3), 1))::bigint AS сколько
+               FROM project_documents
+              WHERE project_id = $1 AND content ~ $2
+              ORDER BY 1, 2",
+            &[&project, &образец_слова, &from],
+        )
+        .await?;
+    let документов = затронуто.len();
+    let упоминаний: i64 = затронуто.iter().map(|r| r.get::<_, i64>(2)).sum();
+    if документов == 0 {
+        return Ok(json!({ "status": "not_found", "from": from,
+            "why": "такого имени в наборе нет ни в одном документе" }));
+    }
+    if !apply {
+        return Ok(json!({ "status": "dry", "from": from, "to": to,
+            "documents": документов, "mentions": упоминаний,
+            "where": затронуто.iter().take(8).map(|r| json!({
+                "kind": r.get::<_, String>(0), "name": r.get::<_, String>(1),
+                "times": r.get::<_, i64>(2) })).collect::<Vec<_>>(),
+            "means": "показано, что изменится. Запись — тем же вызовом с `apply=true`" }));
+    }
+
+    let mut client = pool.get().await.expect("пул отдал соединение");
+    let tx = client.transaction().await?;
+    // Правка сперва, ревизия следом: текущее содержимое уже записано под своим
+    // номером, и попытка записать его второй раз падала на уникальности пары
+    // «документ, ревизия». Ревизия — это НОВАЯ версия, а не копия старой.
+    let n = tx
+        .execute(
+            "UPDATE project_documents
+                SET content = regexp_replace(content, $2, $3, 'g'),
+                    revision = revision + 1,
+                    updated_at = $4
+              WHERE project_id = $1 AND content ~ $2",
+            &[&project, &образец_слова, &to, &now_ms()],
+        )
+        .await?;
+    tx.execute(
+        "INSERT INTO project_document_revisions
+                (project_id, entity_kind, entity_name, content, content_hash, bytes, revision,
+                 written_at, written_by)
+         SELECT project_id, entity_kind, entity_name, content, md5(content), length(content),
+                revision, $2, 'rename'
+           FROM project_documents
+          WHERE project_id = $1 AND content ~ $3",
+        &[&project, &now_ms(), &regex_escape(to)],
+    )
+    .await?;
+    tx.commit().await?;
+    // РАЗБОР ДОКУМЕНТА — ЧАСТЬЮ ПРАВКИ. Дверь правила текст и на этом
+    // останавливалась: блоки, секции и ячейки оставались прежними, и вниз по
+    // течению не менялось НИЧЕГО — переименовал 71 вопрос, а проекция
+    // показывала прежние имена, потому что читала старые ячейки.
+    //
+    // Правка документа мимо разбора — это правка, которой набор не увидит.
+    crate::store::reparse_all(pool, project).await?;
+    Ok(json!({ "status": "renamed", "from": from, "to": to,
+               "documents": n, "mentions": упоминаний,
+               "means": "документы разобраны заново; проекции устарели — позовите `reproject`" }))
+}
+
+/// Экранирование имени для регулярного выражения: имя приходит снаружи, и
+/// точка в нём должна значить точку.
+fn regex_escape(s: &str) -> String {
+    s.chars()
+        .flat_map(|c| {
+            if "\\^$.|?*+()[]{}".contains(c) {
+                vec!['\\', c]
+            } else {
+                vec![c]
+            }
+        })
+        .collect()
+}
+
 pub async fn holders(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
     let client = pool.get().await.expect("пул отдал соединение");
     let rows = client

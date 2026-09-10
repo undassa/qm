@@ -509,6 +509,11 @@ impl Mcp {
             "inputSchema": { "type": "object", "properties": { "set": s("набор, по умолчанию godzy") } } }));
         tools.push(json!({ "name": "screen-area-set", "description": "объявить область экрана: раздел интерфейса; пустая область снимает объявление",
             "inputSchema": { "type": "object", "properties": { "drop": json!({"type":"boolean","description":"снять объявленное этой же дверью"}), "screen": s("имя экрана"), "area": s("область") }, "required": ["screen"] } }));
+        tools.push(json!({ "name": "entity-rename", "description": "переименовать сущность во всём наборе: имя сверяется с общим образцом вида; сухой ход по умолчанию",
+            "inputSchema": { "type": "object", "properties": { "kind": s("вид сущности"),
+                "from": s("старое имя"), "to": s("новое имя"),
+                "apply": json!({"type":"boolean","description":"записать; без него только показ"}) },
+                "required": ["kind", "from", "to"] } }));
         tools.push(json!({ "name": "links-retarget", "description": "переписать цель ссылок в `вид:имя` по уже разобранной связи; ярлык не трогается; сухой режим по умолчанию",
             "inputSchema": { "type": "object", "properties": { "apply": json!({"type":"boolean"}) } } }));
         tools.push(json!({ "name": "gate-item-waive", "description": "объявить пункт гейта неприменимым к этому проекту — с обязательной причиной",
@@ -665,7 +670,7 @@ impl Mcp {
         "task-state-push", "code-facts-push", "skills-push", "preflight-push", "worktree-push",
         "ceiling-set", "blame-set", "derived-copy-set", "field-column-alias", "column-server-filled", "counts-sync", "kind-required", "kind-projection", "frozen-tree-set", "scheme-term-set", "orphans-purge", "surface-source-add", "sensor-spec-add", "agent-set", "donor-add", "guard-add", "gate-sign", "gate-item-set", "method-set", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "step-selftest", "version-close", "phase-gate-set", "exception-set",
         "author-set", "screen-area-set", "skill-set", "version-freeze",
-        "links-rewrite", "links-retarget",
+        "links-rewrite", "links-retarget", "entity-rename",
     ];
 
     /// Вызов инструмента — и отметка, если он писал.
@@ -2112,6 +2117,14 @@ impl Mcp {
                 match crate::projector::rewrite_links(&self.pool, &self.kinds, p, !apply).await {
                 Ok(v) => ok(v),
                 Err(e) => refusal(Miss::Db(e.to_string())),
+                }
+            }
+            "entity-rename" => {
+                let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
+                match crate::projector::rename_entity(&self.pool, p, kind_arg, &g("from"), &g("to"),
+                        args.get("apply").map(|v| v == "true" || v == true).unwrap_or(false)).await {
+                    Ok(v) => ok(v),
+                    Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
                 }
             }
             "links-retarget" => {
