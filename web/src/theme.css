@@ -3290,14 +3290,19 @@ table.rows td.n.hole { color: var(--warn); font-weight: 600; }
  */
 .rail {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   margin: 14px 0 18px;
   max-width: var(--measure);
-  overflow-x: auto;
   padding-bottom: 4px;
 }
+/*
+ * Рельс ПЕРЕНОСИТСЯ, а не уезжает за край. Горизонтальная прокрутка здесь
+ * молчалива: на узком экране Ф4 и Ф5 оказывались за обрезом без всякого знака,
+ * что они есть, — и «где мы» отвечало неполно, не сказав об этом.
+ */
 .rail-seg {
-  flex: 1 1 0;
+  flex: 1 1 148px;
   min-width: 148px;
   display: grid;
   grid-template-areas: "n g" "t t" "b b" "s s";
