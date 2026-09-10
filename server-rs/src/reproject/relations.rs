@@ -8,8 +8,46 @@ use deadpool_postgres::Pool;
 use once_cell::sync::Lazy;
 use regex::Regex;
 
+/// Образец имени проверки ПО УМОЛЧАНИЮ — когда набор своего не объявил.
+///
+/// Зашитый один на всех: `TC-[A-Z]+-[0-9]+[a-z]?`. У `tot-ade` проверок с таким
+/// именем НОЛЬ из 191 — там их зовут именем тестовой функции Rust, ключом
+/// сценария приёмки (`S1-AC-4`) и именем гейта (`criterion:agent-write-denied`).
+/// Поэтому `project_task_check` пуст, и оба пункта, которые его читают, зелены
+/// на пустоте либо красны на молчании.
+///
+/// Роль `id.check` в словаре набора; объявленных образцов может быть несколько.
 static CHECK_ID: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"TC-[A-Z]+-[0-9]+[a-z]?").expect("образец проверки"));
+
+/// Образцы имени проверки этого набора: объявленные либо один зашитый.
+fn check_ids(terms: &crate::scheme::Terms) -> Vec<Regex> {
+    let own: Vec<Regex> = terms
+        .all("id.check")
+        .iter()
+        .filter_map(|p| Regex::new(p).ok())
+        .collect();
+    if own.is_empty() { vec![CHECK_ID.clone()] } else { own }
+}
+
+/// Имена проверок в строке — по всем объявленным образцам.
+///
+/// Снятое имя не считается: зачёркнутое `~~`имя`~~` помянуто как убранное, и
+/// связь по нему поехала бы. Словарь уже знает `word.caveat`, и разбор проверок
+/// обязан его спрашивать.
+fn checks_in(line: &str, res: &[Regex], caveats: &[String]) -> Vec<String> {
+    let low = line.to_lowercase();
+    if line.contains("~~") || caveats.iter().any(|c| low.contains(&c.to_lowercase())) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for re in res {
+        for m in re.find_iter(line) {
+            out.push(m.as_str().to_owned());
+        }
+    }
+    out
+}
 
 pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres::Error> {
     let client = pool.get().await.expect("пул отдал соединение");
@@ -17,6 +55,8 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
     // пустое: пустое совпало бы со всем подряд. Такая связь просто не
     // считается, и её отсутствие видно перечнем ниже.
     let terms = crate::scheme::Terms::load(pool, project).await?;
+    let check_res = check_ids(&terms);
+    let caveats: Vec<String> = terms.all("word.caveat").to_vec();
     let missing = terms.missing(&[
         "field.task-contract-ops", "field.red-parent", "field.red-checks",
         "section.proof", "word.not-a-subject", "path.crate-home",
@@ -50,9 +90,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
     let mut checks: Vec<String> = Vec::new();
     for r in &written {
         let line: String = r.get(0);
-        for m in CHECK_ID.find_iter(&line) {
-            checks.push(m.as_str().to_owned());
-        }
+        checks.extend(checks_in(&line, &check_res, &caveats));
     }
     checks.sort();
     checks.dedup();
@@ -140,8 +178,8 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
     for r in &proof {
         let task: String = r.get(0);
         let value: String = r.get(1);
-        for m in CHECK_ID.find_iter(&value) {
-            task_check.push((task.clone(), m.as_str().to_owned(), "доказательство"));
+        for m in checks_in(&value, &check_res, &caveats) {
+            task_check.push((task.clone(), m, "доказательство"));
         }
     }
     let red = if let Some(term) = terms.one("field.red-checks") { client
@@ -157,8 +195,8 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
     for r in &red {
         let task: String = r.get(0);
         let value: String = r.get(1);
-        for m in CHECK_ID.find_iter(&value) {
-            task_check.push((task.clone(), m.as_str().to_owned(), "красная фаза"));
+        for m in checks_in(&value, &check_res, &caveats) {
+            task_check.push((task.clone(), m, "красная фаза"));
         }
     }
 
