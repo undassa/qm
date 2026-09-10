@@ -1722,6 +1722,18 @@ ALTER TABLE project_db_tables ADD COLUMN IF NOT EXISTS section_ord integer;
 ALTER TABLE project_requirements ADD COLUMN IF NOT EXISTS section_ord integer;
 ALTER TABLE project_checks ADD COLUMN IF NOT EXISTS section_ord integer;
 
+-- ССЫЛКА ИЗ ТЕКСТА ТРЕБОВАНИЯ ложится в `project_requirement_sources` — она
+-- уже есть, той же формы `(requirement_id, kind, target)`, и дверь к ней тоже
+-- есть: `requirement-source-add` со словарём `decision · article · screen ·
+-- requirement`. Пустовала она потому, что заполнять её было некому.
+--
+-- Я завёл было отдельную таблицу и снял: две таблицы одной формы разошлись бы
+-- при первой же правке, а правил, читающих обе, не написал бы никто.
+--
+-- `origin` отделяет извлечённое от объявленного: без него пересборка стирала
+-- бы объявленное дверью.
+ALTER TABLE project_requirement_sources ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'declared';
+
 -- РОЛЬ связи: определяет документ сущность или только называет её.
 --
 -- Связь знала «ui-spec называет SCR-SHELL-01», но не знала, задаёт он экран

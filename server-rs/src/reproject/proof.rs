@@ -211,6 +211,34 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize)
     let mut client = pool.get().await.expect("пул отдал соединение");
     let tx = client.transaction().await?;
     tx.execute("DELETE FROM project_checks WHERE project_id = $1 AND origin = 'projected'", &[&project]).await?;
+    // ССЫЛКА ИЗ ТЕКСТА ТРЕБОВАНИЯ — отдельной строкой, а не растворённая в
+    // связи документа. Имена берутся ОБЪЯВЛЕННЫМ раскрывателем `ids::plain`,
+    // а не новым образцом: перечислить здесь `FR|NFR|ADR` значило бы зашить
+    // слова, которыми владеет проект.
+    //
+    // Род связи — `cites`, и это всё, что разбор честно знает: зачем именно
+    // требование сослалось, текст не говорит. Уточняется дверью.
+    let mut ссылки: Vec<(String, String)> = Vec::new();
+    for r in requirements.values() {
+        for имя in super::ids::plain(&r.text) {
+            if имя != r.id {
+                ссылки.push((r.id.clone(), имя));
+            }
+        }
+    }
+    tx.execute(
+        "DELETE FROM project_requirement_sources WHERE project_id = $1 AND origin = 'projected'",
+        &[&project],
+    )
+    .await?;
+    for (откуда, куда) in &ссылки {
+        tx.execute(
+            "INSERT INTO project_requirement_sources (project_id, requirement_id, kind, target, origin)
+             VALUES ($1,$2,'requirement',$3,'projected') ON CONFLICT DO NOTHING",
+            &[&project, откуда, куда],
+        )
+        .await?;
+    }
     tx.execute("DELETE FROM project_requirement_needs WHERE project_id = $1", &[&project]).await?;
     tx.execute("DELETE FROM project_requirements WHERE project_id = $1 AND origin = 'projected'", &[&project]).await?;
     for r in requirements.values() {
