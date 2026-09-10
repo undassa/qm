@@ -30,19 +30,36 @@ export function Proof({ projectId }: { projectId: string }): React.JSX.Element {
 
   return (
     <>
-      <Live at={live.at} again={live.again} />
-      <header className="head">
-        <h1>Доказательство</h1>
-        <p className="note">
-          Требований {rows.length} · без единой проверки — <b>{bare.length}</b>.
-          Требование без проверки ничем не закрыто, и зелёное на нём значит лишь, что никто не смотрел.
-        </p>
-        <div className="tabs">
-          <button type="button" className={only === "bare" ? "on" : ""} onClick={() => { setOnly("bare"); setPicked(null); }}>без проверок</button>
-          <button type="button" className={only === "all" ? "on" : ""} onClick={() => { setOnly("all"); setPicked(null); }}>все</button>
+      <div className="head">
+        <div>
+          <h1>Доказательство</h1>
+          <div className="prov">чем закрыто каждое требование</div>
         </div>
-        <input type="search" placeholder="имя или текст" value={query} onChange={(e) => setQuery(e.target.value)} />
-      </header>
+        <span className="prov">
+          <Live at={live.at} again={live.again} /> <b>{rows.length}</b> требований · без единой проверки —{" "}
+          <b className={bare.length > 0 ? "bad-n" : ""}>{bare.length}</b>
+        </span>
+      </div>
+
+      <p className="lede">
+        Требование без проверки ничем не закрыто, и зелёное на нём значит лишь, что никто не смотрел.
+      </p>
+
+      <div className="tabs">
+        <button type="button" className={only === "bare" ? "on" : ""} onClick={() => { setOnly("bare"); setPicked(null); }}>
+          без проверок
+        </button>
+        <button type="button" className={only === "all" ? "on" : ""} onClick={() => { setOnly("all"); setPicked(null); }}>
+          все
+        </button>
+        <input
+          type="search"
+          placeholder="имя или текст"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          aria-label="Поиск требования"
+        />
+      </div>
 
       <Chain rows={rows} onPick={(ids) => setPicked(ids)} />
       {picked ? (
