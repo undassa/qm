@@ -1695,6 +1695,38 @@ impl Mcp {
                 if rule.is_empty() || id.is_empty() {
                     return refusal(Miss::Db("исключение без правила или без сущности не объявляется".into()));
                 }
+
+                // ПРАВИЛО ОБЯЗАНО ЧИТАТЬ ИСКЛЮЧЕНИЯ. Дверь отвечала «written: 1»
+                // и не делала НИЧЕГО: запрос пункта не соединялся с
+                // `rule_exception`, и записанный человеком довод исчезал без
+                // следа — следующий проход писал его заново.
+                //
+                // Проверяется по самому запросу: если он не поминает
+                // `rule_exception`, исключение к нему бессмысленно, и молчать об
+                // этом хуже, чем отказать.
+                if !drop {
+                    let reads = self
+                        .pool
+                        .get()
+                        .await
+                        .expect("пул отдал соединение")
+                        .query(
+                            "SELECT count(*) FROM gate_item
+                              WHERE kind = 'query' AND query LIKE '%' || $1 || '%'
+                                AND query LIKE '%rule_exception%'",
+                            &[&rule],
+                        )
+                        .await
+                        .map(|r| r.first().map(|x| x.get::<_, i64>(0)).unwrap_or(0))
+                        .unwrap_or(0);
+                    if reads == 0 {
+                        return refusal(Miss::Db(format!(
+                            "правило «{rule}» исключений не читает: ни один пункт гейта не соединяет \
+                             свой запрос с `rule_exception` по этому имени. Записанное здесь исчезло бы \
+                             без следа. Сперва научите пункт читать исключения — потом объявляйте."
+                        )));
+                    }
+                }
                 if reason.trim().is_empty() && !drop {
                     return refusal(Miss::Db("исключение без причины — это дыра с разрешением, а не решение".into()));
                 }

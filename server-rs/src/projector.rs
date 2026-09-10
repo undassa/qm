@@ -5801,6 +5801,27 @@ pub async fn set_ceiling(
             .await?;
         return Ok(json!({ "status": if gone > 0 { "dropped" } else { "not_found" }, "rule": rule }));
     }
+    // ПРАВИЛО ОБЯЗАНО ЧИТАТЬ ПОТОЛОК. `ceiling-set rule=column-input ceiling=41`
+    // отвечал «declared» и не делал ничего: запрос пункта не соединялся с
+    // `rule_ceiling`. Потолок, который никто не читает, — обещание, данное в
+    // пустоту.
+    let reads: i64 = client
+        .query_one(
+            "SELECT count(*) FROM gate_item
+              WHERE kind = 'query' AND query LIKE '%' || $1 || '%' AND query LIKE '%rule_ceiling%'",
+            &[&rule],
+        )
+        .await?
+        .get(0);
+    if reads == 0 {
+        return Ok(json!({
+            "status": "rule_ignores_ceiling",
+            "why": format!(
+                "правило «{rule}» потолка не читает: ни один пункт гейта не соединяет свой запрос с \
+                 `rule_ceiling` по этому имени. Записанное здесь ничего бы не держало."
+            ),
+        }));
+    }
     // Потолок без причины — это разрешение, выданное неизвестно кем и зачем.
     // Через полгода его никто не решится опустить: непонятно, что он держит.
     if why.trim().is_empty() {
