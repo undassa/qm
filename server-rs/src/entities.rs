@@ -307,6 +307,33 @@ async fn relations_of(
     }
 }
 
+/// ЖИВОЕ состояние записи: переоткрыта ли она правкой того, на чём стоит.
+///
+/// Объявленное состояние говорит, чем запись закончили; живое — можно ли этому
+/// ещё верить. Каскад считал это верно, а наружу отдавала одна дверь из пяти:
+/// `mh call task` показывал `closed` при переоткрытой задаче.
+async fn живое(pool: &Pool, project: &str, kind: &str, id: &str) -> Value {
+    let Ok(client) = pool.get().await else { return Value::Null };
+    let Ok(Some(r)) = client
+        .query_opt(
+            "SELECT live_state, why, coalesce(depth,0), stale_link
+               FROM entity_live
+              WHERE project_id = $1 AND kind = $2 AND id = $3",
+            &[&project, &kind, &id],
+        )
+        .await
+    else {
+        return Value::Null;
+    };
+    let состояние: String = r.get(0);
+    if состояние != "reopened" {
+        return json!({ "state": состояние });
+    }
+    json!({ "state": состояние, "why": r.get::<_, String>(1),
+            "through": r.get::<_, i32>(2), "cause": r.get::<_, Option<String>>(3),
+            "means": "запись стоит на том, что изменили после неё: закрытость держится памятью" })
+}
+
 /// ГДЕ сущность названа: документ, секция и её заголовок.
 ///
 /// Обратная сторона `names`: та считает, КОГО сущность называет. Спросить у
@@ -401,6 +428,7 @@ pub async fn entity(pool: &Pool, kinds: &Kinds, project: &str, kind: &str, id: O
             .unwrap_or_else(|_| (String::new(), String::new()));
         let rel = relations_of(pool, project, kind, id, &ok, &oi, true).await;
         return Ok(json!({ "kind": kind, "id": id, "entity": row, "relations": rel,
+                          "live": живое(pool, project, kind, id).await,
                           "saidIn": сказано_в(pool, project, id).await }));
     }
 
@@ -437,6 +465,7 @@ pub async fn entity(pool: &Pool, kinds: &Kinds, project: &str, kind: &str, id: O
         "id": id.unwrap_or(kind),
         "content": content,
         "relations": rel,
+        "live": живое(pool, project, kind, id.unwrap_or(&owner_name)).await,
         "saidIn": сказано_в(pool, project, id.unwrap_or(&owner_name)).await,
         "revision": row.get::<_, i64>(1),
         "updatedAt": row.get::<_, i64>(2),
