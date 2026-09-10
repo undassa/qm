@@ -2912,6 +2912,14 @@ pub async fn gate(pool: &Pool, project: &str, phase: Option<&str>) -> Result<Val
             // «Пробу не проверяли» и «проба не роняет» — разное, и оба не
             // «зелёное»: пункт, который ни разу не уронили, никто не проверял.
             m.insert("probeRuns".into(), json!(r.get::<_, Option<bool>>(10)));
+            // Чем адресуется исключение к находке этого пункта. `null` — пункт
+            // исключений не читает, и объявлять их ему бессмысленно; это
+            // разное с «читает, но ключ такой-то», и путать нельзя.
+            let q: Option<String> = r.get(7);
+            m.insert(
+                "exceptionKey".into(),
+                json!(q.as_deref().and_then(exception_key)),
+            );
 
         }
         let slot = checked_at.entry(phase.clone()).or_insert(at);
@@ -5817,6 +5825,79 @@ pub async fn readiness_gaps(pool: &Pool, project: &str) -> Result<Value, tokio_p
         // сервер. Интерфейс, знающий имя двери, — вторая запись о том же.
         "closedBy": "method-set",
     }))
+}
+
+/// Чем правило сравнивает исключение — выражением из его же запроса.
+///
+/// `exception-set` требует `entityId`, и чем он должен быть, не было сказано
+/// нигде: ключ выясняли перебором. У `contract-field` это `Absence.from`, у
+/// `domain-check` — пара целиком, у `milestone-names-its-parts` не подходило
+/// ничто, потому что правило исключений не читает вовсе.
+///
+/// Ответ достаётся из САМОГО запроса, а не из второй записи о нём: вторая
+/// разошлась бы с первой при первой же правке правила.
+pub fn exception_key(query: &str) -> Option<String> {
+    let at = query.find("e.entity_id")?;
+    let rest = &query[at + "e.entity_id".len()..];
+    let rest = rest.trim_start().strip_prefix('=')?.trim_start();
+    // Ключ берётся ЦЕЛИКОМ, до конца выражения. У части правил он составной:
+    // `с.nfr || ' → ' || с.файл`, и первое слово такого ключа не совпадёт ни с
+    // чем — частичный ответ здесь хуже отсутствия ответа, потому что по нему
+    // объявят исключение, которое не сработает.
+    //
+    // Конец — закрывающая скобка условия либо слово, продолжающее запрос.
+    let mut depth = 0i32;
+    let mut end = rest.len();
+    for (i, c) in rest.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' if depth == 0 => { end = i; break }
+            ')' => depth -= 1,
+            _ => {
+                if depth == 0 {
+                    let tail = &rest[i..];
+                    for w in [" AND ", " OR ", " ORDER ", " GROUP ", " LIMIT ", "\n"] {
+                        if tail.starts_with(w) { end = i; break }
+                    }
+                    if end == i { break }
+                }
+            }
+        }
+    }
+    let key = rest[..end].trim();
+    if key.is_empty() { None } else { Some(key.to_owned()) }
+}
+
+#[cfg(test)]
+mod ключ_тесты {
+    use super::exception_key;
+
+    #[test]
+    fn ключ_берётся_из_запроса() {
+        let q = "SELECT f.name FROM code_fact f WHERE NOT EXISTS (SELECT 1 FROM rule_exception e \
+                 WHERE e.rule = 'x' AND e.entity_id = f.name) ORDER BY 1";
+        assert_eq!(exception_key(q).as_deref(), Some("f.name"));
+    }
+
+    #[test]
+    fn пробелы_вокруг_равенства_не_мешают() {
+        assert_eq!(exception_key("e.entity_id   =   tc.task_id AND x").as_deref(), Some("tc.task_id"));
+    }
+
+    /// Составной ключ берётся целиком: первое его слово не совпадёт ни с чем, и
+    /// объявленное по нему исключение не сработает — а выглядеть будет рабочим.
+    #[test]
+    fn составной_ключ_берётся_целиком() {
+        let q = "... e.entity_id = с.nfr || ' → ' || с.файл) ORDER BY 1";
+        assert_eq!(exception_key(q).as_deref(), Some("с.nfr || ' → ' || с.файл"));
+    }
+
+    /// Правило без чтения исключений и правило с ключом — разное. Пустая строка
+    /// вместо `None` совпала бы с пустым значением и прочиталась как «ключ есть».
+    #[test]
+    fn правило_без_исключений_ключа_не_имеет() {
+        assert_eq!(exception_key("SELECT 1 FROM project_gates"), None);
+    }
 }
 
 /// Записать исход пересборки: удалась или упала и чем.
