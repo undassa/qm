@@ -4210,6 +4210,35 @@ pub async fn links_of(pool: &Pool, project: &str, kind: &str, id: &str) -> Resul
             ("incoming", "SELECT l.decision_id, l.kind, 'decision' FROM project_decision_links l
                            WHERE l.project_id = $1 AND l.target = $2 ORDER BY l.decision_id"),
         ],
+        // ЭКРАН И ЗАДАЧА отвечали «вид в базу не спроецирован», а `summary
+        // kind=screen` печатал их связи колонками — два ответа об одном
+        // предмете. Отказ был неправдой: связи в базе есть, их не спрашивала
+        // эта ручка.
+        "screen" => vec![
+            ("requirements", "SELECT s.requirement_id, coalesce(left(r.text, 90), ''), 'requirement'
+                                FROM project_screen_requirements s
+                                LEFT JOIN project_requirements r ON r.project_id = s.project_id AND r.id = s.requirement_id
+                               WHERE s.project_id = $1 AND s.screen_id = $2 ORDER BY s.requirement_id"),
+            ("references", "SELECT r.source, r.source_kind, 'reference'
+                              FROM project_screen_references r
+                             WHERE r.project_id = $1 AND r.screen_id = $2 ORDER BY r.source"),
+        ],
+        "task" => vec![
+            ("requirements", "SELECT r.requirement_id, coalesce(left(q.text, 90), ''), 'requirement'
+                                FROM task_requirement r
+                                LEFT JOIN project_requirements q ON q.project_id = r.project_id AND q.id = r.requirement_id
+                               WHERE r.project_id = $1 AND r.task_id = $2 ORDER BY r.requirement_id"),
+            ("checks", "SELECT c.check_id, c.said_as, 'check' FROM project_task_check c
+                         WHERE c.project_id = $1 AND c.task_id = $2 ORDER BY c.check_id"),
+            ("dependsOn", "SELECT d.depends_on, coalesce(left(t.title, 90), ''), 'task'
+                             FROM project_plan_task_deps d
+                             LEFT JOIN project_plan_tasks t ON t.project_id = d.project_id AND t.id = d.depends_on
+                            WHERE d.project_id = $1 AND d.task_id = $2 ORDER BY d.depends_on"),
+            ("blocks", "SELECT d.task_id, coalesce(left(t.title, 90), ''), 'task'
+                          FROM project_plan_task_deps d
+                          LEFT JOIN project_plan_tasks t ON t.project_id = d.project_id AND t.id = d.task_id
+                         WHERE d.project_id = $1 AND d.depends_on = $2 ORDER BY d.task_id"),
+        ],
         other => return Err(Miss::Unprojected(other.to_owned())),
     };
 

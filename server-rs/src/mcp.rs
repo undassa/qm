@@ -144,7 +144,7 @@ impl Mcp {
             "inputSchema": { "type": "object", "properties": { "kind": s("вид"), "id": s("имя"), "revision": json!({"type":"integer"}) }, "required": ["kind", "revision"] } }));
         tools.push(json!({ "name": "readiness-gaps", "description": "пункты готовности без способа проверки — разбивкой по виду владельца и чем это закрывается",
             "inputSchema": { "type": "object", "properties": {} } }));
-        tools.push(json!({ "name": "coverage", "description": "какие документы не достаются ни одним видом и какие достаются двумя",
+        tools.push(json!({ "name": "coverage", "description": "что не покрыто: какие документы не достаются ни одним видом и какие достаются двумя",
             "inputSchema": { "type": "object", "properties": {} } }));
         tools.push(json!({ "name": "phases", "description": "цепочка фаз с полной картиной: документы, гейт и задачи каждой фазы порознь",
             "inputSchema": { "type": "object", "properties": {} } }));
@@ -152,7 +152,7 @@ impl Mcp {
             "inputSchema": { "type": "object", "properties": {} } }));
         tools.push(json!({ "name": "pipeline", "description": "плитка конвейера задач: сколько на каждом статусе и где факт не пишется",
             "inputSchema": { "type": "object", "properties": {} } }));
-        tools.push(json!({ "name": "next-step", "description": "первая невыполненная ступень процесса с владельцем; три списка: пройдено, пропущено с причиной, неотвечаемо",
+        tools.push(json!({ "name": "next-step", "description": "что сейчас держит проект: первая невыполненная ступень процесса с владельцем; три списка: пройдено, пропущено с причиной, неотвечаемо",
             "inputSchema": { "type": "object", "properties": { "process": s("имя процесса, по умолчанию godzy"), "record": json!({"type":"boolean"}) } } }));
         tools.push(json!({ "name": "process-state", "description": "все ступени процесса целиком: вопрос, запрос, проба, вычисленное состояние, нарушения",
             "inputSchema": { "type": "object", "properties": { "process": s("имя процесса") } } }));
@@ -165,7 +165,7 @@ impl Mcp {
                 "kind": s("вид владельца"), "id": s("имя владельца; у одиночки пусто"),
                 "ord": json!({"type":"integer"}), "methodKind": s("query · command · signed · unknown"),
                 "method": s("запрос либо команда") }, "required": ["kind", "ord", "methodKind"] } }));
-        tools.push(json!({ "name": "links-of", "description": "связи сущности по видам: проверки, истории, задачи, решения — то, что показывает панель раздела",
+        tools.push(json!({ "name": "links-of", "description": "чем доказано и с чем связано: связи сущности по видам: проверки, истории, задачи, решения — то, что показывает панель раздела",
             "inputSchema": { "type": "object", "properties": { "kind": s("requirement · story · decision"), "id": s("имя") }, "required": ["kind", "id"] } }));
         tools.push(json!({ "name": "retired-terms", "description": "слова, снятые из словаря: встреченные в свежем тексте — находка",
             "inputSchema": { "type": "object", "properties": {} } }));
@@ -519,7 +519,7 @@ impl Mcp {
             "inputSchema": { "type": "object", "properties": { "id": s("имя истории") }, "required": ["id"] } }));
         tools.push(json!({ "name": "preflight-queue", "description": "задачи, которым предполёт не делали либо делали до правки",
             "inputSchema": { "type": "object", "properties": {} } }));
-        tools.push(json!({ "name": "claims", "description": "заявленные набором числа против факта, с оговоркой о том, что считается",
+        tools.push(json!({ "name": "claims", "description": "где расходятся числа: заявленные набором числа против факта, с оговоркой о том, что считается",
             "inputSchema": { "type": "object", "properties": {} } }));
         tools.push(json!({ "name": "exceptions", "description": "объявленные исключения из правил и те, что пора снять",
             "inputSchema": { "type": "object", "properties": { "rule": s("правило") } } }));
@@ -527,7 +527,7 @@ impl Mcp {
             "inputSchema": { "type": "object", "properties": { "id": s("имя гейта, например G2; без него — все") } } }));
         tools.push(json!({ "name": "next-task", "description": "следующая незакрытая задача с закрытыми зависимостями, со всем контекстом внутри",
             "inputSchema": { "type": "object", "properties": {} } }));
-        tools.push(json!({ "name": "blockers", "description": "чего ждёт задача: задачи и этапы целиком",
+        tools.push(json!({ "name": "blockers", "description": "что держит задачу: чего ждёт задача: задачи и этапы целиком",
             "inputSchema": { "type": "object", "properties": { "id": s("имя задачи") }, "required": ["id"] } }));
         tools.push(json!({ "name": "events", "description": "журнал сущности: что с ней происходило и кем",
             "inputSchema": { "type": "object", "properties": { "kind": s("вид"), "id": s("имя") }, "required": ["kind", "id"] } }));
@@ -543,7 +543,10 @@ impl Mcp {
                 "blame": s("harness · corpus"), "fixedBy": s("чем это чинится — обязательно"),
                 "why": s("довод"), "drop": json!({"type":"boolean"}) },
                 "required": ["rule", "entityId", "blame", "fixedBy"] } }));
-        tools.push(json!({ "name": "declared-unwritten", "description": "объявлено дверью и не написано документом: имена, по которым `get` откажет",
+        tools.push(json!({ "name": "doors", "description": "какой вопрос какой дверью закрывается: поиск по дверям словами вопроса",
+            "inputSchema": { "type": "object", "properties": { "q": s("вопрос словами: «кто ссылается на требование», «что сейчас держит»"),
+                "limit": json!({"type":"integer","description":"сколько дверей назвать, по умолчанию 8"}) } } }));
+        tools.push(json!({ "name": "declared-unwritten", "description": "что объявлено и не написано: объявлено дверью и не написано документом: имена, по которым `get` откажет",
             "inputSchema": { "type": "object", "properties": {} } }));
         tools.push(json!({ "name": "kinds-due", "description": "виды, которым положена таблица, но они ещё не разложены; и те, у кого это не объявлено",
             "inputSchema": { "type": "object", "properties": {} } }));
@@ -609,7 +612,7 @@ impl Mcp {
         const RESERVED: &[&str] = &[
             "method-set", "gate-item-set", "question-holders", "preflight-push", "worktree-push",
             "sensor-specs", "scheme-terms", "frozen-trees", "addresses-declared", "tree-declared", "donors", "skills-push", "skills", "agents", "code-facts-push", "code-facts", "summary", "links-of", "retired-terms", "order", "gate-measure", "gate-item-waive", "gate-selftest", "gate-sign", "links-rewrite", "links-retarget", "reparse", "screen-area-set", "skill-set", "skills-paths", "version-freeze", "version-delta", "generated-check", "principal-allow", "principals", "author-set", "authors", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "step-selftest", "version-close", "phase-gate-set", "exception-set", "next-step", "process-state", "statuses", "task-status", "status-anomaly", "pipeline", "waves", "phases", "coverage", "blocks", "history", "at-revision", "process-history", "progress",
-            "kinds", "kinds-due", "readiness-gaps", "declared-unwritten", "blame-set", "sections", "section", "backlinks", "search", "put",
+            "kinds", "kinds-due", "readiness-gaps", "declared-unwritten", "blame-set", "doors", "sections", "section", "backlinks", "search", "put",
             "put-section", "rm", "document-add", "reproject", "sweep", "gate", "next-task", "blockers", "events",
             "norm-versions", "measurements", "plan", "readiness", "requirements-of",
             "tasks-of", "preflight-queue", "claims", "exceptions",
@@ -857,6 +860,77 @@ impl Mcp {
                     Ok(v) => ok(v),
                     Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
                 }
+            }
+            // УКАЗАТЕЛЬ ДВЕРЕЙ. Их двести двадцать четыре, плоским списком, и
+            // агент, которому нужен ответ на «кто ссылается на это требование»,
+            // должен угадать слово `backlinks` среди них — либо обойти набор
+            // руками. Обход при этом НЕ ОТКАЗЫВАЕТ: даёт число, даже верное, и в
+            // отчёт уходит работа, которой не требовалось. Дыра, которой нет,
+            // стоит дороже настоящей: настоящую видно по отказу.
+            //
+            // Три жалобы «такой ручки нет» были написаны за одну ночь, и все три
+            // оказались о существующих дверях.
+            "doors" => {
+                let q = args.get("q").and_then(|v| v.as_str()).unwrap_or("").trim().to_lowercase();
+                let limit = num(args, "limit").unwrap_or(8).clamp(1, 60) as usize;
+                if q.is_empty() {
+                    return ok(json!({ "count": self.tools().len(),
+                        "why": "спросите вопросом: `doors q=\"кто ссылается на требование\"`. \
+                                Без вопроса это тот же плоский список из двух с лишним сотен." }));
+                }
+                // Слова короче трёх букв не различают ничего и вытягивают всё
+                // подряд: «на», «что», «где».
+                // Слово сводится к ОСНОВЕ: «держит», «держат», «держащий» —
+                // одно и то же для того, кто ищет. Пять знаков хватает русскому
+                // корню и не склеивает разные слова.
+                let stem = |w: &str| -> String { w.chars().take(5).collect() };
+                let words: Vec<String> = q
+                    .split(|c: char| !c.is_alphanumeric())
+                    .filter(|w| w.chars().count() >= 3)
+                    .map(stem)
+                    .collect();
+                let mut hits: Vec<(i32, Value)> = Vec::new();
+                for t in self.tools() {
+                    let name = t.get("name").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
+                    let about = t.get("description").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
+                    let mut score = 0i32;
+                    if name == q {
+                        score += 100;
+                    }
+                    for w in &words {
+                        // Имя весит больше описания: дверь, названная словом
+                        // вопроса, — почти наверняка та самая.
+                        //
+                        // Короткое слово весит вдвое меньше: «что», «где», «кто»,
+                        // «чем» стоят в половине описаний и вытягивают всё
+                        // подряд, ничего не различая.
+                        let ves = if w.chars().count() <= 3 { 1 } else { 2 };
+                        if name.contains(w.as_str()) { score += 5 * ves }
+                        if about.contains(w.as_str()) { score += 2 * ves }
+                    }
+                    if score > 0 {
+                        hits.push((score, json!({
+                            "door": t.get("name").cloned().unwrap_or(Value::Null),
+                            "about": t.get("description").cloned().unwrap_or(Value::Null),
+                            "needs": t.get("inputSchema").and_then(|s| s.get("required")).cloned()
+                                .unwrap_or(json!([])),
+                            "score": score,
+                        })));
+                    }
+                }
+                hits.sort_by(|a, b| b.0.cmp(&a.0));
+                let total = hits.len();
+                ok(json!({
+                    "asked": q,
+                    "found": total,
+                    "doors": hits.into_iter().take(limit).map(|(_, v)| v).collect::<Vec<_>>(),
+                    // Ноль — это ОТВЕТ, а не пустой список: двери с такими словами
+                    // нет, и обходить набор руками, не сказав об этом, нельзя.
+                    "why": if total == 0 {
+                        "ни одна дверь не названа этими словами. Это не значит, что ответа нет: \
+                         попробуйте другими словами предмета — «связи», «покрытие», «замер», «план»."
+                    } else { "" },
+                }))
             }
             "declared-unwritten" => match crate::projector::declared_unwritten(&self.pool, &self.kinds, p).await {
                 Ok(v) => ok(v),
