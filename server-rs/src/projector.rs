@@ -1434,6 +1434,24 @@ ALTER TABLE project_sensor_spec ADD COLUMN IF NOT EXISTS how text NOT NULL DEFAU
 -- «не кричать прописными» ловит слово `uppercase` в объяснении самого правила,
 -- и без этого пропуска у каждого правила появляется столько ложных находок,
 -- сколько раз о нём написали. Пустая строка значит «пропускать нечего».
+-- ИМЯ ПУНКТА ГЕЙТА — устойчивый ярлык, а не его заголовок.
+--
+-- Ключом было предложение по-русски: «таблица миграции описана в модели
+-- данных». Всякая правка формулировки рвала отметки, отмены и исключения —
+-- строка с прежним заголовком оставалась сиротой, а пункт заводился заново
+-- пустым. Заголовок теперь просто текст, который можно переписать; адресует
+-- пункт `id`.
+ALTER TABLE gate_item ADD COLUMN IF NOT EXISTS id text NOT NULL DEFAULT '';
+ALTER TABLE project_gates ADD COLUMN IF NOT EXISTS id text NOT NULL DEFAULT '';
+ALTER TABLE gate_item_waiver ADD COLUMN IF NOT EXISTS id text NOT NULL DEFAULT '';
+CREATE UNIQUE INDEX IF NOT EXISTS gate_item_by_id ON gate_item (phase, id) WHERE id <> '';
+CREATE UNIQUE INDEX IF NOT EXISTS project_gates_by_id ON project_gates (project_id, phase, id);
+-- Прежний ключ отметки — заголовок. Переписали формулировку, и рядом со старой
+-- отметкой легла вторая: гейт считал один пункт дважды. Ключ теперь имя.
+DELETE FROM project_gates g WHERE NOT EXISTS
+  (SELECT 1 FROM gate_item i WHERE i.phase = g.phase AND i.item = g.item);
+ALTER TABLE project_gates DROP CONSTRAINT IF EXISTS project_gates_pkey;
+ALTER TABLE project_gates ADD PRIMARY KEY (project_id, phase, id);
 ALTER TABLE project_sensor_spec ADD COLUMN IF NOT EXISTS skip_re text NOT NULL DEFAULT '';
 -- Места, где правило не действует, перечнем образцов пути через пробел.
 -- Шкала размеров живёт в одном файле, и запрещать ей называть размеры значит
@@ -2542,7 +2560,7 @@ pub async fn waive_gate_item(
     let client = pool.get().await.expect("пул отдал соединение");
     if drop {
         let n = client.execute(
-            "DELETE FROM gate_item_waiver WHERE project_id = $1 AND phase = $2 AND item = $3",
+            "DELETE FROM gate_item_waiver WHERE project_id = $1 AND phase = $2 AND id = $3",
             &[&project, &phase, &item]).await?;
         return Ok(json!({ "status": if n > 0 { "dropped" } else { "not_found" } }));
     }
@@ -2551,16 +2569,16 @@ pub async fn waive_gate_item(
                           "why": "неприменимость без причины не объявляется: это решение, а не умолчание" }));
     }
     let known: i64 = client
-        .query_one("SELECT count(*) FROM gate_item WHERE phase = $1 AND item = $2", &[&phase, &item])
+        .query_one("SELECT count(*) FROM gate_item WHERE phase = $1 AND id = $2", &[&phase, &item])
         .await?.get(0);
     if known == 0 {
         return Ok(json!({ "status": "not_found", "why": format!("пункта «{item}» у гейта {phase} нет") }));
     }
     client.execute(
-        "INSERT INTO gate_item_waiver (project_id, phase, item, why, declared_at, declared_by,
+        "INSERT INTO gate_item_waiver (project_id, phase, id, item, why, declared_at, declared_by,
                                        holds_while_empty)
-         VALUES ($1,$2,$3,$4,$5,$6,$7)
-         ON CONFLICT (project_id, phase, item) DO UPDATE SET why = EXCLUDED.why,
+         VALUES ($1,$2,$3,$3,$4,$5,$6,$7)
+         ON CONFLICT (project_id, phase, item) DO UPDATE SET why = EXCLUDED.why, id = EXCLUDED.id,
            declared_at = EXCLUDED.declared_at, declared_by = EXCLUDED.declared_by,
            holds_while_empty = EXCLUDED.holds_while_empty",
         &[&project, &phase, &item, &why, &now_ms(), &actor, &holds_while_empty]).await?;
@@ -2575,16 +2593,16 @@ pub async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, tokio_po
     // вопрос «можно ли идти дальше», и ответ не должен зависеть от того, кто как
     // завёл проверки у себя.
     let rows = client
-        .query("SELECT phase, item, kind, query, why, owner FROM gate_item ORDER BY phase, item", &[])
+        .query("SELECT phase, item, kind, query, why, owner, id FROM gate_item ORDER BY phase, id", &[])
         .await?;
     let waived: std::collections::HashSet<(String, String)> = client
-        .query("SELECT phase, item FROM gate_item_waiver WHERE project_id = $1", &[&project])
+        .query("SELECT phase, id FROM gate_item_waiver WHERE project_id = $1", &[&project])
         .await?
         .iter()
         .map(|r| (r.get::<_, String>(0), r.get::<_, String>(1)))
         .collect();
     let why_waived: std::collections::HashMap<(String, String), String> = client
-        .query("SELECT phase, item, why FROM gate_item_waiver WHERE project_id = $1", &[&project])
+        .query("SELECT phase, id, why FROM gate_item_waiver WHERE project_id = $1", &[&project])
         .await?
         .iter()
         .map(|r| ((r.get::<_, String>(0), r.get::<_, String>(1)), r.get::<_, String>(2)))
@@ -2597,12 +2615,15 @@ pub async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, tokio_po
         let item: String = r.get(1);
         let kind: String = r.get(2);
         let query: Option<String> = r.get(3);
+        // Отмена и отметка адресуются ИМЕНЕМ, а не заголовком: заголовок
+        // переписывают, и прежде всякая правка формулировки роняла отмену.
+        let id: String = r.get(6);
         // Неприменимый пункт НЕ ИСПОЛНЯЕТСЯ. Исполнить и прощать значило бы
         // считать нарушением то, чего в этом проекте не существует: `.sqlx` у
         // проекта без sqlx не «не снята» — её тут не бывает.
-        let entry = if waived.contains(&(phase.clone(), item.clone())) {
+        let entry = if waived.contains(&(phase.clone(), id.clone())) {
             json!({ "item": item, "kind": kind, "computed": "waived",
-                    "why": why_waived.get(&(phase.clone(), item.clone())).cloned().unwrap_or_default(),
+                    "why": why_waived.get(&(phase.clone(), id.clone())).cloned().unwrap_or_default(),
                     "means": r.get::<_, String>(4) })
         } else {
             measure_item(&client, project, &phase, &item, &kind, query.as_deref(), r).await?
@@ -2637,16 +2658,16 @@ pub async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, tokio_po
                 // «new row violates check constraint», четыре пункта из сорока
                 // не мерились вовсе.
                 "INSERT INTO project_gates (project_id, phase, item, kind, query, why, owner,
-                                            state, violations, detail, result, checked_at)
-                 VALUES ($1,$2,$3,$9,$10,$11,$12,$4,$5,$6,$7,$8)
-                 ON CONFLICT (project_id, phase, item) DO UPDATE SET
-                   kind = EXCLUDED.kind, query = EXCLUDED.query, why = EXCLUDED.why,
-                   owner = EXCLUDED.owner,
+                                            state, violations, detail, result, checked_at, id)
+                 VALUES ($1,$2,$3,$9,$10,$11,$12,$4,$5,$6,$7,$8,$13)
+                 ON CONFLICT (project_id, phase, id) DO UPDATE SET
+                   item = EXCLUDED.item, kind = EXCLUDED.kind, query = EXCLUDED.query, why = EXCLUDED.why,
+                   owner = EXCLUDED.owner, id = EXCLUDED.id,
                    state = EXCLUDED.state, violations = EXCLUDED.violations,
                    detail = EXCLUDED.detail, result = EXCLUDED.result,
                    checked_at = EXCLUDED.checked_at",
                 &[&project, &phase, &item, &flat, &violations, &detail, &entry, &now,
-                  &kind, &query_col, &why_col, &owner_col],
+                  &kind, &query_col, &why_col, &owner_col, &id],
             )
             .await?;
         measured += 1;
@@ -6689,7 +6710,7 @@ pub async fn gate_selftest(pool: &Pool, project: &str) -> Result<Value, tokio_po
     let mut client = pool.get().await.expect("пул отдал соединение");
     let items = client
         .query(
-            "SELECT phase, item, query, probe FROM gate_item
+            "SELECT phase, id, query, probe FROM gate_item
               WHERE kind = 'query' ORDER BY phase, item",
             &[],
         )
@@ -7170,7 +7191,8 @@ pub async fn set_gate_item(
     pool: &Pool,
     project: &str,
     phase: &str,
-    item: &str,
+    id: &str,
+    title: &str,
     kind: &str,
     query: Option<&str>,
     owner: Option<&str>,
@@ -7184,47 +7206,55 @@ pub async fn set_gate_item(
     // уходят вместе с ним, иначе гейт продолжал бы считать его непройденным.
     if drop_it {
         let gone = client
-            .execute("DELETE FROM gate_item WHERE phase = $1 AND item = $2", &[&phase, &item])
+            .execute("DELETE FROM gate_item WHERE phase = $1 AND id = $2", &[&phase, &id])
             .await?;
         client
-            .execute("DELETE FROM project_gates WHERE phase = $1 AND item = $2", &[&phase, &item])
+            .execute("DELETE FROM project_gates WHERE phase = $1 AND id = $2", &[&phase, &id])
             .await?;
         return Ok(json!({ "status": if gone > 0 { "dropped" } else { "not_found" },
-                          "phase": phase, "item": item }));
+                          "phase": phase, "id": id }));
     }
     // Не переданное берётся у существующей строки: объявить пробу, не повторяя
     // запрос, — обычное дело, а вставляемая строка проверяется целиком, и
     // `query IS NULL` при `kind='query'` не проходит по правилу таблицы.
+    // Заголовок не переданный — берётся у существующей строки: правка запроса
+    // не должна требовать повторять текст, а пустой заголовок сделал бы пункт
+    // безымянным в глазах человека.
     let was = client
         .query(
-            "SELECT query, owner, probe FROM gate_item WHERE phase = $1 AND item = $2",
-            &[&phase, &item],
+            "SELECT query, owner, probe, item FROM gate_item WHERE phase = $1 AND id = $2",
+            &[&phase, &id],
         )
         .await?;
-    let had: (Option<String>, Option<String>, String) = match was.first() {
-        Some(r) => (r.get(0), r.get(1), r.get(2)),
-        None => (None, None, String::new()),
+    let had: (Option<String>, Option<String>, String, String) = match was.first() {
+        Some(r) => (r.get(0), r.get(1), r.get(2), r.get(3)),
+        None => (None, None, String::new(), String::new()),
     };
+    let title = if title.trim().is_empty() { had.3.clone() } else { title.to_owned() };
+    if id.trim().is_empty() {
+        return Ok(json!({ "status": "nameless",
+                          "why": "пункт гейта без имени не заводится: имя адресует пункт, заголовок его объясняет" }));
+    }
     let query = query.map(|q| q.to_owned()).or(had.0);
     let owner = owner.map(|o| o.to_owned()).or(had.1);
     let probe = probe.map(|p| p.to_owned()).unwrap_or(had.2);
     let n = client
         .execute(
-            "INSERT INTO gate_item (phase, item, kind, query, owner, probe)
-             VALUES ($1, $2, $3, $4, $5, $6)
-             ON CONFLICT (phase, item)
-               DO UPDATE SET kind = EXCLUDED.kind, query = EXCLUDED.query,
+            "INSERT INTO gate_item (phase, id, item, kind, query, owner, probe)
+             VALUES ($1, $2, $7, $3, $4, $5, $6)
+             ON CONFLICT (phase, id) WHERE id <> ''
+               DO UPDATE SET item = EXCLUDED.item, kind = EXCLUDED.kind, query = EXCLUDED.query,
                              owner = EXCLUDED.owner, probe = EXCLUDED.probe",
-            &[&phase, &item, &kind, &query, &owner, &probe],
+            &[&phase, &id, &kind, &query, &owner, &probe, &title],
         )
         .await?;
     if !why.is_empty() {
         client
-            .execute("UPDATE gate_item SET why = $3 WHERE phase = $1 AND item = $2",
-                     &[&phase, &item, &why])
+            .execute("UPDATE gate_item SET why = $3 WHERE phase = $1 AND id = $2",
+                     &[&phase, &id, &why])
             .await?;
     }
-    Ok(json!({ "phase": phase, "item": item, "kind": kind, "written": n, "why": why }))
+    Ok(json!({ "phase": phase, "id": id, "item": title, "kind": kind, "written": n, "why": why }))
 }
 
 /// Виды, чьи пункты готовности переносятся. Список назван здесь один раз и

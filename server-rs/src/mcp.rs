@@ -437,7 +437,7 @@ impl Mcp {
         tools.push(json!({ "name": "links-retarget", "description": "переписать цель ссылок в `вид:имя` по уже разобранной связи; ярлык не трогается; сухой режим по умолчанию",
             "inputSchema": { "type": "object", "properties": { "apply": json!({"type":"boolean"}) } } }));
         tools.push(json!({ "name": "gate-item-waive", "description": "объявить пункт гейта неприменимым к этому проекту — с обязательной причиной",
-            "inputSchema": { "type": "object", "properties": { "phase": s("гейт"), "item": s("пункт"), "holdsWhileEmpty": s("род факта, который обязан оставаться пустым, пока отмена верна"),
+            "inputSchema": { "type": "object", "properties": { "id": s("имя пункта, латиницей через дефис"), "phase": s("гейт"), "item": s("пункт"), "holdsWhileEmpty": s("род факта, который обязан оставаться пустым, пока отмена верна"),
                 "why": s("почему неприменим"), "drop": json!({"type":"boolean"}) },
                 "required": ["phase", "item"] } }));
         tools.push(json!({ "name": "gate-measure", "description": "перемерить пункты гейтов и сохранить измеренное; обычно не нужно — пересчёт идёт сам при изменении набора",
@@ -474,12 +474,12 @@ impl Mcp {
         tools.push(json!({ "name": "question-holders", "description": "вопрос и его задача-держатель: пора закрывать, закрыт рано, судить нечем",
             "inputSchema": { "type": "object", "properties": {} } }));
         tools.push(json!({ "name": "gate-item-set", "description": "объявить пункт гейта: запрос, команда или подпись",
-            "inputSchema": { "type": "object", "properties": { "phase": s("гейт, например G5"), "item": s("имя пункта"),
+            "inputSchema": { "type": "object", "properties": { "id": s("устойчивое имя пункта, латиницей через дефис — им пункт адресуется"), "phase": s("гейт, например G5"), "item": s("заголовок пункта для человека; переписывается свободно, ссылок не рвёт"),
                 "itemKind": s("query · command · signed"), "query": s("запрос для вида query"),
                 "owner": s("кто подписывает, для вида signed"),
                 "probe": s("запрос, подсаживающий нарушение — им самотест роняет пункт"),
                 "why": s("почему способа нет — для рода unknown"),
-                "drop": json!({"type":"boolean","description":"снять пункт вместе с его замерами"}) }, "required": ["phase", "item", "itemKind"] } }));
+                "drop": json!({"type":"boolean","description":"снять пункт вместе с его замерами"}) }, "required": ["phase", "id", "itemKind"] } }));
         tools.push(json!({ "name": "ceiling-set", "description": "объявить потолок долга правила: сколько находок сегодня терпимо и почему; держит не долг, а его рост",
             "inputSchema": { "type": "object", "properties": {
                 "rule": s("имя правила — оно же род факта"),
@@ -1827,7 +1827,10 @@ impl Mcp {
             "gate-item-waive" => {
                 let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
                 let drop = args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false);
-                match crate::projector::waive_gate_item(&self.pool, p, &g("phase"), &g("item"),
+                // Отмена адресуется ИМЕНЕМ пункта. Прежде — заголовком, и стоило
+                // переписать формулировку, как отмена оставалась висеть в пустоте.
+                let who = if g("id").is_empty() { g("item") } else { g("id") };
+                match crate::projector::waive_gate_item(&self.pool, p, &g("phase"), &who,
                                                          &g("why"), &self.author, drop,
                                                          &g("holdsWhileEmpty")).await {
                     Ok(v) => ok(v),
@@ -1868,16 +1871,21 @@ impl Mcp {
             }
             "gate-item-set" => {
                 let phase = args.get("phase").and_then(|v| v.as_str()).unwrap_or("");
+                // `id` адресует пункт, `item` — заголовок для человека. Прежде
+                // ключом был заголовок, и всякая правка формулировки заводила
+                // пункт заново, оставляя прежний сиротой вместе с его отметками.
+                let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("");
                 let item = args.get("item").and_then(|v| v.as_str()).unwrap_or("");
                 let gk = args.get("itemKind").and_then(|v| v.as_str()).unwrap_or("query");
                 let why = args.get("why").and_then(|v| v.as_str()).unwrap_or("");
                 let query = args.get("query").and_then(|v| v.as_str());
                 let owner = args.get("owner").and_then(|v| v.as_str());
                 let probe = args.get("probe").and_then(|v| v.as_str());
-                if phase.is_empty() || item.is_empty() {
-                    return refusal(Miss::Db("пункт гейта без фазы или без имени не заводится".into()));
+                if phase.is_empty() || id.is_empty() {
+                    return refusal(Miss::Db(
+                        "пункт гейта без фазы или без имени не заводится: `id` адресует пункт, `item` его объясняет".into()));
                 }
-                match crate::projector::set_gate_item(&self.pool, p, phase, item, gk, query, owner,
+                match crate::projector::set_gate_item(&self.pool, p, phase, id, item, gk, query, owner,
                                                       probe, why, args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
