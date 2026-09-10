@@ -7,7 +7,8 @@ const list = [{ projectId: "a" }, { projectId: "b" }];
 test("адрес без параметра означает первый проект", () => {
   // Это же значение получает «назад», вернувшийся на страницу без параметра;
   // иначе он не возвращает никуда.
-  assert.deepEqual(chooseProject(list, null), { project: { projectId: "a" }, unknown: "" });
+  // Адрес без проекта значит «все»: показывается сводка, а не чей-то первый.
+  assert.deepEqual(chooseProject(list, null), { project: null, unknown: "" });
 });
 
 test("названный проект открывается, а не первый по списку", () => {

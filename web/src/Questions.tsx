@@ -1,6 +1,6 @@
 import type React from "react";
-import { useEffect, useState } from "react";
-import { loadEntityByName, loadSummary } from "./api";
+import { useState } from "react";
+import { loadSummary } from "./api";
 import { Live } from "./Live";
 import { useLive } from "./live";
 import { EntityDrawer } from "./EntityDrawer";
@@ -16,17 +16,9 @@ export function Questions({ projectId, onFind }: { projectId: string; onFind?: (
   const live = useLive(() => loadSummary(projectId, "question").then((d) => d.rows), [projectId]);
   const rows = live.data;
   const [chosenId, setChosenId] = useState<string>("");
-  const [body, setBody] = useState<string | null>(null);
   const [only, setOnly] = useState<"all" | "unsaid" | "open">("open");
   const chosen = (rows ?? []).find((r) => r.id === chosenId) ?? null;
 
-  useEffect(() => {
-    if (!chosen) return;
-    setBody(null);
-    void loadEntityByName(projectId, "question", chosen.id)
-      .then((e) => setBody(String((e as { content?: string }).content ?? "")))
-      .catch(() => setBody(""));
-  }, [projectId, chosenId]);
 
   if (!rows) return <p className="empty">Читаю вопросы…</p>;
   const unsaid = rows.filter((r) => String(r["answerState"] ?? r["answer_state"] ?? "") === "unsaid").length;
@@ -65,7 +57,7 @@ export function Questions({ projectId, onFind }: { projectId: string; onFind?: (
         ))}
       </div>
 
-      <div className="split">
+      <div>
         <table className="rows">
           <thead>
             <tr>
@@ -91,19 +83,6 @@ export function Questions({ projectId, onFind }: { projectId: string; onFind?: (
             })}
           </tbody>
         </table>
-
-        <aside className="panel">
-          {!chosen ? <p className="empty">Выберите вопрос.</p> : (
-            <>
-              <h2><code>{chosen.id}</code> {String(chosen.title)}</h2>
-              <p className="note">
-                заведён {String(chosen["opened"] ?? chosen["opened_at"] ?? "—")} ·
-                закрыт {String(chosen["closed"] ?? chosen["closed_at"] ?? "—")}
-              </p>
-              {body === null ? <p className="empty">Читаю…</p> : <pre className="body">{body}</pre>}
-            </>
-          )}
-        </aside>
       </div>
     {chosen ? (
       <EntityDrawer

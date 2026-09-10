@@ -60,9 +60,6 @@ const PAGES: { page: string; title: string; note: string; view: (id: string, ctx
   { page: "proof", title: "Доказательство", note: "чем закрыто", view: (id) => <Proof projectId={id} /> },
   { page: "questions", title: "Вопросы", note: "чем закрыт каждый", view: (id, ctx) => <Questions projectId={id} onFind={ctx.onFind} /> },
   { page: "entities", title: "Сущности", note: "виды", view: (id) => <Entities projectId={id} /> },
-  // Раздел БЕЗ проекта: он про то, что у проектов общее. `projectId` ему не
-  // нужен — он спрашивает всех.
-  { page: "together", title: "Вместе", note: "проекты рядом", view: () => <Together /> },
 ];
 
 /**
@@ -150,7 +147,22 @@ export function App(): React.JSX.Element {
   return (
     <div className="app">
       <nav className="side" aria-label="Экраны">
-        <ProjectPicker projects={projects} current={project} onPick={(p) => go({ project: p })} />
+        <ProjectPicker
+            projects={projects}
+            current={project}
+            onPick={(p) => go({ project: p })}
+            onAll={() => {
+              setProject(null);
+              setUnknown("");
+              // Раздел уходит вместе с проектом: он про ОДИН проект, и
+              // оставшийся в адресе `page` читался бы как неполная ссылка —
+              // а человек сам выбрал сводку, ссылка тут ни при чём.
+              const url = new URL(window.location.href);
+              url.searchParams.delete("project");
+              url.searchParams.delete("page");
+              window.history.pushState({}, "", url);
+            }}
+          />
 
         {unknown ? (
           <p className="side-note warn">
@@ -159,20 +171,47 @@ export function App(): React.JSX.Element {
           </p>
         ) : null}
 
-        {PAGES.map((p) => (
-          <button
-            key={p.page}
-            type="button"
-            className={`ent top${p.page === page ? " on" : ""}`}
-            onClick={() => go({ page: p.page })}
-          >
-            <span className="ent-n">{p.title}</span>
-            <span className="ent-c">{p.note}</span>
-          </button>
-        ))}
+        {/* Разделы — про ВЫБРАННЫЙ проект. Без выбора они бессмысленны: раздел
+            «Задачи» без проекта не про что. Вместо них — возврат к сводке. */}
+        {project
+          ? PAGES.map((p) => (
+              <button
+                key={p.page}
+                type="button"
+                className={`ent top${p.page === page ? " on" : ""}`}
+                onClick={() => go({ page: p.page })}
+              >
+                <span className="ent-n">{p.title}</span>
+                <span className="ent-c">{p.note}</span>
+              </button>
+            ))
+          : null}
       </nav>
 
-      <main className="main">{project ? view.view(project.projectId, ctx) : <p className="empty">Выбираю проект…</p>}</main>
+      <main className="main">
+        {projects.length === 0 ? (
+          <p className="empty">Читаю проекты…</p>
+        ) : project ? (
+          view.view(project.projectId, ctx)
+        ) : (
+          // Проект не выбран — показывается сводка по всем. Первый вопрос при
+          // открытии не «что у myack», а «что у нас вообще»: подставлять на него
+          // чужие числа под именем, которого человек не выбирал, значит отвечать
+          // не на тот вопрос.
+          <>
+            {/* Адрес, просящий раздел без проекта, НЕПОЛОН. Молча показать
+                сводку значит ответить не на тот вопрос: человек шёл по ссылке
+                в «Задачи», и ему надо сказать, чего в ссылке не хватило. */}
+            {asked("page") ? (
+              <p className="side-note warn">
+                В ссылке назван раздел <code>{asked("page")}</code>, но не назван проект. Разделы
+                показывают ОДИН проект: выберите его ниже, и раздел откроется.
+              </p>
+            ) : null}
+            <Together onPick={(p) => go({ project: p, page: asked("page") ?? page })} />
+          </>
+        )}
+      </main>
 
       {pal && project ? (
         <Palette

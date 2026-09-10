@@ -46,11 +46,11 @@ export function EntityDrawer({
   kind: string;
   id: string;
   title: string;
-  subtitle?: string;
+  subtitle?: string | undefined;
   /** Внутренняя сущность: у неё нет своего документа, только строка. */
-  inner?: boolean;
+  inner?: boolean | undefined;
   onClose: () => void;
-  onFind?: (q: string) => void;
+  onFind?: ((q: string) => void) | undefined;
 }): React.JSX.Element {
   const [sections, setSections] = useState<Section[] | null>(null);
   const [body, setBody] = useState<Map<string, DocBlock[]>>(new Map());

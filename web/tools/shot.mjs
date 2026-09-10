@@ -13,7 +13,11 @@ p.on('pageerror', e => errs.push('PAGEERROR '+String(e).slice(0,140)));
 for (const [name, path] of routes) {
   errs.length = 0;
   try {
-    await p.goto(base + path, { waitUntil: 'networkidle', timeout: 25000 });
+    // Раздел показывает ОДИН проект: адрес без проекта открывает сводку, и
+    // снимок вышел бы не того, что просили.
+    const url = base + (process.env.MH_UI_PROJECT && path.startsWith('?')
+      ? `?project=${process.env.MH_UI_PROJECT}&` + path.slice(1) : path);
+    await p.goto(url, { waitUntil: 'networkidle', timeout: 25000 });
     await p.waitForTimeout(1000);
     // Растим окно под ВСЮ внутреннюю прокрутку: каркас — окно в 100vh, и
     // обычный fullPage снимает только первый экран.

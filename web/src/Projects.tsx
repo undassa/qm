@@ -18,10 +18,13 @@ import { dayOf, plural } from "./findings";
 export function ProjectPicker({
   projects,
   current,
+  onAll,
   onPick,
 }: {
   projects: Project[];
   current: Project | null;
+  /** Вернуться к сводке: показать все проекты разом. */
+  onAll?: () => void;
   onPick: (p: Project) => void;
 }): React.JSX.Element {
   const [open, setOpen] = useState(false);
@@ -73,12 +76,33 @@ export function ProjectPicker({
         title="Выбрать проект"
       >
         <span className="place-k">{projects.length > 1 ? `проект · ${projects.length}` : "проект"}</span>
-        <span className="place-n">{current?.name ?? "…"}</span>
-        <span className="place-s">{current ? volume(current) : "читаю список"}</span>
+        {/* «Все проекты» — законное состояние, а не «ещё не выбрал»: без выбора
+            показывается сводка. Многоточие тут читалось как загрузка. */}
+        <span className="place-n">{current?.name ?? (projects.length ? "все проекты" : "…")}</span>
+        <span className="place-s">
+          {current ? volume(current) : projects.length ? `${projects.length} · сводка` : "читаю список"}
+        </span>
       </button>
 
       {open ? (
         <ul className="picks" role="listbox" aria-label="Проекты">
+          {/* Возврат к сводке — первой строкой: уйдя в проект, вернуться было
+              нечем, а сводка и есть ответ на «что у нас вообще». */}
+          <li className={current ? "" : "at"}>
+            <button
+              type="button"
+              role="option"
+              aria-selected={!current}
+              className={current ? "" : "on"}
+              onClick={() => {
+                onAll?.();
+                setOpen(false);
+              }}
+            >
+              <b>все проекты</b>
+              <span>сводка</span>
+            </button>
+          </li>
           {projects.map((p, i) => (
             <li key={p.projectId} className={i === at ? "at" : ""}>
               <button

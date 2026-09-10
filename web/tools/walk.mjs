@@ -8,7 +8,7 @@ p.on('pageerror', e => errs.push('PAGEERROR ' + String(e).slice(0, 110)));
 p.on('console', m => { if (m.type() === 'error') errs.push(m.text().slice(0, 110)); });
 const say = (what, ok, note = '') => console.log(`${ok ? '  ✓' : '  ✗'} ${what}${note ? ' — ' + note : ''}`);
 
-await p.goto('http://127.0.0.1:8096/next/?page=where', { waitUntil: 'networkidle' });
+await p.goto('http://127.0.0.1:8096/next/?project=308ed7a2-d18f-4a76-a9c4-c792ce7de0d3&page=where', { waitUntil: 'networkidle' });
 await p.waitForTimeout(1100);
 
 // 1. щёлкнуть по каждой фазе
@@ -48,7 +48,7 @@ for (const btn of await p.$$('.side .ent.top')) {
 say(`разделы открываются (${pages})`, bad.length === 0, bad.join(' ; '));
 
 // 6. чтение: вид → документ → ссылка → назад
-await p.goto('http://127.0.0.1:8096/next/?page=read', { waitUntil: 'networkidle' });
+await p.goto('http://127.0.0.1:8096/next/?project=308ed7a2-d18f-4a76-a9c4-c792ce7de0d3&page=read', { waitUntil: 'networkidle' });
 await p.waitForTimeout(900);
 await (await p.$('.reader-kinds :text-is("task")')).click(); await p.waitForTimeout(1000);
 const auto = await p.$eval('.reader-doc', e => e.innerText.slice(0, 12)).catch(() => '');
