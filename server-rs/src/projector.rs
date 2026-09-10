@@ -1810,11 +1810,13 @@ CREATE TABLE IF NOT EXISTS project_milestone_links (
 -- 830 при четырёх настоящих, потому что 824 имени раскрыты из диапазона
 -- («TC-STP-01…14», где существует не каждый). Слово, называющее законное
 -- состояние дефектом, дороже отсутствия слова: по нему чинят несломанное.
--- Порядок обязателен: `question_live` СТОИТ НА `named_id_role`, и снос
--- нижнего без верхнего роняет сервер на старте. Так и вышло: вид, заведённый
--- рукой мимо DDL, пережил первую пересборку и убил вторую, а ошибка пришла
--- словом «db error» — тем самым, которое сегодня уже стоило трёх попыток.
+-- Порядок обязателен: верхние виды СТОЯТ НА нижних, и снос нижнего без
+-- верхнего роняет сервер на старте. Так и вышло: вид, заведённый рукой мимо
+-- DDL, пережил первую пересборку и убил вторую, а ошибка пришла словом
+-- «db error» — тем самым, которое сегодня уже стоило трёх попыток.
 DROP VIEW IF EXISTS question_live;
+DROP VIEW IF EXISTS entity_live;
+DROP VIEW IF EXISTS entity_link;
 DROP VIEW IF EXISTS entity_row;
 DROP VIEW IF EXISTS named_id_role;
 CREATE OR REPLACE VIEW named_id_role AS
@@ -1857,59 +1859,105 @@ SELECT n.project_id, n.entity_kind, n.entity_name, n.said_id, n.caveated,
 --
 -- `origin` исключён: он про то, ОТКУДА запись, а не что в ней.
 CREATE OR REPLACE VIEW entity_row AS
-       SELECT project_id, 'requirement' AS kind, id, entity_kind, entity_name,
+       SELECT project_id, 'requirement' AS kind, id, entity_kind, entity_name, section_ord,
               (to_jsonb(r.*) - 'project_id' - 'origin')::text AS body FROM project_requirements r
- UNION ALL SELECT project_id, 'check', id, entity_kind, entity_name,
+ UNION ALL SELECT project_id, 'check', id, entity_kind, entity_name, section_ord,
               (to_jsonb(c.*) - 'project_id' - 'origin')::text FROM project_checks c
- UNION ALL SELECT project_id, 'need', id, entity_kind, entity_name,
+ UNION ALL SELECT project_id, 'need', id, entity_kind, entity_name, section_ord,
               (to_jsonb(n.*) - 'project_id')::text FROM project_needs n
- UNION ALL SELECT project_id, 'decision', id, entity_kind, entity_name,
+ UNION ALL SELECT project_id, 'decision', id, entity_kind, entity_name, NULL::integer,
               (to_jsonb(d.*) - 'project_id' - 'origin')::text FROM project_decisions d
- UNION ALL SELECT project_id, 'screen', id, entity_kind, entity_name,
+ UNION ALL SELECT project_id, 'screen', id, entity_kind, entity_name, NULL::integer,
               (to_jsonb(s.*) - 'project_id' - 'origin')::text FROM project_screens s
- UNION ALL SELECT project_id, 'story', id, entity_kind, entity_name,
-              (to_jsonb(t.*) - 'project_id' - 'origin')::text FROM project_stories t;
+ UNION ALL SELECT project_id, 'story', id, entity_kind, entity_name, NULL::integer,
+              (to_jsonb(t.*) - 'project_id' - 'origin')::text FROM project_stories t
+ UNION ALL SELECT project_id, 'task', id, entity_kind, entity_name, NULL::integer,
+              (to_jsonb(p.*) - 'project_id' - 'origin')::text FROM project_plan_tasks p
+ UNION ALL SELECT project_id, 'milestone', id, entity_kind, entity_name, NULL::integer,
+              (to_jsonb(m.*) - 'project_id' - 'origin')::text FROM project_plan_milestones m
+ UNION ALL SELECT project_id, 'question', id, entity_kind, entity_name, NULL::integer,
+              (to_jsonb(q.*) - 'project_id' - 'origin' - 'created_at' - 'updated_at')::text
+         FROM project_questions q;
 
--- ЖИВОЕ СОСТОЯНИЕ ВОПРОСА. Закрытым он остаётся, только пока ни одна его
--- связь не обновилась после него: изменилось требование — вопрос переоткрыт,
--- и гейт, который его читает, краснеет сам. Состояние СЛЕДУЕТ из связей, а не
--- объявляется.
+-- НАПРАВЛЕННАЯ СВЯЗЬ: КТО НА КОМ СТОИТ. Раньше каскад шёл по совместному
+-- упоминанию — «названо в той же секции», — и это оказалось не зависимостью, а
+-- СОСЕДСТВОМ: правка `FR-ORG-01` переоткрывала `FR-ORG-02…09` только потому,
+-- что они стоят в том же разделе `srs`. Того, что обновился документ, о самой
+-- записи не говорит ничего.
 --
--- Сравнение идёт с `updated_at` вопроса, а не с полем «Закрыт»: у 290 из 373
--- закрытых оно прочерк — даты потеряли при переносе из реестра. История
--- документа знает дату у всех.
+-- Здесь собраны настоящие связи — те, что уже лежат таблицами и у которых есть
+-- сторона: задача СТОИТ НА требовании, проверка СТОИТ НА требовании, этап
+-- СТОИТ НА своих задачах и перечнях. Правка правого переоткрывает левое, и
+-- никогда наоборот.
+CREATE OR REPLACE VIEW entity_link AS
+       SELECT project_id, 'task' AS from_kind, task_id AS from_id,
+              'requirement' AS to_kind, requirement_id AS to_id FROM task_requirement
+ UNION ALL SELECT project_id, 'check', check_id, 'requirement', requirement_id
+         FROM project_check_requirements
+ UNION ALL SELECT project_id, 'milestone', milestone_id, 'requirement', requirement_id
+         FROM project_milestone_requirements
+ UNION ALL SELECT project_id, 'milestone', milestone_id, kind, target
+         FROM project_milestone_links
+ UNION ALL SELECT project_id, 'story', story_id, 'requirement', requirement_id
+         FROM project_story_requirements
+ UNION ALL SELECT project_id, 'requirement', requirement_id, 'need', need_id
+         FROM project_requirement_needs
+ UNION ALL SELECT project_id, 'requirement', requirement_id, kind, target
+         FROM project_requirement_sources
+ -- Вопрос стоит на том, что называет, и таблицы под это нет. Брать упоминание
+ -- здесь МОЖНО — в отличие от `srs`: документ вопроса это ОДИН вопрос, и
+ -- соседства по разделу тут не бывает. Ровно поэтому у требования упоминание
+ -- не годится, а у вопроса годится.
+ UNION ALL SELECT DISTINCT n.project_id, 'question', n.entity_name, s.kind, n.said_id
+         FROM project_named_id n
+         JOIN entity_stamp s ON s.project_id = n.project_id AND s.id = n.said_id
+        WHERE n.entity_kind = 'question' AND n.entity_name <> '' AND NOT n.caveated;
+
+-- ЖИВОЕ СОСТОЯНИЕ. Сущность остаётся закрытой, только пока ничто из
+-- названного ею не изменилось после неё. Состояние СЛЕДУЕТ из связей.
+--
+-- Виды берутся из объявления `reopens`, а не перечислены здесь: решение и
+-- прогон объявлены непереоткрываемыми, и вид о них молчит сам.
+--
+-- Связи берутся НАПРАВЛЕННЫЕ, из `entity_link`: «стоит на», а не «названо
+-- рядом». Соседство по разделу зависимостью не является.
+CREATE OR REPLACE VIEW entity_live AS
+SELECT e.project_id, e.kind, e.id, st.updated_at, st.created_at,
+       св.target AS stale_link, св.когда AS link_changed,
+       CASE WHEN св.target IS NOT NULL THEN 'reopened' ELSE 'current' END AS live_state,
+       CASE WHEN св.target IS NOT NULL
+            THEN 'связь ' || св.target || ' обновлена '
+                 || to_char(to_timestamp(св.когда/1000),'YYYY-MM-DD')
+                 || ', а сама запись стояла с '
+                 || to_char(to_timestamp(st.updated_at/1000),'YYYY-MM-DD')
+            ELSE '' END AS why
+  FROM entity_row e
+  JOIN kind_layout k ON k.name = e.kind AND (k.spec->>'reopens')::boolean IS TRUE
+  JOIN entity_stamp st
+    ON st.project_id = e.project_id AND st.kind = e.kind AND st.id = e.id
+  LEFT JOIN LATERAL (
+       SELECT l.to_id AS target, s2.updated_at AS когда
+         FROM entity_link l
+         JOIN entity_stamp s2
+           ON s2.project_id = l.project_id AND s2.kind = l.to_kind AND s2.id = l.to_id
+        WHERE l.project_id = e.project_id AND l.from_kind = e.kind AND l.from_id = e.id
+          AND s2.updated_at > st.updated_at
+        ORDER BY s2.updated_at DESC
+        LIMIT 1) св ON true;
+
+-- Вопрос — частный случай общего вида: к живому состоянию добавлено
+-- объявленное состояние («открыт», «закрыт», «решён»), потому что вопрос
+-- бывает открытым и без всяких правок связей.
 CREATE OR REPLACE VIEW question_live AS
 SELECT q.project_id, q.id, q.number, q.title, q.state, q.created_at, q.updated_at,
-       св.треб AS stale_link, св.когда AS link_changed,
-       CASE WHEN q.state = 'open'      THEN 'open'
-            WHEN q.updated_at IS NULL AND q.closed_at = '' THEN q.state
-            WHEN св.треб IS NOT NULL   THEN 'reopened'
+       l.stale_link, l.link_changed,
+       CASE WHEN q.state = 'open'          THEN 'open'
+            WHEN l.live_state = 'reopened' THEN 'reopened'
             ELSE q.state END AS live_state,
-       CASE WHEN q.state <> 'open' AND q.updated_at IS NULL AND q.closed_at = ''
-              THEN 'когда вопрос писали в последний раз — неизвестно: сверить связи не с чем'
-            WHEN св.треб IS NOT NULL
-              THEN 'связь ' || св.треб || ' обновлена '
-                   || to_char(to_timestamp(св.когда/1000),'YYYY-MM-DD')
-                   || ', а вопрос стоял с '
-                   || coalesce(nullif(q.closed_at,''), to_char(to_timestamp(q.updated_at/1000),'YYYY-MM-DD'))
-            ELSE '' END AS why
+       coalesce(l.why, '') AS why
   FROM project_questions q
-  LEFT JOIN LATERAL (
-       SELECT n.said_id AS треб, поя.когда
-         FROM named_id_role n
-         JOIN entity_row r ON r.project_id = n.project_id AND r.id = n.said_id
-         CROSS JOIN LATERAL (
-              SELECT t.updated_at AS когда FROM entity_stamp t
-               WHERE t.project_id = r.project_id AND t.kind = r.kind AND t.id = r.id) поя
-        WHERE n.project_id = q.project_id AND n.entity_kind = 'question' AND n.entity_name = q.id
-          -- Дата ответа — ЛУЧШАЯ ИЗ ДВУХ: поле «Закрыт» там, где оно есть (оно
-          -- старше переноса), иначе история документа. И сравнение ПО ДНЮ:
-          -- по миллисекундам первичный импорт засчитывался изменением, и все
-          -- 29 «переоткрытых» оказались записанными в один день с требованием.
-          AND поя.когда IS NOT NULL
-          AND to_timestamp(поя.когда/1000)::date
-              > coalesce(nullif(q.closed_at,'')::date, to_timestamp(q.updated_at/1000)::date)
-        ORDER BY поя.когда DESC LIMIT 1) св ON true;
+  LEFT JOIN entity_live l
+    ON l.project_id = q.project_id AND l.kind = 'question' AND l.id = q.id;
 -- Заявленное число и объявленный предмет связываются ТОЖДЕСТВОМ ДОКУМЕНТА, а не
 -- совпадением строк: «constitution:» и «constitution.md» — одно и то же, и
 -- строковое равенство их не сводило ни разу.

@@ -338,24 +338,24 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize)
     // ОТМЕТКА ИЗМЕНЕНИЯ. Отпечаток записи сверяется с прошлым: совпал — дата
     // держится, разошёлся — ставится новая.
     //
-    // ПЕРВАЯ отметка берёт САМУЮ РАННЮЮ известную дату — первую ревизию
-    // документа-источника, а не «сейчас» и не его текущую дату.
+    // ПЕРВАЯ отметка — ОДНА НА ВСЕХ, а не из документа-источника. Это ловилось
+    // замером четырежды, и три раза я ошибался:
+    //     «сейчас»                  → 213 переоткрытых вопросов
+    //     текущая дата документа    → 210
+    //     первая ревизия документа  →  12, но 271 требование из 306
+    // Последнее и показало ошибку: у разных документов разная первая ревизия,
+    // и требование из `srs` выходило старше проверки из `test-cases`. Разница
+    // была разницей ДОКУМЕНТОВ, а не правок записей — а то, что обновился
+    // `srs`, о самой записи не говорит ничего.
     //
-    // Мерено дважды: с «сейчас» каскад дал 213 переоткрытых вопросов, с
-    // текущей датой документа — 210, и все они враньё. Причина простая: в
-    // `srs` 306 требований, документ переписывается целиком, и его дата
-    // ничего не говорит об отдельной записи. Ранняя дата честна: она значит
-    // «правок этой записи мы не видели», а это и есть правда о наборе,
-    // который приехал переносом.
+    // Одна дата на всех значит «правок мы не видели ни одной». Это правда о
+    // наборе, приехавшем переносом, и с неё каскад начинает считать честно.
     tx.execute(
         "INSERT INTO entity_stamp (project_id, kind, id, text_hash, created_at, updated_at)
-         SELECT e.project_id, e.kind, e.id, md5(e.body),
-                coalesce(перв.когда, $2), coalesce(перв.когда, $2)
+         SELECT e.project_id, e.kind, e.id, md5(e.body), нач.когда, нач.когда
            FROM entity_row e
-           LEFT JOIN LATERAL (
-                SELECT min(v.written_at) AS когда FROM project_document_revisions v
-                 WHERE v.project_id = e.project_id AND v.entity_kind = e.entity_kind
-                   AND v.entity_name = e.entity_name) перв ON true
+           CROSS JOIN (SELECT coalesce(min(written_at), $2) AS когда
+                         FROM project_document_revisions WHERE project_id = $1) нач
           WHERE e.project_id = $1
          ON CONFLICT (project_id, kind, id) DO UPDATE
             SET updated_at = CASE WHEN entity_stamp.text_hash <> EXCLUDED.text_hash
