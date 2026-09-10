@@ -1904,6 +1904,14 @@ CREATE OR REPLACE VIEW entity_link AS
          FROM project_requirement_needs
  UNION ALL SELECT project_id, 'requirement', requirement_id, kind, target
          FROM project_requirement_sources
+ -- Этап стоит на своих задачах, красная задача — на родительской. Оба ребра
+ -- лежали колонками `milestone_id` и `parent_task_id` и в связи не попадали,
+ -- отчего цепочка обрывалась на первом же шаге: правка требования доходила до
+ -- задачи и дальше не шла.
+ UNION ALL SELECT project_id, 'milestone', milestone_id, 'task', id
+         FROM project_plan_tasks WHERE milestone_id <> '' AND kind <> 'red'
+ UNION ALL SELECT project_id, 'red-task', id, 'task', parent_task_id
+         FROM project_plan_tasks WHERE kind = 'red' AND parent_task_id <> ''
  -- Вопрос стоит на том, что называет, и таблицы под это нет. Брать упоминание
  -- здесь МОЖНО — в отличие от `srs`: документ вопроса это ОДИН вопрос, и
  -- соседства по разделу тут не бывает. Ровно поэтому у требования упоминание
@@ -1922,28 +1930,50 @@ CREATE OR REPLACE VIEW entity_link AS
 -- Связи берутся НАПРАВЛЕННЫЕ, из `entity_link`: «стоит на», а не «названо
 -- рядом». Соседство по разделу зависимостью не является.
 CREATE OR REPLACE VIEW entity_live AS
+WITH RECURSIVE прямо AS (
+       -- Первый шаг: то, на чём запись стоит, изменилось ПОСЛЕ неё.
+       SELECT st.project_id, st.kind, st.id, l.to_id AS cause, l.to_kind AS cause_kind,
+              s2.updated_at AS cause_at, 0 AS depth
+         FROM entity_stamp st
+         JOIN kind_layout k ON k.name = st.kind AND (k.spec->>'reopens')::boolean IS TRUE
+         JOIN entity_link l
+           ON l.project_id = st.project_id AND l.from_kind = st.kind AND l.from_id = st.id
+         JOIN entity_stamp s2
+           ON s2.project_id = l.project_id AND s2.kind = l.to_kind AND s2.id = l.to_id
+        WHERE s2.updated_at > st.updated_at
+),
+цепь AS (
+       SELECT * FROM прямо
+        UNION
+       -- Дальше: кто стоит на переоткрытом, переоткрыт и сам. Глубина ограничена
+       -- шестью: связи образуют не дерево, а граф, и без предела обход по кругу
+       -- не кончится. Шесть — длина самой длинной цепочки набора плюс запас.
+       SELECT l.project_id, l.from_kind, l.from_id, ц.cause, ц.cause_kind, ц.cause_at, ц.depth + 1
+         FROM цепь ц
+         JOIN entity_link l
+           ON l.project_id = ц.project_id AND l.to_kind = ц.kind AND l.to_id = ц.id
+         JOIN kind_layout k ON k.name = l.from_kind AND (k.spec->>'reopens')::boolean IS TRUE
+        WHERE ц.depth < 6
+)
 SELECT e.project_id, e.kind, e.id, st.updated_at, st.created_at,
-       св.target AS stale_link, св.когда AS link_changed,
-       CASE WHEN св.target IS NOT NULL THEN 'reopened' ELSE 'current' END AS live_state,
-       CASE WHEN св.target IS NOT NULL
-            THEN 'связь ' || св.target || ' обновлена '
-                 || to_char(to_timestamp(св.когда/1000),'YYYY-MM-DD')
-                 || ', а сама запись стояла с '
-                 || to_char(to_timestamp(st.updated_at/1000),'YYYY-MM-DD')
-            ELSE '' END AS why
+       ц.cause AS stale_link, ц.cause_at AS link_changed, ц.depth,
+       CASE WHEN ц.cause IS NOT NULL THEN 'reopened' ELSE 'current' END AS live_state,
+       CASE WHEN ц.cause IS NULL THEN ''
+            WHEN ц.depth = 0
+              THEN 'связь ' || ц.cause || ' обновлена '
+                   || to_char(to_timestamp(ц.cause_at/1000),'YYYY-MM-DD')
+                   || ', а сама запись стояла с '
+                   || to_char(to_timestamp(st.updated_at/1000),'YYYY-MM-DD')
+            ELSE 'переоткрыто по цепочке: ' || ц.cause || ' обновлена '
+                 || to_char(to_timestamp(ц.cause_at/1000),'YYYY-MM-DD')
+                 || ', через ' || ц.depth || ' связь' END AS why
   FROM entity_row e
   JOIN kind_layout k ON k.name = e.kind AND (k.spec->>'reopens')::boolean IS TRUE
   JOIN entity_stamp st
     ON st.project_id = e.project_id AND st.kind = e.kind AND st.id = e.id
-  LEFT JOIN LATERAL (
-       SELECT l.to_id AS target, s2.updated_at AS когда
-         FROM entity_link l
-         JOIN entity_stamp s2
-           ON s2.project_id = l.project_id AND s2.kind = l.to_kind AND s2.id = l.to_id
-        WHERE l.project_id = e.project_id AND l.from_kind = e.kind AND l.from_id = e.id
-          AND s2.updated_at > st.updated_at
-        ORDER BY s2.updated_at DESC
-        LIMIT 1) св ON true;
+  LEFT JOIN LATERAL (SELECT * FROM цепь c
+                      WHERE c.project_id = e.project_id AND c.kind = e.kind AND c.id = e.id
+                      ORDER BY c.depth, c.cause_at DESC LIMIT 1) ц ON true;
 
 -- Вопрос — частный случай общего вида: к живому состоянию добавлено
 -- объявленное состояние («открыт», «закрыт», «решён»), потому что вопрос
