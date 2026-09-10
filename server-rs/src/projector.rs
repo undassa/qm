@@ -1598,6 +1598,30 @@ ALTER TABLE gate_item ADD COLUMN IF NOT EXISTS probe_ok boolean;
 -- прочее уходило в `_ => continue` БЕЗ ЕДИНОГО СЛОВА. Документ `run` с именем
 -- `v1` не появлялся в наборе, ошибки не было, счётчик не менялся — тот же род
 -- молчания, который вычищен из подачи фактов.
+-- ИСТОЧНИК И ЕГО КОПИИ. Нормативный перечень живёт в четырёх местах, и
+-- равенство держит рука: три копии честно помечены производными, но пометка —
+-- ПРОЗА. Двадцать первая настройка потребует пяти правок, и красной станет ноль.
+--
+-- Дверь одна на два решения владельца: там сверяется пара чисел, здесь — тело
+-- названной функции (запрет восьмой копии помощника). Разница только в способе
+-- сравнения, и он объявляется полем, а не второй дверью.
+CREATE TABLE IF NOT EXISTS derived_copy (
+  project_id text NOT NULL,
+  name text NOT NULL,
+  source_kind text NOT NULL,
+  source_name text NOT NULL,
+  copy_kind text NOT NULL,
+  copy_name text NOT NULL,
+  compare text NOT NULL CHECK (compare IN ('count', 'body')),
+  -- ОБРАЗЕЦ У КАЖДОЙ СТОРОНЫ СВОЙ. Источник и копия говорят одно и то же
+  -- РАЗНЫМИ словами — «`ADR-0020` называет девять» против «гейтятся девять», — и
+  -- один образец на обоих берёт из одного нужное, из другого соседнее слово.
+  source_pattern text NOT NULL DEFAULT '',
+  pattern text NOT NULL,
+  why text NOT NULL DEFAULT '',
+  decided_by text NOT NULL DEFAULT '',
+  PRIMARY KEY (project_id, name, copy_kind, copy_name));
+ALTER TABLE derived_copy ADD COLUMN IF NOT EXISTS source_pattern text NOT NULL DEFAULT '';
 ALTER TABLE project_runs_log ADD COLUMN IF NOT EXISTS is_version boolean NOT NULL DEFAULT false;
 ALTER TABLE gate_item ADD COLUMN IF NOT EXISTS subject_query text NOT NULL DEFAULT '';
 ALTER TABLE gate_item ADD COLUMN IF NOT EXISTS subject_why text NOT NULL DEFAULT '';
@@ -6401,6 +6425,63 @@ pub async fn set_server_filled(
         &[&project, &table, &column, &by, &why, &decided_by]).await?;
     Ok(json!({ "status": "declared", "column": format!("{table}.{column}"), "by": by,
                "means": "правила входа больше не спрашивают эту колонку: вход у неё есть, просто не телом запроса" }))
+}
+
+/// Объявить производную копию: вот источник, вот копия, вот чем сверять.
+///
+/// Причина обязательна: копия без довода неотличима от случайного совпадения, и
+/// снять её потом будет не за что.
+pub async fn set_derived_copy(
+    pool: &Pool, project: &str, name: &str, source: &str, copy: &str,
+    compare: &str, pattern: &str, source_pattern: &str, why: &str, decided_by: &str, drop_it: bool,
+) -> Result<Value, tokio_postgres::Error> {
+    let split = |v: &str| -> (String, String) {
+        match v.split_once(':') {
+            Some((k, n)) => (k.trim().to_owned(), n.trim().to_owned()),
+            None => (v.trim().to_owned(), String::new()),
+        }
+    };
+    let (sk, sn) = split(source);
+    let (ck, cn) = split(copy);
+    let client = pool.get().await.expect("пул отдал соединение");
+    if drop_it {
+        let gone = client
+            .execute("DELETE FROM derived_copy WHERE project_id = $1 AND name = $2 AND copy_kind = $3 AND copy_name = $4",
+                     &[&project, &name, &ck, &cn]).await?;
+        return Ok(json!({ "status": if gone > 0 { "dropped" } else { "not_found" } }));
+    }
+    if name.trim().is_empty() || sk.is_empty() || ck.is_empty() {
+        return Ok(json!({ "status": "incomplete",
+            "why": "называются трое: величина, источник и копия — каждый видом и именем через двоеточие" }));
+    }
+    if !matches!(compare, "count" | "body") {
+        return Ok(json!({ "status": "unknown_compare",
+            "why": "чем сверять: `count` — число, названное образцом; `body` — тело названного куска" }));
+    }
+    if pattern.trim().is_empty() {
+        return Ok(json!({ "status": "no_pattern",
+            "why": "не сказано, ЧТО именно сверять: без образца сверка не отличит нужное число от соседнего" }));
+    }
+    if why.trim().is_empty() {
+        return Ok(json!({ "status": "no_why",
+            "why": "не сказано, почему это копия. Без довода она неотличима от случайного совпадения, \
+                    и снять её потом будет не за что." }));
+    }
+    client.execute(
+        "INSERT INTO derived_copy (project_id, name, source_kind, source_name, copy_kind, copy_name,
+                                   compare, pattern, source_pattern, why, decided_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+         ON CONFLICT (project_id, name, copy_kind, copy_name) DO UPDATE SET
+           source_kind = EXCLUDED.source_kind, source_name = EXCLUDED.source_name,
+           compare = EXCLUDED.compare, pattern = EXCLUDED.pattern,
+           source_pattern = EXCLUDED.source_pattern, why = EXCLUDED.why,
+           decided_by = EXCLUDED.decided_by",
+        &[&project, &name, &sk, &sn, &ck, &cn, &compare, &pattern,
+          &(if source_pattern.trim().is_empty() { pattern } else { source_pattern }),
+          &why, &decided_by]).await?;
+    Ok(json!({ "status": "declared", "name": name,
+               "pair": format!("{sk}:{sn} → {ck}:{cn}"), "compare": compare,
+               "means": "равенство держит теперь машина, а не рука" }))
 }
 
 pub async fn set_field_alias(
