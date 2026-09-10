@@ -16,10 +16,15 @@ let phases = 0;
 for (const seg of await p.$$('.rail-seg')) { await seg.click(); await p.waitForTimeout(220); phases++; }
 say(`фазы переключаются (${phases})`, phases === 6);
 
-// 2. развернуть пройденные
-const fold = await p.$('.fold');
+// 2. развернуть пройденные. Кнопка стоит В ПОЛОСЕ ОТБОРА рядом с фазами: это
+//    не «ещё одна фаза», а «показать спрятанное», и место у неё то же.
+const before = (await p.$$('.item')).length;
+const fold = await p.$('.tab-fold');
+if (fold) { await fold.click(); await p.waitForTimeout(400); }
+const after = (await p.$$('.item')).length;
+say(`пройденные разворачиваются (${before} → ${after})`, !!fold && after > before);
+
 if (fold) { await fold.click(); await p.waitForTimeout(300); }
-say('пройденные разворачиваются', !!fold);
 
 // 3. раскрыть пункт и свернуть
 const it = await p.$('.item-head');

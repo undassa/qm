@@ -25,9 +25,7 @@ interface Ctx {
   /** Найти имя и открыть его: тем же взвешенным поиском, что и палитра. */
   onFind: (q: string) => void;
 }
-import { Process } from "./Process";
 import { Tasks } from "./Tasks";
-import { Gates } from "./Gates";
 import { Decisions } from "./Decisions";
 import { Proof } from "./Proof";
 import { Questions } from "./Questions";

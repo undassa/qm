@@ -5,31 +5,48 @@ import { Live } from "./Live";
 import { useLive } from "./live";
 
 /**
- * Готовность: где проект стоит, что его держит и чем именно.
+ * Готовность: можно ли верить числам, где проект стоит, что его держит.
  *
- * Прежде это были три раздела — «Где мы», «Ступени» и «Гейты», — и каждый
- * отвечал на свою треть одного вопроса. Человек, увидевший красный гейт, шёл
- * в другой раздел искать ступень, а оттуда в третий за находками; связь между
- * ними держалась у него в голове и рвалась при первом отвлечении.
+ * Порядок разделов — порядок вопросов, которые задают вслух.
  *
- * Здесь один спуск сверху вниз: полоса фаз → что держит сейчас → пункты
- * выбранной фазы → находки пункта. Каждый следующий уровень объясняет
- * предыдущий, и ни один не требует помнить, что было на другой странице.
+ * ПЕРВЫЙ вопрос не «сколько прошло», а «чего стоит это число». Страница
+ * показывала «94 из 111 прошли» и молчала о том, что накануне семьдесят восемь
+ * из этих правил не роняли НИ РАЗУ: зелёное у них значило только, что запрос
+ * ничего не вернул. Выглядела страница при этом ровно так же. Поэтому наверху
+ * стоит полоса доверия, и она красная, пока хоть одно правило не проверено
+ * сломом.
+ *
+ * ВТОРОЙ — «что не прошло». Прежде показывались пункты ОДНОЙ выбранной фазы, а
+ * провалы жили в других: полоса говорила «Ф4 · 135 нарушений», и чтобы их
+ * увидеть, надо было догадаться щёлкнуть. Теперь непройденное собрано в один
+ * список по всем гейтам разом, тяжёлое сверху; фаза остаётся отбором, а не
+ * условием видимости.
+ *
+ * У каждой находки есть КЛЮЧ, которым она адресуется. Он приходит из самого
+ * запроса пункта, и рядом с ним стоит готовая команда: объявить исключение
+ * можно, не выясняя ключ перебором.
  */
 
 interface Item {
   item: string;
   kind: string;
   computed: string;
+  phase?: string;
   /** Роняли ли пункт пробой. `false` — не роняли ни разу, и зелёное у него ничего не значит. */
   probeRuns?: boolean | null;
   probe?: string;
+  query?: string;
   id?: string;
   violations?: number;
   detail?: string[];
   why?: string;
   means?: string;
   excepted?: number;
+  /** Чем адресуется находка этого правила. `null` — правило исключений не читает. */
+  exceptionKey?: string | null;
+  /** Объявленные исключения, под которые сегодня ничего не подходит. */
+  staleExceptions?: number;
+  staleExceptionNames?: string[];
 }
 interface Gate {
   gate: string;
@@ -43,17 +60,12 @@ interface Phase {
   title: string;
   gate?: string;
   gateState?: string;
-  documents?: { present: number; declared: number; absent: number } | null;
-  tasks?: { total: number; closed: number; open: number } | null;
 }
 interface Step {
   ord: number;
   question: string;
-  state?: string;
   owner?: string;
-  owner_kind?: string;
   touches?: string;
-  why?: string;
 }
 interface Tile {
   tile: string;
@@ -63,14 +75,14 @@ interface Tile {
   percent?: number;
   says?: string;
 }
-interface Step2 {
+interface PipeStep {
   status: string;
   title?: string;
   reached?: number;
   unknown?: number;
 }
 interface NextStep {
-  at?: { ord?: number; question?: string; detail?: string[]; run?: string; owner?: string; side?: string } | null;
+  at?: { ord?: number; question?: string; detail?: string[]; run?: string; owner?: string } | null;
   says?: string;
 }
 
@@ -107,10 +119,11 @@ export function Readiness({
   onFind,
 }: {
   projectId: string;
-  onFind?: (q: string) => void;
+  onFind?: ((q: string) => void) | undefined;
 }): React.JSX.Element {
-  const [open, setOpen] = useState<string | null>(null);
+  const [phaseOnly, setPhaseOnly] = useState<string | null>(null);
   const [shown, setShown] = useState<string | null>(null);
+  const [showPassed, setShowPassed] = useState(false);
 
   const live = useLive(
     () =>
@@ -120,7 +133,7 @@ export function Readiness({
         tool<{ steps: Step[] }>(projectId, "process-state"),
         tool<NextStep>(projectId, "next-step"),
         tool<{ tiles: Tile[] }>(projectId, "progress"),
-        tool<{ pipeline: Step2[] }>(projectId, "pipeline"),
+        tool<{ pipeline: PipeStep[] }>(projectId, "pipeline"),
       ]).then(([g, p, s, n, pr, pi]) => ({
         gates: g.gates ?? [],
         stale: g.stale === true,
@@ -137,32 +150,55 @@ export function Readiness({
   if (!live.data) return <p className="empty">Считаю готовность…</p>;
   const { gates, phases, steps, next, tiles, pipeline, stale, staleWhy } = live.data;
   const byGate = new Map(gates.map((g) => [g.gate, g]));
+  const gateOfPhase = new Map(phases.filter((p) => p.gate).map((p) => [p.gate as string, p]));
 
   // Фаза, на которой стоим, — ПЕРВАЯ, чей гейт не пройден. Не «текущая по
   // порядку»: пройденная фаза позади независимо от того, чем занят человек.
   const here = phases.find((p) => p.gateState !== "passed")?.phase ?? phases[phases.length - 1]?.phase;
-  const chosen = open ?? here ?? phases[0]?.phase ?? "";
-  const chosenPhase = phases.find((p) => p.phase === chosen);
-  const chosenGate = chosenPhase?.gate ? byGate.get(chosenPhase.gate) : undefined;
 
-  // `corpus` — гейт без фазы: он про набор целиком и держит любую фазу.
-  const loose = gates.filter((g) => !phases.some((p) => p.gate === g.gate));
-  const all = gates.flatMap((g) => g.items);
-  const allItems = all.length;
-  const allPassed = all.filter((i) => i.computed === "passed").length;
-  const allViolations = all.reduce((n, i) => n + (i.violations ?? 0), 0);
+  // Пункты ВСЕХ гейтов в одном списке. Гейт `corpus` фазы не имеет и держит
+  // любую — прятать его в отдельный раздел значило бы делать вид, что он
+  // касается чего-то другого.
+  const all: (Item & { gate: string })[] = gates.flatMap((g) =>
+    g.items.map((i) => ({ ...i, gate: g.gate })),
+  );
+  const passed = all.filter((i) => i.computed === "passed").length;
+  const violations = all.reduce((n, i) => n + (i.violations ?? 0), 0);
+
+  // Полоса доверия. Правило, которое ни разу не уронили, зелёным быть не может:
+  // его никто не проверял. Считается только то, у чего проба вообще
+  // предусмотрена, — у подписных пунктов её и не бывает.
+  const probed = all.filter((i) => i.probeRuns !== null && i.probeRuns !== undefined);
+  const never = probed.filter((i) => i.probeRuns === false);
+  const staleEx = all.reduce((n, i) => n + (i.staleExceptions ?? 0), 0);
+  const noKey = all.filter((i) => i.computed === "failed" && !i.exceptionKey).length;
+
+  const shownItems = all
+    .filter((i) => (phaseOnly ? gateOfPhase.get(i.gate)?.phase === phaseOnly || (phaseOnly === "corpus" && !gateOfPhase.has(i.gate)) : true))
+    .filter((i) => (showPassed ? true : i.computed !== "passed"))
+    .sort(
+      (a, b) =>
+        (a.computed === "failed" ? 0 : a.computed === "passed" ? 2 : 1) -
+          (b.computed === "failed" ? 0 : b.computed === "passed" ? 2 : 1) ||
+        (b.violations ?? 0) - (a.violations ?? 0) ||
+        a.item.localeCompare(b.item),
+    );
+  const hiddenPassed = all.filter(
+    (i) => i.computed === "passed" &&
+      (phaseOnly ? gateOfPhase.get(i.gate)?.phase === phaseOnly || (phaseOnly === "corpus" && !gateOfPhase.has(i.gate)) : true),
+  ).length;
 
   return (
     <>
       <div className="head">
         <div>
           <h1>Готовность</h1>
-          <div className="prov">где стоим · что держит · что не прошло · кого нашли</div>
+          <div className="prov">чему верить · где стоим · что держит · что не прошло</div>
         </div>
         <span className="prov">
           <Live at={live.at} again={live.again} />{" "}
-          <b>{allPassed}</b> из <b>{allItems}</b> пунктов прошли
-          {allViolations > 0 ? <> · <b className="bad-n">{allViolations}</b> нарушений</> : null}
+          <b>{passed}</b> из <b>{all.length}</b> пунктов прошли
+          {violations > 0 ? <> · <b className="bad-n">{violations}</b> нарушений</> : null}
         </span>
       </div>
 
@@ -171,18 +207,49 @@ export function Readiness({
           потерять и то, что всё-таки посчиталось. */}
       {stale ? <p className="side-note warn stale">{staleWhy}</p> : null}
 
+      {/* ── Чему здесь верить ───────────────────────────────────────────── */}
+      <div className={`trust${never.length > 0 ? " bad" : ""}`}>
+        <div className="trust-main">
+          {never.length > 0 ? (
+            <>
+              <b className="bad-n">{never.length}</b> из {probed.length} правил не роняли ни разу —{" "}
+              <b>зелёное у них ничего не значит</b>
+            </>
+          ) : (
+            <>
+              Все <b>{probed.length}</b> правил роняются подсадкой: каждое проверено сломом, а не
+              тем, что запрос ничего не вернул
+            </>
+          )}
+        </div>
+        <div className="trust-side">
+          {staleEx > 0 ? (
+            <span title="исключение объявлено, а находки под него сегодня нет">
+              <b>{staleEx}</b> исключений впустую
+            </span>
+          ) : null}
+          {noKey > 0 ? (
+            <span title="правило не соединяется с таблицей исключений: объявить исключение по нему нельзя">
+              <b>{noKey}</b> красных без ключа исключения
+            </span>
+          ) : null}
+          {staleEx === 0 && noKey === 0 ? <span className="ok">исключения все действующие</span> : null}
+        </div>
+      </div>
+
       {/* ── Полоса фаз ──────────────────────────────────────────────────── */}
       <div className="rail">
         {phases.map((p) => {
           const t = tally(p.gate ? byGate.get(p.gate) : undefined);
           const isHere = p.phase === here;
-          const isOpen = p.phase === chosen;
+          const isOn = p.phase === phaseOnly;
           return (
             <button
               key={p.phase}
               type="button"
-              className={`rail-seg${isOpen ? " on" : ""}${isHere ? " here" : ""} ${TONE[p.gateState ?? "unknown"] ?? "dim"}`}
-              onClick={() => { setOpen(p.phase); setShown(null); }}
+              className={`rail-seg${isOn ? " on" : ""}${isHere ? " here" : ""} ${TONE[p.gateState ?? "unknown"] ?? "dim"}`}
+              onClick={() => { setPhaseOnly(isOn ? null : p.phase); setShown(null); }}
+              title={isOn ? "показать все фазы" : "оставить только эту фазу"}
             >
               <span className="rail-n">{p.phase}</span>
               <span className="rail-t">{p.title}</span>
@@ -206,31 +273,6 @@ export function Readiness({
         })}
       </div>
 
-      {/* ── Сколько прошли — три числа, никогда одно ────────────────────── */}
-      {tiles.length > 0 ? (
-        <div className="tilestrip">
-          {tiles.map((t) => (
-            <div key={t.tile} className="ts">
-              <div className="ts-t">{t.tile}</div>
-              <div className="ts-n">
-                <b>{t.done}</b>
-                <span>из {t.done + t.open + t.unknown}</span>
-              </div>
-              {/* Три числа, и третье — «не отвечается». Сложить его в любую
-                  сторону значит соврать в успокаивающую. */}
-              <div className="ts-bar" title={`${t.done} сделано · ${t.open} открыто · ${t.unknown} не отвечается`}>
-                <span className="ts-done" style={{ flexGrow: t.done || 0.001 }} />
-                <span className="ts-open" style={{ flexGrow: t.open || 0.001 }} />
-                <span className="ts-unk" style={{ flexGrow: t.unknown || 0.001 }} />
-              </div>
-              <div className="ts-s">
-                {t.unknown > 0 ? <em>{t.unknown} не отвечается</em> : t.says ?? `${t.percent ?? 0} %`}
-              </div>
-            </div>
-          ))}
-        </div>
-      ) : null}
-
       {/* ── Что держит прямо сейчас ─────────────────────────────────────── */}
       {next?.at ? (
         <section className="holds">
@@ -248,7 +290,7 @@ export function Readiness({
             {(next.at.detail ?? []).length > 0 ? (
               <ul className="holds-list">
                 {(next.at.detail ?? []).slice(0, 6).map((d, i) => (
-                  <li key={i}>{d}</li>
+                  <li key={i}><Found text={String(d)} onFind={onFind} /></li>
                 ))}
                 {(next.at.detail ?? []).length > 6 ? (
                   <li className="holds-more">…и ещё {(next.at.detail ?? []).length - 6}</li>
@@ -261,15 +303,81 @@ export function Readiness({
         <p className="note">{next.says}</p>
       ) : null}
 
-      {/* ── Пункты выбранной фазы ───────────────────────────────────────── */}
+      {/* ── Что не прошло: все гейты разом ──────────────────────────────── */}
       <h2 className="pick-h">
-        {chosenPhase ? `${chosenPhase.phase} · ${chosenPhase.title}` : chosen}
-        {chosenPhase?.gate ? <span className="pick-g">гейт {chosenPhase.gate}</span> : null}
+        Что не прошло
+        <span className="pick-g">
+          {phaseOnly ? `только ${phaseOnly}` : "все фазы разом"} · тяжёлое сверху
+        </span>
       </h2>
-      <ItemList gate={chosenGate} shown={shown} onShow={setShown} onFind={onFind} />
 
-      {/* ── Ступени лестницы, относящиеся к этой стороне ────────────────── */}
+      <div className="tabs">
+        <button type="button" className={phaseOnly === null ? "on" : ""} onClick={() => setPhaseOnly(null)}>
+          все фазы
+        </button>
+        {here ? (
+          <button type="button" className={phaseOnly === here ? "on" : ""} onClick={() => setPhaseOnly(here)}>
+            где стоим · {here}
+          </button>
+        ) : null}
+        <button type="button" className={phaseOnly === "corpus" ? "on" : ""} onClick={() => setPhaseOnly("corpus")}>
+          порядок в наборе
+        </button>
+        {hiddenPassed > 0 ? (
+          <button type="button" className={`tab-fold${showPassed ? " on" : ""}`} onClick={() => setShowPassed(!showPassed)}>
+            {showPassed ? "▾" : "▸"} {hiddenPassed} пройденных
+          </button>
+        ) : null}
+      </div>
+
+      {shownItems.length === 0 ? (
+        <p className="empty ok-note">Здесь всё пройдено.</p>
+      ) : (
+        <ul className="items">
+          {shownItems.map((i) => (
+            <ItemRow
+              key={`${i.gate}·${i.item}`}
+              item={i}
+              phase={gateOfPhase.get(i.gate)?.phase ?? i.gate}
+              open={shown === `${i.gate}·${i.item}`}
+              onShow={() => setShown(shown === `${i.gate}·${i.item}` ? null : `${i.gate}·${i.item}`)}
+              onFind={onFind}
+            />
+          ))}
+        </ul>
+      )}
+
+      {/* ── Лестница входа ──────────────────────────────────────────────── */}
       <Ladder steps={steps} at={next?.at?.ord} />
+
+      {/* ── Сколько прошли — три числа, никогда одно ────────────────────── */}
+      {tiles.length > 0 ? (
+        <>
+          <h2 className="pick-h">
+            Счёт по предметам
+            <span className="pick-g">третье число — «не отвечается», и складывать его некуда</span>
+          </h2>
+          <div className="tilestrip">
+            {tiles.map((t) => (
+              <div key={t.tile} className={`ts${t.unknown > t.done + t.open ? " ts-mostly-unknown" : ""}`}>
+                <div className="ts-t">{t.tile}</div>
+                <div className="ts-n">
+                  <b>{t.done}</b>
+                  <span>из {t.done + t.open + t.unknown}</span>
+                </div>
+                <div className="ts-bar" title={`${t.done} сделано · ${t.open} открыто · ${t.unknown} не отвечается`}>
+                  <span className="ts-done" style={{ flexGrow: t.done || 0.001 }} />
+                  <span className="ts-open" style={{ flexGrow: t.open || 0.001 }} />
+                  <span className="ts-unk" style={{ flexGrow: t.unknown || 0.001 }} />
+                </div>
+                <div className="ts-s">
+                  {t.unknown > 0 ? <em>{t.unknown} не отвечается</em> : t.says ?? `${t.percent ?? 0} %`}
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      ) : null}
 
       {/* ── Конвейер задач ──────────────────────────────────────────────── */}
       {pipeline.length > 0 ? (
@@ -284,126 +392,126 @@ export function Readiness({
                 <span className="pipe-n">{s2.reached ?? 0}</span>
                 <span className="pipe-t">{s2.status}</span>
                 <span className="pipe-s">{s2.title ?? ""}</span>
-                {(s2.unknown ?? 0) > 0 ? <span className="pipe-u">{s2.unknown} не отвечается</span> : null}
+                <span className="pipe-u">
+                  {(s2.unknown ?? 0) > 0 ? <em>{s2.unknown} не отвечается</em> : null}
+                </span>
               </li>
             ))}
           </ol>
         </section>
       ) : null}
-
-      {/* ── Гейт без фазы ───────────────────────────────────────────────── */}
-      {loose.map((g) => (
-        <section key={g.gate} className="loose">
-          <h2 className="pick-h">
-            Порядок в наборе
-            <span className="pick-g">
-              гейт {g.gate} · держит любую фазу · {tally(g).passed}/{tally(g).total}
-            </span>
-          </h2>
-          {g.title ? <p className="lede">{g.title}</p> : null}
-          <ItemList gate={g} shown={shown} onShow={setShown} onFind={onFind} />
-        </section>
-      ))}
     </>
   );
 }
 
-/** Пункты гейта: непройденные сверху, находки — по щелчку. */
-function ItemList({
-  gate,
-  shown,
+/**
+ * Пункт гейта: состояние, находки и ЧЕМ ИХ АДРЕСОВАТЬ.
+ *
+ * Ключ исключения приходит из самого запроса пункта. Прежде его выясняли
+ * перебором: `exception-set` требовал `entityId`, и чем он должен быть, не было
+ * сказано нигде. `null` значит «правило исключений не читает» — это другое, чем
+ * «читает, ключ такой-то», и путать нельзя.
+ */
+function ItemRow({
+  item: i,
+  phase,
+  open,
   onShow,
   onFind,
 }: {
-  gate: Gate | undefined;
-  shown: string | null;
-  onShow: (v: string | null) => void;
-  onFind?: (q: string) => void;
+  item: Item & { gate: string };
+  phase: string;
+  open: boolean;
+  onShow: () => void;
+  onFind?: ((q: string) => void) | undefined;
 }): React.JSX.Element {
-  const [showAll, setShowAll] = useState(false);
-  if (!gate) return <p className="empty">У этой фазы гейта нет.</p>;
-  if (gate.items.length === 0) return <p className="empty">Пунктов не объявлено — проверять нечем.</p>;
-  // Сперва то, что держит: провален, потом неизвестное, потом прошедшее.
-  const order = (i: Item) => (i.computed === "failed" ? 0 : i.computed === "passed" ? 2 : 1);
-  const items = [...gate.items].sort(
-    (a, b) => order(a) - order(b) || (b.violations ?? 0) - (a.violations ?? 0),
-  );
-  // Пройденное СВЁРНУТО. Пункт, который прошёл, внимания не требует, а места
-  // занимает столько же, сколько провал: на гейте из двадцати шести пунктов
-  // семнадцать зелёных отжимали красные за край экрана.
-  const held = items.filter((i) => i.computed !== "passed");
-  const done = items.length - held.length;
-  const list = showAll ? items : held;
+  const [showQuery, setShowQuery] = useState(false);
+  const has = (i.detail ?? []).length > 0;
   return (
-    <>
-    {done > 0 ? (
-      <button type="button" className="fold" onClick={() => setShowAll(!showAll)}>
-        {showAll ? "▾" : "▸"} {done} {done === 1 ? "пройденный пункт" : "пройденных пунктов"}
+    <li className={`item ${TONE[i.computed] ?? "dim"}${open ? " open" : ""}`}>
+      <button type="button" className="item-head" onClick={onShow} aria-expanded={open}>
+        <span className="item-dot" aria-hidden="true" />
+        <span className="item-ph">{phase}</span>
+        <span className="item-t">{i.item}</span>
+        <span className="item-s">
+          {i.probeRuns === false ? (
+            <b className="never" title="пробу не удалось исполнить: правило ни разу не роняли">не роняли</b>
+          ) : null}
+          {i.probeRuns === false ? " · " : null}
+          {WORD[i.computed] ?? i.computed}
+          {(i.violations ?? 0) > 0 ? <b> · {i.violations}</b> : null}
+          {(i.excepted ?? 0) > 0 ? <em> · {i.excepted} с причиной</em> : null}
+        </span>
+        <span className="item-caret" aria-hidden="true">{open ? "▾" : "▸"}</span>
       </button>
-    ) : null}
-    {held.length === 0 && !showAll ? <p className="note ok-note">Всё пройдено.</p> : null}
-    <ul className="items">
-      {list.map((i) => {
-        const isOpen = shown === gate.gate + i.item;
-        const has = (i.detail ?? []).length > 0;
-        return (
-          <li key={i.item} className={`item ${TONE[i.computed] ?? "dim"}${isOpen ? " open" : ""}`}>
-            <button
-              type="button"
-              className="item-head"
-              onClick={() => onShow(isOpen ? null : gate.gate + i.item)}
-              aria-expanded={isOpen}
-            >
-              <span className="item-dot" aria-hidden="true" />
-              <span className="item-t">{i.item}</span>
-              <span className="item-s">
-                {/* Пункт, который ни разу не уронили, зелёным быть не может:
-                    его никто не проверял. Слово «пройден» без этой оговорки
-                    обещает проверку, которой не было. */}
-                {i.probeRuns === false ? <b className="never" title="пробу не удалось исполнить: правило ни разу не роняли">не роняли</b> : null}
-                {i.probeRuns === false ? " · " : null}
-                {WORD[i.computed] ?? i.computed}
-                {(i.violations ?? 0) > 0 ? <b> · {i.violations}</b> : null}
-                {(i.excepted ?? 0) > 0 ? <em> · {i.excepted} с причиной</em> : null}
+      {open ? (
+        <div className="item-body">
+          {i.probeRuns === false ? (
+            <p className="item-why never-why">
+              Пробу этого пункта исполнить нельзя — она записана прозой, а не запросом. Значит правило
+              не роняли ни разу, и его зелёное ничего не доказывает.
+              {i.probe ? <> Что записано: <code>{i.probe}</code></> : null}
+            </p>
+          ) : null}
+          {i.means ? <p className="item-why">{i.means}</p> : null}
+          {i.why && !i.means ? <p className="item-why">{i.why}</p> : null}
+
+          {(i.staleExceptions ?? 0) > 0 ? (
+            <p className="item-why never-why">
+              {i.staleExceptions} исключений объявлено впустую: находки, ради которой их записали,
+              сегодня нет. {(i.staleExceptionNames ?? []).slice(0, 4).join(" · ")}
+            </p>
+          ) : null}
+
+          {has ? (
+            <ul className="item-finds">
+              {(i.detail ?? []).slice(0, 40).map((d, n) => (
+                <li key={n}><Found text={String(d)} onFind={onFind} /></li>
+              ))}
+              {(i.detail ?? []).length > 40 ? (
+                <li className="holds-more">…и ещё {(i.detail ?? []).length - 40}</li>
+              ) : null}
+            </ul>
+          ) : (
+            <p className="note">Находок нет.</p>
+          )}
+
+          {/* Чем адресуется находка — рядом с находкой, а не в чужой памяти. */}
+          <div className="item-key">
+            {i.exceptionKey ? (
+              <>
+                <span className="item-k">ключ исключения</span>
+                <code>{i.exceptionKey}</code>
+                <span className="item-hint">
+                  объявить: <code>mh call exception-set rule={i.id ?? i.item} entityId=«ключ» reason=…</code>
+                </span>
+              </>
+            ) : (
+              <span className="item-hint">
+                Правило не соединяется с таблицей исключений — объявить исключение по нему нельзя.
               </span>
-              {has ? <span className="item-caret" aria-hidden="true">{isOpen ? "▾" : "▸"}</span> : null}
-            </button>
-            {isOpen ? (
-              <div className="item-body">
-                {i.probeRuns === false ? (
-                  <p className="item-why never-why">
-                    Пробу этого пункта исполнить нельзя — она записана прозой, а не запросом. Значит
-                    правило не роняли ни разу, и его зелёное ничего не доказывает.
-                    {i.probe ? <> Что записано: <code>{i.probe}</code></> : null}
-                  </p>
-                ) : null}
-                {i.means ? <p className="item-why">{i.means}</p> : null}
-                {i.why && !i.means ? <p className="item-why">{i.why}</p> : null}
-                {has ? (
-                  <ul className="item-finds">
-                    {(i.detail ?? []).slice(0, 40).map((d, n) => (
-                      <li key={n}>
-                        <Found text={String(d)} onFind={onFind} />
-                      </li>
-                    ))}
-                    {(i.detail ?? []).length > 40 ? (
-                      <li className="holds-more">…и ещё {(i.detail ?? []).length - 40}</li>
-                    ) : null}
-                  </ul>
-                ) : (
-                  <p className="note">Находок нет.</p>
-                )}
-              </div>
+            )}
+            {i.query ? (
+              <button type="button" className="item-q" onClick={() => setShowQuery(!showQuery)}>
+                {showQuery ? "▾" : "▸"} запрос правила
+              </button>
             ) : null}
-          </li>
-        );
-      })}
-    </ul>
-    </>
+          </div>
+          {showQuery && i.query ? <pre className="item-sql">{i.query}</pre> : null}
+        </div>
+      ) : null}
+    </li>
   );
 }
 
-/** Лестница входа: тринадцать ступеней, две стороны, одна текущая. */
+/**
+ * Лестница входа: тринадцать ступеней, две стороны, одна текущая.
+ *
+ * Прежде ступени стояли плитками в строку, и текст обрезался многоточием:
+ * «каждый объявленный датчик репозитория по…». Ступень — это ВОПРОС, и вопрос,
+ * обрезанный на середине, перестаёт быть вопросом. Здесь строки: места по
+ * ширине хватает всем, и порядок читается сверху вниз, как он и работает.
+ */
 function Ladder({ steps, at }: { steps: Step[]; at: number | undefined }): React.JSX.Element | null {
   if (steps.length === 0) return null;
   // Сторона названа в `touches`: `corpus` или `repository`. Слова здесь свои,
@@ -424,7 +532,7 @@ function Ladder({ steps, at }: { steps: Step[]; at: number | undefined }): React
         group.length === 0 ? null : (
           <div key={name} className="rung-side">
             <div className="rung-k">{name}</div>
-            <ol className="rung-strip">
+            <ol className="rung-rows">
               {group
                 .slice()
                 .sort((a, b) => a.ord - b.ord)
@@ -435,13 +543,11 @@ function Ladder({ steps, at }: { steps: Step[]; at: number | undefined }): React
                   const now = s.ord === at;
                   const done = at !== undefined && s.ord < at;
                   return (
-                    <li
-                      key={s.ord}
-                      className={`rung-chip${now ? " now" : ""}${done ? " done" : ""}`}
-                      title={s.question}
-                    >
+                    <li key={s.ord} className={`rung-row${now ? " now" : ""}${done ? " done" : ""}`}>
                       <span className="rung-num">{s.ord}</span>
                       <span className="rung-q">{s.question}</span>
+                      {s.owner ? <span className="rung-o">{s.owner}</span> : null}
+                      {now ? <span className="rung-now">здесь</span> : null}
                     </li>
                   );
                 })}
@@ -468,7 +574,7 @@ function Ladder({ steps, at }: { steps: Step[]; at: number | undefined }): React
  */
 const NAMED = /\b([A-Z][A-Z0-9]{0,7}(?:-[A-Z0-9]{1,9}){1,3})\b/g;
 
-function Found({ text, onFind }: { text: string; onFind?: (q: string) => void }): React.JSX.Element {
+function Found({ text, onFind }: { text: string; onFind?: ((q: string) => void) | undefined }): React.JSX.Element {
   if (!onFind) return <>{text}</>;
   const parts: React.ReactNode[] = [];
   let at = 0;

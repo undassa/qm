@@ -3930,3 +3930,143 @@ button.chain-card:disabled { cursor: default; opacity: .55; }
 .never-why { color: var(--accent, #d8a657) !important; }
 .never-why code { color: inherit; opacity: .8; }
 .stale { max-width: var(--measure); margin: 12px 0 4px; }
+
+/* ─── полоса доверия ──────────────────────────────────────────────────────
+   Стоит НАД числами и говорит, чего они стоят. Красная, пока хоть одно
+   правило не проверено сломом: страница с непроверенными правилами выглядит
+   ровно так же, как страница с проверенными, и различить их нечем, кроме
+   этой строки. */
+.trust {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 20px;
+  max-width: var(--measure);
+  margin: 14px 0 18px;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--ok, #6ea86e);
+  border-radius: 8px;
+  font-size: 13px;
+  background: color-mix(in srgb, var(--ok, #6ea86e) 4%, transparent);
+}
+.trust.bad {
+  border-left-color: var(--bad, #c25b5b);
+  background: color-mix(in srgb, var(--bad, #c25b5b) 6%, transparent);
+}
+.trust-main { flex: 1 1 42ch; }
+.trust-side {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  font-size: 12px;
+  color: var(--dim);
+  font-family: var(--mono, monospace);
+}
+.trust-side .ok { color: var(--ok, #6ea86e); }
+
+/* ─── пункт: фаза, ключ исключения, запрос ───────────────────────────────
+   Фаза стоит У ПУНКТА, потому что список теперь общий: без неё непонятно,
+   к какому гейту относится строка. */
+.item-head { grid-template-columns: 10px 56px minmax(0, 1fr) auto 14px; }
+/* Ширина под самое длинное имя — `corpus`. Гейт без фазы зовётся словом, а не
+   номером, и колонка в два знака его роняла за край. */
+.item-ph {
+  font-family: var(--mono, monospace);
+  font-size: 11px;
+  color: var(--dim);
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.item-key {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 12px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--line);
+  font-size: 12px;
+}
+.item-k {
+  font-size: 10.5px;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+.item-key code {
+  font-family: var(--mono, monospace);
+  font-size: 12px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--line);
+  overflow-wrap: anywhere;
+}
+.item-hint { color: var(--dim); }
+.item-hint code { background: none; padding: 0; opacity: .85; }
+.item-q {
+  background: none;
+  border: 0;
+  color: var(--dim);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0;
+  margin-left: auto;
+}
+.item-q:hover { color: var(--ink, inherit); }
+.item-sql {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-family: var(--mono, monospace);
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--dim);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+/* ─── лестница строками ──────────────────────────────────────────────────
+   Плитками текст ступени обрезался многоточием, а ступень — это ВОПРОС, и
+   вопрос, обрезанный на середине, перестаёт быть вопросом. */
+.rung-rows { list-style: none; margin: 0; padding: 0; }
+.rung-row {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto auto;
+  align-items: baseline;
+  gap: 10px;
+  padding: 6px 8px 6px 4px;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+.rung-row.done { color: var(--dim); }
+.rung-row.done .rung-num { opacity: .55; }
+.rung-row.now { border-left: 2px solid var(--accent, #d8a657); padding-left: 6px; }
+.rung-row.now .rung-num { background: var(--accent, #d8a657); color: #1a1a1a; }
+.rung-row .rung-q { white-space: normal; overflow: visible; }
+.rung-o { font-family: var(--mono, monospace); font-size: 11px; color: var(--dim); }
+.rung-now {
+  font-size: 10.5px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--accent, #d8a657);
+}
+
+/* Отбор пройденного стоит в той же полосе, что и отбор фаз, но кнопкой
+   другого веса: это не «ещё одна фаза», а «показать спрятанное». */
+.tab-fold { margin-left: auto; opacity: .8; }
+
+/* Плитка, где неизвестного больше, чем всего остального, — не такая же, как
+   соседние: это главный пробел проекта, и ровный ряд его прячет. */
+.ts-mostly-unknown { border-color: color-mix(in srgb, var(--accent, #d8a657) 45%, var(--line)); }
+
+/* Столбец «не отвечается» занимает место ВСЕГДА: пропущенный у части строк,
+   он сдвигал их сетку, и число уезжало под соседнюю колонку. */
+.pipe-u { min-width: 16ch; text-align: right; font-size: 12px; color: var(--dim); }
+.pipe-u em { font-style: normal; }
