@@ -2329,10 +2329,56 @@ impl Mcp {
                         _ => {}
                     }
                 }
+                // «НЕ ОБЪЯВЛЕНО» И «НЕ РАЗБИРАЕТСЯ» — РАЗНОЕ. Ручка звала
+                // необъявленными шестнадцать видов, и среди них `srs`,
+                // `constitution`, `glossary`, `test-cases` — те, из которых гейты
+                // берут требования, статьи, термины и проверки КАЖДЫМ ЗАМЕРОМ.
+                // Вести по плану, который не знает своих же видов, нельзя.
+                //
+                // Разбирается вид или нет — не мнение, а наблюдение: проекция
+                // называет источник колонкой `entity_kind`. Таблицы берутся из
+                // схемы, а не перечислены здесь: перечень разошёлся бы с ней при
+                // первой новой проекции.
+                let read: std::collections::HashSet<String> = {
+                    // Таблицы берутся из РЕЕСТРА ВИДОВ, а не из схемы по наличию
+                    // колонки: `entity_kind` есть и у `project_documents`, и у
+                    // разделов, и у ячеек — туда попадает КАЖДЫЙ вид, у которого
+                    // есть хоть один документ, и разбор перестал бы значить
+                    // что-либо. Предметная таблица — та, что объявлена виду.
+                    let tables: Vec<String> = self
+                        .kinds
+                        .0
+                        .keys()
+                        .filter_map(|k| crate::kinds::table_of(k).map(|(t, _, _)| t.to_owned()))
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter()
+                        .collect();
+                    let mut seen = std::collections::HashSet::new();
+                    for t in &tables {
+                        if let Ok(rows) = client
+                            .query(
+                                &format!("SELECT DISTINCT entity_kind FROM {t} WHERE project_id = $1 AND entity_kind <> ''"),
+                                &[p],
+                            )
+                            .await
+                        {
+                            for r in &rows {
+                                seen.insert(r.get::<_, String>(0));
+                            }
+                        }
+                    }
+                    seen
+                };
+                let (parsed, silent): (Vec<String>, Vec<String>) =
+                    undeclared.iter().cloned().partition(|k| read.contains(k));
                 Ok(json!({
                     "due": due,
                     "undeclared": undeclared,
-                    "note": "«не объявлено» — не «не надо»: этого не сказал никто, и спросить придётся человека"
+                    "undeclaredButParsed": parsed,
+                    "undeclaredAndSilent": silent,
+                    "note": "«не объявлено» — не «не надо»: этого не сказал никто, и спросить придётся человека. \
+                             Но «не объявлено» и «не разбирается» — разное: вид из `undeclaredButParsed` набор \
+                             читает каждым замером, и необъявленной у него осталась только раскладка."
                 }))
             }
         }

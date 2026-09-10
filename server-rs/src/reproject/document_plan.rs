@@ -75,7 +75,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize), tokio
     let blocks = cells(pool, project, KIND, NAME, false).await?;
     let heads = headings(pool, project, KIND, NAME).await?;
     let mut entries: Vec<(String, String, String, String, &str, String, String)> = Vec::new();
-    let mut counts: Vec<(String, &str, i32)> = Vec::new();
+    let mut counts: Vec<(String, &str, i32, String, String)> = Vec::new();
     let mut seen = HashSet::new();
 
     for (block, rows) in &blocks {
@@ -104,7 +104,8 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize), tokio
                     Some(m) => (m[1].to_owned(), m.get(2).map(|g| g.as_str().to_owned()).unwrap_or_default()),
                     None => (String::new(), String::new()),
                 };
-                entries.push((name.clone(), level.clone(), contains.clone(), state.clone(), claim, kind, id));
+                entries.push((name.clone(), level.clone(), contains.clone(), state.clone(), claim,
+                              kind.clone(), id.clone()));
                 // Число живёт и в «Что содержит» («79 ST-nn»), и в «Состояние».
                 for (subject, pattern) in SUBJECTS.iter() {
                     let mut taken = false;
@@ -117,7 +118,13 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize), tokio
                             if is_coverage(text, whole.start(), whole.len()) {
                                 continue;
                             }
-                            counts.push((name.clone(), subject, m[1].parse().unwrap_or(0)));
+                            // Вид и имя документа едут ВМЕСТЕ с числом: связь
+                            // заявленного с фактом держалась на совпадении строк
+                            // («constitution:» против «constitution.md»), и не
+                            // совпадала ни разу — восемь чисел набора не сверял
+                            // никто, а ответ выглядел как «сверено, молчит».
+                            counts.push((name.clone(), subject, m[1].parse().unwrap_or(0),
+                                         kind.clone(), id.clone()));
                             taken = true;
                             break;
                         }
@@ -140,11 +147,12 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize), tokio
         )
         .await?;
     }
-    for (name, subject, claimed) in &counts {
+    for (name, subject, claimed, kind, id) in &counts {
         tx.execute(
-            "INSERT INTO project_document_plan_counts(project_id, name, subject, claimed) VALUES ($1,$2,$3,$4)
-             ON CONFLICT DO NOTHING",
-            &[&project, name, subject, claimed],
+            "INSERT INTO project_document_plan_counts(project_id, name, subject, claimed,
+                                                      planned_kind, planned_name)
+             VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING",
+            &[&project, name, subject, claimed, kind, id],
         )
         .await?;
     }

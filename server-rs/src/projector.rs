@@ -1530,6 +1530,13 @@ ALTER TABLE project_traceability_said ADD COLUMN IF NOT EXISTS is_total boolean 
 -- указатель обязан написать имя, а перечень вправе его сократить.
 ALTER TABLE project_named_id ADD COLUMN IF NOT EXISTS from_range boolean NOT NULL DEFAULT false;
 ALTER TABLE project_named_id ADD COLUMN IF NOT EXISTS heads_row boolean NOT NULL DEFAULT false;
+-- Заявленное число и объявленный предмет связываются ТОЖДЕСТВОМ ДОКУМЕНТА, а не
+-- совпадением строк: «constitution:» и «constitution.md» — одно и то же, и
+-- строковое равенство их не сводило ни разу.
+ALTER TABLE project_document_plan_counts ADD COLUMN IF NOT EXISTS planned_kind text NOT NULL DEFAULT '';
+ALTER TABLE project_document_plan_counts ADD COLUMN IF NOT EXISTS planned_name text NOT NULL DEFAULT '';
+ALTER TABLE claim_subject ADD COLUMN IF NOT EXISTS entity_kind text NOT NULL DEFAULT '';
+ALTER TABLE claim_subject ADD COLUMN IF NOT EXISTS entity_name text NOT NULL DEFAULT '';
 -- На чём держится отмена пункта: род факта, который обязан оставаться ПУСТЫМ.
 -- Отмена «у проекта нет sqlx» верна, пока датчик sqlx ничего не подаёт; появился
 -- хоть один факт — довод отмены исчез. Без этой колонки отмена живёт прозой и
@@ -2219,24 +2226,24 @@ pub async fn rebuild(pool: &Pool, project: &str) -> Result<Value, tokio_postgres
     tx.execute("DELETE FROM claim_subject WHERE project_id = $1", &[&project]).await?;
     let subjects = tx
         .execute(
-            "INSERT INTO claim_subject (project_id, name, subject, counts, note) VALUES
+            "INSERT INTO claim_subject (project_id, name, subject, counts, note, entity_kind) VALUES
                ($1, 'constitution.md', 'articles',
-                'SELECT count(*) FROM project_articles WHERE project_id = $1', ''),
+                'SELECT count(*) FROM project_articles WHERE project_id = $1', '', 'constitution'),
                ($1, 'strs.md', 'needs',
-                'SELECT count(*) FROM project_needs WHERE project_id = $1', ''),
+                'SELECT count(*) FROM project_needs WHERE project_id = $1', '', 'strs'),
                ($1, 'srs.md', 'requirements',
                 'SELECT count(*) FROM project_requirements WHERE project_id = $1 AND id NOT LIKE $$NFR-%$$',
-                'заявлено про функциональные; таблица держит FR и NFR вместе'),
+                'заявлено про функциональные; таблица держит FR и NFR вместе', 'srs'),
                ($1, 'srs.md', 'nfr',
-                'SELECT count(*) FROM project_requirements WHERE project_id = $1 AND id LIKE $$NFR-%$$', ''),
+                'SELECT count(*) FROM project_requirements WHERE project_id = $1 AND id LIKE $$NFR-%$$', '', 'srs'),
                ($1, 'ui-spec.md', 'screens',
-                'SELECT count(*) FROM project_screens WHERE project_id = $1', ''),
+                'SELECT count(*) FROM project_screens WHERE project_id = $1', '', 'ui-spec'),
                ($1, 'adr/', 'decisionFiles',
                 'SELECT count(*) FROM project_documents WHERE project_id = $1
                    AND entity_kind IN ($$decision$$, $$decision-template$$)',
-                'считано по файлам вместе с шаблоном; записей решений на одну меньше'),
+                'считано по файлам вместе с шаблоном; записей решений на одну меньше', 'decision'),
                ($1, 'test-cases.md', 'checks',
-                'SELECT count(*) FROM project_checks WHERE project_id = $1', '')
+                'SELECT count(*) FROM project_checks WHERE project_id = $1', '', 'test-cases')
              ON CONFLICT DO NOTHING",
             &[&project],
         )
@@ -2536,6 +2543,31 @@ pub async fn next_task(pool: &Pool, project: &str) -> Result<Value, tokio_postgr
 /// Почему задача не берётся: перечень того, чего она ждёт.
 pub async fn task_blockers(pool: &Pool, project: &str, task: &str) -> Result<Value, tokio_postgres::Error> {
     let client = pool.get().await.expect("пул отдал соединение");
+    // ПУСТОЙ СПИСОК ВМЕСТО ОТВЕТА ВРЁТ. Ручку звали без задачи, и она отвечала
+    // `{"task": "", "waitsForMilestones": [], "waitsForTasks": []}` — неотличимо
+    // от «ничто не блокирует». Тот же приём, что у `kinds-due` («у
+    // неспроецированных — не ноль, а пусто»), здесь применён не был.
+    if task.trim().is_empty() {
+        return Ok(json!({
+            "task": Value::Null,
+            "why": "задача не названа, и это НЕ «ничто не блокирует»: спрашивать не о чем. \
+                    Текущую задачу даёт `next-task`, перечень — `task-list`.",
+        }));
+    }
+    let known: i64 = client
+        .query_one(
+            "SELECT count(*) FROM project_plan_tasks WHERE project_id = $1 AND id = $2",
+            &[&project, &task],
+        )
+        .await?
+        .get(0);
+    if known == 0 {
+        return Ok(json!({
+            "task": task,
+            "why": format!("задачи «{task}» в наборе нет: пустой перечень здесь значил бы, \
+                            что она ничем не блокирована, а её просто не существует"),
+        }));
+    }
     let tasks = client
         .query(
             "SELECT d.depends_on FROM project_plan_task_deps d
@@ -2555,6 +2587,7 @@ pub async fn task_blockers(pool: &Pool, project: &str, task: &str) -> Result<Val
             &[&project, &task],
         )
         .await?;
+    let free = tasks.is_empty() && milestones.is_empty();
     Ok(json!({
         "task": task,
         "waitsForTasks": tasks.iter().map(|r| r.get::<_, String>(0)).collect::<Vec<_>>(),
@@ -2563,6 +2596,9 @@ pub async fn task_blockers(pool: &Pool, project: &str, task: &str) -> Result<Val
             "said": r.get::<_, String>(1),
             "openTasks": r.get::<_, i64>(2),
         })).collect::<Vec<_>>(),
+        // Пустота СКАЗАНА СЛОВОМ: два пустых списка и «ничто не держит» — разное
+        // только для того, кто знает, что задача существует и была спрошена.
+        "why": if free { "ничто не держит: все зависимости закрыты" } else { "" },
     }))
 }
 
@@ -3011,7 +3047,8 @@ pub async fn claims(pool: &Pool, project: &str) -> Result<Value, tokio_postgres:
             "SELECT c.name, c.subject, c.claimed, s.counts, s.note
                FROM project_document_plan_counts c
                LEFT JOIN claim_subject s
-                 ON s.project_id = c.project_id AND s.name = c.name AND s.subject = c.subject
+                 ON s.project_id = c.project_id AND s.subject = c.subject
+                AND s.entity_kind = c.planned_kind AND s.entity_name = c.planned_name
               WHERE c.project_id = $1 ORDER BY c.name, c.subject",
             &[&project],
         )
@@ -5146,7 +5183,7 @@ pub async fn declare_question(
            answer_state = EXCLUDED.answer_state, has_answer = EXCLUDED.has_answer,
            origin = 'declared'",
         &[&project, &id, &number, &title, &state, &answer,
-          &(if answer.trim().is_empty() { "unanswered" } else { "answered" }),
+          &(if answer.trim().is_empty() { "unsaid" } else { "answered" }),
           &!answer.trim().is_empty()]).await?;
     if !closed_by.is_empty() {
         client.execute(
