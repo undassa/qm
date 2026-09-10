@@ -403,10 +403,11 @@ impl Mcp {
             "inputSchema": { "type": "object", "properties": { "drop": json!({"type":"boolean","description":"снять объявленное этой же дверью"}), "process": s("процесс, по умолчанию godzy"),
                 "ord": json!({"type":"integer"}), "question": s("условие словами") },
                 "required": ["ord", "question"] } }));
-        tools.push(json!({ "name": "scheme-term-set", "description": "объявить слово схемы: роль, которую знает код, и как её зовёт набор",
+        tools.push(json!({ "name": "scheme-term-set", "description": "объявить слово схемы этого набора; роль, объявленная набором, замещает общий список целиком",
             "inputSchema": { "type": "object", "properties": { "role": s("роль, латиницей"),
                 "value": s("слово набора"), "ord": s("порядок, если слов несколько"),
-                "why": s("зачем"), "drop": s("true — снять слово") },
+                "why": s("зачем"), "drop": s("true — снять слово"),
+                "shared": json!({"type":"boolean","description":"объявить для ВСЕХ наборов; по умолчанию слово принадлежит этому"}) },
                 "required": ["role", "value"] } }));
         tools.push(json!({ "name": "scheme-terms", "description": "словарь схемы: какие роли объявлены и какими словами",
             "inputSchema": { "type": "object", "properties": {} } }));
@@ -1614,27 +1615,45 @@ impl Mcp {
                 let ord = num(args, "ord").unwrap_or(0) as i32;
                 let drop = args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false);
                 let client = self.pool.get().await.expect("пул отдал соединение");
+                // СЛОЙ НАЗЫВАЕТСЯ. По умолчанию слово принадлежит ЭТОМУ набору:
+                // дверь зовётся из репозитория и отвечает про проект, и писать
+                // из неё в общее значило бы менять чужой разбор молча — так и
+                // было, пока слоя не было.
+                //
+                // `shared=true` — объявление для всех, и его надо сказать вслух.
+                let shared = args.get("shared").map(|v| v == "true" || v == true).unwrap_or(false);
+                let owner = if shared { "" } else { p };
                 let done = if drop {
-                    client.execute("DELETE FROM scheme_term WHERE role=$1 AND value=$2",
-                                   &[&role, &value]).await
+                    client.execute("DELETE FROM scheme_term WHERE project_id=$3 AND role=$1 AND value=$2",
+                                   &[&role, &value, &owner]).await
                 } else {
                     client.execute(
-                        "INSERT INTO scheme_term (role, value, ord, why) VALUES ($1,$2,$3,$4)
-                         ON CONFLICT (role, value) DO UPDATE SET ord = EXCLUDED.ord, why = EXCLUDED.why",
-                        &[&role, &value, &ord, &g("why")]).await
+                        "INSERT INTO scheme_term (project_id, role, value, ord, why) VALUES ($5,$1,$2,$3,$4)
+                         ON CONFLICT (project_id, role, value) DO UPDATE SET ord = EXCLUDED.ord,
+                           why = EXCLUDED.why",
+                        &[&role, &value, &ord, &g("why"), &owner]).await
                 };
                 match done {
-                    Ok(n) => ok(json!({ "role": role, "value": value, "written": n, "dropped": drop })),
+                    Ok(n) => ok(json!({ "role": role, "value": value, "written": n, "dropped": drop,
+                        "layer": if shared { "общий — действует на все наборы" } else { "этого набора" },
+                        "means": if shared { "" } else {
+                            "роль, объявленная набором, ЗАМЕЩАЕТ общий список целиком, а не дополняет его" } })),
                     Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
                 }
             }
             "scheme-terms" => {
                 let client = self.pool.get().await.expect("пул отдал соединение");
-                match client.query("SELECT role, value, ord, why FROM scheme_term
-                                     ORDER BY role, ord, value", &[]).await {
+                // Отдаётся РАЗРЕШЁННЫЙ словарь — тот, которым говорит этот набор.
+                // Показывать оба слоя вперемешку значило бы показывать список,
+                // которым не пользуется никто.
+                match client.query("SELECT s.role, s.value, s.ord, s.why,
+                                           EXISTS (SELECT 1 FROM scheme_term o
+                                                    WHERE o.project_id = $1 AND o.role = s.role) AS своё
+                                      FROM scheme($1) s ORDER BY s.role, s.ord, s.value", &[p]).await {
                     Ok(rows) => ok(json!({ "count": rows.len(), "terms": rows.iter().map(|r| json!({
                         "role": r.get::<_, String>(0), "value": r.get::<_, String>(1),
-                        "ord": r.get::<_, i32>(2), "why": r.get::<_, String>(3) })).collect::<Vec<_>>() })),
+                        "ord": r.get::<_, i32>(2), "why": r.get::<_, String>(3),
+                        "layer": if r.get::<_, bool>(4) { "набора" } else { "общий" } })).collect::<Vec<_>>() })),
                     Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
                 }
             }

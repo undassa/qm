@@ -16,7 +16,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
     // Слова схемы — из словаря, не из кода. Роль без слова НЕ подставляет
     // пустое: пустое совпало бы со всем подряд. Такая связь просто не
     // считается, и её отсутствие видно перечнем ниже.
-    let terms = crate::scheme::Terms::load(pool).await?;
+    let terms = crate::scheme::Terms::load(pool, project).await?;
     let missing = terms.missing(&[
         "field.task-contract-ops", "field.red-parent", "field.red-checks",
         "section.proof", "word.not-a-subject", "path.crate-home",

@@ -987,6 +987,32 @@ CREATE TABLE IF NOT EXISTS finding_blame (
   why text NOT NULL DEFAULT '',
   decided_by text NOT NULL DEFAULT '',
   PRIMARY KEY (project_id, rule, entity_id));
+-- СЛОВАРЬ В ДВА СЛОЯ. `scheme_term` не имел колонки проекта, и `scheme-term-set`
+-- выглядел проектной дверью: зовётся из репозитория, отвечает про проект, стоит
+-- в одном ряду с `requirement-add`. Проект, поправивший СВОЁ слово, молча менял
+-- разбор у всех остальных — проверено: слово, объявленное из одного набора,
+-- пришло в ответе соседнего.
+--
+-- Цена была не в неудобстве: правку, закрывавшую 77 нарушений, пришлось
+-- отменить ровно потому, что она ложилась на чужой набор.
+--
+-- Пустой `project_id` — ОБЩИЙ слой. Раздавать сто семнадцать слов по владельцам
+-- не нужно: они и есть общее объявление, а проект переопределяет ту роль, где
+-- его форма своя.
+ALTER TABLE scheme_term ADD COLUMN IF NOT EXISTS project_id text NOT NULL DEFAULT '';
+ALTER TABLE scheme_term DROP CONSTRAINT IF EXISTS scheme_term_pkey;
+ALTER TABLE scheme_term ADD PRIMARY KEY (project_id, role, value);
+
+-- Слова, которыми говорит ЭТОТ набор: своё, если роль объявлена, иначе общее.
+-- Переопределение идёт РОЛЬЮ ЦЕЛИКОМ, а не отдельным словом: список из двух
+-- источников — это список, которого не писал никто.
+CREATE OR REPLACE FUNCTION scheme(p text)
+RETURNS TABLE(role text, value text, ord integer, why text) AS $ф$
+  SELECT t.role, t.value, t.ord, t.why FROM scheme_term t
+   WHERE t.project_id = p
+      OR (t.project_id = '' AND NOT EXISTS (
+            SELECT 1 FROM scheme_term o WHERE o.project_id = p AND o.role = t.role))
+$ф$ LANGUAGE sql STABLE;
 ALTER TABLE harness_process_step ADD COLUMN IF NOT EXISTS subject_query text NOT NULL DEFAULT '';
 ALTER TABLE harness_process_step ADD COLUMN IF NOT EXISTS subject_why text NOT NULL DEFAULT '';
 

@@ -9,7 +9,7 @@ use deadpool_postgres::Pool;
 
 pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres::Error> {
     let client = pool.get().await.expect("пул отдал соединение");
-    let terms = crate::scheme::Terms::load(pool).await?;
+    let terms = crate::scheme::Terms::load(pool, project).await?;
     let rows = client
         .query(
             "SELECT block_ord, row_ord, col, value FROM project_document_cells

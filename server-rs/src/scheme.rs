@@ -16,10 +16,11 @@ pub struct Terms {
 }
 
 impl Terms {
-    pub async fn load(pool: &Pool) -> Result<Self, tokio_postgres::Error> {
+    /// Словарь ЭТОГО набора: своё, если роль объявлена, иначе общее.
+    pub async fn load(pool: &Pool, project: &str) -> Result<Self, tokio_postgres::Error> {
         let client = pool.get().await.expect("пул отдал соединение");
         let rows = client
-            .query("SELECT role, value FROM scheme_term ORDER BY role, ord, value", &[])
+            .query("SELECT role, value FROM scheme($1) ORDER BY role, ord, value", &[&project])
             .await?;
         let mut by_role: HashMap<String, Vec<String>> = HashMap::new();
         for r in &rows {

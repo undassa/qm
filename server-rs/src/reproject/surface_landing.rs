@@ -13,7 +13,7 @@ use deadpool_postgres::Pool;
 
 pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres::Error> {
     let client = pool.get().await.expect("пул отдал соединение");
-    let terms = crate::scheme::Terms::load(pool).await?;
+    let terms = crate::scheme::Terms::load(pool, project).await?;
     let surface_marker = terms.one("marker.surface-list").unwrap_or("").to_owned();
     // Живые требования: имя, которого нет в перечне, поверхностью не считается.
     // Документ вправе поминать удалённое — считать это приземлением значит

@@ -24,10 +24,10 @@ static ANSWER: Lazy<Regex> = Lazy::new(|| Regex::new(r"^Ответ(\s*[,:—-]|\
 ///
 /// Пусто — роль не объявлена, и состояние `owner` в этом наборе не возникает.
 /// Умолчания в коде здесь нет намеренно: слово принадлежит набору.
-async fn owner_sections(pool: &Pool) -> Result<Vec<Regex>, tokio_postgres::Error> {
+async fn owner_sections(pool: &Pool, project: &str) -> Result<Vec<Regex>, tokio_postgres::Error> {
     let client = pool.get().await.expect("пул отдал соединение");
     Ok(client
-        .query("SELECT value FROM scheme_term WHERE role = 'section.owner-decides'", &[])
+        .query("SELECT value FROM scheme($1) WHERE role = 'section.owner-decides'", &[&project])
         .await?
         .iter()
         .filter_map(|r| Regex::new(&r.get::<_, String>(0)).ok())
@@ -80,7 +80,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
     // Слово даёт НАБОР, а не код: роль `section.owner-decides` — образец
     // заголовка. Роли нет — состояние не возникает, и это видно, а не
     // подразумевается.
-    let owner_marks = owner_sections(pool).await?;
+    let owner_marks = owner_sections(pool, project).await?;
     let named = super::runs::named_of_kinds(pool, project, &["question"]).await?;
     let titles = super::runs::section_titles(pool, project, &["question"]).await?;
     let fields = fields(pool, project).await?;

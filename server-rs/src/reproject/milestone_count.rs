@@ -20,7 +20,7 @@ const PAIRS: [(&str, &str, &str); 4] = [
 
 pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres::Error> {
     let client = pool.get().await.expect("пул отдал соединение");
-    let terms = crate::scheme::Terms::load(pool).await?;
+    let terms = crate::scheme::Terms::load(pool, project).await?;
     let docs = client
         .query(
             "SELECT entity_name, content FROM project_documents

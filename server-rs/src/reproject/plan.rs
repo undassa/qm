@@ -100,7 +100,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize,
     // Блок «Требования» этапа — свёрнутый `<details>`. Читается он целиком и
     // построчно, мимо строк с оговоркой об удалении: имя в такой строке
     // названо, чтобы сказать, что его больше нет.
-    let terms = crate::scheme::Terms::load(pool).await?;
+    let terms = crate::scheme::Terms::load(pool, project).await?;
     let milestone_requirements: Vec<(String, String)> = {
         let client = pool.get().await.expect("пул отдал соединение");
         let rows = client

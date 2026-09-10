@@ -174,7 +174,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize,
 
     let mut client = pool.get().await.expect("пул отдал соединение");
     // Имя поля — из словаря схемы: зашитое, оно знает один набор.
-    let terms = crate::scheme::Terms::load(pool).await?;
+    let terms = crate::scheme::Terms::load(pool, project).await?;
     let screen_requirements: Vec<(String, String)> = if let Some(field) =
         terms.one("field.requirements").map(str::to_owned)
     {

@@ -20,7 +20,7 @@ use regex::Regex;
 pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres::Error> {
     let client = pool.get().await.expect("пул отдал соединение");
     let caveats: Vec<String> = client
-        .query("SELECT value FROM scheme_term WHERE role = 'word.caveat'", &[])
+        .query("SELECT value FROM scheme($1) WHERE role = 'word.caveat'", &[&project])
         .await?
         .iter()
         .map(|r| r.get::<_, String>(0))
