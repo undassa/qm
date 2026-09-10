@@ -115,10 +115,25 @@ pub async fn ids(pool: &Pool, kinds: &Kinds, project: &str, kind: &str) -> Resul
     let Some(k) = kinds.get(kind) else {
         return Err(Miss::NoKind(kind.to_owned()));
     };
-    if k.single {
-        return Ok(vec![kind.to_owned()]);
-    }
     let client = pool.get().await.expect("пул отдал соединение");
+    if k.single {
+        // ЕДИНИЦА ВЫДУМЫВАЛАСЬ. Одиночному виду перечень отдавал имя вида
+        // независимо от того, есть ли документ: `goals-list` сообщал
+        // `count: 1, ids: ["goals"]` при нуле документов. Это не пустота в
+        // ответе, а придуманная строка, и она читается как знание — тот же
+        // род, что «пустой список вместо ответа».
+        //
+        // Контроль, которым это поймано: у вида, где документ есть, ответ не
+        // менялся, а у `postmortem` он честно пуст.
+        let есть = client
+            .query_opt(
+                "SELECT 1 FROM project_documents WHERE project_id = $1 AND entity_kind = $2",
+                &[&project, &kind],
+            )
+            .await?
+            .is_some();
+        return Ok(if есть { vec![kind.to_owned()] } else { Vec::new() });
+    }
     if let Some((table, id_col, _)) = table_of(kind) {
         let sql = if kind == "task" {
             format!("SELECT DISTINCT {id_col} FROM {table} WHERE project_id = $1 AND kind <> 'red' ORDER BY 1")

@@ -107,7 +107,27 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
         .expect("образец адреса");
     let mut addresses: Vec<(String, String, String, i32, String)> = Vec::new();
     let mut seen_addr = std::collections::HashSet::new();
+    // АДРЕС ВНУТРИ СПРАВКИ — АДРЕС ЧУЖОГО ДЕРЕВА. Виды с проекцией
+    // `provenance` («ценность в том, откуда взято») держат материал соседнего
+    // продукта: у `tot-ade` из 112 адресов 40 указывали в `packages/`, `cmd/`,
+    // `routes/` — каталогов, которых в этом репозитории нет вовсе. Правило
+    // мерило наш код чужими адресами и давало 39 нарушений из 39.
+    //
+    // Отбор идёт по ОБЪЯВЛЕННОЙ проекции, а не по имени вида: перечислить
+    // здесь `reference` значило бы зашить слово, которым владеет проект.
+    let чужие: std::collections::HashSet<String> = client
+        .query(
+            "SELECT name FROM kind_layout WHERE spec->>'projection' = 'provenance'",
+            &[],
+        )
+        .await?
+        .iter()
+        .map(|r| r.get::<_, String>(0))
+        .collect();
     for d in &docs {
+        if чужие.contains(&d.get::<_, String>(0)) {
+            continue;
+        }
         let kind: String = d.get(0);
         let name: String = d.get(1);
         let content: String = d.get(2);
