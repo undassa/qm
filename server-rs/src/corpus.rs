@@ -78,13 +78,33 @@ pub async fn search(
     let client = pool.get().await.expect("пул отдал соединение");
     let rows = client
         .query(
-            "SELECT entity_kind, entity_name, bytes,
-                    (SELECT string_agg(line, E'\\n')
-                       FROM (SELECT line FROM unnest(string_to_array(content, E'\\n')) AS line
-                              WHERE line ILIKE '%' || $2 || '%' LIMIT 3) hits) AS excerpt
-               FROM project_documents
-              WHERE project_id = $1 AND content ILIKE '%' || $2 || '%'
-              ORDER BY entity_kind, entity_name LIMIT $3",
+            // Порядок ответа — не мелочь. Ищущий «ADR-0138» ищет ДОКУМЕНТ с таким
+            // именем, а не четыре чужих, где эта строка встретилась в прозе.
+            // Поиск только по тексту отдавал именно чужие: имя документа
+            // упоминается в нём реже, чем в ссылающихся на него.
+            //
+            // Потому вес: точное имя, потом имя с начала, потом имя где угодно,
+            // и только затем текст. Внутри веса — по имени, чтобы порядок не
+            // плясал между запросами.
+            "SELECT entity_kind, entity_name, bytes, excerpt FROM (
+               SELECT entity_kind, entity_name, bytes,
+                      (SELECT string_agg(line, E'\\n')
+                         FROM (SELECT line FROM unnest(string_to_array(content, E'\\n')) AS line
+                                WHERE line ILIKE '%' || $2 || '%' LIMIT 3) hits) AS excerpt,
+                      CASE
+                        WHEN lower(entity_name) = lower($2) THEN 0
+                        WHEN entity_name ILIKE $2 || '%' THEN 1
+                        WHEN entity_name ILIKE '%' || $2 || '%' THEN 2
+                        WHEN lower(entity_kind) = lower($2) THEN 3
+                        ELSE 4
+                      END AS weight
+                 FROM project_documents
+                WHERE project_id = $1
+                  AND (content ILIKE '%' || $2 || '%'
+                       OR entity_name ILIKE '%' || $2 || '%'
+                       OR entity_kind ILIKE '%' || $2 || '%')
+             ) ranked
+             ORDER BY weight, entity_kind, entity_name LIMIT $3",
             &[&project, &query, &limit],
         )
         .await?;

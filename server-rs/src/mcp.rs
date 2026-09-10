@@ -92,7 +92,7 @@ impl Mcp {
         tools.push(json!({ "name": "backlinks", "description": "кто ссылается на сущность — сущностями, а не файлами",
             "inputSchema": { "type": "object", "properties": { "kind": s("вид"), "id": s("имя") }, "required": ["kind"] } }));
         tools.push(json!({ "name": "search", "description": "где встречается строка",
-            "inputSchema": { "type": "object", "properties": { "query": s("что искать"), "limit": json!({"type":"integer"}) }, "required": ["query"] } }));
+            "inputSchema": { "type": "object", "properties": { "q": s("что ищем — короткое имя того же довода"), "query": s("что искать"), "limit": json!({"type":"integer"}) }, "required": ["query"] } }));
         tools.push(json!({ "name": "put", "description": "записать сущность целиком; expectedRevision бережёт от потери чужой правки",
             "inputSchema": { "type": "object", "properties": { "deferProjection": json!({"type":"boolean","description":"не пересобирать проекции сейчас; позвать `reproject` после серии правок"}), "kind": s("вид"), "id": s("имя"), "content": s("текст целиком"), "expectedRevision": json!({"type":"integer"}) }, "required": ["kind", "content"] } }));
         tools.push(json!({ "name": "put-section", "description": "заменить один раздел сущности; проекции пересобираются в этом же вызове",
@@ -653,7 +653,21 @@ impl Mcp {
                 Err(e) => refusal(e),
             },
             "search" => {
-                let q = args.get("query").and_then(|v| v.as_str()).unwrap_or_default();
+                // `query` и `q` — одна и та же просьба. Дверь принимала только
+                // длинное имя, а короткое молча уходило пустотой: пустой запрос
+                // совпадает со ВСЕМ, и ответ на «ADR-0138» был тот же, что на
+                // «Q-372» — первые по алфавиту. Отказ был бы честнее молчания,
+                // но принять оба имени честнее отказа.
+                let q = args
+                    .get("query")
+                    .or_else(|| args.get("q"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                if q.trim().is_empty() {
+                    return refusal(Miss::Db(
+                        "поиск без запроса вернул бы весь набор: назовите, что ищете (`query` или `q`)".into(),
+                    ));
+                }
                 let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(20).clamp(1, 200);
                 match corpus::search(&self.pool, p, q, limit).await {
                     Ok(hits) => ok(json!({ "count": hits.len(), "hits": hits })),

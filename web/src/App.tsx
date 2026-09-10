@@ -9,6 +9,7 @@ import { Requirements } from "./Requirements";
 import { Rules } from "./Rules";
 import { Users } from "./Users";
 import { Readiness } from "./Readiness";
+import { Palette, type Jump } from "./Palette";
 import { Process } from "./Process";
 import { Tasks } from "./Tasks";
 import { Gates } from "./Gates";
@@ -31,7 +32,7 @@ import { Unknown } from "./Unknown";
  * 523 варианта, не показанных нигде), **доказательство** (чем закрыто каждое
  * требование) и **вопросы** (чем закрыт каждый).
  */
-const PAGES: { page: string; title: string; note: string; view: (id: string) => React.JSX.Element }[] = [
+const PAGES: { page: string; title: string; note: string; view: (id: string, want: Jump | null) => React.JSX.Element }[] = [
   { page: "where", title: "Готовность", note: "фазы и гейты", view: (id) => <Readiness projectId={id} /> },
   { page: "tasks", title: "Задачи", note: "конвейер", view: (id) => <Tasks projectId={id} /> },
   { page: "unknown", title: "Не знаем", note: "пробелы", view: (id) => <Unknown projectId={id} /> },
@@ -40,7 +41,7 @@ const PAGES: { page: string; title: string; note: string; view: (id: string) => 
   { page: "rules", title: "Правила", note: "конституция", view: (id) => <Rules projectId={id} /> },
   { page: "requirements", title: "Требования", note: "и доказательства", view: (id) => <Requirements projectId={id} /> },
   { page: "users", title: "Пользователь", note: "путь и истории", view: (id) => <Users projectId={id} /> },
-  { page: "read", title: "Документы", note: "читать", view: (id) => <Reader projectId={id} /> },
+  { page: "read", title: "Документы", note: "читать", view: (id, want) => <Reader projectId={id} want={want} /> },
   { page: "movement", title: "Движение", note: "куда дошли", view: (id) => <Movement projectId={id} /> },
   { page: "decisions", title: "Архитектура", note: "и отвергнутое", view: (id) => <Decisions projectId={id} /> },
   { page: "proof", title: "Доказательство", note: "чем закрыто", view: (id) => <Proof projectId={id} /> },
@@ -61,6 +62,9 @@ export function App(): React.JSX.Element {
   const [project, setProject] = useState<Project | null>(null);
   const [page, setPage] = useState<string>(asked("page") ?? "where");
   const [unknown, setUnknown] = useState<string>("");
+  /** Палитра и то, куда она попросила перейти. */
+  const [pal, setPal] = useState(false);
+  const [jump, setJump] = useState<Jump | null>(null);
 
   useEffect(() => {
     void loadProjects().then((list) => {
@@ -96,6 +100,19 @@ export function App(): React.JSX.Element {
     window.history.pushState({}, "", url);
   };
 
+  // Cmd+K на маке, Ctrl+K везде: одна привычка, выученная в других
+  // инструментах, здесь работает без обучения.
+  useEffect(() => {
+    const key = (e: KeyboardEvent): void => {
+      if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
+        e.preventDefault();
+        setPal((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", key);
+    return () => window.removeEventListener("keydown", key);
+  }, []);
+
   const view = PAGES.find((p) => p.page === page) ?? PAGES[0]!;
 
   return (
@@ -123,7 +140,19 @@ export function App(): React.JSX.Element {
         ))}
       </nav>
 
-      <main className="main">{project ? view.view(project.projectId) : <p className="empty">Выбираю проект…</p>}</main>
+      <main className="main">{project ? view.view(project.projectId, jump) : <p className="empty">Выбираю проект…</p>}</main>
+
+      {pal && project ? (
+        <Palette
+          projectId={project.projectId}
+          sections={PAGES.map((p) => ({ page: p.page, title: p.title, note: p.note }))}
+          onClose={() => setPal(false)}
+          onGo={(j) => {
+            if (j.page && j.page !== page) { setPage(j.page); go({ page: j.page }); }
+            if (j.kind && j.id) setJump(j);
+          }}
+        />
+      ) : null}
     </div>
   );
 }

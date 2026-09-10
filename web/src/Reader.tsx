@@ -42,7 +42,13 @@ function kb(chars: number): string {
  * Обратные ссылки лежат рядом с текстом, а не на другой странице: «кто на это
  * ссылается» — часть чтения, а не отдельное занятие.
  */
-export function Reader({ projectId }: { projectId: string }): React.JSX.Element {
+export function Reader({
+  projectId,
+  want,
+}: {
+  projectId: string;
+  want?: { kind?: string; id?: string } | null;
+}): React.JSX.Element {
   const [kinds, setKinds] = useState<KindRow[] | null>(null);
   const [kind, setKind] = useState<KindRow | null>(null);
   const [ids, setIds] = useState<string[] | null>(null);
@@ -121,6 +127,24 @@ export function Reader({ projectId }: { projectId: string }): React.JSX.Element 
       .then((d) => setLinks(d.backlinks))
       .catch(() => setLinks([]));
   }
+
+  /**
+   * Открыть то, что попросили снаружи — палитрой или ссылкой в адресе.
+   *
+   * Реагируем на СМЕНУ просьбы, а не на её наличие: иначе всякая перерисовка
+   * возвращала бы читателя туда, откуда он уже ушёл.
+   */
+  const asked = want?.kind && want?.id ? `${want.kind}/${want.id}` : "";
+  const [wasAsked, setWasAsked] = useState("");
+  useEffect(() => {
+    if (!asked || asked === wasAsked || !kinds) return;
+    setWasAsked(asked);
+    const row = kinds.find((k) => k.kind === want?.kind);
+    if (!row) { setFailed(`вида «${want?.kind}» в наборе нет`); return; }
+    setKind(row);
+    void loadIds(projectId, row.kind).then(setIds).catch(() => setIds([]));
+    show(row, want?.id);
+  }, [asked, wasAsked, kinds, projectId, want]);
 
   /**
    * Переход по ссылке внутрь набора.
