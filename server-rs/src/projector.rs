@@ -1025,6 +1025,28 @@ CREATE TABLE IF NOT EXISTS finding_blame (
 --
 -- Причина пишется ОДИН раз и в одном месте: размазанная по шести, она разойдётся
 -- на первой же правке.
+-- КОЛОНКА, КОТОРУЮ ЗАПОЛНЯЕТ СЕРВЕР. У ПОЛЯ контракта есть чем сказать «я
+-- вычисляюсь» — пометка с правилом вывода. У КОЛОНКИ такого способа не было:
+-- список системных имён закрыт пятью (`id`, `account_id`, `created_at`,
+-- `updated_at`, `rev`), и колонка, которую сервер выдаёт в момент выдачи, в него
+-- не входит.
+--
+-- `POST /sessions` завёл писателя таблице и тут же дал шесть находок: `user_id`
+-- из сошедшихся учётных данных, `jti` от подписывателя маркера, `device` из
+-- заголовка, `ip` из соединения, `expires_at` по правилу аккаунта. Обязательное
+-- поле с таким именем в схеме запроса означало бы, что входящий сам называет, за
+-- кого он вошёл, чем и насколько.
+--
+-- `by` обязателен: «заполняет сервер» без указания ЧЕМ — обещание, а не запись.
+CREATE TABLE IF NOT EXISTS column_server_filled (
+  project_id text NOT NULL,
+  table_name text NOT NULL,
+  column_name text NOT NULL,
+  by_what text NOT NULL,
+  why text NOT NULL DEFAULT '',
+  decided_by text NOT NULL DEFAULT '',
+  PRIMARY KEY (project_id, table_name, column_name));
+
 CREATE TABLE IF NOT EXISTS field_column_alias (
   project_id text NOT NULL,
   schema_name text NOT NULL,
@@ -6073,6 +6095,36 @@ pub async fn declare_sensor_spec(
 ///
 /// Причина обязательна: пара без неё неотличима от опечатки, и снять её потом
 /// будет нечем — ровно та беда, от которой заведена сама запись.
+/// Объявить, что колонку заполняет сервер, и назвать ЧЕМ.
+pub async fn set_server_filled(
+    pool: &Pool, project: &str, table: &str, column: &str, by: &str, why: &str,
+    decided_by: &str, drop_it: bool,
+) -> Result<Value, tokio_postgres::Error> {
+    let client = pool.get().await.expect("пул отдал соединение");
+    if drop_it {
+        let gone = client
+            .execute("DELETE FROM column_server_filled WHERE project_id = $1 AND table_name = $2 AND column_name = $3",
+                     &[&project, &table, &column]).await?;
+        return Ok(json!({ "status": if gone > 0 { "dropped" } else { "not_found" } }));
+    }
+    if table.trim().is_empty() || column.trim().is_empty() {
+        return Ok(json!({ "status": "nameless", "why": "колонка называется таблицей и именем" }));
+    }
+    if by.trim().is_empty() {
+        return Ok(json!({ "status": "no_source", "why":
+            "не сказано, ЧЕМ сервер её заполняет. «Заполняет сервер» без этого — обещание, \
+             а не запись: проверить его нечем, и снять потом будет не за что." }));
+    }
+    client.execute(
+        "INSERT INTO column_server_filled (project_id, table_name, column_name, by_what, why, decided_by)
+         VALUES ($1,$2,$3,$4,$5,$6)
+         ON CONFLICT (project_id, table_name, column_name) DO UPDATE SET by_what = EXCLUDED.by_what,
+           why = EXCLUDED.why, decided_by = EXCLUDED.decided_by",
+        &[&project, &table, &column, &by, &why, &decided_by]).await?;
+    Ok(json!({ "status": "declared", "column": format!("{table}.{column}"), "by": by,
+               "means": "правила входа больше не спрашивают эту колонку: вход у неё есть, просто не телом запроса" }))
+}
+
 pub async fn set_field_alias(
     pool: &Pool, project: &str, schema: &str, field: &str, table: &str, column: &str,
     why: &str, decided_by: &str, drop_it: bool,
@@ -6210,9 +6262,17 @@ pub async fn declared_unwritten(
             inner.push(name.clone());
             continue;
         }
+        // ПРИЗРАК ОТДАЁТСЯ ЦЕЛИКОМ. Прежде перечень называл имена, и прочесть
+        // объявленное было нечем: `get` по такому имени отказывает, а заголовок
+        // доезжал только через запрос гейта и обрезанным до шестидесяти знаков.
+        // Восстанавливать пришлось замером предмета, потому что самого текста не
+        // отдавала ни одна дверь.
+        //
+        // Объявление — ВСЯ правда о призраке: документа за ним нет.
         let rows = client
             .query(
-                &format!("SELECT {id_col} FROM {table} WHERE project_id = $1 AND origin = 'declared' ORDER BY 1"),
+                &format!("SELECT {id_col}, to_jsonb(t) FROM {table} t
+                           WHERE project_id = $1 AND origin = 'declared' ORDER BY 1"),
                 &[&project],
             )
             .await?;
@@ -6220,8 +6280,24 @@ pub async fn declared_unwritten(
             continue;
         }
         let ids: Vec<String> = rows.iter().map(|r| r.get::<_, String>(0)).collect();
+        let declared: Vec<Value> = rows
+            .iter()
+            .map(|r| {
+                let mut v: Value = r.get(1);
+                // Пустые колонки не показываются: у призрака их большинство, и
+                // они топят то немногое, что о нём сказано.
+                if let Some(o) = v.as_object_mut() {
+                    o.retain(|k, val| {
+                        k != "project_id" && k != "origin"
+                            && !matches!(val, Value::String(s) if s.trim().is_empty())
+                            && *val != Value::Null
+                    });
+                }
+                v
+            })
+            .collect();
         total += ids.len();
-        out.push(json!({ "kind": name, "count": ids.len(), "ids": ids }));
+        out.push(json!({ "kind": name, "count": ids.len(), "ids": ids, "declared": declared }));
     }
     Ok(json!({
         "declared": total,

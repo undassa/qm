@@ -114,7 +114,8 @@ impl Mcp {
         tools.push(json!({ "name": "search", "description": "где встречается строка",
             "inputSchema": { "type": "object", "properties": { "q": s("что ищем — короткое имя того же довода"), "query": s("что искать"), "limit": json!({"type":"integer"}) }, "required": ["query"] } }));
         tools.push(json!({ "name": "put", "description": "записать сущность целиком; expectedRevision бережёт от потери чужой правки",
-            "inputSchema": { "type": "object", "properties": { "deferProjection": json!({"type":"boolean","description":"не пересобирать проекции сейчас; позвать `reproject` после серии правок"}), "kind": s("вид"), "id": s("имя"), "content": s("текст целиком"), "expectedRevision": json!({"type":"integer"}) }, "required": ["kind", "content"] } }));
+            "inputSchema": { "type": "object", "properties": { "deferProjection": json!({"type":"boolean","description":"не пересобирать проекции сейчас; позвать `reproject` после серии правок"}), "kind": s("вид"), "id": s("имя"), "content": s("текст целиком"), "expectedRevision": json!({"type":"integer"}),
+                "create": json!({"type":"boolean","description":"завести, если сущности ещё нет; без этого `put` только правит"}) }, "required": ["kind", "content"] } }));
         tools.push(json!({ "name": "put-section", "description": "заменить один раздел сущности; проекции пересобираются в этом же вызове",
             "inputSchema": { "type": "object", "properties": { "kind": s("вид"), "id": s("имя"), "anchor": s("якорь"), "body": s("новое тело раздела"), "expectedRevision": json!({"type":"integer"}) }, "required": ["kind", "anchor", "body"] } }));
         tools.push(json!({ "name": "rm", "description": "удалить сущность",
@@ -543,6 +544,10 @@ impl Mcp {
                 "blame": s("harness · corpus"), "fixedBy": s("чем это чинится — обязательно"),
                 "why": s("довод"), "drop": json!({"type":"boolean"}) },
                 "required": ["rule", "entityId", "blame", "fixedBy"] } }));
+        tools.push(json!({ "name": "column-server-filled", "description": "колонку заполняет сервер, и названо чем: правила входа её больше не спрашивают",
+            "inputSchema": { "type": "object", "properties": { "table": s("таблица"), "column": s("колонка"),
+                "by": s("чем именно сервер её заполняет — обязательно"), "why": s("довод"),
+                "drop": json!({"type":"boolean"}) }, "required": ["table", "column", "by"] } }));
         tools.push(json!({ "name": "field-column-alias", "description": "поле контракта и колонка схемы — одно под разными именами; читается всеми правилами имён разом",
             "inputSchema": { "type": "object", "properties": { "schema": s("схема контракта, например Absence"),
                 "field": s("поле схемы, например from"), "table": s("таблица, например absences"),
@@ -572,7 +577,7 @@ impl Mcp {
     const WRITES: &[&str] = &[
         "put", "put-section", "rm", "document-add", "reparse", "reproject", "sweep",
         "task-state-push", "code-facts-push", "skills-push", "preflight-push", "worktree-push",
-        "ceiling-set", "blame-set", "field-column-alias", "frozen-tree-set", "scheme-term-set", "orphans-purge", "surface-source-add", "sensor-spec-add", "agent-set", "donor-add", "guard-add", "gate-sign", "gate-item-set", "method-set", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "step-selftest", "version-close", "phase-gate-set", "exception-set",
+        "ceiling-set", "blame-set", "field-column-alias", "column-server-filled", "frozen-tree-set", "scheme-term-set", "orphans-purge", "surface-source-add", "sensor-spec-add", "agent-set", "donor-add", "guard-add", "gate-sign", "gate-item-set", "method-set", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "step-selftest", "version-close", "phase-gate-set", "exception-set",
         "author-set", "screen-area-set", "skill-set", "version-freeze",
         "links-rewrite", "links-retarget",
     ];
@@ -618,7 +623,7 @@ impl Mcp {
         const RESERVED: &[&str] = &[
             "method-set", "gate-item-set", "question-holders", "preflight-push", "worktree-push",
             "sensor-specs", "scheme-terms", "frozen-trees", "addresses-declared", "tree-declared", "donors", "skills-push", "skills", "agents", "code-facts-push", "code-facts", "summary", "links-of", "retired-terms", "order", "gate-measure", "gate-item-waive", "gate-selftest", "gate-sign", "links-rewrite", "links-retarget", "reparse", "screen-area-set", "skill-set", "skills-paths", "version-freeze", "version-delta", "generated-check", "principal-allow", "principals", "author-set", "authors", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "step-selftest", "version-close", "phase-gate-set", "exception-set", "next-step", "process-state", "statuses", "task-status", "status-anomaly", "pipeline", "waves", "phases", "coverage", "blocks", "history", "at-revision", "process-history", "progress",
-            "kinds", "kinds-due", "readiness-gaps", "declared-unwritten", "blame-set", "doors", "field-column-alias", "sections", "section", "backlinks", "search", "put",
+            "kinds", "kinds-due", "readiness-gaps", "declared-unwritten", "blame-set", "doors", "field-column-alias", "column-server-filled", "sections", "section", "backlinks", "search", "put",
             "put-section", "rm", "document-add", "reproject", "sweep", "gate", "next-task", "blockers", "events",
             "norm-versions", "measurements", "plan", "readiness", "requirements-of",
             "tasks-of", "preflight-queue", "claims", "exceptions",
@@ -876,6 +881,15 @@ impl Mcp {
             //
             // Три жалобы «такой ручки нет» были написаны за одну ночь, и все три
             // оказались о существующих дверях.
+            "column-server-filled" => {
+                let g = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("");
+                match crate::projector::set_server_filled(&self.pool, p, g("table"), g("column"),
+                        g("by"), g("why"), &self.author,
+                        args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
+                    Ok(v) => ok(v),
+                    Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
+                }
+            }
             "field-column-alias" => {
                 let g = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("");
                 match crate::projector::set_field_alias(&self.pool, p, g("schema"), g("field"),
@@ -2177,6 +2191,35 @@ impl Mcp {
                 {
                     Ok(v) => ok(v),
                     Err(e) => refusal(Miss::Db(e.to_string())),
+                }
+            }
+            // ОДНА ДВЕРЬ ПОД ОДНУ РАБОТУ. `put` правил написанное, заводил
+            // `document-add`, и какая из двух нужна, выяснялось отказом.
+            //
+            // Молчаливого заведения при этом не будет: `create` надо сказать
+            // вслух. Отказ без него остаётся — он и называет, куда идти, — но
+            // сказавшему «заводи» больше не приходится звать вторую дверь.
+            "put" if args.get("create").map(|v| v == "true" || v == true).unwrap_or(false) => {
+                let exists = crate::entities::locate(&self.pool, &self.kinds, p, kind_arg, id)
+                    .await
+                    .is_ok();
+                if exists {
+                    self.write(name, kind_arg, id, args).await
+                } else {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0);
+                    match crate::store::create(
+                        &self.pool, &self.kinds, &self.project, kind_arg, id.unwrap_or(""),
+                        args.get("content").and_then(|v| v.as_str()).unwrap_or(""),
+                        &self.author, now,
+                    )
+                    .await
+                    {
+                        Ok(v) => ok(v),
+                        Err(e) => refusal(Miss::Db(e.to_string())),
+                    }
                 }
             }
             "put" | "put-section" | "rm" => self.write(name, kind_arg, id, args).await,
