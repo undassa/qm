@@ -41,6 +41,7 @@ static NEED_REFERENCE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\bST-(\d+)\b").ex
 static PRIORITY: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\s*`?([ОЖП])`?\s*$").expect("образец приоритета"));
 struct Requirement {
     id: String,
+    секция: Option<i32>,
     kind: String,
     area: String,
     text: String,
@@ -53,6 +54,7 @@ struct Requirement {
 
 struct Check {
     id: String,
+    секция: Option<i32>,
     area: String,
     requirement: Option<String>,
     spec: String,
@@ -96,6 +98,26 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize)
         )
         .await?;
 
+    // Секции документов — чтобы у строки сущности был не только документ, но и
+    // МЕСТО в нём. Без места документ из таблицы не собрать: неизвестен ни
+    // порядок, ни к какому разделу строка относится.
+    let sec = client
+        .query(
+            "SELECT entity_kind, entity_name, ord FROM project_document_sections
+              WHERE project_id = $1 ORDER BY entity_kind, entity_name, ord",
+            &[&project],
+        )
+        .await?;
+    let mut секции: HashMap<(String, String), Vec<i32>> = HashMap::new();
+    for r in &sec {
+        секции.entry((r.get(0), r.get(1))).or_default().push(r.get(2));
+    }
+    let секция_для = |k: &str, n: &str, block: i32| -> Option<i32> {
+        секции
+            .get(&(k.to_owned(), n.to_owned()))
+            .and_then(|v| v.iter().rev().find(|o| **o <= block).copied())
+    };
+
     // Ячейки одной строки таблицы — вместе и в порядке появления.
     let mut order: Vec<(String, String, i32, i32)> = Vec::new();
     let mut buckets: HashMap<(String, String, i32, i32), Vec<(String, String)>> = HashMap::new();
@@ -131,7 +153,8 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize)
             checks.insert(
                 id.clone(),
                 Check { id, area: m[2].to_owned(), requirement, spec: value_at(2),
-                        kind_of_document: doc_kind.clone(), name: doc_name.clone() },
+                        kind_of_document: doc_kind.clone(), name: doc_name.clone(),
+                        секция: секция_для(doc_kind, doc_name, key.2) },
             );
             continue;
         }
@@ -156,6 +179,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize)
             id.clone(),
             Requirement {
                 id: id.clone(),
+                секция: секция_для(doc_kind, doc_name, key.2),
                 // У нефункционального области нет: `NFR-15` — номер, а не «область 15».
                 area: if is_fr { m[3].to_owned() } else { String::new() },
                 kind,
@@ -196,14 +220,15 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize)
             // переписать их пустотой значило бы стереть прочитанное.
             "INSERT INTO project_requirements(project_id, id, kind, area, text,
                                               entity_kind, entity_name, satisfied,
-                                              priority, measured_by)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                                              priority, measured_by, section_ord)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
              ON CONFLICT (project_id, id) DO UPDATE SET kind = EXCLUDED.kind,
                area = EXCLUDED.area, text = EXCLUDED.text, entity_kind = EXCLUDED.entity_kind,
                entity_name = EXCLUDED.entity_name, satisfied = EXCLUDED.satisfied,
-               priority = EXCLUDED.priority, measured_by = EXCLUDED.measured_by",
+               priority = EXCLUDED.priority, measured_by = EXCLUDED.measured_by,
+               section_ord = EXCLUDED.section_ord",
             &[&project, &r.id, &r.kind, &r.area, &r.text, &r.kind_of_document, &r.name,
-              &r.satisfied, &r.priority, &r.measured_by],
+              &r.satisfied, &r.priority, &r.measured_by, &r.секция],
         )
         .await?;
     }
@@ -218,10 +243,11 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize)
     for c in checks.values() {
         tx.execute(
             "INSERT INTO project_checks(project_id, id, area, requirement_id, spec,
-                                        entity_kind, entity_name)
-             VALUES ($1,$2,$3,$4,$5,$6,$7)
+                                        entity_kind, entity_name, section_ord)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
              ON CONFLICT (project_id, id) DO NOTHING",
-            &[&project, &c.id, &c.area, &c.requirement, &c.spec, &c.kind_of_document, &c.name],
+            &[&project, &c.id, &c.area, &c.requirement, &c.spec, &c.kind_of_document, &c.name,
+              &c.секция],
         )
         .await?;
     }

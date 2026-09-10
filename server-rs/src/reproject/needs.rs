@@ -6,7 +6,7 @@
 //! колонкой в таблице требований (цитата). Они расходятся, и это находка, а не
 //! повод слить их в одну связь — потому у связи есть вид.
 
-use super::rows::{at, cells, headings, title_of};
+use super::rows::{at, cells, headings, title_of, ord_of};
 use deadpool_postgres::Pool;
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -61,7 +61,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize), tokio
     let blocks = cells(pool, project, REGISTER_KIND, REGISTER_NAME, false).await?;
     let heads = headings(pool, project, REGISTER_KIND, REGISTER_NAME).await?;
 
-    let mut needs: Vec<(String, i32, String, String, String, &str, String)> = Vec::new();
+    let mut needs: Vec<(String, i32, String, String, String, &str, String, Option<i32>)> = Vec::new();
     let mut claimed = HashSet::new();
     for (block, rows) in &blocks {
         for row in rows.values() {
@@ -79,6 +79,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize), tokio
                 at(row, 3).trim().to_owned(),
                 priority_of(at(row, 4)),
                 title_of(&heads, *block),
+                ord_of(&heads, *block),
             ));
         }
     }
@@ -106,12 +107,12 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize), tokio
     let tx = client.transaction().await?;
     tx.execute("DELETE FROM project_need_stories WHERE project_id = $1", &[&project]).await?;
     tx.execute("DELETE FROM project_needs WHERE project_id = $1", &[&project]).await?;
-    for (id, number, text, sides, sources, priority, theme) in &needs {
+    for (id, number, text, sides, sources, priority, theme, секция) in &needs {
         tx.execute(
             "INSERT INTO project_needs(project_id, id, number, text, sides, sources, theme, priority,
-                                        entity_kind, entity_name)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
-            &[&project, id, number, text, sides, sources, theme, priority, &REGISTER_KIND, &REGISTER_NAME],
+                                        entity_kind, entity_name, section_ord)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+            &[&project, id, number, text, sides, sources, theme, priority, &REGISTER_KIND, &REGISTER_NAME, секция],
         )
         .await?;
     }

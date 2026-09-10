@@ -5,7 +5,7 @@
 //! источник. Принятые как цена решения и закрытые перечислены отдельно, и там у
 //! риска другое состояние — открытым его считать нельзя.
 
-use super::rows::{at, cells, headings, title_of};
+use super::rows::{at, cells, headings, title_of, ord_of};
 use deadpool_postgres::Pool;
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -30,6 +30,7 @@ struct Risk {
     trigger: String,
     source: String,
     settled_by: String,
+    секция: Option<i32>,
 }
 
 /// «высокое / среднее» — влияние и вероятность одной ячейкой.
@@ -69,6 +70,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
                     number: m[2].parse().unwrap_or(0),
                     title: m[3].to_owned(),
                     state: "open",
+                    секция: ord_of(&heads, *block),
                     impact,
                     probability,
                     owner: field("Владелец"),
@@ -104,6 +106,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
                     number: m[2].parse().unwrap_or(0),
                     title: at(row, 1).trim().to_owned(),
                     state,
+                    секция: ord_of(&heads, *block),
                     impact: String::new(),
                     probability: String::new(),
                     owner: String::new(),
@@ -135,10 +138,11 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
     for r in &all {
         tx.execute(
             "INSERT INTO project_risks(project_id, id, number, title, state, impact, probability,
-                                       owner, trigger_sign, source, settled_by, entity_kind, entity_name)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
+                                       owner, trigger_sign, source, settled_by, entity_kind, entity_name,
+                                       section_ord)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
             &[&project, &r.id, &r.number, &r.title, &r.state, &r.impact, &r.probability,
-              &r.owner, &r.trigger, &r.source, &r.settled_by, &KIND, &NAME],
+              &r.owner, &r.trigger, &r.source, &r.settled_by, &KIND, &NAME, &r.секция],
         )
         .await?;
     }

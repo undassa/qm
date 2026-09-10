@@ -1710,6 +1710,18 @@ ALTER TABLE project_named_id ADD COLUMN IF NOT EXISTS heads_row boolean NOT NULL
 -- каким она лежит в `project_document_sections`.
 ALTER TABLE project_named_id ADD COLUMN IF NOT EXISTS section_ord integer;
 
+-- МЕСТО СТРОКИ В ЕЁ ДОКУМЕНТЕ. Строка сущности называла документ-источник, но
+-- не место в нём: 900 строк в семи таблицах, адреса нет ни у одной. Пока места
+-- нет, собрать документ обратно из таблицы нельзя — неизвестен ни порядок, ни
+-- к какому разделу строка относится, а это и есть условие разворота «таблица
+-- источник, документ — сборка».
+ALTER TABLE project_terms ADD COLUMN IF NOT EXISTS section_ord integer;
+ALTER TABLE project_needs ADD COLUMN IF NOT EXISTS section_ord integer;
+ALTER TABLE project_risks ADD COLUMN IF NOT EXISTS section_ord integer;
+ALTER TABLE project_db_tables ADD COLUMN IF NOT EXISTS section_ord integer;
+ALTER TABLE project_requirements ADD COLUMN IF NOT EXISTS section_ord integer;
+ALTER TABLE project_checks ADD COLUMN IF NOT EXISTS section_ord integer;
+
 -- РОЛЬ связи: определяет документ сущность или только называет её.
 --
 -- Связь знала «ui-spec называет SCR-SHELL-01», но не знала, задаёт он экран

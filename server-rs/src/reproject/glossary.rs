@@ -3,7 +3,7 @@
 //! Русское имя и машинное — одно понятие, и расхождение между ними ловится
 //! только тем, что они лежат рядом. Раздел над таблицей — область термина.
 
-use super::rows::{at, cells, headings, title_of};
+use super::rows::{at, cells, headings, ord_of, title_of};
 use deadpool_postgres::Pool;
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -21,7 +21,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
     let blocks = cells(pool, project, KIND, NAME, false).await?;
     let heads = headings(pool, project, KIND, NAME).await?;
 
-    let mut terms: Vec<(String, String, String, String)> = Vec::new();
+    let mut terms: Vec<(String, String, String, String, Option<i32>)> = Vec::new();
     let mut seen = HashSet::new();
     for (block, rows) in &blocks {
         // Только таблицы словаря: в документе есть и таблица переименований
@@ -31,6 +31,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
             continue;
         }
         let area = title_of(&heads, *block);
+        let секция = ord_of(&heads, *block);
         for (ord, row) in rows {
             if *ord == 0 {
                 continue;
@@ -45,7 +46,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
             if !seen.insert(id.clone()) {
                 continue;
             }
-            terms.push((id, term, at(row, 2).trim().to_owned(), area.clone()));
+            terms.push((id, term, at(row, 2).trim().to_owned(), area.clone(), секция));
         }
     }
 
@@ -63,11 +64,11 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
     let ids: Vec<String> = terms.iter().map(|t| t.0.clone()).collect();
     tx.execute("DELETE FROM project_terms WHERE project_id = $1 AND id = ANY($2)",
                &[&project, &ids]).await?;
-    for (id, term, meaning, area) in &terms {
+    for (id, term, meaning, area, секция) in &terms {
         tx.execute(
-            "INSERT INTO project_terms(project_id, id, term, meaning, area, entity_kind, entity_name)
-             VALUES ($1,$2,$3,$4,$5,$6,$7)",
-            &[&project, id, term, meaning, area, &KIND, &NAME],
+            "INSERT INTO project_terms(project_id, id, term, meaning, area, entity_kind, entity_name, section_ord)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+            &[&project, id, term, meaning, area, &KIND, &NAME, секция],
         )
         .await?;
     }

@@ -72,6 +72,24 @@ pub fn title_of(headings: &[(i32, String)], block: i32) -> String {
     title
 }
 
+/// Номер секции, в которой стоит блок, — тот же `ord`, каким она лежит в
+/// `project_document_sections`.
+///
+/// Рядом с `title_of` номер лежал всё это время и не брался: строка сущности
+/// знала документ, но не место в нём. Пока места нет, собрать документ обратно
+/// из таблицы нельзя — неизвестен ни порядок, ни к какому разделу строка
+/// относится.
+pub fn ord_of(headings: &[(i32, String)], block: i32) -> Option<i32> {
+    let mut ord = None;
+    for (o, _) in headings {
+        if *o > block {
+            break;
+        }
+        ord = Some(*o);
+    }
+    ord
+}
+
 /// Значение ячейки строки, которой в таблице может не быть.
 pub fn at(row: &[String], col: usize) -> &str {
     row.get(col).map(String::as_str).unwrap_or("")
