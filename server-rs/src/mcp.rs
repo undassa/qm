@@ -172,6 +172,7 @@ impl Mcp {
         tools.push(json!({ "name": "step-method-set", "description": "объявить способ проверки ступени лестницы; переживает пересборку и выкатку",
             "inputSchema": { "type": "object", "properties": { "process": s("процесс, по умолчанию godzy"),
                 "ord": json!({"type":"integer"}), "methodKind": s("query · command · signed"), "method": s("запрос либо команда"),
+                "run": s("команда, которой видна единица работы ступени; `{имя}` — первое слово находки"),
                 "drop": json!({"type":"boolean"}) },
                 "required": ["ord", "methodKind"] } }));
         tools.push(json!({ "name": "document-add", "description": "завести новый документ объявленного вида; правит существующий — `put`, и заводить он отказывается",
@@ -1056,6 +1057,7 @@ impl Mcp {
                 let method = args.get("method").and_then(|v| v.as_str()).unwrap_or("");
                 let drop = args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false);
                 match crate::projector::set_step_method(&self.pool, set_name, process, ord, mk, method,
+                                                  args.get("run").and_then(|v| v.as_str()),
                                                         &self.author, drop).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(Miss::Db(e.to_string())),

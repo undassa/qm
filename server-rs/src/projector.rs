@@ -959,6 +959,10 @@ ALTER TABLE project_gates ADD COLUMN IF NOT EXISTS result jsonb;
 -- нарушение в откатываемой транзакции. Ступень без пробы не «прошла самотест» —
 -- про неё просто не сказано, чем её ронять, и это разные ответы.
 ALTER TABLE harness_process_step ADD COLUMN IF NOT EXISTS probe text NOT NULL DEFAULT '';
+-- Команда, которой ЕДИНИЦА РАБОТЫ этой ступени видна. `{имя}` подставляется
+-- первым словом находки. Пусто — команды нет, и это видно: `next-step` не
+-- выдумывает её за набор.
+ALTER TABLE harness_process_step ADD COLUMN IF NOT EXISTS work_run text NOT NULL DEFAULT '';
 
 -- Что планируется — ВИДОМ И ИМЕНЕМ, а не строкой «constitution.md».
 --
@@ -6901,6 +6905,9 @@ pub async fn set_step_method(
     ord: i32,
     method_kind: &str,
     method: &str,
+    // Команда, которой видна единица работы этой ступени. `None` — не трогать
+    // уже объявленную.
+    run: Option<&str>,
     declared_by: &str,
     drop: bool,
 ) -> Result<Value, tokio_postgres::Error> {
@@ -6928,20 +6935,31 @@ pub async fn set_step_method(
         return Ok(json!({ "status": "not_found",
                           "why": format!("ступени {ord} в процессе «{process}» нет: способ объявлять некому") }));
     }
+    // НЕ ПЕРЕДАННОЕ БЕРЁТСЯ У СТРОКИ. Дверь писала `method` всегда, и вызов,
+    // объявлявший одну лишь команду, СТИРАЛ запрос ступени: ступень оставалась
+    // объявленной, отвечала «мерить нечем» и молчала об этом. Проверено на себе
+    // дважды за один проход — на шестой ступени и на одиннадцатой.
+    let method: Option<&str> = if method.trim().is_empty() { None } else { Some(method) };
     client
         .execute(
             "INSERT INTO harness_process_method (set_name, process, ord, method_kind, method, declared_by)
-             VALUES ($1,$2,$3,$4,$5,$6)
+             VALUES ($1,$2,$3,$4,coalesce($5,''),$6)
              ON CONFLICT (set_name, process, ord) DO UPDATE SET method_kind = EXCLUDED.method_kind,
-               method = EXCLUDED.method, declared_by = EXCLUDED.declared_by",
+               method = coalesce($5, harness_process_method.method),
+               declared_by = EXCLUDED.declared_by",
             &[&set_name, &process, &ord, &method_kind, &method, &declared_by],
         )
         .await?;
+    // Команда, не переданная, БЕРЁТСЯ У СТРОКИ: правка запроса не должна стирать
+    // уже объявленную команду — так же, как правка запроса пункта гейта не
+    // стирает его пробу.
     let n = client
         .execute(
-            "UPDATE harness_process_step SET method_kind = $4, method = $5
+            "UPDATE harness_process_step SET method_kind = $4,
+                    method = coalesce($5, method),
+                    work_run = coalesce($6, work_run)
               WHERE set_name = $1 AND process = $2 AND ord = $3",
-            &[&set_name, &process, &ord, &method_kind, &method],
+            &[&set_name, &process, &ord, &method_kind, &method, &run],
         )
         .await?;
     Ok(json!({ "updated": n, "methodKind": method_kind, "declaredBy": declared_by,
@@ -7871,7 +7889,8 @@ async fn compute_next_step(
     let client = pool.get().await.expect("пул отдал соединение");
     let steps = client
         .query(
-            "SELECT ord, question, method_kind, method, when_query, when_why, owner_kind, owner, touches
+            "SELECT ord, question, method_kind, method, when_query, when_why, owner_kind, owner,
+                    touches, work_run
                FROM harness_process_step
               WHERE set_name = $1 AND process = $2 ORDER BY ord",
             &[&set_name, &process],
@@ -7906,6 +7925,7 @@ async fn compute_next_step(
         let owner_kind: String = row.get(6);
         let owner: String = row.get(7);
         let touches: String = row.get(8);
+        let work_run: String = row.get(9);
 
         // Условие ступени проверяется первым: пропущенная ступень не «пройдена».
         if !when_query.trim().is_empty() {
@@ -7951,10 +7971,27 @@ async fn compute_next_step(
                     "why": "ступень пишет в репозиторий, а фаза набора ещё открыта",
                 }));
             } else {
+                // ПЕРВАЯ ЕДИНИЦА РАБОТЫ, а не заголовок ступени. «ord 5 ·
+                // открытых вопросов не осталось · violations 10» — и всё: какой
+                // вопрос брать первым и чем он закрывается, не сказано. Соседняя
+                // ручка `next-task` устроена наоборот и отдаёт задачу со всем
+                // контекстом внутри.
+                //
+                // Команду даёт САМА СТУПЕНЬ колонкой `work_run`, `{имя}` —
+                // первое слово находки. Пусто — команды нет, и `next-step` её не
+                // выдумывает: угаданная команда хуже отсутствующей.
+                let first = verdict.detail.first().cloned().unwrap_or_default();
+                let name = violator(&first);
+                let run = if work_run.trim().is_empty() || name.is_empty() {
+                    Value::Null
+                } else {
+                    json!(work_run.replace("{имя}", &name))
+                };
                 at = Some(json!({
                     "ord": ord, "question": question, "state": verdict.state,
                     "ownerKind": owner_kind, "owner": owner, "touches": touches,
                     "why": verdict.why, "violations": verdict.violations, "detail": verdict.detail,
+                    "first": json!({ "unit": first, "name": name, "run": run }),
                 }));
             }
         }
@@ -8013,7 +8050,55 @@ pub async fn measure_process(
     set_name: &str,
     process: &str,
 ) -> Result<Value, tokio_postgres::Error> {
-    let answer = compute_next_step(pool, project, set_name, process, true).await?;
+    let mut answer = compute_next_step(pool, project, set_name, process, true).await?;
+    // КРАСНЫЙ ГЕЙТ ТЕКУЩЕЙ ФАЗЫ — вне очереди ступеней.
+    //
+    // Ступени про гейты — шестая и одиннадцатая, а пятая спрашивает про открытые
+    // вопросы. Пока хоть один вопрос открыт, лестница НИКОГДА не назовёт красный
+    // гейт: измерено на myack, где `phases` печатал `gateState: failed` у двух
+    // фаз, а `next-step` всю дорогу отвечал «отвечайте на вопросы». Две ручки
+    // знали разное об одном проекте, и не соединяло их ничто.
+    //
+    // Здесь гейт называется НЕЗАВИСИМО от того, куда дошла лестница: работа в
+    // нём есть уже сейчас, и ждать своей ступени ей незачем.
+    {
+        let client = pool.get().await.expect("пул отдал соединение");
+        let rows = client
+            .query(
+                "SELECT ph.id, ph.title, ph.gate, g.id, g.item, g.violations
+                   FROM phase ph
+                   JOIN project_gates g ON g.project_id = $1 AND g.phase = ph.gate
+                  WHERE ph.ord = (SELECT min(p2.ord) FROM phase p2
+                                   WHERE EXISTS (SELECT 1 FROM project_gates x
+                                                  WHERE x.project_id = $1 AND x.phase = p2.gate
+                                                    AND x.result->>'computed' <> 'passed'))
+                    AND g.result->>'computed' = 'failed'
+                  ORDER BY g.violations DESC NULLS LAST, g.id",
+                &[&project],
+            )
+            .await?;
+        if let Some(o) = answer.as_object_mut() {
+            o.insert(
+                "redGate".into(),
+                if rows.is_empty() {
+                    Value::Null
+                } else {
+                    json!({
+                        "phase": rows[0].get::<_, String>(0),
+                        "title": rows[0].get::<_, String>(1),
+                        "gate": rows[0].get::<_, String>(2),
+                        "items": rows.iter().map(|r| json!({
+                            "id": r.get::<_, String>(3),
+                            "item": r.get::<_, String>(4),
+                            "violations": r.get::<_, Option<i32>>(5),
+                        })).collect::<Vec<_>>(),
+                        "why": "красный гейт текущей фазы: работа в нём есть независимо от того, \
+                                куда дошла лестница",
+                    })
+                },
+            );
+        }
+    }
     let at = answer.get("at").cloned().unwrap_or(Value::Null);
     let text = |key: &str| -> String {
         at.get(key).and_then(|v| v.as_str()).unwrap_or("").to_owned()
@@ -8078,7 +8163,7 @@ pub async fn process_state(
     let rows = client
         .query(
             "SELECT ord, question, method_kind, method, when_query, when_why,
-                    owner_kind, owner, touches, probe
+                    owner_kind, owner, touches, probe, work_run
                FROM harness_process_step
               WHERE set_name = 'godzy' AND process = $1 ORDER BY ord",
             &[&process],
@@ -8126,6 +8211,7 @@ pub async fn process_state(
             "ownerKind": r.get::<_, String>(6),
             "owner": r.get::<_, String>(7),
             "touches": r.get::<_, String>(8),
+            "workRun": r.get::<_, String>(10),
             "computed": match &verdict { Some(v) => v.state, None => "skipped" },
             "violations": verdict.as_ref().map(|v| v.violations),
             "detail": verdict.as_ref().map(|v| v.detail.clone()),

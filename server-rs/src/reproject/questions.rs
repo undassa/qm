@@ -20,6 +20,20 @@ static DATE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(\d{4}-\d{2}-\d{2})").expec
 /// «ответа нет» там, где ответ есть.
 static ANSWER: Lazy<Regex> = Lazy::new(|| Regex::new(r"^Ответ(\s*[,:—-]|\s+\d|$)").expect("образец ответа"));
 
+/// Образцы заголовков, которыми набор помечает «решение за владельцем».
+///
+/// Пусто — роль не объявлена, и состояние `owner` в этом наборе не возникает.
+/// Умолчания в коде здесь нет намеренно: слово принадлежит набору.
+async fn owner_sections(pool: &Pool) -> Result<Vec<Regex>, tokio_postgres::Error> {
+    let client = pool.get().await.expect("пул отдал соединение");
+    Ok(client
+        .query("SELECT value FROM scheme_term WHERE role = 'section.owner-decides'", &[])
+        .await?
+        .iter()
+        .filter_map(|r| Regex::new(&r.get::<_, String>(0)).ok())
+        .collect())
+}
+
 /// Первое слово поля решает; неизвестное считаем открытым, а не закрытым.
 fn state_of(field: &str) -> (&'static str, String) {
     let text = field.trim().to_owned();
@@ -56,6 +70,17 @@ async fn fields(pool: &Pool, project: &str) -> Result<HashMap<String, HashMap<St
 }
 
 pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres::Error> {
+    // «Решение за владельцем» — ЧЕТВЁРТОЕ состояние ответа, и оно не выводится
+    // из молчания. Вопрос, разобранный до конца и упирающийся в слово владельца,
+    // и вопрос, которого никто не открывал, стояли одним `unsaid`: ступень
+    // считала оба нарушением, и проход, честно записавший десять находок,
+    // выглядел откатившим проект назад. Лестница, на которой записанная находка
+    // читается как регресс, учит находки не записывать.
+    //
+    // Слово даёт НАБОР, а не код: роль `section.owner-decides` — образец
+    // заголовка. Роли нет — состояние не возникает, и это видно, а не
+    // подразумевается.
+    let owner_marks = owner_sections(pool).await?;
     let named = super::runs::named_of_kinds(pool, project, &["question"]).await?;
     let titles = super::runs::section_titles(pool, project, &["question"]).await?;
     let fields = fields(pool, project).await?;
@@ -101,12 +126,17 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
                 let said = got("Ответ");
                 let none = got("Ответа нет");
                 let section = list.iter().any(|t| ANSWER.is_match(t.trim()));
+                // Отвеченный вопрос отвечен, даже если раздел про владельца в нём
+                // остался: ответ сильнее ожидания ответа.
+                let held = list.iter().find(|t| owner_marks.iter().any(|r| r.is_match(t.trim())));
                 if !said.trim().is_empty() {
                     ("answered", said.to_owned())
                 } else if section {
                     ("answered", "объявлен разделом «Ответ»".to_owned())
                 } else if !none.trim().is_empty() {
                     ("searched", none.to_owned())
+                } else if let Some(t) = held {
+                    ("owner", format!("решение за владельцем: раздел «{}»", t.trim()))
                 } else {
                     ("unsaid", String::new())
                 }
