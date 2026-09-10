@@ -302,8 +302,8 @@ async fn сказано_в(pool: &Pool, project: &str, id: &str) -> Value {
     let Ok(client) = pool.get().await else { return Value::Null };
     let Ok(rows) = client
         .query(
-            "SELECT n.entity_kind, n.entity_name, s.ord, s.title, n.caveated
-               FROM project_named_id n
+            "SELECT n.entity_kind, n.entity_name, s.ord, s.title, n.caveated, n.role
+               FROM named_id_role n
                LEFT JOIN project_document_sections s
                  ON s.project_id = n.project_id AND s.entity_kind = n.entity_kind
                 AND s.entity_name = n.entity_name AND s.ord = n.section_ord
@@ -319,6 +319,15 @@ async fn сказано_в(pool: &Pool, project: &str, id: &str) -> Value {
         return Value::Null;
     }
     let всего = rows.len();
+    // «Определяет» идёт первым: на вопрос «где это задано» ответ один, а
+    // упоминаний два десятка, и без порядка первый ответ был случайным.
+    let определяет: Vec<Value> = rows
+        .iter()
+        .filter(|r| r.get::<_, String>(5) == "defines")
+        .map(|r| json!({ "kind": r.get::<_, String>(0), "name": r.get::<_, String>(1),
+                         "section": r.get::<_, Option<i32>>(2),
+                         "title": r.get::<_, Option<String>>(3).unwrap_or_default() }))
+        .collect();
     let места: Vec<Value> = rows
         .iter()
         .take(40)
@@ -332,12 +341,13 @@ async fn сказано_в(pool: &Pool, project: &str, id: &str) -> Value {
                 "section": ord,
                 "title": title.unwrap_or_default(),
                 "caveated": r.get::<_, bool>(4),
+                "role": r.get::<_, String>(5),
                 "by": format!("mh call section kind={} id={} ord={}", kind, name,
                               ord.map(|o| o.to_string()).unwrap_or_default()),
             })
         })
         .collect();
-    json!({ "count": всего, "where": места,
+    json!({ "count": всего, "definedIn": определяет, "where": места,
             "means": if всего > 40 { "показаны первые сорок" } else { "" } })
 }
 

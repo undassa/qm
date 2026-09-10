@@ -1709,6 +1709,52 @@ ALTER TABLE project_named_id ADD COLUMN IF NOT EXISTS heads_row boolean NOT NULL
 -- какая секция его задаёт, было нечем. Секция — ord блока-заголовка, тот же,
 -- каким она лежит в `project_document_sections`.
 ALTER TABLE project_named_id ADD COLUMN IF NOT EXISTS section_ord integer;
+
+-- РОЛЬ связи: определяет документ сущность или только называет её.
+--
+-- Связь знала «ui-spec называет SCR-SHELL-01», но не знала, задаёт он экран
+-- или ссылается на него. На вопрос «где определено» приходил двадцать один
+-- ответ вместо одного.
+--
+-- Роль НЕ колонка: колонка разошлась бы с истиной при первой пересборке, а
+-- источник у сущности уже записан — `entity_kind`/`entity_name` её
+-- собственной строки. Вид соединяет и не может устареть.
+--
+-- Словарь проверен замером, и первая его редакция ВРАЛА: `dangles` набирал
+-- 830 при четырёх настоящих, потому что 824 имени раскрыты из диапазона
+-- («TC-STP-01…14», где существует не каждый). Слово, называющее законное
+-- состояние дефектом, дороже отсутствия слова: по нему чинят несломанное.
+DROP VIEW IF EXISTS named_id_role;
+CREATE OR REPLACE VIEW named_id_role AS
+SELECT n.project_id, n.entity_kind, n.entity_name, n.said_id, n.caveated,
+       n.from_range, n.heads_row, n.section_ord,
+       src.kind AS source_kind, src.name AS source_name,
+       CASE
+         WHEN src.kind IS NOT NULL AND src.kind = n.entity_kind
+                                  AND src.name = n.entity_name THEN 'defines'
+         WHEN src.kind IS NOT NULL                             THEN 'mentions'
+         WHEN n.caveated                                       THEN 'foretells'
+         WHEN n.from_range                                     THEN 'in-range'
+         ELSE                                                       'dangles'
+       END AS role
+  FROM project_named_id n
+  LEFT JOIN LATERAL (
+        SELECT r.entity_kind AS kind, r.entity_name AS name FROM project_requirements r
+         WHERE r.project_id = n.project_id AND r.id = n.said_id
+        UNION ALL
+        SELECT c.entity_kind, c.entity_name FROM project_checks c
+         WHERE c.project_id = n.project_id AND c.id = n.said_id
+        UNION ALL
+        SELECT s.entity_kind, s.entity_name FROM project_screens s
+         WHERE s.project_id = n.project_id AND s.id = n.said_id
+        UNION ALL
+        SELECT d.entity_kind, d.entity_name FROM project_needs d
+         WHERE d.project_id = n.project_id AND d.id = n.said_id
+        UNION ALL
+        SELECT t.entity_kind, t.entity_name FROM project_stories t
+         WHERE t.project_id = n.project_id AND t.id = n.said_id
+        LIMIT 1
+  ) src ON true;
 -- Заявленное число и объявленный предмет связываются ТОЖДЕСТВОМ ДОКУМЕНТА, а не
 -- совпадением строк: «constitution:» и «constitution.md» — одно и то же, и
 -- строковое равенство их не сводило ни разу.
