@@ -6101,6 +6101,133 @@ pub async fn declare_sensor_spec(
 ///
 /// Нужны датчику: судить, настоящий ли держатель, можно только прочитав файл, а
 /// файл есть у клиента, не у сервера.
+/// Объявленные числа против измеренных: показать, а по слову — записать.
+///
+/// Харнес СВЕРЯЕТ каждое объявленное число пятью пунктами, а двери, которая эти
+/// числа ПИШЕТ, не было ни одной. Заведение одного требования стоило правки
+/// больше тридцати чисел в шести документах, и каждое из них харнес уже знал: он
+/// их и посчитал, чтобы сравнить.
+///
+/// Проверку это не обесценивает: она и сегодня краснеет на устаревшем числе.
+/// Дверь снимает переписывание руками того, что уже посчитано.
+///
+/// Пишется ТОЛЬКО чистый счёт — число, стоящее перед именем вида. Колонка «в
+/// коде (домен)» меряется прогоном, а не набором, и такая дверь обязана её не
+/// знать: записать туда посчитанное значило бы объявить сделанным то, чего нет.
+pub async fn counts_sync(
+    pool: &Pool,
+    project: &str,
+    // Область: вид и имя документа. Пусто — все. Запись без области правит
+    // столько документов, сколько нашлось, и это не всегда то, чего хотят.
+    only_kind: &str,
+    only_name: &str,
+    apply: bool,
+    author: &str,
+) -> Result<Value, tokio_postgres::Error> {
+    let client = pool.get().await.expect("пул отдал соединение");
+    // Тот же образец и тот же счёт, что у пункта `kind-count-matches`: второй
+    // источник правды разошёлся бы с первым.
+    let rows = client
+        .query(
+            r#"WITH факт(вид, n) AS (
+                 SELECT 'FR', count(*) FROM project_requirements WHERE project_id = $1 AND kind = 'FR'
+                 UNION ALL SELECT 'NFR', count(*) FROM project_requirements WHERE project_id = $1 AND kind = 'NFR'
+                 UNION ALL SELECT 'TC', count(*) FROM project_checks WHERE project_id = $1
+                 UNION ALL SELECT 'ST', count(*) FROM project_needs WHERE project_id = $1
+                 UNION ALL SELECT 'US', count(*) FROM project_stories WHERE project_id = $1
+                 UNION ALL SELECT 'SCR', count(*) FROM project_screens WHERE project_id = $1),
+             образец AS (SELECT '([0-9]{2,4})\s+(?:(?:' ||
+                 coalesce((SELECT string_agg(c.value, '|') FROM scheme($1) c WHERE c.role = 'word.counts'),
+                          'НЕТ-ТАКОГО-СЛОВА') ||
+                 ')\s+)?`?(FR|NFR|TC|ST|US|SCR)(?:-nn|-NN)?`?(?![A-Za-z0-9-])' AS re),
+             строка AS (SELECT d.entity_kind AS ok, d.entity_name AS oi, l.line
+                          FROM project_documents d
+                          CROSS JOIN LATERAL regexp_split_to_table(d.content, E'\n') AS l(line)
+                         WHERE d.project_id = $1)
+             SELECT s.ok, s.oi, x[1]::int, x[2], s.line, к.n
+               FROM строка s
+               CROSS JOIN LATERAL regexp_matches(regexp_replace(s.line, '«[^»]*»', ' ', 'g'),
+                                                 (SELECT re FROM образец), 'g') AS x
+               JOIN факт к ON к.вид = x[2]
+              WHERE x[1]::int <> к.n
+                AND s.line !~ '[~≈]?[0-9]+\s*[–—-]\s*[0-9]+'
+                AND s.line !~ '\[0-9\]'
+                -- ТЕ ЖЕ ОГОВОРКИ, ЧТО У ПУНКТА. Второй набор условий разошёлся бы
+                -- с первым, и дверь писала бы туда, куда правило не смотрит: в
+                -- летопись, в текст вопроса, в строку с историческим числом.
+                AND NOT EXISTS (SELECT 1 FROM scheme($1) c WHERE c.role = 'word.caveat'
+                                 AND lower(s.line) LIKE '%' || lower(c.value) || '%')
+                AND NOT EXISTS (SELECT 1 FROM scheme($1) q WHERE q.role = 'word.count-prefix'
+                                 AND lower(s.line) LIKE '%' || lower(q.value) || '%')
+                AND ($2 = '' OR s.ok = $2)
+                AND ($3 = '' OR s.oi = $3)
+              ORDER BY 1, 2, 3"#,
+            &[&project, &only_kind, &only_name],
+        )
+        .await?;
+    let mut items = Vec::new();
+    for r in &rows {
+        items.push(json!({
+            "kind": r.get::<_, String>(0),
+            "name": r.get::<_, String>(1),
+            "said": r.get::<_, i32>(2),
+            "subject": r.get::<_, String>(3),
+            "fact": r.get::<_, i64>(5),
+            "line": r.get::<_, String>(4).trim().chars().take(120).collect::<String>(),
+        }));
+    }
+    if !apply {
+        return Ok(json!({
+            "drift": items.len(), "counts": items,
+            "means": "показано, а не записано. Записать — `counts-sync apply=true`: \
+                      пишется только чистый счёт, число перед именем вида.",
+        }));
+    }
+    // Запись идёт ДОКУМЕНТОМ ЦЕЛИКОМ и через ту же дорогу, что у человека: сервер
+    // — единственная дверь и для себя тоже.
+    let mut changed = Vec::new();
+    for r in &rows {
+        let (kind, name): (String, String) = (r.get(0), r.get(1));
+        let said: i32 = r.get(2);
+        let fact: i64 = r.get(5);
+        let line: String = r.get(4);
+        let Some(row) = client
+            .query_opt(
+                "SELECT content, revision FROM project_documents
+                  WHERE project_id = $1 AND entity_kind = $2 AND entity_name = $3",
+                &[&project, &kind, &name],
+            )
+            .await?
+        else {
+            continue;
+        };
+        let content: String = row.get(0);
+        // Заменяется число ИМЕННО В ЭТОЙ СТРОКЕ, и только оно: строка целиком —
+        // единственный надёжный якорь, а слепая замена по всему документу задела
+        // бы одинаковые числа о другом.
+        let fixed_line = line.replacen(&said.to_string(), &fact.to_string(), 1);
+        if fixed_line == line || !content.contains(&line) {
+            continue;
+        }
+        let next = content.replacen(&line, &fixed_line, 1);
+        client
+            .execute(
+                "UPDATE project_documents SET content = $4, revision = revision + 1,
+                        updated_by = $5
+                  WHERE project_id = $1 AND entity_kind = $2 AND entity_name = $3",
+                &[&project, &kind, &name, &next, &author],
+            )
+            .await?;
+        changed.push(json!({ "kind": kind, "name": name, "subject": r.get::<_, String>(3),
+                             "from": said, "to": fact }));
+    }
+    Ok(json!({
+        "changed": changed.len(), "counts": changed,
+        "means": "записано измеренное. Пересборку зовите отдельно: числа — текст документа, \
+                  и проекции его ещё не читали.",
+    }))
+}
+
 pub async fn holders(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
     let client = pool.get().await.expect("пул отдал соединение");
     let rows = client
@@ -7546,6 +7673,9 @@ pub async fn gate_selftest(pool: &Pool, project: &str) -> Result<Value, tokio_po
         .await?;
 
     let (mut alive, mut broken, mut undeclared) = (Vec::new(), Vec::new(), Vec::new());
+    // Третья корзина: правило, чей род факта не свеж, судить отказывается, и
+    // уронить его подсадкой нельзя — реагировать нечему.
+    let mut stale: Vec<Value> = Vec::new();
     // Самотест ЗАПИСЫВАЕТ приговор пробе: «ни разу не роняли» должен видеть
     // всякий, кто смотрит гейт, а не только тот, кто позвал самотест.
     let mut verdict: Vec<(String, String, bool)> = Vec::new();
@@ -7588,9 +7718,45 @@ pub async fn gate_selftest(pool: &Pool, project: &str) -> Result<Value, tokio_po
                     "was": was.len(), "became": became.len() }));
             }
             Ok((was, _)) => {
+                // ПРОТУХШИЙ ДАТЧИК — ТРЕТЬЕ, а не «сломан». Правило, чей род
+                // факта не свеж, честно отказывается судить: оно отвечает одной
+                // строкой об этом и на подсадку не реагирует — реагировать
+                // нечему. Звать это сломанным значит валить в одну кучу «пробу
+                // не проверяли» и «проверять сейчас нечем», а чинится это разным:
+                // первое — пробой, второе — кормильцем.
+                let mut tx_done = false;
+                let stale_fact = {
+                    static F: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+                        regex::Regex::new(r"fact_fresh\(\$1, '([a-z-]+)'\)").expect("образец рода")
+                    });
+                    let mut found: Option<String> = None;
+                    for c in F.captures_iter(&sql) {
+                        let f = c[1].to_owned();
+                        let fresh: bool = client
+                            .query_one("SELECT fact_fresh($1, $2)", &[&project, &f])
+                            .await
+                            .map(|r| r.get::<_, Option<bool>>(0).unwrap_or(true))
+                            .unwrap_or(true);
+                        if !fresh {
+                            found = Some(f);
+                            break;
+                        }
+                    }
+                    found
+                };
+                if let Some(f) = stale_fact {
+                    verdict.push((phase.clone(), item.clone(), true));
+                    stale.push(json!({ "phase": phase, "item": item, "fact": f,
+                        "why": format!("датчик «{f}» не свеж: правило отказывается судить, и уронить \
+                                        его подсадкой нельзя — реагировать нечему. Это не «не роняли», \
+                                        а «сейчас нечем мерить»") }));
+                    tx_done = true;
+                }
+                if !tx_done {
                 verdict.push((phase.clone(), item.clone(), false));
                 broken.push(json!({ "phase": phase, "item": item,
                     "why": format!("на подсаженном нарушении ответ пункта не изменился: те же {} строк, слово в слово", was.len()) }));
+                }
             }
             Err(why) => {
                 verdict.push((phase.clone(), item.clone(), false));
@@ -7616,6 +7782,7 @@ pub async fn gate_selftest(pool: &Pool, project: &str) -> Result<Value, tokio_po
         "queryItems": items.len(),
         "alive": alive.len(), "aliveItems": alive,
         "broken": broken.len(), "brokenItems": broken,
+        "stale": stale.len(), "staleItems": stale,
         "undeclared": undeclared.len(), "undeclaredItems": undeclared,
         "why": "пункт без пробы не «прошёл самотест», а «самотест не объявлен» — это разные ответы",
     }))

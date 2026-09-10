@@ -467,7 +467,7 @@ impl Mcp {
             "inputSchema": { "type": "object", "properties": { "id": s("имя пункта, латиницей через дефис"), "phase": s("гейт"), "item": s("пункт"), "holdsWhileEmpty": s("род факта, который обязан оставаться пустым, пока отмена верна"),
                 "why": s("почему неприменим"), "drop": json!({"type":"boolean"}) },
                 "required": ["phase", "item"] } }));
-        tools.push(json!({ "name": "gate-measure", "description": "перемерить пункты гейтов и сохранить измеренное; обычно не нужно — пересчёт идёт сам при изменении набора",
+        tools.push(json!({ "name": "gate-measure", "description": "перемерить все пункты СЕЙЧАС и дождаться итога; зовите, когда нужно измеренное сейчас — сам пересчёт идёт фоном, и узнать, что он кончился, вызывающему нечем",
             "inputSchema": { "type": "object", "properties": {} } }));
         tools.push(json!({ "name": "gate-selftest", "description": "самотест гейтов: каждый запросный пункт роняется подсаженным нарушением в откатываемой транзакции",
             "inputSchema": { "type": "object", "properties": {} } }));
@@ -544,6 +544,10 @@ impl Mcp {
                 "blame": s("harness · corpus"), "fixedBy": s("чем это чинится — обязательно"),
                 "why": s("довод"), "drop": json!({"type":"boolean"}) },
                 "required": ["rule", "entityId", "blame", "fixedBy"] } }));
+        tools.push(json!({ "name": "counts-sync", "description": "объявленные числа против измеренных: без ключа показывает разницу, с `apply` записывает посчитанное",
+            "inputSchema": { "type": "object", "properties": {
+                "apply": json!({"type":"boolean","description":"записать измеренное; без него только показ"}),
+                "kind": s("вид документа — сузить область"), "id": s("имя документа — сузить область") } } }));
         tools.push(json!({ "name": "holders", "description": "объявленные держатели инварианта: требование и путь",
             "inputSchema": { "type": "object", "properties": {} } }));
         tools.push(json!({ "name": "column-server-filled", "description": "колонку заполняет сервер, и названо чем: правила входа её больше не спрашивают",
@@ -579,7 +583,7 @@ impl Mcp {
     const WRITES: &[&str] = &[
         "put", "put-section", "rm", "document-add", "reparse", "reproject", "sweep",
         "task-state-push", "code-facts-push", "skills-push", "preflight-push", "worktree-push",
-        "ceiling-set", "blame-set", "field-column-alias", "column-server-filled", "frozen-tree-set", "scheme-term-set", "orphans-purge", "surface-source-add", "sensor-spec-add", "agent-set", "donor-add", "guard-add", "gate-sign", "gate-item-set", "method-set", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "step-selftest", "version-close", "phase-gate-set", "exception-set",
+        "ceiling-set", "blame-set", "field-column-alias", "column-server-filled", "counts-sync", "frozen-tree-set", "scheme-term-set", "orphans-purge", "surface-source-add", "sensor-spec-add", "agent-set", "donor-add", "guard-add", "gate-sign", "gate-item-set", "method-set", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "step-selftest", "version-close", "phase-gate-set", "exception-set",
         "author-set", "screen-area-set", "skill-set", "version-freeze",
         "links-rewrite", "links-retarget",
     ];
@@ -625,7 +629,7 @@ impl Mcp {
         const RESERVED: &[&str] = &[
             "method-set", "gate-item-set", "question-holders", "preflight-push", "worktree-push",
             "sensor-specs", "scheme-terms", "frozen-trees", "addresses-declared", "tree-declared", "donors", "skills-push", "skills", "agents", "code-facts-push", "code-facts", "summary", "links-of", "retired-terms", "order", "gate-measure", "gate-item-waive", "gate-selftest", "gate-sign", "links-rewrite", "links-retarget", "reparse", "screen-area-set", "skill-set", "skills-paths", "version-freeze", "version-delta", "generated-check", "principal-allow", "principals", "author-set", "authors", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "step-selftest", "version-close", "phase-gate-set", "exception-set", "next-step", "process-state", "statuses", "task-status", "status-anomaly", "pipeline", "waves", "phases", "coverage", "blocks", "history", "at-revision", "process-history", "progress",
-            "kinds", "kinds-due", "readiness-gaps", "declared-unwritten", "blame-set", "doors", "field-column-alias", "column-server-filled", "holders", "sections", "section", "backlinks", "search", "put",
+            "kinds", "kinds-due", "readiness-gaps", "declared-unwritten", "blame-set", "doors", "field-column-alias", "column-server-filled", "holders", "counts-sync", "sections", "section", "backlinks", "search", "put",
             "put-section", "rm", "document-add", "reproject", "sweep", "gate", "next-task", "blockers", "events",
             "norm-versions", "measurements", "plan", "readiness", "requirements-of",
             "tasks-of", "preflight-queue", "claims", "exceptions",
@@ -883,6 +887,14 @@ impl Mcp {
             //
             // Три жалобы «такой ручки нет» были написаны за одну ночь, и все три
             // оказались о существующих дверях.
+            "counts-sync" => {
+                let apply = args.get("apply").map(|v| v == "true" || v == true).unwrap_or(false);
+                match crate::projector::counts_sync(&self.pool, p, kind_arg,
+                        id.unwrap_or(""), apply, &self.author).await {
+                    Ok(v) => ok(v),
+                    Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
+                }
+            }
             "holders" => match crate::projector::holders(&self.pool, p).await {
                 Ok(v) => ok(v),
                 Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
