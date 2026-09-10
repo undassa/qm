@@ -3647,3 +3647,10 @@ button.chain-card:disabled { cursor: default; opacity: .55; }
 .chain-card.warn b { color: var(--accent, #d8a657); }
 .chain-card.bad { border-color: color-mix(in srgb, var(--bad, #c25b5b) 50%, transparent); }
 .chain-card.bad b { color: var(--bad, #c25b5b); }
+/*
+ * Поле поиска в колонке ИМЁН не растягивается. `.rows-search` объявлено с
+ * `flex: 1 1 260px` для рядов — там оно стоит в строке и растёт вширь. Здесь
+ * контейнер колоночный, и то же правило растило его ВВЫСЬ: над списком висела
+ * пустая коробка в треть экрана, а список начинался под ней со сдвигом.
+ */
+.reader-list > .rows-search { flex: 0 0 auto; }

@@ -89,7 +89,13 @@ export function Reader({
       show(kind, undefined);
       return;
     }
-    void loadIds(projectId, kind.kind).then(setIds);
+    void loadIds(projectId, kind.kind).then((names) => {
+      setIds(names);
+      // Первое имя открывается САМО. «Выберите сущность слева» — не ответ, а
+      // отсрочка: выбрали вид, значит хотят его читать, и лишний щелчок здесь
+      // ничего не уточняет.
+      if (!id && names.length && kind) show(kind, names[0]);
+    });
   }, [projectId, kind]);
 
   /**
