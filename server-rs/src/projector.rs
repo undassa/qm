@@ -1822,6 +1822,24 @@ CREATE TABLE IF NOT EXISTS project_lint_rules (
     origin      text NOT NULL DEFAULT 'projected',
     PRIMARY KEY (project_id, id)
 );
+-- ЧЕМ ДОКАЗАНО ТРЕБОВАНИЕ — одной таблицей на все роды доказательства.
+--
+-- Правило «у каждого требования есть проверка» знало ровно три источника, и
+-- все три — про тест-кейс. А у `tot-ade` 122 требования доказываются ПРАВИЛОМ
+-- КОДА: линт не пробует случай, он отказывается собирать нарушение. Считать
+-- это «непокрытым» значит требовать сценарий там, где стоит запрет.
+--
+-- Годится ли род доказательством — ОБЪЯВЛЯЕТСЯ (`kind-proves`), а не решается
+-- здесь: это суждение о том, чем в проекте принято доказывать.
+CREATE TABLE IF NOT EXISTS project_requirement_proof (
+    project_id     text NOT NULL,
+    requirement_id text NOT NULL,
+    proof_kind     text NOT NULL,
+    proof_id       text NOT NULL,
+    origin         text NOT NULL DEFAULT 'projected',
+    PRIMARY KEY (project_id, requirement_id, proof_kind, proof_id)
+);
+
 CREATE TABLE IF NOT EXISTS project_assertions (
     project_id  text NOT NULL,
     id          text NOT NULL,
@@ -7509,6 +7527,53 @@ pub async fn add_kind(
     Ok(json!({ "status": "declared", "kind": name, "shape": shape, "id": id_pattern,
                "means": "вид объявлен ОБЩИМ: он виден всем наборам. Чем он становится — \
                          отдельной дверью `kind-projection`" }))
+}
+
+/// Объявить, годится ли род доказательством требования.
+///
+/// Тест-кейс пробует случай; правило кода отказывается собирать нарушение.
+/// Оба доказывают, но по-разному, и что из этого принято в проекте — суждение
+/// владельца, а не машины. Прежде правило знало один ответ и зашивало его.
+///
+/// Проверяется, что такие связи ЕСТЬ: объявить доказательством род, которым
+/// ничего не доказано, — подписать намерение вместо факта.
+pub async fn set_kind_proves(
+    pool: &Pool, project: &str, kind: &str, proves: bool, why: &str,
+) -> Result<Value, tokio_postgres::Error> {
+    let client = pool.get().await.expect("пул отдал соединение");
+    if kind.trim().is_empty() || why.trim().is_empty() {
+        return Ok(json!({ "status": "empty", "why": "нужны род и довод" }));
+    }
+    if client
+        .query_opt("SELECT 1 FROM kind_layout WHERE name = $1", &[&kind])
+        .await?
+        .is_none()
+    {
+        return Ok(json!({ "status": "no_kind", "kind": kind, "why": "вид не объявлен" }));
+    }
+    let связей: i64 = client
+        .query_one(
+            "SELECT count(*) FROM project_requirement_proof
+              WHERE project_id = $1 AND proof_kind = $2",
+            &[&project, &kind],
+        )
+        .await?
+        .get(0);
+    if proves && связей == 0 {
+        return Ok(json!({ "status": "proves_nothing", "kind": kind,
+            "why": "этим родом в наборе не доказано ни одно требование: объявление \
+                    описывало бы то, чего нет" }));
+    }
+    client
+        .execute(
+            "UPDATE kind_layout SET spec = spec || jsonb_build_object('proves', $2::boolean,
+                                                                      'proves-why', $3::text)
+              WHERE name = $1",
+            &[&kind, &proves, &why],
+        )
+        .await?;
+    Ok(json!({ "status": "declared", "kind": kind, "proves": proves, "links": связей,
+               "means": "объявление ОБЩЕЕ: чем доказывают требование — одно для всех проектов" }))
 }
 
 pub async fn holders(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {

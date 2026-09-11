@@ -419,6 +419,49 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize)
         }
     }
 
+    // ЧЕМ ДОКАЗАНО ТРЕБОВАНИЕ. Имена берутся из той же колонки `measured_by`, но
+    // род каждого определяется ОБРАЗЦОМ ВИДА, а не зашитой формой: проверка,
+    // правило кода и утверждение попадают каждое к себе, и связь с требованием
+    // записывается для всех трёх одинаково.
+    tx.execute("DELETE FROM project_requirement_proof WHERE project_id = $1 AND origin = 'projected'",
+               &[&project]).await?;
+    tx.execute(
+        "INSERT INTO project_requirement_proof (project_id, requirement_id, proof_kind, proof_id)
+         SELECT r.project_id, r.id, k.name, m[2]
+           FROM project_requirements r,
+                LATERAL regexp_matches(r.measured_by,
+                  '(тест|бенч|линт|гейт|сценари|проверк|фикстур)[а-яё]*[^`]{0,24}`([^`]{2,80})`',
+                  'g') m,
+                kind_layout k
+          WHERE r.project_id = $1 AND r.measured_by <> ''
+            AND k.name IN ('check','lint-rule','assertion')
+            AND k.spec->>'id' IS NOT NULL AND m[2] ~ (k.spec->>'id')
+         ON CONFLICT DO NOTHING",
+        &[&project],
+    )
+    .await?;
+
+    // ...И ПРОВЕРКИ, ПРИШЕДШИЕ ДРУГИМ ПУТЁМ. У `myack` доказательства не в
+    // прозе `measured_by`, а в ячейках таблиц, и таблица доказательств
+    // оставалась пустой — правило честно отвечало «судить нечем» при 363
+    // живых проверках. Таблица собирает ВСЕ источники, иначе она не общая.
+    tx.execute(
+        "INSERT INTO project_requirement_proof (project_id, requirement_id, proof_kind, proof_id)
+         SELECT project_id, requirement_id, 'check', id FROM project_checks
+          WHERE project_id = $1 AND requirement_id IS NOT NULL AND requirement_id <> ''
+         ON CONFLICT DO NOTHING",
+        &[&project],
+    )
+    .await?;
+    tx.execute(
+        "INSERT INTO project_requirement_proof (project_id, requirement_id, proof_kind, proof_id)
+         SELECT project_id, requirement_id, 'check', check_id FROM project_check_requirements
+          WHERE project_id = $1
+         ON CONFLICT DO NOTHING",
+        &[&project],
+    )
+    .await?;
+
     // ОТМЕТКА ИЗМЕНЕНИЯ. Отпечаток записи сверяется с прошлым: совпал — дата
     // держится, разошёлся — ставится новая.
     //
