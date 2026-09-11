@@ -4641,6 +4641,90 @@ tbody:first-of-type .co-grp th { padding-top: 8px; }
 .wk-tl li.on .wk-track { outline: 1px solid var(--muted); outline-offset: 1px; }
 .wk-gap { color: var(--muted); font-size: 11.5px; margin: 14px 0 0; max-width: 68ch; line-height: 1.5; }
 
+/* ── Три вида работы ─────────────────────────────────────────────────────
+   Переключатель стоит над данными: набор один, показ разный. */
+.wk-views { display: flex; align-items: center; gap: 2px; margin-bottom: 10px; }
+.wk-views button {
+  font: inherit; font-size: 13px; background: none; border: 0; cursor: pointer;
+  color: var(--muted); padding: 4px 12px; border-radius: 7px;
+}
+.wk-views button:hover { color: var(--ink); }
+.wk-views button.on { color: var(--ink); background: var(--panel); font-weight: 600; }
+.wk-views .wk-all { margin-left: auto; color: var(--live); }
+
+/* Колонка не ужимается под экран: при шести колонках на 1440 карточке
+   остаётся десять знаков, и название превращается в «Пароль уходит из …».
+   Доска едет вбок внутри себя — как в Jira, — а страница стоит на месте. */
+.wk-board { display: grid; gap: 8px; align-items: start; overflow-x: auto; padding-bottom: 6px; }
+/* Доска берёт всю ширину: колонок шесть, и при 900px «закрыта» уезжала
+   за край — а именно она показывает ступень через голову. */
+.work.wide { max-width: none; }
+.wk-col { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.wk-colh { border-bottom: 1px solid var(--line); padding-bottom: 7px; margin-bottom: 2px; }
+.wk-colh b { display: block; font-size: 12px; font-weight: 600; }
+.wk-colh i {
+  font-style: normal; font-family: var(--mono); font-size: 11px;
+  color: var(--muted); font-variant-numeric: tabular-nums;
+}
+.wk-colh i .torn { color: var(--warn); }
+.wk-colh.empty b { color: var(--muted); font-weight: 400; }
+.wk-why {
+  font-size: 11.5px; color: var(--muted); margin: 0; padding: 9px 8px;
+  border: 1px dashed var(--line); border-radius: 6px; line-height: 1.4;
+}
+.wk-why.warn { border-color: var(--warn); color: var(--warn); }
+
+.wk-cards { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
+.wk-cards li { min-width: 0; }
+.wk-cards button {
+  display: block; width: 100%; text-align: left; font: inherit; cursor: pointer;
+  background: var(--panel); border: 0; border-left: 2px solid transparent;
+  border-radius: 6px; padding: 6px 8px; min-width: 0;
+}
+.wk-cards button:hover { outline: 1px solid var(--muted); }
+.wk-cards li.torn button { border-left-color: var(--warn); }
+.wk-top { display: flex; align-items: baseline; gap: 6px; }
+.wk-cards .wk-id { font-size: 11px; }
+.wk-torn { color: var(--warn); font-size: 11px; margin-left: auto; }
+.wk-bt {
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden; font-size: 11.5px; color: var(--muted);
+  line-height: 1.35; margin-top: 2px;
+}
+
+/* Ступени получают цвет по порядку, а не по имени: набор объявляет ступени
+   сам, и седьмая возьмёт следующий тон, не требуя правки здесь. */
+.wk-track i.st-0 { background: color-mix(in oklab, var(--wait) 80%, var(--ink)); }
+.wk-track i.st-1 { background: color-mix(in oklab, var(--live) 45%, var(--wait)); }
+.wk-track i.st-2 { background: var(--live); }
+.wk-track i.st-3 { background: var(--ready); }
+.wk-track i.st-4 { background: color-mix(in oklab, var(--ready) 60%, var(--done)); }
+.wk-track i.st-5 { background: var(--done); }
+
+.wk-key { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 14px; }
+.wk-key li { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--muted); }
+.wk-key i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+.wk-key i.st-0 { background: color-mix(in oklab, var(--wait) 80%, var(--ink)); }
+.wk-key i.st-1 { background: color-mix(in oklab, var(--live) 45%, var(--wait)); }
+.wk-key i.st-2 { background: var(--live); }
+.wk-key i.st-3 { background: var(--ready); }
+.wk-key i.st-4 { background: color-mix(in oklab, var(--ready) 60%, var(--done)); }
+.wk-key i.st-5 { background: var(--done); }
+
+.wk-cnt .bad { color: var(--warn); }
+
+.wk-key li.off { opacity: .45; }
+.wk-key em { font-style: normal; color: var(--warn); }
+
+@media (max-width: 560px) {
+  /* На телефоне доска остаётся горизонтальной лентой: колонка шире экрана
+     читалась бы хуже, чем прокрутка на один палец. */
+  /* На телефоне раскладка из шести колонок задаётся кодом: здесь её надо
+     перебить, иначе колонка ужмётся до неразборчивого. */
+  .wk-board { grid-template-columns: none !important; grid-auto-flow: column; grid-auto-columns: 76vw; }
+  .wk-views button { padding: 4px 9px; font-size: 12.5px; }
+}
+
 .wk-list { list-style: none; margin: 0; padding: 0; }
 .wk-list li { border-top: 1px solid var(--line-soft); }
 .wk-list li:first-child { border-top: 0; }

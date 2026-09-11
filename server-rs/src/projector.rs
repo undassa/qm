@@ -249,6 +249,12 @@ ALTER TABLE kind_status ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT ''
 -- Почему факта нет. Пустой статус без причины читается как «забыли»; с
 -- причиной — как решение, которое кто-то принял и записал.
 ALTER TABLE kind_status ADD COLUMN IF NOT EXISTS why text NOT NULL DEFAULT '';
+-- Переживает ли факт ступени её прохождение. У большинства ступеней факт
+-- накопительный: трейлер закрытия остаётся в истории навсегда. У «в работе»
+-- факт — текущее состояние: ветку заводят и сносят, и её отсутствие СЕГОДНЯ
+-- ничего не говорит о том, была ли задача в работе ВЧЕРА. Доска отличает одно
+-- от другого: пропуском считается только непройденная накопительная ступень.
+ALTER TABLE kind_status ADD COLUMN IF NOT EXISTS durable boolean NOT NULL DEFAULT true;
 
 -- Подача факта: кто и когда подал. Без этой записи пустая таблица деревьев
 -- значит и «никто не работает», и «никто ни разу не подавал» — а это разные
@@ -673,6 +679,19 @@ CREATE TABLE IF NOT EXISTS task_worktree (
 --
 -- `task_revision` — та же привязка, что у предполёта: план, написанный до
 -- переписывания задачи, планом для новой задачи не является.
+-- ОБЪЯВЛЕННОЕ ПЕРЕЖИВАЕТ ПЕРЕСБОРКУ — у этих трёх не переживало.
+--
+-- Пересборка сносит свою проекцию целиком и пишет заново. У проекций, где
+-- объявленное соседствует с выведенным, снос ограничен `origin='projected'` —
+-- у `project_checks`, `project_requirements`, `project_questions` так и есть. У
+-- этих трёх колонки не было вовсе: `decision-link-add`, `feature-story-add` и
+-- `story-requirement-add` отвечали «записано», и ближайшая пересборка стирала
+-- записанное без звука. Дверь, чей итог живёт до следующего прогона, — это
+-- дверь, которой нет.
+ALTER TABLE project_decision_links ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'projected';
+ALTER TABLE project_feature_stories ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'projected';
+ALTER TABLE project_story_requirements ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'projected';
+
 CREATE TABLE IF NOT EXISTS task_plan (
   project_id text NOT NULL,
   task_id text NOT NULL,
@@ -1865,9 +1884,12 @@ ALTER TABLE project_screens ADD COLUMN IF NOT EXISTS spec text NOT NULL DEFAULT 
 -- и сервер, у которого функция уже есть в прежней форме, не поднялся бы вовсе
 -- — со словом «db error», как это и случилось при первой правке.
 DROP FUNCTION IF EXISTS rename_in_columns(text, text, text);
-CREATE OR REPLACE FUNCTION rename_in_columns(п text, было text, стало text)
+-- Снимается трёхдоводная: у неё не было слова о склейке, и склейку она делала
+-- всегда — молча и удалением.
+DROP FUNCTION IF EXISTS rename_in_columns(text, text, text);
+CREATE OR REPLACE FUNCTION rename_in_columns(п text, было text, стало text, слить boolean DEFAULT false)
 RETURNS TABLE(таблица text, колонка text, строк bigint, снято bigint) AS $$
-DECLARE c record; n bigint; d bigint;
+DECLARE c record; n bigint; d bigint; места tid[]; место tid;
 BEGIN
   FOR c IN
     SELECT k.table_name AS t, k.column_name AS col
@@ -1885,6 +1907,22 @@ BEGIN
        -- записей. Это подделка прошлого: старое имя в старой ревизии — правда,
        -- а не опечатка.
        AND k.table_name <> 'project_document_revisions'
+       -- ЧТО ПЕРЕЕДЕТ САМО — НЕ ТРОГАТЬ. Пять колонок разбора ссылаются на
+       -- `project_documents.entity_name` связью `ON UPDATE CASCADE`: родитель
+       -- переименуется, дети переедут за ним. Обход же шёл по
+       -- `information_schema` в её собственном порядке и брал ребёнка РАНЬШЕ
+       -- родителя — тогда строка ячейки показывала на имя, которого ещё нет, и
+       -- вся правка падала `project_document_cells_document_fk`. Воспроизводилось
+       -- на любом виде с таблицей: `task`, `run`, `story`.
+       AND NOT EXISTS (
+             SELECT 1 FROM information_schema.referential_constraints rc
+               JOIN information_schema.key_column_usage u
+                 ON u.constraint_name = rc.constraint_name
+                AND u.constraint_schema = rc.constraint_schema
+              WHERE rc.update_rule = 'CASCADE'
+                AND u.table_schema = 'public'
+                AND u.table_name = k.table_name AND u.column_name = k.column_name)
+     ORDER BY k.table_name, k.column_name
   LOOP
     d := 0;
     BEGIN
@@ -1894,13 +1932,35 @@ BEGIN
         USING '\m' || было || '\M', стало, п;
       GET DIAGNOSTICS n = ROW_COUNT;
     EXCEPTION WHEN unique_violation THEN
-      -- ДВОЙНИК: запись под новым именем уже есть. Это та же сущность, заведённая
-      -- заново, — старая строка снимается, и снятое СЧИТАЕТСЯ ОТДЕЛЬНО: удаление
-      -- под видом переименования было бы тихой потерей.
-      EXECUTE format('DELETE FROM %I WHERE project_id = $2 AND %I = $1', c.t, c.col)
-        USING было, п;
-      GET DIAGNOSTICS d = ROW_COUNT;
+      -- ДВОЙНИК. Прежде здесь стояло удаление ВСЕХ строк со старым именем —
+      -- без спроса и без слова о склейке. Пять строк ссылались на старое имя,
+      -- одна из них сталкивалась с существующей — и удалялись все пять вместо
+      -- «четыре переименовать, одну слить». Итог писался как `строк=0`, то есть
+      -- дверь отвечала «ничего не переименовано» там, где потеряла запись.
+      IF NOT слить THEN
+        RAISE EXCEPTION
+          'имя «%» в %.% уже занято: переименование склеило бы две записи в одну',
+          стало, c.t, c.col USING ERRCODE = 'unique_violation',
+          HINT = 'если это одна и та же сущность, заведённая дважды, — скажите merge';
+      END IF;
+      -- Со словом о склейке — построчно: переименовывается всё, что может, и
+      -- снимается только то, что вправду столкнулось.
       n := 0;
+      EXECUTE format('SELECT array_agg(ctid) FROM %I WHERE project_id = $1 AND %I ~ $2',
+                     c.t, c.col)
+        INTO места USING п, '\m' || было || '\M';
+      FOREACH место IN ARRAY coalesce(места, ARRAY[]::tid[]) LOOP
+        BEGIN
+          EXECUTE format(
+            'UPDATE %I SET %I = regexp_replace(%I, $1, $2, ''g'') WHERE ctid = $3',
+            c.t, c.col, c.col)
+            USING '\m' || было || '\M', стало, место;
+          n := n + 1;
+        EXCEPTION WHEN unique_violation THEN
+          EXECUTE format('DELETE FROM %I WHERE ctid = $1', c.t) USING место;
+          d := d + 1;
+        END;
+      END LOOP;
     END;
     IF n > 0 OR d > 0 THEN
       таблица := c.t; колонка := c.col; строк := n; снято := d; RETURN NEXT;
@@ -2970,8 +3030,16 @@ pub async fn rebuild(pool: &Pool, project: &str) -> Result<Value, tokio_postgres
     tx.execute(
         r#"UPDATE kind_status SET
              fact = 'SELECT 1 FROM task_worktree WHERE project_id = $1 AND task_id = $2',
-             source = 'SELECT 1 FROM fact_push WHERE project_id = $1 AND fact = ''worktree'''
+             source = 'SELECT 1 FROM fact_push WHERE project_id = $1 AND fact = ''worktree''',
+             durable = false
            WHERE kind = 'task' AND name = 'в работе' AND fact = ''"#,
+        &[],
+    )
+    .await?;
+    // Набор, заведённый до колонки `durable`, уже имеет факт — правило выше
+    // его не трогает. Свойство ступени проставляется отдельно и однократно.
+    tx.execute(
+        "UPDATE kind_status SET durable = false WHERE kind = 'task' AND name = 'в работе' AND durable",
         &[],
     )
     .await?;
@@ -5852,8 +5920,8 @@ pub async fn declare_decision_link(
             return Ok(json!({ "status": if gone > 0 { "dropped" } else { "not_found" } }));
         }
     client.execute(
-        "INSERT INTO project_decision_links (project_id, decision_id, kind, target)
-         VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING",
+        "INSERT INTO project_decision_links (project_id, decision_id, kind, target, origin)
+         VALUES ($1,$2,$3,$4,'declared') ON CONFLICT DO NOTHING",
         &[&project, &decision, &kind, &target]).await?;
     Ok(json!({ "status": "declared", "decision": decision, "kind": kind, "target": target }))
 }
@@ -6127,8 +6195,8 @@ pub async fn declare_story_requirement(
     }
     let n = client
         .execute(
-            "INSERT INTO project_story_requirements (project_id, story_id, requirement_id)
-             VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
+            "INSERT INTO project_story_requirements (project_id, story_id, requirement_id, origin)
+             VALUES ($1,$2,$3,'declared') ON CONFLICT DO NOTHING",
             &[&project, &story, &requirement],
         )
         .await?;
@@ -6181,8 +6249,8 @@ pub async fn declare_feature_story(
     }
     let n = client
         .execute(
-            "INSERT INTO project_feature_stories (project_id, feature_id, story_id)
-             VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
+            "INSERT INTO project_feature_stories (project_id, feature_id, story_id, origin)
+             VALUES ($1,$2,$3,'declared') ON CONFLICT DO NOTHING",
             &[&project, &feature, &story],
         )
         .await?;
@@ -6359,13 +6427,22 @@ pub async fn declare_question(
         &[&project, &id, &number, &title, &state, &answer,
           &(if answer.trim().is_empty() { "unsaid" } else { "answered" }),
           &!answer.trim().is_empty()]).await?;
+    // СВЯЗЬ «ЧЕМ ЗАКРЫТ» — ЧАСТЬ ОТВЕТА, а не побочное действие. Вставка стояла
+    // под `.ok()`: связь молча не писалась, а дверь всё равно отвечала
+    // «declared». Спросивший получал слово о том, чего не произошло.
+    let mut закрыт = json!(closed_by);
     if !closed_by.is_empty() {
-        client.execute(
-            "INSERT INTO project_decision_links (project_id, decision_id, kind, target)
-             VALUES ($1,$2,'closes',$3) ON CONFLICT DO NOTHING",
-            &[&project, &closed_by, &id]).await.ok();
+        match client.execute(
+            "INSERT INTO project_decision_links (project_id, decision_id, kind, target, origin)
+             VALUES ($1,$2,'closes',$3,'declared') ON CONFLICT DO NOTHING",
+            &[&project, &closed_by, &id]).await
+        {
+            Ok(_) => {}
+            Err(e) => закрыт = json!({ "asked": closed_by, "written": false,
+                                       "why": db_says(&e) }),
+        }
     }
-    Ok(json!({ "status": "declared", "id": id, "state": state, "closedBy": closed_by }))
+    Ok(json!({ "status": "declared", "id": id, "state": state, "closedBy": закрыт }))
 }
 
 pub async fn declare_task_requirement(
@@ -7808,13 +7885,18 @@ pub async fn rename_entity(
     // действительно стоит, и правит только там; перечень колонок в коде
     // разошёлся бы со схемой.
     let в_колонках = tx
-        .query("SELECT таблица, колонка, строк FROM rename_in_columns($1, $2, $3)",
-               &[&project, &from, &to])
+        .query("SELECT таблица, колонка, строк, снято FROM rename_in_columns($1, $2, $3, $4)",
+               &[&project, &from, &to, &merge])
         .await?;
+    // СНЯТОЕ НАЗЫВАЕТСЯ. Колонка `снято` считалась и отбрасывалась: ответ нёс
+    // `rows: 0` там, где строку удалили, и удаление под видом переименования
+    // оставалось невидимым — ровно то, чего довод у самой функции велит не
+    // делать.
+    let снято: i64 = в_колонках.iter().map(|r| r.get::<_, i64>(3)).sum();
     let колонки: Vec<Value> = в_колонках
         .iter()
         .map(|r| json!({ "table": r.get::<_, String>(0), "column": r.get::<_, String>(1),
-                         "rows": r.get::<_, i64>(2) }))
+                         "rows": r.get::<_, i64>(2), "dropped": r.get::<_, i64>(3) }))
         .collect();
     let mut записей = 0u64;
     for table in &свои {
@@ -7845,8 +7927,12 @@ pub async fn rename_entity(
     crate::store::reparse_all(pool, project).await?;
     Ok(json!({ "status": "renamed", "from": from, "to": to,
                "documents": n, "mentions": упоминаний, "records": записей,
-               "columns": колонки,
-               "means": "документы разобраны заново; проекции устарели — позовите `reproject`" }))
+               "columns": колонки, "dropped": снято,
+               "means": if снято > 0 {
+                   "документы разобраны заново; проекции устарели — позовите `reproject`.                     ВНИМАНИЕ: снято строк — это склейка, названная словом `merge`"
+               } else {
+                   "документы разобраны заново; проекции устарели — позовите `reproject`"
+               } }))
 }
 
 /// Экранирование имени для регулярного выражения: имя приходит снаружи, и
@@ -11692,8 +11778,10 @@ pub async fn task_pipeline(pool: &Pool, project: &str) -> Result<Value, tokio_po
         }
         let n: i64 = client
             .query_one(
-                &format!("SELECT count(*) FROM project_plan_tasks t WHERE t.project_id = $1 AND EXISTS ({})",
-                         fact.replace("$2", "t.id")),
+                // Псевдоним кириллицей: объявленный факт может завести свой
+                // `t` и перекрыть внешний — см. `task_board`.
+                &format!("SELECT count(*) FROM project_plan_tasks задача WHERE задача.project_id = $1 AND EXISTS ({})",
+                         fact.replace("$2", "задача.id")),
                 &[&project],
             )
             .await
@@ -11703,6 +11791,145 @@ pub async fn task_pipeline(pool: &Pool, project: &str) -> Result<Value, tokio_po
                            "reached": n, "unknown": 0 }));
     }
     Ok(json!({ "total": total, "pipeline": tiles }))
+}
+
+/// Доска: где стоит каждая задача разработки и какие ступени она миновала.
+///
+/// Плитка конвейера считает ступени порознь: «закрыта 17» и «проверена 82» —
+/// два независимых числа, и по ним не видно, что это разные задачи. Доска
+/// ставит каждую задачу в одну колонку — самую дальнюю, которой она достигла,
+/// — и потому показывает то, чего плитка показать не может: ступень, через
+/// которую перешагнули.
+///
+/// Ступени берутся из `kind_status`, а не из списка в коде: набор объявляет их
+/// сам, и седьмая ступень появится здесь без правки этой функции.
+///
+/// Зеркала (`kind = 'red'`) в доску не идут. Они не проходят те же ступени, и
+/// смешивать их с задачами разработки — это ровно та ошибка, из-за которой
+/// «222 задачи» много недель значили 139 задач и 83 их пары.
+pub async fn task_board(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
+    let client = pool.get().await.expect("пул отдал соединение");
+    let statuses = client
+        .query("SELECT ord, name, title, fact, durable FROM kind_status WHERE kind = 'task' ORDER BY ord", &[])
+        .await?;
+
+    // Сами задачи: только разработка, с этапом, названием и зеркалом.
+    let rows = client
+        .query(
+            "SELECT t.id, t.title, t.milestone_id,
+                    (SELECT r.id FROM red_task r
+                      WHERE r.project_id = t.project_id AND r.parent_task = t.id LIMIT 1) AS mirror
+               FROM project_plan_tasks t
+              WHERE t.project_id = $1 AND t.kind = 'dev'
+              ORDER BY t.milestone_id, t.ord, t.id",
+            &[&project],
+        )
+        .await?;
+    let mirrors: i64 = client
+        .query_one(
+            "SELECT count(*) FROM project_plan_tasks WHERE project_id = $1 AND kind = 'red'",
+            &[&project],
+        )
+        .await?
+        .get(0);
+
+    // По ступени — множество достигших её задач, одним запросом на ступень.
+    // Ступень без факта не «никем не достигнута», а неизмерима: её ответ —
+    // `null`, и в подсчёт пропусков она не входит.
+    let mut ladder: Vec<(String, String, bool, Option<std::collections::HashSet<String>>)> = Vec::new();
+    for s in &statuses {
+        let name: String = s.get(1);
+        let title: String = s.get(2);
+        let fact: String = s.get(3);
+        let durable: bool = s.get(4);
+        if fact.trim().is_empty() {
+            ladder.push((name, title, durable, None));
+            continue;
+        }
+        // Псевдоним внешней задачи — кириллицей, и это не украшение. Факт
+        // «проанализирована» объявляет ВНУТРИ себя `JOIN project_plan_tasks t`;
+        // с внешним `t` он перекрывал его, `$2` указывал на внутреннюю строку,
+        // и ступень выходила достигнутой у всех 139. Латинский псевдоним может
+        // совпасть с любым в объявленном факте — кириллический не может.
+        let q = format!(
+            "SELECT задача.id FROM project_plan_tasks задача
+              WHERE задача.project_id = $1 AND задача.kind = 'dev' AND EXISTS ({})",
+            fact.replace("$2", "задача.id")
+        );
+        match client.query(q.as_str(), &[&project]).await {
+            Ok(r) => ladder.push((name, title, durable, Some(r.iter().map(|x| x.get::<_, String>(0)).collect()))),
+            // Запрос не выполнился — это тоже «нечем мерить», а не «никого нет».
+            Err(_) => ladder.push((name, title, durable, None)),
+        }
+    }
+
+    let total = rows.len() as i64;
+    let mut at_count: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    let mut torn_count: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    let mut tasks = Vec::new();
+    let mut torn_total: i64 = 0;
+
+    for r in &rows {
+        let id: String = r.get(0);
+        let title: String = r.get(1);
+        let milestone: Option<String> = r.get(2);
+        let mirror: Option<String> = r.get(3);
+
+        let mut at: Option<&str> = None;
+        let mut at_ord = 0usize;
+        for (i, (name, _, _, set)) in ladder.iter().enumerate() {
+            if set.as_ref().is_some_and(|s| s.contains(&id)) {
+                at = Some(name.as_str());
+                at_ord = i;
+            }
+        }
+        // Пропущенная ступень — накопительная, измеримая, стоящая раньше
+        // достигнутой и не достигнутая. Неизмеримую сюда не пишем:
+        // «неизвестно» не улика. Ненакопительную — тоже: «ветки нет сейчас»
+        // не значит «работы не было».
+        let missed: Vec<String> = ladder
+            .iter()
+            .take(at_ord)
+            .filter(|(_, _, durable, set)| *durable && set.as_ref().is_some_and(|s| !s.contains(&id)))
+            .map(|(name, _, _, _)| name.clone())
+            .collect();
+        let torn = !missed.is_empty();
+        if torn {
+            torn_total += 1;
+        }
+        if let Some(a) = at {
+            *at_count.entry(a.to_owned()).or_insert(0) += 1;
+            if torn {
+                *torn_count.entry(a.to_owned()).or_insert(0) += 1;
+            }
+        }
+        tasks.push(json!({
+            "id": id, "title": title, "milestone": milestone, "mirror": mirror,
+            "at": at, "torn": torn, "missed": missed,
+        }));
+    }
+
+    let columns: Vec<Value> = ladder
+        .iter()
+        .map(|(name, title, durable, set)| match set {
+            Some(s) => json!({
+                "status": name, "title": title,
+                "at": at_count.get(name).copied().unwrap_or(0),
+                "torn": torn_count.get(name).copied().unwrap_or(0),
+                "reached": s.len() as i64, "unknown": 0, "durable": durable,
+            }),
+            None => json!({
+                "status": name, "title": title,
+                "at": Value::Null, "torn": 0, "reached": Value::Null, "unknown": total,
+                "durable": durable, "why": "факт этого статуса никто не записывает",
+            }),
+        })
+        .collect();
+
+    Ok(json!({
+        "total": total, "mirrors": mirrors, "torn": torn_total,
+        "columns": columns, "tasks": tasks,
+    }))
 }
 
 /// Волны: что можно вести одновременно.
