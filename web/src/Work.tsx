@@ -136,6 +136,27 @@ export function Work({ projectId, lang }: { projectId: string; lang: Lang }): Re
   /** Ступени, в которых не стоит никто: пустые и неизмеримые порознь. */
   const пустые = useMemo(() => (board?.columns ?? []).filter((c) => !c.at), [board]);
 
+  /**
+   * Колонки доски: сперва занятые в объявленном порядке, затем пустые.
+   *
+   * Пустая ступень посреди лестницы разрезала поток: «в работе» и
+   * «имплементирована» стояли между «проверена» и «закрыта», и глаз терял
+   * дорогу между тремя четвертями работы и её концом. Порядок ВНУТРИ занятых
+   * не трогается — это лестница, а не вкус; а то, что две вынесены, сказано
+   * строкой под доской, с их настоящими местами.
+   */
+  const колонкиДоски = useMemo(() => {
+    const все = board?.columns ?? [];
+    return [...все.filter((c) => c.at), ...все.filter((c) => !c.at)];
+  }, [board]);
+
+  /** Настоящее место ступени в лестнице — чтобы вынос не соврал о порядке. */
+  const местоВЛестнице = useMemo(() => {
+    const m = new Map<string, number>();
+    (board?.columns ?? []).forEach((c, i) => m.set(c.status, i + 1));
+    return m;
+  }, [board]);
+
   /** Пропуск один на всех? Тогда его можно назвать, а не пересчитывать глазами. */
   const единственныйПропуск = useMemo(() => {
     const н = new Set((board?.tasks ?? []).filter((t) => t.torn).map((t) => t.missed.join(" · ")));
@@ -216,12 +237,12 @@ export function Work({ projectId, lang }: { projectId: string; lang: Lang }): Re
           <div
             className="wk-board"
             style={{
-              gridTemplateColumns: board.columns
+              gridTemplateColumns: колонкиДоски
                 .map((c) => (c.at ? "minmax(186px, 1fr)" : "150px"))
                 .join(" "),
             }}
           >
-            {board.columns.map((c) => {
+            {колонкиДоски.map((c) => {
               const свои = колонки.get(c.status) ?? [];
               return (
                 <div key={c.status} className="wk-col">
@@ -274,6 +295,19 @@ export function Work({ projectId, lang }: { projectId: string; lang: Lang }): Re
               </>
             )}
           </p>
+          {пустые.length > 0 && (
+            <p className="wk-gap">
+              {say(lang, "wk.movedOut")}{" "}
+              {пустые.map((c, i) => (
+                <span key={c.status}>
+                  {i > 0 && " · "}
+                  <b>{c.status}</b> — {местоВЛестнице.get(c.status)}
+                  {say(lang, "wk.nth")}
+                </span>
+              ))}
+              .
+            </p>
+          )}
         </section>
       )}
 

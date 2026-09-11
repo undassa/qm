@@ -20,6 +20,12 @@ for (const [name, w] of [['стол', 1440], ['телефон', 390]]) {
   say('колонок доски', кол === 6, String(кол));
   const заг = await p.locator('.wk-colh').allInnerTexts();
   console.log('    ' + заг.map(t=>t.replace(/\s+/g,' ')).join(' | ').slice(0,190));
+  const порядок = (await p.locator('.wk-colh b').allInnerTexts()).map(x=>x.trim());
+  const занятые = порядок.slice(0, 4), пустые = порядок.slice(4);
+  say('занятые колонки идут подряд', !занятые.includes('в работе') && !занятые.includes('имплементирована'), занятые.join(' | '));
+  say('пустые вынесены вправо', пустые.join(' ') === 'в работе имплементирована', пустые.join(' | '));
+  const вын = (await p.locator('.wk-gap').allInnerTexts()).find(t=>t.includes('вынесены')) ?? '';
+  say('вынос назвал настоящие места', /4/.test(вын) && /5/.test(вын), вын.replace(/\s+/g,' ').slice(0,90));
   const карт = await p.locator('.wk-cards li').count();
   say('карточек видно', карт > 5, String(карт));
   const рв = await p.locator('.wk-cards li.torn').count();
@@ -41,7 +47,7 @@ for (const [name, w] of [['стол', 1440], ['телефон', 390]]) {
     say('доска едет вбок внутри себя', край.need > край.have + 1,
         `нужно ${Math.round(край.need)}, есть ${край.have}`);
   }
-  const дп = (await p.locator('.wk-gap').last().innerText().catch(()=>'')).replace(/\s+/g,' ');
+  const дп = ((await p.locator('.wk-gap').allInnerTexts()).find(t=>t.includes('↯')) ?? '').replace(/\s+/g,' ');
   say('подпись под доской из данных', дп.includes('↯') && /\d/.test(дп), дп.slice(0,95));
   await p.screenshot({ path: process.env.SHOT + `-доска-${w}.png`, fullPage: w === 390 });
 
