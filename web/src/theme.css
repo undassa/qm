@@ -4404,6 +4404,19 @@ button.chain-card:disabled { cursor: default; opacity: .55; }
 .co-kinds button:hover { background: var(--panel); }
 .co-kinds button.on { background: var(--panel-2, var(--panel)); font-weight: 600; }
 .co-kinds button b { margin-left: auto; font-family: var(--mono); font-size: 11px; font-weight: 500; color: var(--muted); }
+/* Полоска под родом — его доля в корпусе. Список становится распределением:
+   видно, что вопросов и проверок втрое больше, чем историй. */
+.co-kinds li { position: relative; }
+.co-kinds li i {
+  position: absolute;
+  left: 8px; right: 8px; bottom: 2px;
+  height: 2px;
+  border-radius: 1px;
+  background: color-mix(in srgb, var(--live) 30%, transparent);
+  transform-origin: left;
+  pointer-events: none;
+}
+.co-kinds button { padding-bottom: 7px; }
 
 .co-top { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
 .co-q {
@@ -4418,18 +4431,41 @@ button.chain-card:disabled { cursor: default; opacity: .55; }
   color: var(--ink);
 }
 .co-q:focus-visible { outline: 2px solid var(--live); outline-offset: 1px; }
-.co-cnt { color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.co-cnt { color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* Постоянное — один раз над таблицей, а не в каждой строке. */
+.co-wide {
+  font: inherit; font-size: 12px; background: none; border: 1px solid var(--line);
+  border-radius: 999px; padding: 2px 10px; color: var(--muted); cursor: pointer; white-space: nowrap;
+}
+.co-wide:hover { color: var(--ink); border-color: var(--muted); }
+.co-same { display: flex; gap: 12px; color: var(--muted); font-size: 12px; flex-wrap: wrap; }
+.co-same b { color: var(--ink); font-family: var(--mono); font-size: 11.5px; font-weight: 500; }
 
-/* Таблица листается вбок ВНУТРИ себя: страница вбок не едет никогда. */
-.co-tbl { overflow-x: auto; }
-.co-tbl table { width: 100%; border-collapse: collapse; font-size: 13px; }
-.co-tbl th { text-align: left; padding: 0 12px 7px 0; border-bottom: 1px solid var(--line); }
-.co-tbl th.n, .co-tbl td.n { text-align: right; font-variant-numeric: tabular-nums; }
+/* ── Таблица корпуса ───────────────────────────────────────────────────────
+   Не сетка на десять колонок, а строка о записи: имя, о чём она, и свойства
+   справа мелко. Имя НИКОГДА не обрезается — это якорь, по нему узнают.
+
+   Первая попытка задала ячейкам `max-width: 0`, чтобы длинный заголовок
+   ужимался, — и обрезала имя до «F…», а свойства выдавила за край. Ужимается
+   только заголовок, и только он.                                          */
+.co-tbl { overflow-x: auto; margin: 0 -4px; }
+.co-tbl table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: auto; }
+
+.co-tbl thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--ground);
+  text-align: left;
+  padding: 0 10px 8px;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
 .co-tbl th button {
   font: inherit;
   font-family: var(--mono);
-  font-size: 10.5px;
-  letter-spacing: 0.1em;
+  font-size: 10px;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--muted);
   background: none;
@@ -4437,11 +4473,33 @@ button.chain-card:disabled { cursor: default; opacity: .55; }
   padding: 0;
   cursor: pointer;
 }
+.co-tbl th button:hover { color: var(--ink); }
 .co-tbl th button.on { color: var(--live); }
-.co-tbl td { padding: 6px 12px 6px 0; border-bottom: 1px solid var(--line-soft); }
+
+.co-tbl td { padding: 7px 10px; border-bottom: 1px solid var(--line-soft); vertical-align: baseline; }
 .co-tbl tbody tr { cursor: pointer; }
+/* Граница вереницы: там, где меняется группа. Линия заметнее обычной, но не
+   кричит — это ритм, а не тревога. */
+.co-tbl tbody tr.brk td { border-top: 1px solid var(--line); padding-top: 11px; }
 .co-tbl tbody tr:hover td { background: var(--panel); }
+
+/* Имя — якорь: своя ширина, моноширинный, целиком. */
+.co-tbl td.id, .co-tbl th.id { width: 1%; white-space: nowrap; }
 .co-id { font-family: var(--mono); font-size: 12.5px; color: var(--live); }
+
+/* Заголовок забирает остаток и ужимается один: ради него строку и читают. */
+.co-tbl th.t, .co-tbl td.t { width: 100%; }
+.co-tbl td.t { color: var(--ink); max-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Свойства — мелко и вплотную; числа выровнены по разряду. */
+.co-tbl th.n, .co-tbl td.n { text-align: right; white-space: nowrap; width: 1%; font-variant-numeric: tabular-nums; }
+.co-tbl td.n { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+/* Единица — обычное дело и не должна спорить с заголовком за внимание;
+   больше одного заметно само. */
+.co-tbl td.n.one { opacity: .45; }
+/* Ноль в колонке доказательств — не «мало», а «ничем»: он и показан иначе. */
+.co-tbl td.n.zero { color: var(--warn); }
+.co-tbl td.p { white-space: nowrap; color: var(--muted); font-size: 12px; }
 
 .co-back { font: inherit; font-size: 12.5px; background: none; border: 0; color: var(--live); cursor: pointer; padding: 0 0 12px; }
 .co-one-top { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }

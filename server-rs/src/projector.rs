@@ -3355,9 +3355,46 @@ pub async fn task_blockers(pool: &Pool, project: &str, task: &str) -> Result<Val
             &[&project, &task],
         )
         .await?;
-    let free = tasks.is_empty() && milestones.is_empty();
+    // ФАЗА — ТОЖЕ БЛОКИРОВКА, и спрашивают о ней здесь.
+    //
+    // Барьер фаз живёт в `next-task`, а задачу исполнителю называет человек — и
+    // зовут его мимо барьера. Тогда дверь «почему задача не берётся» отвечала
+    // «ничто не держит» о задаче фазы, которую гейт ещё не открыл: два ответа об
+    // одном, и берут тот, что короче.
+    let phase = client
+        .query_opt(
+            "SELECT tp.phase, tp.gate, tp.open,
+                    (SELECT CASE WHEN p2.gate = '' THEN 'гейт фазы ' || p2.id || ' не объявлен'
+                                 ELSE p2.gate END
+                       FROM phase p2
+                      WHERE p2.ord < tp.phase_ord
+                        AND coalesce((SELECT s.computed FROM gate_state s
+                                       WHERE s.project_id = $1 AND s.gate = p2.gate), 'open') <> 'passed'
+                      ORDER BY p2.ord LIMIT 1)
+               FROM task_phase tp WHERE tp.project_id = $1 AND tp.task_id = $2",
+            &[&project, &task],
+        )
+        .await?;
+    let phase_open = phase.as_ref().and_then(|r| r.get::<_, Option<bool>>(2));
+    let held_by: Option<String> = phase.as_ref().and_then(|r| r.get(3));
+    let free = tasks.is_empty() && milestones.is_empty() && phase_open == Some(true);
     Ok(json!({
         "task": task,
+        "phase": match &phase {
+            Some(r) => json!({
+                "phase": r.get::<_, Option<String>>(0),
+                "gate": r.get::<_, Option<String>>(1),
+                "open": phase_open,
+                "opensWith": held_by,
+                "why": match phase_open {
+                    Some(true) => "фаза задачи открыта".to_owned(),
+                    Some(false) => format!("фаза не открыта: её открывает {}",
+                                           held_by.clone().unwrap_or_else(|| "предшествующий гейт".into())),
+                    None => "вид задачи не отображён ни на одну фазу: отображение не объявлено,                              и это не «можно всё»".to_owned(),
+                },
+            }),
+            None => Value::Null,
+        },
         "waitsForTasks": tasks.iter().map(|r| r.get::<_, String>(0)).collect::<Vec<_>>(),
         "waitsForMilestones": milestones.iter().map(|r| json!({
             "milestone": r.get::<_, String>(0),
@@ -3366,7 +3403,7 @@ pub async fn task_blockers(pool: &Pool, project: &str, task: &str) -> Result<Val
         })).collect::<Vec<_>>(),
         // Пустота СКАЗАНА СЛОВОМ: два пустых списка и «ничто не держит» — разное
         // только для того, кто знает, что задача существует и была спрошена.
-        "why": if free { "ничто не держит: все зависимости закрыты" } else { "" },
+        "why": if free { "ничто не держит: все зависимости закрыты и фаза задачи открыта" } else { "" },
     }))
 }
 
@@ -9531,7 +9568,7 @@ pub async fn set_step_probe(
 ///
 /// Подсадка живёт внутри транзакции и умирает вместе с ней: набор после
 /// самотеста обязан остаться тем же, чем был.
-pub async fn step_selftest(pool: &Pool, project: &str, process: &str) -> Result<Value, tokio_postgres::Error> {
+pub async fn step_selftest(pool: &Pool, project: &str, process: &str, under: &str) -> Result<Value, tokio_postgres::Error> {
     let mut client = pool.get().await.expect("пул отдал соединение");
     let steps = client
         .query(
@@ -9559,6 +9596,7 @@ pub async fn step_selftest(pool: &Pool, project: &str, process: &str) -> Result<
             continue;
         }
         let tx = client.transaction().await?;
+        force_gates(&tx, project, under).await?;
         let saw = match answer_of(&tx, &method, project).await {
             Err(e) => Err(format!("запрос ступени не исполнился: {e}")),
             Ok(before) => match tx.execute(probe.as_str(), &[&project]).await {
@@ -9587,6 +9625,7 @@ pub async fn step_selftest(pool: &Pool, project: &str, process: &str) -> Result<
     }
 
     Ok(json!({
+        "under": if under.is_empty() { "как есть" } else { under },
         "steps": steps.len(),
         "alive": alive.len(), "aliveSteps": alive,
         "broken": broken.len(), "brokenSteps": broken,
@@ -9710,7 +9749,72 @@ pub async fn set_step_method(
                "survivesRebuild": true }))
 }
 
-pub async fn gate_selftest(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
+/// Сдвинуть ВСЕ гейты проекта в одно состояние — внутри откатываемой пробы.
+///
+/// Проба, живая только в сегодняшнем состоянии, не доказывает ничего. Мои же
+/// пробы ступеней 9 и 10 переоткрывали закрытую задачу ОТКРЫТОЙ фазы: пока
+/// открытая фаза с задачами была, самотест говорил «живы», а стоило гейту
+/// покраснеть — обе назвались сломанными. Живой считается та, что роняет своё
+/// правило и при всех зелёных гейтах, и при всех красных; разошлись ответы —
+/// проба зависит от состояния, которого сама не форсирует.
+async fn force_gates(
+    tx: &deadpool_postgres::Transaction<'_>,
+    project: &str,
+    under: &str,
+) -> Result<(), tokio_postgres::Error> {
+    // ТРОГАЕТСЯ РОВНО ТО, ЧТО МЕНЯЕТ ВЕРДИКТ, а не весь замер.
+    //
+    // Первая редакция красила все строки проекта — сто тридцать одну, и делала
+    // это на КАЖДЫЙ пункт. Сто тридцать полных обходов с блокировками наперегонки
+    // со сборщиком, который в это же время меряет соседний проект: прогон
+    // отказывал «база не ответила», и отказ не называл причины. Зелёным гейт
+    // делает отсутствие непройденных строк, красным — одна красная; больше
+    // ничего трогать не нужно.
+    // СТРОКИ БЕРУТСЯ В ТОМ ЖЕ ПОРЯДКЕ, ЧТО И КРУГОМ ЗАМЕРА, — `phase, id`.
+    //
+    // Это не украшение, а условие, без которого два писателя в `project_gates`
+    // встают в тупик. Пока круг замера писал по строке за раз, инверсия порядка
+    // разруливалась сама: замок отпускался сразу. Круг стал одной транзакцией и
+    // держит свои замки до фиксации — и первый же писатель, берущий те же строки
+    // в порядке планировщика, получает `deadlock detected`. Поймано ровно так:
+    // отказ «база не ответила: db error» ничего не говорил, пока дверь не начала
+    // называть причину.
+    //
+    // `FOR UPDATE` в подзапросе и задаёт порядок: без него `ORDER BY` в UPDATE
+    // не выразить вовсе.
+    let (sql, order) = match under {
+        "green" => (
+            "UPDATE project_gates
+                SET state = 'passed',
+                    result = jsonb_set(coalesce(result, '{}'::jsonb), '{computed}', '\"passed\"')
+              WHERE (phase, id) IN (SELECT phase, id FROM project_gates
+                                     WHERE project_id = $1 AND state <> 'passed'
+                                     ORDER BY phase, id FOR UPDATE)
+                AND project_id = $1",
+            true,
+        ),
+        // Красным гейт делает ОДНА красная строка: трогать весь замер незачем.
+        "red" => (
+            "UPDATE project_gates
+                SET state = 'failed',
+                    result = jsonb_set(coalesce(result, '{}'::jsonb), '{computed}', '\"failed\"')
+              WHERE (phase, id) IN (SELECT g2.phase, g2.id FROM project_gates g2
+                                     WHERE g2.project_id = $1
+                                       AND g2.id = (SELECT min(x.id) FROM project_gates x
+                                                     WHERE x.project_id = $1 AND x.phase = g2.phase)
+                                     ORDER BY g2.phase, g2.id FOR UPDATE)
+                AND project_id = $1",
+            true,
+        ),
+        _ => ("", false),
+    };
+    if order {
+        tx.execute(sql, &[&project]).await?;
+    }
+    Ok(())
+}
+
+pub async fn gate_selftest(pool: &Pool, project: &str, under: &str) -> Result<Value, tokio_postgres::Error> {
     let mut client = pool.get().await.expect("пул отдал соединение");
     let items = client
         .query(
@@ -9740,6 +9844,7 @@ pub async fn gate_selftest(pool: &Pool, project: &str) -> Result<Value, tokio_po
         // Подсадка живёт внутри транзакции и умирает вместе с ней: набор после
         // самотеста обязан остаться тем же, чем был.
         let tx = client.transaction().await?;
+        force_gates(&tx, project, under).await?;
         // Запрос исполняется ДВАЖДЫ, до подсадки и после, и живым считается
         // пункт, у которого число выросло.
         //
@@ -9833,6 +9938,7 @@ pub async fn gate_selftest(pool: &Pool, project: &str) -> Result<Value, tokio_po
     }
 
     Ok(json!({
+        "under": if under.is_empty() { "как есть" } else { under },
         "queryItems": items.len(),
         "alive": alive.len(), "aliveItems": alive,
         "broken": broken.len(), "brokenItems": broken,

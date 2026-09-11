@@ -43,17 +43,47 @@ const КОЛОНКА: Record<string, [string, string]> = {
   area: ["область", "area"],
   priority: ["приоритет", "priority"],
   satisfied: ["удовлетворено", "satisfied"],
-  checks: ["проверок", "checks"],
-  stories: ["историй", "stories"],
-  tasks: ["задач", "tasks"],
-  needs: ["потребностей", "needs"],
+  checks: ["пров.", "chk"],
+  stories: ["ист.", "sty"],
+  tasks: ["зад.", "tsk"],
+  needs: ["потр.", "need"],
+  decisions: ["реш.", "dec"],
+  alternatives: ["альт.", "alt"],
+  consequences: ["следств.", "cons"],
+  articles: ["ст.", "art"],
+  journal: ["журн.", "log"],
+  edits: ["правок", "edits"],
+  links: ["связей", "links"],
+  closes: ["закр.", "closes"],
   title: ["заголовок", "title"],
   state: ["состояние", "state"],
   answer: ["ответ", "answer"],
   text: ["текст", "text"],
   number: ["номер", "no."],
   status: ["состояние", "status"],
+  answerState: ["ответ", "answer"],
+  closedAt: ["закрыт", "closed"],
+  gate: ["гейт", "gate"],
+  date: ["дата", "date"],
+  deciders: ["решали", "deciders"],
+  persona: ["персона", "persona"],
+  phase: ["фаза", "phase"],
+  feature: ["фича", "feature"],
+  milestone: ["этап", "milestone"],
+  size: ["размер", "size"],
+  spec: ["чем меряется", "spec"],
+  requirement_id: ["требование", "requirement"],
+  measured_by: ["чем меряется", "measured by"],
+  crosscutting: ["сквозное", "crosscutting"],
+  out_of_version: ["вне выпуска", "out of release"],
 };
+/** Колонки, ноль в которых значит «ничем не доказано», а не «мало». */
+const ДОКАЗ = new Set(["checks", "stories", "tasks", "needs", "decisions"]);
+
+/** Какого рода колонка: якорь · заголовок · число · свойство. */
+const клеть = (c: string, numbers: string[]): string =>
+  c === "id" ? "id" : c === "title" ? "t" : numbers.includes(c) ? "n" : "p";
+
 const подпись = (l: Lang, c: string): string => (КОЛОНКА[c] ? (l === "en" ? КОЛОНКА[c][1] : КОЛОНКА[c][0]) : c);
 
 export function Corpus({ projectId, lang }: { projectId: string; lang: Lang }): React.JSX.Element {
@@ -64,6 +94,8 @@ export function Corpus({ projectId, lang }: { projectId: string; lang: Lang }): 
   const [ent, setEnt] = useState<Ent | null>(null);
   const [q, setQ] = useState<string>("");
   const [by, setBy] = useState<string>("");
+  /** Показывать все колонки или сводку. Десять колонок разом — сетка, а не список. */
+  const [wide, setWide] = useState(false);
 
   useEffect(() => {
     if (!projectId) return;
@@ -92,6 +124,83 @@ export function Corpus({ projectId, lang }: { projectId: string; lang: Lang }): 
     if (!projectId || !pick) { setEnt(null); return; }
     void tool<Ent>(projectId, kind, { id: pick }).then(setEnt).catch(() => setEnt(null));
   }, [projectId, kind, pick]);
+
+  /**
+   * Колонки для показа. Сервер объявляет в `columns` только СВОЙСТВА рода —
+   * имя и заголовок в перечень не входят, хотя в строке лежат. Отрисовав один
+   * `columns`, я получил таблицу, которая показывает числа и не называет, о
+   * чём они: ни имени записи, ни заголовка.
+   *
+   * Имя идёт первым всегда, заголовок — если он есть в строках.
+   */
+  const columns = useMemo(() => {
+    const c = sum?.columns ?? [];
+    const rs = sum?.rows ?? [];
+    const first = rs[0] ?? {};
+    const есть = (k: string): boolean => k in first && !c.includes(k);
+    // КОЛОНКА С ОДНИМ ЗНАЧЕНИЕМ НЕ НЕСЁТ НИЧЕГО. У требований «род» был `FR` во
+    // всех трёхстах шести строках и занимал место, которого не хватало
+    // заголовку. Постоянные колонки уходят, а их значение показано над
+    // таблицей — один раз, как и положено постоянному.
+    const постоянные = c.filter(
+      (k) => rs.length > 2 && new Set(rs.map((r) => String(r[k] ?? ""))).size === 1,
+    );
+    // ПУСТАЯ КОЛОНКА ЗАНИМАЕТ МЕСТО И НЕ ГОВОРИТ НИЧЕГО. «Удовлетворено» было
+    // пусто у всех трёхсот шести строк и отнимало полторы сотни точек у
+    // заголовка. Колонка, заполненная реже чем у пятой части записей, уходит
+    // за переключатель — но не исчезает: её видно по «+N колонок».
+    const редкие = c.filter(
+      (k) =>
+        rs.length > 10 &&
+        rs.filter((r) => String(r[k] ?? "") !== "").length / rs.length < 0.2,
+    );
+    // По умолчанию — СВОДКА: имя, о чём запись, и свойства словами. Числовые
+    // колонки уходят за переключатель: их десять, они почти все единицы, и
+    // вместе они отнимают у заголовка ту ширину, ради которой строку читают.
+    // Исключение одно — ноль доказательств: это не «мало», а «ничем», и
+    // молчать о нём нельзя.
+    const числа = sum?.numbers ?? [];
+    const видно = (k: string): boolean =>
+      wide || (!числа.includes(k) && !редкие.includes(k)) || k === "checks";
+    return {
+      show: [
+        ...(есть("id") ? ["id"] : []),
+        ...(есть("title") ? ["title"] : []),
+        ...c.filter((k) => !постоянные.includes(k) && видно(k)),
+      ],
+      hidden: c.filter((k) => !постоянные.includes(k) && !видно(k)).length,
+      same: постоянные.map((k) => [k, String(first[k] ?? "")] as [string, string]),
+    };
+  }, [sum, wide]);
+
+  /**
+   * Колонка, по которой записи идут вереницами: у требований это область —
+   * пятнадцать `CFG`, потом одиннадцать `COR`. Значение показывается на первой
+   * строке вереницы, дальше молчит, и на границе ложится линия.
+   */
+  /**
+   * Колонки, идущие ВЕРЕНИЦАМИ: у требований это область — пятнадцать `CFG`,
+   * потом одиннадцать `COR`. В них повтор молчит, и на границе ложится линия.
+   *
+   * Приоритет сюда НЕ попадает, и это важно: он чередуется, а не тянется, и
+   * схлопнутый читается дырами — «О _ _ _ Ж» вместо «О О О О Ж». Схлопывать
+   * можно повтор, но не чередование.
+   */
+  const вереницы = useMemo(() => {
+    const rs = sum?.rows ?? [];
+    const nums = new Set(sum?.numbers ?? []);
+    if (rs.length < 12) return new Set<string>();
+    const годные = (sum?.columns ?? []).filter((k) => {
+      if (nums.has(k)) return false;
+      const v = rs.map((r) => String(r[k] ?? ""));
+      const разных = new Set(v).size;
+      if (разных < 2 || разных > v.length / 4) return false;
+      const скачков = v.filter((x, i) => i > 0 && x !== v[i - 1]).length;
+      return скачков <= разных + 1;
+    });
+    return new Set(годные);
+  }, [sum]);
+  const группа = [...вереницы][0] ?? "";
 
   const rows = useMemo(() => {
     const r = sum?.rows ?? [];
@@ -125,6 +234,7 @@ export function Corpus({ projectId, lang }: { projectId: string; lang: Lang }): 
                 <span>{kindName(lang, k.kind)}</span>
                 <b>{k.count}</b>
               </button>
+              <i style={{ transform: `scaleX(${(k.count ?? 0) / (kinds[0]?.count || 1)})` }} />
             </li>
           ))}
         </ul>
@@ -152,13 +262,32 @@ export function Corpus({ projectId, lang }: { projectId: string; lang: Lang }): 
               <span className="co-cnt">
                 {rows.length} {say(lang, "co.rows")}
               </span>
+              {columns.hidden > 0 && (
+                <button className="co-wide" type="button" onClick={() => setWide(true)}>
+                  + {columns.hidden} {say(lang, "co.cols")}
+                </button>
+              )}
+              {wide && (
+                <button className="co-wide" type="button" onClick={() => setWide(false)}>
+                  {say(lang, "co.fold")}
+                </button>
+              )}
+              {columns.same.length > 0 && (
+                <span className="co-same">
+                  {columns.same.map(([k, v]) => (
+                    <span key={k}>
+                      {подпись(lang, k)} <b>{v || "—"}</b>
+                    </span>
+                  ))}
+                </span>
+              )}
             </div>
             <div className="co-tbl">
               <table>
                 <thead>
                   <tr>
-                    {sum.columns.map((c) => (
-                      <th key={c} className={(sum.numbers ?? []).includes(c) ? "n" : ""}>
+                    {columns.show.map((c) => (
+                      <th key={c} className={клеть(c, sum.numbers ?? [])}>
                         <button type="button" onClick={() => setBy(by === c ? "" : c)} className={by === c ? "on" : ""}>
                           {подпись(lang, c)}
                         </button>
@@ -167,11 +296,39 @@ export function Corpus({ projectId, lang }: { projectId: string; lang: Lang }): 
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.slice(0, 400).map((r) => (
-                    <tr key={String(r.id)} onClick={() => setPick(String(r.id))}>
-                      {sum.columns.map((c) => (
-                        <td key={c} className={(sum.numbers ?? []).includes(c) ? "n" : ""}>
-                          {c === "id" ? <span className="co-id">{String(r[c] ?? "")}</span> : String(r[c] ?? "")}
+                  {rows.slice(0, 400).map((r, i, all) => (
+                    <tr
+                      key={String(r.id)}
+                      onClick={() => setPick(String(r.id))}
+                      /* Полоса начинается там, где меняется группа: пятнадцать
+                         «CFG» подряд читаются как одна, а не как пятнадцать. */
+                      className={
+                        группа && i > 0 && String(all[i - 1]?.[группа] ?? "") !== String(r[группа] ?? "")
+                          ? "brk"
+                          : ""
+                      }
+                    >
+                      {columns.show.map((c) => (
+                        <td
+                          key={c}
+                          className={
+                            клеть(c, sum.numbers ?? []) +
+                            // Ноль доказательств — не «мало», а «ничем».
+                            (ДОКАЗ.has(c) && Number(r[c] ?? 0) === 0 ? " zero" : "") +
+                            ((sum.numbers ?? []).includes(c) && Number(r[c] ?? 0) === 1 ? " one" : "")
+                          }
+                        >
+                          {c === "id" ? (
+                            <span className="co-id">{String(r[c] ?? "")}</span>
+                          ) : вереницы.has(c) &&
+                            i > 0 &&
+                            String(all[i - 1]?.[c] ?? "") === String(r[c] ?? "") ? (
+                            // Повтор молчит: пятнадцать «CFG» подряд читаются
+                            // как один, а не как пятнадцать.
+                            ""
+                          ) : (
+                            String(r[c] ?? "")
+                          )}
                         </td>
                       ))}
                     </tr>

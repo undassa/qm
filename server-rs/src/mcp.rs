@@ -449,8 +449,9 @@ impl Mcp {
             "inputSchema": { "type": "object", "properties": { "drop": json!({"type":"boolean","description":"снять объявленное этой же дверью"}), "process": s("процесс, по умолчанию godzy"),
                 "ord": json!({"type":"integer"}), "probe": s("запрос подсадки") },
                 "required": ["ord", "probe"] } }));
-        tools.push(json!({ "name": "step-selftest", "description": "самотест лестницы: каждая ступень роняется подсаженным нарушением в откатываемой транзакции; живой считается та, у которой число выросло",
-            "inputSchema": { "type": "object", "properties": { "process": s("процесс, по умолчанию godzy") } } }));
+        tools.push(json!({ "name": "step-selftest", "description": "самотест лестницы: каждая ступень роняется подсаженным нарушением в откатываемой транзакции; живой считается та, у которой число выросло — и выросло при всех зелёных гейтах и при всех красных, а не только в сегодняшнем состоянии",
+            "inputSchema": { "type": "object", "properties": { "process": s("процесс, по умолчанию godzy"),
+                "under": s("green · red — прогнать при всех зелёных либо всех красных гейтах; пусто — как есть") } } }));
         tools.push(json!({ "name": "step-question-set", "description": "переименовать ступень лестницы: условие, которое должно быть верно, чтобы она считалась пройденной",
             "inputSchema": { "type": "object", "properties": { "drop": json!({"type":"boolean","description":"снять объявленное этой же дверью"}), "process": s("процесс, по умолчанию godzy"),
                 "ord": json!({"type":"integer"}), "question": s("условие словами") },
@@ -521,8 +522,9 @@ impl Mcp {
                 "required": ["phase", "item"] } }));
         tools.push(json!({ "name": "gate-measure", "description": "перемерить все пункты СЕЙЧАС и дождаться итога; зовите, когда нужно измеренное сейчас — сам пересчёт идёт фоном, и узнать, что он кончился, вызывающему нечем",
             "inputSchema": { "type": "object", "properties": {} } }));
-        tools.push(json!({ "name": "gate-selftest", "description": "самотест гейтов: каждый запросный пункт роняется подсаженным нарушением в откатываемой транзакции",
-            "inputSchema": { "type": "object", "properties": {} } }));
+        tools.push(json!({ "name": "gate-selftest", "description": "самотест гейтов: каждый запросный пункт роняется подсаженным нарушением в откатываемой транзакции; `under` прогоняет его при всех зелёных либо всех красных гейтах — проба, живая лишь в одном из двух, зависит от состояния, которого не форсирует",
+            "inputSchema": { "type": "object", "properties": {
+                "under": s("green · red — прогнать при всех зелёных либо всех красных гейтах; пусто — как есть") } } }));
         tools.push(json!({ "name": "order", "description": "порядок выполнения задач: волны как топологические слои внутри этапа — вывод сервера, файл производен",
             "inputSchema": { "type": "object", "properties": {} } }));
         tools.push(json!({ "name": "summary", "description": "перечень сущностей вида с колонками-числами: сколько проверок у требования, вариантов у решения, требований у истории",
@@ -1927,9 +1929,10 @@ impl Mcp {
             }
             "step-selftest" => {
                 let process = args.get("process").and_then(|v| v.as_str()).unwrap_or("godzy");
-                match crate::projector::step_selftest(&self.pool, p, process).await {
+                match crate::projector::step_selftest(&self.pool, p, process,
+                        args.get("under").and_then(|v| v.as_str()).unwrap_or("")).await {
                     Ok(v) => ok(v),
-                    Err(e) => refusal(Miss::Db(e.to_string())),
+                    Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
                 }
             }
             "step-question-set" => {
@@ -2326,9 +2329,12 @@ impl Mcp {
                 Ok(v) => ok(v),
                 Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
             },
-            "gate-selftest" => match crate::projector::gate_selftest(&self.pool, p).await {
+            "gate-selftest" => match crate::projector::gate_selftest(&self.pool, p,
+                    args.get("under").and_then(|v| v.as_str()).unwrap_or("")).await {
                 Ok(v) => ok(v),
-                Err(e) => refusal(Miss::Db(e.to_string())),
+                // `e.to_string()` у ошибки Postgres — это слово «db error» и
+                // ничего больше: отказ, по которому не видно, что случилось.
+                Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
             },
             "order" => match crate::projector::order(&self.pool, p).await {
                 Ok(v) => ok(v),

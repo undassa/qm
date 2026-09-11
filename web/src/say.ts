@@ -81,6 +81,8 @@ const СЛОВАРЬ: Record<string, [string, string]> = {
   "co.live.current": ["свежо", "current"],
   "co.live.reopened": ["переоткрыто", "reopened"],
   "co.search": ["Искать по имени", "Search by name"],
+  "co.cols": ["колонок", "more columns"],
+  "co.fold": ["свернуть колонки", "fold columns"],
 
   // Зависимости
   "de.skeleton": ["Скелет", "Skeleton"],
