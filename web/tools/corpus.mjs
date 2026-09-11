@@ -11,11 +11,11 @@ for (const [name, w, h, lang] of [['стол · РУ', 1440, 1000, 'ru'], ['те
   await p.waitForTimeout(1700);
   console.log(`══ ${name}`);
   say('родов в списке', (await p.locator('.co-kinds li').count()) > 8, String(await p.locator('.co-kinds li').count()));
-  say('строк в таблице', (await p.locator('.co-tbl tbody tr').count()) > 10, String(await p.locator('.co-tbl tbody tr').count()));
+  say('строк в таблице', (await p.locator('.co-tbl tbody tr:not(.co-grp)').count()) > 10, String(await p.locator('.co-tbl tbody tr:not(.co-grp)').count()));
   const nav = await p.locator('.side .ent.top .ent-n').allInnerTexts();
   say('разделов', nav.length === 7, nav.join(' · '));
   // Клик по строке — раскладка одной записи.
-  await p.locator('.co-tbl tbody tr').first().click();
+  await p.locator('.co-tbl tbody tr:not(.co-grp)').first().click();
   await p.waitForTimeout(1100);
   say('раскладка открылась', (await p.locator('.co-one').count()) === 1, (await p.locator('.co-one-id').innerText().catch(()=>'')));
   say('ячеек раскладки', (await p.locator('.co-cell').count()) > 2, String(await p.locator('.co-cell').count()));
