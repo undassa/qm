@@ -507,7 +507,8 @@ impl Mcp {
         tools.push(json!({ "name": "entity-rename", "description": "переименовать сущность во всём наборе: имя сверяется с общим образцом вида; сухой ход по умолчанию",
             "inputSchema": { "type": "object", "properties": { "kind": s("вид сущности"),
                 "from": s("старое имя"), "to": s("новое имя"),
-                "apply": json!({"type":"boolean","description":"записать; без него только показ"}) },
+                "apply": json!({"type":"boolean","description":"записать; без него только показ"}),
+                "merge": json!({"type":"boolean","description":"новое имя уже занято ТОЙ ЖЕ сущностью: слить, сняв старую строку"}) },
                 "required": ["kind", "from", "to"] } }));
         tools.push(json!({ "name": "links-retarget", "description": "переписать цель ссылок в `вид:имя` по уже разобранной связи; ярлык не трогается; сухой режим по умолчанию",
             "inputSchema": { "type": "object", "properties": { "apply": json!({"type":"boolean"}) } } }));
@@ -2112,7 +2113,8 @@ impl Mcp {
             "entity-rename" => {
                 let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
                 match crate::projector::rename_entity(&self.pool, p, kind_arg, &g("from"), &g("to"),
-                        args.get("apply").map(|v| v == "true" || v == true).unwrap_or(false)).await {
+                        args.get("apply").map(|v| v == "true" || v == true).unwrap_or(false),
+                        args.get("merge").map(|v| v == "true" || v == true).unwrap_or(false)).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
                 }

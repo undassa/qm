@@ -1745,6 +1745,67 @@ ALTER TABLE project_requirement_sources ADD COLUMN IF NOT EXISTS origin text NOT
 -- — кладётся колонкой.
 ALTER TABLE project_screens ADD COLUMN IF NOT EXISTS spec text NOT NULL DEFAULT '';
 
+-- ПЕРЕИМЕНОВАНИЕ ИМЕНИ ВНУТРИ КОЛОНОК. Дверь правила документы и `id` вида, а
+-- имя живёт ещё в ссылочных и прозаических колонках: `measured_by` требования
+-- называет проверки строкой, `check_requirements.check_id` — ссылкой. У
+-- `tot-ade` 227 проверок воссоздавались каждой пересборкой из `measured_by`,
+-- потому что там стояли старые имена.
+--
+-- Колонки НЕ ПЕРЕЧИСЛЕНЫ здесь и не угаданы: функция обходит текстовые колонки
+-- проектных таблиц и правит те, где имя ДЕЙСТВИТЕЛЬНО стоит. Перечень в коде
+-- разошёлся бы со схемой при первой новой таблице.
+--
+-- `project_documents.content` исключён намеренно: его правит сама дверь, и
+-- правит с ревизией. Дважды переписать — потерять след.
+--
+-- Границы слова обязательны: без них `Q-1` попал бы внутрь `Q-15`.
+-- Снос перед созданием обязателен: `CREATE OR REPLACE` не меняет ТИП ВОЗВРАТА,
+-- и сервер, у которого функция уже есть в прежней форме, не поднялся бы вовсе
+-- — со словом «db error», как это и случилось при первой правке.
+DROP FUNCTION IF EXISTS rename_in_columns(text, text, text);
+CREATE OR REPLACE FUNCTION rename_in_columns(п text, было text, стало text)
+RETURNS TABLE(таблица text, колонка text, строк bigint, снято bigint) AS $$
+DECLARE c record; n bigint; d bigint;
+BEGIN
+  FOR c IN
+    SELECT k.table_name AS t, k.column_name AS col
+      FROM information_schema.columns k
+      JOIN information_schema.columns pid
+        ON pid.table_schema = k.table_schema AND pid.table_name = k.table_name
+       AND pid.column_name = 'project_id'
+     WHERE k.table_schema = 'public' AND k.data_type = 'text'
+       AND k.table_name LIKE 'project\_%'
+       -- Содержание документа правит сама дверь, и правит с ревизией; дважды
+       -- переписать — потерять след.
+       AND NOT (k.table_name = 'project_documents' AND k.column_name = 'content')
+       -- ИСТОРИЮ НЕ ПРАВИТЬ. `project_document_revisions.content` — запись о
+       -- том, что документ говорил ТОГДА, и обход хотел переписать 479 таких
+       -- записей. Это подделка прошлого: старое имя в старой ревизии — правда,
+       -- а не опечатка.
+       AND k.table_name <> 'project_document_revisions'
+  LOOP
+    d := 0;
+    BEGIN
+      EXECUTE format(
+        'UPDATE %I SET %I = regexp_replace(%I, $1, $2, ''g'')
+          WHERE project_id = $3 AND %I ~ $1', c.t, c.col, c.col, c.col)
+        USING '\m' || было || '\M', стало, п;
+      GET DIAGNOSTICS n = ROW_COUNT;
+    EXCEPTION WHEN unique_violation THEN
+      -- ДВОЙНИК: запись под новым именем уже есть. Это та же сущность, заведённая
+      -- заново, — старая строка снимается, и снятое СЧИТАЕТСЯ ОТДЕЛЬНО: удаление
+      -- под видом переименования было бы тихой потерей.
+      EXECUTE format('DELETE FROM %I WHERE project_id = $2 AND %I = $1', c.t, c.col)
+        USING было, п;
+      GET DIAGNOSTICS d = ROW_COUNT;
+      n := 0;
+    END;
+    IF n > 0 OR d > 0 THEN
+      таблица := c.t; колонка := c.col; строк := n; снято := d; RETURN NEXT;
+    END IF;
+  END LOOP;
+END $$ LANGUAGE plpgsql;
+
 -- ДОМА ПРАВИЛУ КОДА И УТВЕРЖДЕНИЮ. У `tot-ade` под видом `check` лежали три
 -- разные вещи: 56 критериев приёмки, 141 ИМЯ ПРАВИЛА В КОДЕ (11 из 12 найдены
 -- в `crates/`) и 30 утверждений с пространством имён.
@@ -7200,7 +7261,7 @@ async fn своих_таблиц(
 /// Новое имя проверяется ОБЩИМ образцом вида, а не проектным: переименование
 /// ради того и делается, чтобы расхождение ушло.
 pub async fn rename_entity(
-    pool: &Pool, project: &str, kind: &str, from: &str, to: &str, apply: bool,
+    pool: &Pool, project: &str, kind: &str, from: &str, to: &str, apply: bool, merge: bool,
 ) -> Result<Value, tokio_postgres::Error> {
     let client = pool.get().await.expect("пул отдал соединение");
     if from.trim().is_empty() || to.trim().is_empty() {
@@ -7244,10 +7305,15 @@ pub async fn rename_entity(
             .await?
             .get::<_, i64>(0);
     }
-    if занято > 0 {
+    // `merge` — ЯВНОЕ слово о том, что это одна и та же сущность, заведённая
+    // дважды: разбором под новым именем и остатком под старым. Без него отказ
+    // остаётся, потому что отличить «тот же» от «другой» машине нечем, а
+    // молчаливое слияние двух сущностей в одну не заметит никто.
+    if занято > 0 && !merge {
         return Ok(json!({ "status": "taken", "to": to, "mentions": занято,
-            "why": "новое имя уже встречается в наборе: переименование склеило бы две \
-                    сущности в одну, и заметить это было бы нечем" }));
+            "why": "запись под новым именем уже есть. Если это ТА ЖЕ сущность, заведённая \
+                    дважды, скажите об этом словом: `merge=true` — старая строка будет снята, \
+                    и снятое посчитано отдельно" }));
     }
 
     let образец_слова = format!("\\m{}\\M", regex_escape(from));
@@ -7319,7 +7385,8 @@ pub async fn rename_entity(
          SELECT project_id, entity_kind, entity_name, content, md5(content), length(content),
                 revision, $2, 'rename'
            FROM project_documents
-          WHERE project_id = $1 AND content ~ $3",
+          WHERE project_id = $1 AND content ~ $3
+         ON CONFLICT DO NOTHING",
         &[&project, &now_ms(), &regex_escape(to)],
     )
     .await?;
@@ -7329,6 +7396,18 @@ pub async fn rename_entity(
     // старыми именами. Переименование вышло бы половинным и тихим.
     //
     // Таблицы берутся из объявления вида (`holds`), а не перечислены здесь.
+    // Имя внутри КОЛОНОК — ссылочных и прозаических. Обход меряет, где имя
+    // действительно стоит, и правит только там; перечень колонок в коде
+    // разошёлся бы со схемой.
+    let в_колонках = tx
+        .query("SELECT таблица, колонка, строк FROM rename_in_columns($1, $2, $3)",
+               &[&project, &from, &to])
+        .await?;
+    let колонки: Vec<Value> = в_колонках
+        .iter()
+        .map(|r| json!({ "table": r.get::<_, String>(0), "column": r.get::<_, String>(1),
+                         "rows": r.get::<_, i64>(2) }))
+        .collect();
     let mut записей = 0u64;
     for table in &свои {
         let есть: bool = tx
@@ -7358,6 +7437,7 @@ pub async fn rename_entity(
     crate::store::reparse_all(pool, project).await?;
     Ok(json!({ "status": "renamed", "from": from, "to": to,
                "documents": n, "mentions": упоминаний, "records": записей,
+               "columns": колонки,
                "means": "документы разобраны заново; проекции устарели — позовите `reproject`" }))
 }
 

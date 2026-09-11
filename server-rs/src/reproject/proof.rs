@@ -303,9 +303,14 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize)
                     r.entity_kind, r.entity_name
                FROM project_requirements r,
                     LATERAL regexp_matches(r.measured_by,
-                      '(тест|бенч|линт|гейт|сценари|проверк|фикстур)[а-яё]*[^`]{0,24}`([a-z][a-z0-9_]*_[a-z0-9_]+|[a-z][a-z0-9]*:[a-z0-9][a-z0-9-]*|S[0-9]+-AC-[0-9]+)`',
+                      '(тест|бенч|линт|гейт|сценари|проверк|фикстур)[а-яё]*[^`]{0,24}`([^`]{2,80})`',
                       'g') m
               WHERE r.project_id = $1 AND r.measured_by <> ''
+                -- ИМЯ РАЗБИРАЕТСЯ ОБРАЗЦОМ ВИДА, а не тремя формами, зашитыми
+                -- здесь. Прежде сюда попадало всё подряд: и `TC-nn`, и имя
+                -- правила в коде, и утверждение с пространством имён — 171
+                -- запись жила проверкой, не будучи ею.
+                AND m[2] ~ (SELECT spec->>'id' FROM kind_layout WHERE name = 'check')
              ON CONFLICT (project_id, id) DO NOTHING",
             &[&project],
         )
@@ -320,9 +325,10 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize)
          SELECT r.project_id, m[2], r.id
            FROM project_requirements r,
                 LATERAL regexp_matches(r.measured_by,
-                  '(тест|бенч|линт|гейт|сценари|проверк|фикстур)[а-яё]*[^`]{0,24}`([a-z][a-z0-9_]*_[a-z0-9_]+|[a-z][a-z0-9]*:[a-z0-9][a-z0-9-]*|S[0-9]+-AC-[0-9]+)`',
+                  '(тест|бенч|линт|гейт|сценари|проверк|фикстур)[а-яё]*[^`]{0,24}`([^`]{2,80})`',
                   'g') m
           WHERE r.project_id = $1 AND r.measured_by <> ''
+            AND m[2] ~ (SELECT spec->>'id' FROM kind_layout WHERE name = 'check')
          ON CONFLICT DO NOTHING",
         &[&project],
     )
