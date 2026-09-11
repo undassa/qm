@@ -612,6 +612,12 @@ impl Mcp {
                 "holds": json!({"type":"array","items":{"type":"string"},
                     "description":"для container: таблицы, где лежат его сущности — проверяются по entity_kind"}) },
                 "required": ["kind", "projection"] } }));
+        tools.push(json!({ "name": "links-graph", "description": "скелет зависимостей: какие роды на каких стоят, сколькими связями, и где сейчас переоткрыто",
+            "inputSchema": { "type": "object", "properties": {} } }));
+        tools.push(json!({ "name": "impact", "description": "что переоткроется, если эту запись изменить — обход вперёд по тем же связям, что и каскад",
+            "inputSchema": { "type": "object", "properties": { "kind": s("род записи"),
+                "id": s("имя записи"), "depth": json!({"type":"integer","description":"глубина 1..6, по умолчанию 3"}) },
+                "required": ["kind", "id"] } }));
         tools.push(json!({ "name": "tree", "description": "дерево связанного: от одного документа всё, с чем он связан, по записям связей",
             "inputSchema": { "type": "object", "properties": { "kind": s("вид документа, например srs"),
                 "name": s("имя документа; у одиночного вида пусто"),
@@ -1013,6 +1019,18 @@ impl Mcp {
                 let holds = list(&args, "holds");
                 match crate::projector::set_kind_projection(&self.pool, kind_arg,
                         args.get("projection").and_then(|v| v.as_str()).unwrap_or(""), &holds).await {
+                    Ok(v) => ok(v),
+                    Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
+                }
+            }
+            "links-graph" => match crate::projector::links_graph(&self.pool, p).await {
+                Ok(v) => ok(v),
+                Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
+            },
+            "impact" => {
+                match crate::projector::impact(&self.pool, p, kind_arg,
+                        args.get("id").and_then(|v| v.as_str()).or(id).unwrap_or(""),
+                        num(&args, "depth").unwrap_or(3) as i32).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
                 }

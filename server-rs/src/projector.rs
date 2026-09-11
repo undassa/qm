@@ -7685,6 +7685,103 @@ pub async fn set_kind_id(
                "matched": подошло, "of": всего }))
 }
 
+/// Скелет зависимостей набора: какие роды на каких стоят и сколькими связями.
+///
+/// `entity_link` держит три тысячи связей, и поодиночке их не окинуть взглядом.
+/// Свёрнутые до родов, они умещаются в два десятка рёбер — и это карта того,
+/// как устроен проект: задача стоит на требовании, требование на потребности,
+/// этап на своих перечнях.
+pub async fn links_graph(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
+    let client = pool.get().await.expect("пул отдал соединение");
+    let edges = client
+        .query(
+            "SELECT from_kind, to_kind, count(*)::bigint, count(DISTINCT from_id)::bigint
+               FROM entity_link WHERE project_id = $1
+              GROUP BY from_kind, to_kind ORDER BY count(*) DESC",
+            &[&project],
+        )
+        .await?;
+    // Узел знает свой счёт и сколько его записей переоткрыто: карта показывает
+    // не только устройство, но и где сейчас горит.
+    let nodes = client
+        .query(
+            "SELECT s.kind, count(*)::bigint,
+                    count(*) FILTER (WHERE l.live_state = 'reopened')::bigint,
+                    coalesce((SELECT (k.spec->>'reopens')::boolean FROM kind_layout k
+                               WHERE k.name = s.kind), false)
+               FROM entity_stamp s
+               LEFT JOIN entity_live l
+                 ON l.project_id = s.project_id AND l.kind = s.kind AND l.id = s.id
+              WHERE s.project_id = $1
+              GROUP BY s.kind ORDER BY count(*) DESC",
+            &[&project],
+        )
+        .await?;
+    Ok(json!({
+        "nodes": nodes.iter().map(|r| json!({
+            "kind": r.get::<_, String>(0), "count": r.get::<_, i64>(1),
+            "reopened": r.get::<_, i64>(2), "reopens": r.get::<_, bool>(3) })).collect::<Vec<_>>(),
+        "edges": edges.iter().map(|r| json!({
+            "from": r.get::<_, String>(0), "to": r.get::<_, String>(1),
+            "links": r.get::<_, i64>(2), "sources": r.get::<_, i64>(3) })).collect::<Vec<_>>(),
+        "means": "ребро «А → Б» значит «А стоит на Б»: правка Б переоткрывает А",
+    }))
+}
+
+/// Что переоткроется, если эту запись изменить.
+///
+/// Вопрос, на который харнес умел отвечать только задним числом: правку делали,
+/// пересобирали и смотрели. Здесь он задаётся ВПЕРЁД — обход идёт по тем же
+/// направленным связям и той же глубине, что и каскад, но от предполагаемой
+/// правки, а не от случившейся.
+pub async fn impact(
+    pool: &Pool, project: &str, kind: &str, id: &str, depth: i32,
+) -> Result<Value, tokio_postgres::Error> {
+    let client = pool.get().await.expect("пул отдал соединение");
+    let depth = depth.clamp(1, 6);
+    if client
+        .query_opt(
+            "SELECT 1 FROM entity_stamp WHERE project_id = $1 AND kind = $2 AND id = $3",
+            &[&project, &kind, &id],
+        )
+        .await?
+        .is_none()
+    {
+        return Ok(json!({ "status": "no_entity", "kind": kind, "id": id,
+            "why": "такой записи в наборе нет: считать последствия правки не от чего" }));
+    }
+    let rows = client
+        .query(
+            "WITH RECURSIVE вверх AS (
+                 SELECT l.from_kind AS kind, l.from_id AS id, 1 AS depth
+                   FROM entity_link l
+                  WHERE l.project_id = $1 AND l.to_kind = $2 AND l.to_id = $3
+                 UNION
+                 SELECT l.from_kind, l.from_id, в.depth + 1
+                   FROM вверх в
+                   JOIN entity_link l
+                     ON l.project_id = $1 AND l.to_kind = в.kind AND l.to_id = в.id
+                  WHERE в.depth < $4)
+             SELECT в.kind, в.id, min(в.depth)::int,
+                    coalesce((SELECT (k.spec->>'reopens')::boolean FROM kind_layout k
+                               WHERE k.name = в.kind), false)
+               FROM вверх в GROUP BY в.kind, в.id ORDER BY 3, 1, 2",
+            &[&project, &kind, &id, &depth],
+        )
+        .await?;
+    let всего = rows.len();
+    let переоткроется = rows.iter().filter(|r| r.get::<_, bool>(3)).count();
+    Ok(json!({
+        "root": { "kind": kind, "id": id }, "depth": depth,
+        "touched": всего, "reopens": переоткроется,
+        "items": rows.iter().take(200).map(|r| json!({
+            "kind": r.get::<_, String>(0), "id": r.get::<_, String>(1),
+            "depth": r.get::<_, i32>(2), "reopens": r.get::<_, bool>(3) })).collect::<Vec<_>>(),
+        "means": "перечислено то, что СТОИТ НА этой записи. Переоткроется лишь то, чей род \
+                  объявлен переоткрываемым; остальное связано, но состояния не меняет",
+    }))
+}
+
 pub async fn holders(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
     let client = pool.get().await.expect("пул отдал соединение");
     let rows = client

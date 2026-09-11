@@ -4070,3 +4070,100 @@ button.chain-card:disabled { cursor: default; opacity: .55; }
    он сдвигал их сетку, и число уезжало под соседнюю колонку. */
 .pipe-u { min-width: 16ch; text-align: right; font-size: 12px; color: var(--dim); }
 .pipe-u em { font-style: normal; }
+
+/* ── Зависимости ───────────────────────────────────────────────────────────
+   Карта того, что на чём стоит. Направление здесь несущее, и рисуется оно
+   стрелкой, а не подписью: правка правого переоткрывает левое.
+
+   Толщина стрелки — число связей. Она сравнивает рёбра между собой и не
+   притворяется мерой чего-то ещё: рядом стоит само число.                 */
+.depends {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  grid-template-areas: "map what" "kinds what";
+  gap: var(--gap, 20px);
+  align-items: start;
+}
+.dep-map { grid-area: map; }
+.dep-kinds { grid-area: kinds; }
+.dep-what { grid-area: what; }
+@media (max-width: 900px) {
+  .depends { grid-template-columns: minmax(0, 1fr); grid-template-areas: "map" "kinds" "what"; }
+}
+
+.depends h2 {
+  font-size: 13px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  opacity: .55;
+  margin: 0 0 10px;
+}
+.dep-note { font-size: 13px; opacity: .7; margin: 0 0 12px; line-height: 1.5; }
+
+.dep-edges, .dep-list, .dep-hits { list-style: none; margin: 0; padding: 0; }
+.dep-row { display: grid; grid-template-columns: 118px minmax(0, 1fr); gap: 10px; align-items: baseline; padding: 7px 0; }
+.dep-row + .dep-row { border-top: 1px solid var(--line, rgba(128,128,128,.16)); }
+.dep-src { font-weight: 600; }
+
+/* Веер: на чём стоит этот род. Каждая цель — своя кнопка со своей линией,
+   и линия сравнивает цели МЕЖДУ СОБОЙ, а не с чем-то ещё. */
+.dep-fan { display: flex; flex-wrap: wrap; gap: 6px; }
+.dep-dst {
+  font: inherit;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: 1px solid var(--line, rgba(128,128,128,.2));
+  border-radius: 999px;
+  padding: 3px 10px 3px 7px;
+  cursor: pointer;
+  color: inherit;
+}
+.dep-dst:hover { border-color: currentColor; }
+.dep-dst.on { background: var(--pick, rgba(120,160,255,.16)); border-color: transparent; font-weight: 600; }
+.dep-dst i { display: block; width: 16px; background: currentColor; opacity: .4; border-radius: 2px; }
+.dep-dst b { font-size: 11px; font-weight: 600; opacity: .55; font-variant-numeric: tabular-nums; }
+
+.dep-list li { display: grid; grid-template-columns: 118px minmax(0,1fr) 44px auto; gap: 10px; align-items: center; padding: 3px 0; }
+/* Полоска сравнивает роды между собой — число рядом, потому что полоска
+   показывает соотношение, а не величину. */
+/* Прозрачность родителя УМНОЖАЕТСЯ на дочернюю: полоска заполнения при
+   opacity .5 внутри фона с .12 давала .06 и была невидима — все роды
+   выглядели одинаковыми. Цвет задаётся альфой, а не прозрачностью слоя. */
+.dep-bar { height: 4px; background: color-mix(in srgb, currentColor 12%, transparent); border-radius: 2px; }
+.dep-bar i { display: block; height: 100%; background: color-mix(in srgb, currentColor 55%, transparent); border-radius: 2px; }
+.dep-count { font-size: 12px; opacity: .55; font-variant-numeric: tabular-nums; text-align: right; }
+.dep-legend { margin-top: 12px; }
+.dep-hot { font-size: 11px; color: var(--bad, #c2410c); font-weight: 600; }
+.dep-list li.hot .dep-node { font-weight: 600; }
+
+.dep-pick {
+  font: inherit;
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--line, rgba(128,128,128,.3));
+  background: transparent;
+  color: inherit;
+}
+.dep-sum { font-size: 13px; margin: 14px 0 8px; }
+.dep-sum .bad { color: var(--bad, #c2410c); }
+
+/* Затронутое и переоткрываемое различаются ЯРКОСТЬЮ, а не только словом:
+   «связано» и «переоткроется» — разные вещи, и первое не должно тревожить. */
+.dep-hits li {
+  display: grid;
+  grid-template-columns: 50px 96px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: baseline;
+  padding: 3px 0;
+  font-size: 12px;
+}
+.dep-hits li + li { border-top: 1px solid var(--line, rgba(128,128,128,.1)); }
+.dep-depth { opacity: .4; font-variant-numeric: tabular-nums; }
+.dep-kind { opacity: .6; }
+.dep-id { font-family: var(--mono, ui-monospace, monospace); overflow: hidden; text-overflow: ellipsis; }
+.dep-mark { font-size: 11px; }
+.dep-hits li.will .dep-mark { color: var(--bad, #c2410c); font-weight: 600; }
+.dep-hits li.wont { opacity: .5; }

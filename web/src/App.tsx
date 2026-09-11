@@ -4,6 +4,7 @@ import { loadProjects, tool, type Project } from "./api";
 import { chooseProject } from "./project-address";
 import { ProjectPicker } from "./Projects";
 import { Entities } from "./Entities";
+import { Depends } from "./Depends";
 import { Reader } from "./Reader";
 import { Requirements } from "./Requirements";
 import { Rules } from "./Rules";
@@ -58,6 +59,7 @@ const PAGES: { page: string; title: string; note: string; view: (id: string, ctx
   { page: "proof", title: "Доказательство", note: "чем закрыто", view: (id) => <Proof projectId={id} /> },
   { page: "questions", title: "Вопросы", note: "чем закрыт каждый", view: (id, ctx) => <Questions projectId={id} onFind={ctx.onFind} /> },
   { page: "entities", title: "Сущности", note: "виды", view: (id) => <Entities projectId={id} /> },
+  { page: "depends", title: "Зависимости", note: "что на чём стоит", view: (id) => <Depends projectId={id} /> },
 ];
 
 /**
