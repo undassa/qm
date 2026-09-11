@@ -7222,6 +7222,21 @@ pub async fn set_kind_reopens(
     Ok(json!({ "status": "declared", "kind": kind, "reopens": false }))
 }
 
+/// Таблицы, которые вид объявил своими (`kind-projection … holds`).
+async fn своих_таблиц(
+    client: &deadpool_postgres::Client, kind: &str,
+) -> Result<Vec<String>, tokio_postgres::Error> {
+    Ok(client
+        .query_opt("SELECT spec->'holds' FROM kind_layout WHERE name = $1", &[&kind])
+        .await?
+        .and_then(|r| r.get::<_, Option<Value>>(0))
+        .and_then(|v| {
+            v.as_array()
+                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        })
+        .unwrap_or_default())
+}
+
 /// Переименовать сущность во ВСЁМ наборе.
 ///
 /// Имена приехали переносом, и часть приехала не в том формате: у `tot-ade`
@@ -7262,13 +7277,23 @@ pub async fn rename_entity(
                     делается, чтобы расхождение ушло, а не переехало" }));
     }
     // Занятое имя — молчаливая склейка двух сущностей в одну. Отказ.
-    let занято: i64 = client
-        .query_one(
-            "SELECT count(*) FROM project_named_id WHERE project_id = $1 AND said_id = $2",
-            &[&project, &to],
-        )
-        .await?
-        .get(0);
+    let свои = своих_таблиц(&client, kind).await?;
+    // ЗАНЯТОСТЬ — ЭТО ЧУЖАЯ ЗАПИСЬ, а не упоминание в тексте. Проверка по
+    // документам отвергала законное доделывание: текст уже переименован
+    // половинным ходом, а объявленная запись осталась со старым именем, и
+    // дверь отказывала «занято» — самой себе.
+    //
+    // Запись же — доказательство: две сущности с одним именем не бывают.
+    let mut занято: i64 = 0;
+    for table in &свои {
+        занято += client
+            .query_one(
+                &format!("SELECT count(*) FROM {table} WHERE project_id = $1 AND id = $2"),
+                &[&project, &to],
+            )
+            .await?
+            .get::<_, i64>(0);
+    }
     if занято > 0 {
         return Ok(json!({ "status": "taken", "to": to, "mentions": занято,
             "why": "новое имя уже встречается в наборе: переименование склеило бы две \
@@ -7289,9 +7314,29 @@ pub async fn rename_entity(
         .await?;
     let документов = затронуто.len();
     let упоминаний: i64 = затронуто.iter().map(|r| r.get::<_, i64>(2)).sum();
-    if документов == 0 {
+    // ПРЕДМЕТ — И ЗАПИСЬ ТОЖЕ, не только текст. Документы могли быть уже
+    // переименованы, а объявленная запись остаться со старым именем: тогда
+    // «в документах не нашли» — это не «нечего делать», а ровно половина
+    // работы, которую и надо доделать.
+    let есть_запись: bool = {
+        let mut нашлась = false;
+        for table in &свои {
+            let n: i64 = client
+                .query_one(
+                    &format!("SELECT count(*) FROM {table} WHERE project_id = $1 AND id = $2"),
+                    &[&project, &from],
+                )
+                .await?
+                .get(0);
+            if n > 0 {
+                нашлась = true;
+            }
+        }
+        нашлась
+    };
+    if документов == 0 && !есть_запись {
         return Ok(json!({ "status": "not_found", "from": from,
-            "why": "такого имени в наборе нет ни в одном документе" }));
+            "why": "такого имени нет ни в одном документе и ни в одной записи" }));
     }
     if !apply {
         return Ok(json!({ "status": "dry", "from": from, "to": to,
@@ -7328,6 +7373,31 @@ pub async fn rename_entity(
         &[&project, &now_ms(), &regex_escape(to)],
     )
     .await?;
+    // ОБЪЯВЛЕННАЯ ЗАПИСЬ ПЕРЕИМЕНОВЫВАЕТСЯ ТОЖЕ. У `tot-ade` все 203 требования
+    // и все вопросы заведены ДВЕРЬЮ, а не выведены из документов: пересборка их
+    // не трогает, и правка текста меняла бы документы, оставляя записи со
+    // старыми именами. Переименование вышло бы половинным и тихим.
+    //
+    // Таблицы берутся из объявления вида (`holds`), а не перечислены здесь.
+    let mut записей = 0u64;
+    for table in &свои {
+        let есть: bool = tx
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.columns
+                                 WHERE table_schema='public' AND table_name=$1 AND column_name='id')",
+                &[table],
+            )
+            .await?
+            .get(0);
+        if есть {
+            записей += tx
+                .execute(
+                    &format!("UPDATE {table} SET id = $2 WHERE project_id = $1 AND id = $3"),
+                    &[&project, &to, &from],
+                )
+                .await?;
+        }
+    }
     tx.commit().await?;
     // РАЗБОР ДОКУМЕНТА — ЧАСТЬЮ ПРАВКИ. Дверь правила текст и на этом
     // останавливалась: блоки, секции и ячейки оставались прежними, и вниз по
@@ -7337,7 +7407,7 @@ pub async fn rename_entity(
     // Правка документа мимо разбора — это правка, которой набор не увидит.
     crate::store::reparse_all(pool, project).await?;
     Ok(json!({ "status": "renamed", "from": from, "to": to,
-               "documents": n, "mentions": упоминаний,
+               "documents": n, "mentions": упоминаний, "records": записей,
                "means": "документы разобраны заново; проекции устарели — позовите `reproject`" }))
 }
 
