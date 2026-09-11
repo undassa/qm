@@ -620,6 +620,10 @@ impl Mcp {
         tools.push(json!({ "name": "document-coverage", "description": "что документа уже живёт в таблицах, а что держит только текст — по разделам",
             "inputSchema": { "type": "object", "properties": { "kind": s("вид документа"),
                 "name": s("имя документа; у одиночного вида пусто") }, "required": ["kind"] } }));
+        tools.push(json!({ "name": "kind-id-set", "description": "объявить образец имени вида — или поправить объявленный; сверяется на живых именах",
+            "inputSchema": { "type": "object", "properties": { "kind": s("имя вида"),
+                "id": s("образец, например ^Q-\\d+$"), "why": s("почему — обязательно") },
+                "required": ["kind", "id", "why"] } }));
         tools.push(json!({ "name": "kind-proves", "description": "объявить, годится ли род доказательством требования: тест-кейс, правило кода, утверждение",
             "inputSchema": { "type": "object", "properties": { "kind": s("имя вида"),
                 "proves": json!({"type":"boolean"}), "why": s("почему — обязательно") },
@@ -717,7 +721,7 @@ impl Mcp {
         const RESERVED: &[&str] = &[
             "method-set", "gate-item-set", "question-holders", "preflight-push", "worktree-push",
             "sensor-specs", "scheme-terms", "frozen-trees", "addresses-declared", "tree-declared", "donors", "skills-push", "skills", "agents", "code-facts-push", "code-facts", "summary", "links-of", "retired-terms", "order", "gate-measure", "gate-item-waive", "gate-selftest", "links-rewrite", "links-retarget", "reparse", "screen-area-set", "skill-set", "skills-paths", "version-freeze", "version-delta", "generated-check", "principal-allow", "principals", "author-set", "authors", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "step-selftest", "version-close", "phase-gate-set", "exception-set", "next-step", "process-state", "statuses", "task-status", "status-anomaly", "pipeline", "waves", "phases", "coverage", "blocks", "history", "at-revision", "process-history", "progress",
-            "kinds", "kinds-due", "readiness-gaps", "declared-unwritten", "blame-set", "doors", "derived-copy-set", "field-column-alias", "column-server-filled", "holders", "counts-sync", "kind-add", "kind-required", "kind-projection", "kind-reopens", "kind-proves", "tree", "document-coverage", "sections", "section", "backlinks", "search", "put",
+            "kinds", "kinds-due", "readiness-gaps", "declared-unwritten", "blame-set", "doors", "derived-copy-set", "field-column-alias", "column-server-filled", "holders", "counts-sync", "kind-add", "kind-required", "kind-projection", "kind-reopens", "kind-proves", "kind-id-set", "tree", "document-coverage", "sections", "section", "backlinks", "search", "put",
             "put-section", "rm", "document-add", "reproject", "sweep", "gate", "next-task", "blockers", "events",
             "norm-versions", "measurements", "plan", "readiness", "requirements-of",
             "tasks-of", "preflight-queue", "claims", "exceptions",
@@ -1025,6 +1029,13 @@ impl Mcp {
             "document-coverage" => {
                 let name = args.get("name").and_then(|v| v.as_str()).or(id).unwrap_or("");
                 match crate::projector::document_coverage(&self.pool, p, kind_arg, name).await {
+                    Ok(v) => ok(v),
+                    Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
+                }
+            }
+            "kind-id-set" => {
+                let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
+                match crate::projector::set_kind_id(&self.pool, p, kind_arg, &g("id"), &g("why")).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
                 }

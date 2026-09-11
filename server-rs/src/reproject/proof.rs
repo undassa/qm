@@ -462,6 +462,47 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize)
     )
     .await?;
 
+    // РАССУЖДЕНИЕ ИЗ ДОКУМЕНТОВ-КОНТЕЙНЕРОВ: проза раздела — всё, что не
+    // таблица и не заголовок.
+    //
+    // Сперва я брал только разделы, которые НИЧЕГО не объявляют, и потерял
+    // больше половины: из 27 прозаических разделов `srs` взялось 11, а 39851
+    // байта — 13526. Остальное в разделах СМЕШАННЫХ: «3.16. STP» несёт и
+    // таблицу требований, и шесть тысяч знаков о том, почему они такие.
+    // Объявляет раздел сущности или нет — к его рассуждению отношения не имеет.
+    //
+    // Только контейнеры: у решения и вопроса проза — это сам документ, и она
+    // уже лежит колонками `context`, `decision`, `consequences`.
+    tx.execute("DELETE FROM project_rationale WHERE project_id = $1 AND origin = 'projected'",
+               &[&project]).await?;
+    tx.execute(
+        "INSERT INTO project_rationale
+                (project_id, id, entity_kind, entity_name, anchor, section_ord, title, body)
+         SELECT * FROM (
+         SELECT s.project_id,
+                s.entity_kind || coalesce('/' || nullif(s.entity_name,''), '') || '#' || s.anchor,
+                s.entity_kind, s.entity_name, s.anchor, s.ord, s.title,
+                coalesce((SELECT string_agg(b.raw, E'\n' ORDER BY b.ord)
+                   FROM project_document_blocks b
+                  WHERE b.project_id = s.project_id AND b.entity_kind = s.entity_kind
+                    AND b.entity_name = s.entity_name
+                    AND b.ord > s.ord AND b.ord <= s.last_block
+                    AND b.kind NOT IN ('heading','blank','table')
+                    AND NOT EXISTS (SELECT 1 FROM project_document_sections c
+                                     WHERE c.project_id = s.project_id AND c.entity_kind = s.entity_kind
+                                       AND c.entity_name = s.entity_name
+                                       AND c.ord > s.ord AND c.ord <= b.ord)), '') AS тело
+           FROM project_document_sections s
+           JOIN kind_layout k ON k.name = s.entity_kind AND k.spec->>'projection' = 'container'
+          WHERE s.project_id = $1) z
+          -- Раздел без собственного текста рассуждением не является: заголовок
+          -- вернётся сам, когда соберутся его дети.
+          WHERE z.тело <> ''
+         ON CONFLICT DO NOTHING",
+        &[&project],
+    )
+    .await?;
+
     // ОТМЕТКА ИЗМЕНЕНИЯ. Отпечаток записи сверяется с прошлым: совпал — дата
     // держится, разошёлся — ставится новая.
     //

@@ -1822,6 +1822,35 @@ CREATE TABLE IF NOT EXISTS project_lint_rules (
     origin      text NOT NULL DEFAULT 'projected',
     PRIMARY KEY (project_id, id)
 );
+-- РАССУЖДЕНИЕ КАК СУЩНОСТЬ. В пяти документах `myack` 81 килобайт прозы не
+-- держала ни одна колонка: разделы, которые ничего не объявляют, а объясняют —
+-- «Инварианты и их держатели», «MON — мониторы», «Открытые вопросы». Померено
+-- дверью `document-coverage`: из 41 раздела `srs` 14 только текст, 13 смешанных.
+--
+-- Своего имени у рассуждения нет, и потому сущностью оно стать не могло. Но
+-- адрес есть: ЯКОРЬ раздела — он выведен из заголовка, уникален внутри
+-- документа (7394 из 7394) и переживает правки выше по тексту, в отличие от
+-- номера блока.
+--
+-- Тело хранится колонкой: рассуждение — это и есть его текст, и вынимать из
+-- него «суть» значило бы пересказывать, а пересказ протухает.
+-- Имя рассуждения — ЕГО АДРЕС: документ и якорь, склеенные решёткой
+-- (`srs#3-20-invarianty`). Якорь уникален внутри документа, но не в наборе, а
+-- отметки и связи ключуются парой «род, имя» — значит имя обязано быть
+-- полным адресом, иначе рассуждения двух документов слились бы в одно.
+CREATE TABLE IF NOT EXISTS project_rationale (
+    project_id  text NOT NULL,
+    id          text NOT NULL,
+    entity_kind text NOT NULL,
+    entity_name text NOT NULL,
+    anchor      text NOT NULL,
+    section_ord integer,
+    title       text NOT NULL DEFAULT '',
+    body        text NOT NULL DEFAULT '',
+    origin      text NOT NULL DEFAULT 'projected',
+    PRIMARY KEY (project_id, id)
+);
+
 -- ЧЕМ ДОКАЗАНО ТРЕБОВАНИЕ — одной таблицей на все роды доказательства.
 --
 -- Правило «у каждого требования есть проверка» знало ровно три источника, и
@@ -1976,7 +2005,11 @@ CREATE OR REPLACE VIEW entity_row AS
               (to_jsonb(m.*) - 'project_id' - 'origin')::text FROM project_plan_milestones m
  UNION ALL SELECT project_id, 'question', id, entity_kind, entity_name, NULL::integer,
               (to_jsonb(q.*) - 'project_id' - 'origin' - 'created_at' - 'updated_at')::text
-         FROM project_questions q;
+         FROM project_questions q
+ -- Рассуждение — тоже запись: у него есть тело, адрес и дата правки, и оно
+ -- переоткрывается, когда меняется то, что оно объясняет.
+ UNION ALL SELECT project_id, 'rationale', id, entity_kind, entity_name, section_ord,
+              (to_jsonb(a.*) - 'project_id' - 'origin')::text FROM project_rationale a;
 
 -- НАПРАВЛЕННАЯ СВЯЗЬ: КТО НА КОМ СТОИТ. Раньше каскад шёл по совместному
 -- упоминанию — «названо в той же секции», — и это оказалось не зависимостью, а
@@ -7110,6 +7143,11 @@ pub async fn document_coverage(
                  UNION ALL SELECT section_ord FROM project_needs
                   WHERE project_id = $1 AND entity_kind = $2 AND entity_name = $3
                  UNION ALL SELECT section_ord FROM project_risks
+                  WHERE project_id = $1 AND entity_kind = $2 AND entity_name = $3
+                 -- Рассуждение — ТОЖЕ строка. Прежде раздел, несущий довод и
+                 -- ничего не объявляющий, считался «только текст»: правда на тот
+                 -- день, когда доводу негде было лежать.
+                 UNION ALL SELECT section_ord FROM project_rationale
                   WHERE project_id = $1 AND entity_kind = $2 AND entity_name = $3)
              SELECT s.ord, s.title, s.level,
                     coalesce((SELECT count(*) FROM строка r WHERE r.section_ord = s.ord), 0)::bigint AS строк,
@@ -7574,6 +7612,77 @@ pub async fn set_kind_proves(
         .await?;
     Ok(json!({ "status": "declared", "kind": kind, "proves": proves, "links": связей,
                "means": "объявление ОБЩЕЕ: чем доказывают требование — одно для всех проектов" }))
+}
+
+/// Объявить образец имени вида — или поправить объявленный.
+///
+/// Образец ставился только при заведении вида, и поправить его было нечем:
+/// я завёл `rationale` с образцом `^[a-zа-яё0-9-]+$`, а имя рассуждения —
+/// его АДРЕС (`srs#3-20-invarianty`), и решётка с косой чертой под образец не
+/// подошли. Вид остался невидимым при 381 живой записи.
+///
+/// Новый образец ПРОВЕРЯЕТСЯ на живых именах: тот, под который не подходит ни
+/// одно имя, не поймает ничего и промолчит об этом.
+pub async fn set_kind_id(
+    pool: &Pool, project: &str, kind: &str, pattern: &str, why: &str,
+) -> Result<Value, tokio_postgres::Error> {
+    let client = pool.get().await.expect("пул отдал соединение");
+    if kind.trim().is_empty() || pattern.trim().is_empty() || why.trim().is_empty() {
+        return Ok(json!({ "status": "empty", "why": "нужны вид, образец и довод" }));
+    }
+    if client
+        .query_opt("SELECT 1 FROM kind_layout WHERE name = $1", &[&kind])
+        .await?
+        .is_none()
+    {
+        return Ok(json!({ "status": "no_kind", "kind": kind, "why": "вид не объявлен" }));
+    }
+    if client.query_one("SELECT 'проба' ~ $1", &[&pattern]).await.is_err() {
+        return Ok(json!({ "status": "bad_pattern", "pattern": pattern,
+            "why": "образец не разбирается" }));
+    }
+    // Сверка на живых именах: таблицы берутся из объявления вида.
+    let свои = своих_таблиц(&client, kind).await?;
+    let mut подошло = 0i64;
+    let mut всего = 0i64;
+    for table in &свои {
+        let есть: bool = client
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.columns
+                                 WHERE table_schema='public' AND table_name=$1 AND column_name='id')",
+                &[table],
+            )
+            .await?
+            .get(0);
+        if !есть {
+            continue;
+        }
+        let r = client
+            .query_one(
+                &format!(
+                    "SELECT count(*) FILTER (WHERE id ~ $2), count(*) FROM {table} WHERE project_id = $1"
+                ),
+                &[&project, &pattern],
+            )
+            .await?;
+        подошло += r.get::<_, i64>(0);
+        всего += r.get::<_, i64>(1);
+    }
+    if всего > 0 && подошло == 0 {
+        return Ok(json!({ "status": "matches_nothing", "pattern": pattern, "names": всего,
+            "why": "под этот образец не подходит ни одно живое имя вида: он не поймает \
+                    ничего и промолчит об этом" }));
+    }
+    client
+        .execute(
+            "UPDATE kind_layout SET spec = spec || jsonb_build_object('id', $2::text,
+                                                                      'id-why', $3::text)
+              WHERE name = $1",
+            &[&kind, &pattern, &why],
+        )
+        .await?;
+    Ok(json!({ "status": "declared", "kind": kind, "id": pattern,
+               "matched": подошло, "of": всего }))
 }
 
 pub async fn holders(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
