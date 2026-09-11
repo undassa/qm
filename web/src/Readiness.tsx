@@ -92,14 +92,12 @@ const WORD: Record<string, string> = {
   failed: "провален",
   unknown: "мерить нечем",
   waived: "снят с этого проекта",
-  unsigned: "без подписи",
 };
 const TONE: Record<string, string> = {
   passed: "ok",
   failed: "bad",
   unknown: "dim",
   waived: "dim",
-  unsigned: "dim",
 };
 
 /** Считает пункты гейта по состояниям — это и есть содержимое полоски фазы. */

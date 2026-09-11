@@ -202,11 +202,11 @@ DO $$ BEGIN
   ALTER TABLE project_gates DROP CONSTRAINT IF EXISTS project_gates_check;
   ALTER TABLE project_gates DROP CONSTRAINT IF EXISTS project_gates_check1;
   ALTER TABLE project_gates ADD CONSTRAINT project_gates_kind_check
-    CHECK (kind IN ('query','command','signed','manual','unknown'));
+    CHECK (kind IN ('query','command','manual','unknown'));
   ALTER TABLE project_gates ADD CONSTRAINT project_gates_query_check
     CHECK ((kind = 'query') = (query IS NOT NULL));
   ALTER TABLE project_gates ADD CONSTRAINT project_gates_owner_check
-    CHECK ((kind = 'signed') = (owner IS NOT NULL));
+    CHECK (owner IS NULL);
 EXCEPTION WHEN others THEN NULL; END $$;
 
 -- Объявленный способ СТУПЕНИ живёт отдельно от самой ступени — ровно по тому
@@ -215,7 +215,7 @@ EXCEPTION WHEN others THEN NULL; END $$;
 -- строку трогает, и объявленное исчезает молча. Семь способов так и пропали.
 CREATE TABLE IF NOT EXISTS harness_process_method (
   set_name text NOT NULL, process text NOT NULL, ord integer NOT NULL,
-  method_kind text NOT NULL CHECK (method_kind IN ('query','command','signed','unknown')),
+  method_kind text NOT NULL CHECK (method_kind IN ('query','command','unknown')),
   method text NOT NULL DEFAULT '', declared_by text NOT NULL DEFAULT '',
   PRIMARY KEY (set_name, process, ord));
 
@@ -247,24 +247,17 @@ CREATE INDEX IF NOT EXISTS project_questions_by_answer
 CREATE TABLE IF NOT EXISTS gate (
   project_id text NOT NULL, phase text NOT NULL,
   title text NOT NULL DEFAULT '',
-  needs_signature boolean NOT NULL DEFAULT true,
   PRIMARY KEY (project_id, phase));
 
-CREATE TABLE IF NOT EXISTS gate_signature (
-  project_id text NOT NULL, phase text NOT NULL,
-  signed_at date NOT NULL, signed_by text NOT NULL,
-  wording text NOT NULL,             -- формулировка, под которой стоит подпись
-  note text NOT NULL DEFAULT '',     -- обстоятельства: чем подтверждена, что было спорным
-  lifted_by text NOT NULL DEFAULT '',-- правка либо решение, снявшее подпись
-  PRIMARY KEY (project_id, phase));
-
--- Под чем именно подписано: документ и его содержание НА ТОТ МОМЕНТ. Правка
--- подписанного делает подпись устаревшей — и умеет назвать, какая именно.
-CREATE TABLE IF NOT EXISTS gate_signature_doc (
-  project_id text NOT NULL, phase text NOT NULL,
-  entity_kind text NOT NULL, entity_id text NOT NULL,
-  content_hash text NOT NULL, revision bigint,
-  PRIMARY KEY (project_id, phase, entity_kind, entity_id));
+-- ПОДПИСИ ГЕЙТА БОЛЬШЕ НЕТ. Гейт автоматический: он закрыт, когда выполнены
+-- его условия, и человеку нечего добавить к машинному замеру. Подпись только
+-- откладывала закрытие — `G2` стоял с двадцатью пятью зелёными пунктами и
+-- ждал росчерка, — а однажды заставила меня написать правило на понятие,
+-- которого в наборе нет.
+--
+-- Таблицы `gate_signature` и `gate_signature_doc` НЕ СНОСЯТСЯ из базы: в них
+-- лежат две записи с формулировками владельца о принятом — свидетельство о
+-- дне, а не механизм. Снятие DDL их не трогает; решать их судьбу владельцу.
 
 -- Имя сущности — в самой таблице документов, рядом с путём.
 --
@@ -344,7 +337,7 @@ CREATE TABLE IF NOT EXISTS harness_process_step (
   process text NOT NULL,
   ord integer NOT NULL,
   question text NOT NULL,
-  method_kind text NOT NULL CHECK (method_kind IN ('query','command','signed','unknown')),
+  method_kind text NOT NULL CHECK (method_kind IN ('query','command','unknown')),
   method text NOT NULL DEFAULT '',
   -- Когда ступень вообще в игре. Пусто — всегда. Условная ступень объявляется,
   -- а не подразумевается: пропуск обязан быть виден с причиной.
@@ -423,7 +416,7 @@ CREATE TABLE IF NOT EXISTS readiness_item (
   text text NOT NULL,
   declared boolean,                      -- стояла ли галочка в документе
   method_kind text NOT NULL DEFAULT 'unknown'
-    CHECK (method_kind IN ('query','command','signed','unknown')),
+    CHECK (method_kind IN ('query','command','unknown')),
   method text NOT NULL DEFAULT '',
   PRIMARY KEY (project_id, owner_kind, owner_id, ord));
 
@@ -436,7 +429,7 @@ CREATE TABLE IF NOT EXISTS readiness_item (
 -- переживать пересчёт обязан.
 CREATE TABLE IF NOT EXISTS readiness_method (
   project_id text NOT NULL, owner_kind text NOT NULL, owner_id text NOT NULL, ord integer NOT NULL,
-  method_kind text NOT NULL CHECK (method_kind IN ('query','command','signed','unknown')),
+  method_kind text NOT NULL CHECK (method_kind IN ('query','command','unknown')),
   method text NOT NULL DEFAULT '',
   declared_by text NOT NULL DEFAULT '',
   PRIMARY KEY (project_id, owner_kind, owner_id, ord));
@@ -2154,7 +2147,7 @@ CREATE TABLE IF NOT EXISTS scheme_term (
 CREATE TABLE IF NOT EXISTS gate_item (
   phase text NOT NULL,
   item text NOT NULL,
-  kind text NOT NULL CHECK (kind IN ('query','command','signed','manual','unknown')),
+  kind text NOT NULL CHECK (kind IN ('query','command','manual','unknown')),
   query text,
   owner text,
   probe text NOT NULL DEFAULT '',
@@ -2164,8 +2157,7 @@ CREATE TABLE IF NOT EXISTS gate_item (
 
 CREATE TABLE IF NOT EXISTS gate_head (
   phase text PRIMARY KEY,
-  title text NOT NULL DEFAULT '',
-  needs_signature boolean NOT NULL DEFAULT true);
+  title text NOT NULL DEFAULT '');
 
 CREATE TABLE IF NOT EXISTS phase (
   id text PRIMARY KEY,
@@ -2194,8 +2186,8 @@ CREATE TABLE IF NOT EXISTS phase (
 -- Своё дело чистка сделала давно: тестовых пунктов нет. Правило, стирающее
 -- новое ради уборки старого, вредно чистым итогом — снято.
 
-INSERT INTO gate_head (phase, title, needs_signature)
-SELECT DISTINCT ON (phase) phase, title, needs_signature FROM gate ORDER BY phase, project_id
+INSERT INTO gate_head (phase, title)
+SELECT DISTINCT ON (phase) phase, title FROM gate ORDER BY phase, project_id
 ON CONFLICT (phase) DO NOTHING;
 
 INSERT INTO phase (id, ord, title, gate, plan_level, task_kind)
@@ -3327,61 +3319,14 @@ async fn measure_item(
                 }
             }
         } else {
-            // Подпись у гейта ОДНА, и лежит она в одном месте.
-            //
-            // Прежде их было два: ручка `gate-sign` писала `gate_signature` и
-            // `gate_signature_doc` (кто, когда, под какой формулировкой и под
-            // какими документами), а пункт читал `project_gate_signatures` —
-            // таблицу, которая держала хеш и не держала ни подписавшего, ни
-            // даты. Подписанный гейт оставался с пунктом `unsigned`: подпись
-            // была, а пункт её не видел.
-            let signature = client
-                .query(
-                    "SELECT g.signed_by, g.signed_at::text, g.lifted_by,
-                            count(*) FILTER (WHERE d.content_hash IS DISTINCT FROM p.content_hash),
-                            count(*),
-                            coalesce(string_agg(d.entity_kind || ' ' || d.entity_id, ', ')
-                                     FILTER (WHERE d.content_hash IS DISTINCT FROM p.content_hash), '')
-                       FROM gate_signature g
-                       LEFT JOIN gate_signature_doc d
-                         ON d.project_id = g.project_id AND d.phase = g.phase
-                       LEFT JOIN project_documents p
-                         ON p.project_id = d.project_id AND p.entity_kind = d.entity_kind
-                        AND p.entity_name = d.entity_id
-                      WHERE g.project_id = $1 AND g.phase = $2
-                      GROUP BY g.signed_by, g.signed_at, g.lifted_by",
-                    &[&project, &phase],
-                )
-                .await?;
-            match signature.first() {
-                Some(sig) => {
-                    let lifted: String = sig.get(2);
-                    let changed: i64 = sig.get(3);
-                    let under: i64 = sig.get(4);
-                    let which: String = sig.get(5);
-                    let state = if !lifted.is_empty() {
-                        "lifted"
-                    } else if changed > 0 {
-                        "stale"
-                    } else {
-                        "passed"
-                    };
-                    json!({
-                        "item": item, "kind": kind, "computed": state,
-                        "signedBy": sig.get::<_, String>(0),
-                        "signedAt": sig.get::<_, Option<String>>(1),
-                        "under": under,
-                        // Вот ради чего хеш и хранится: подписано было одно, лежит другое.
-                        "changedSinceSigned": changed,
-                        "changedDocuments": which,
-                        "liftedBy": lifted,
-                    })
-                }
-                None => json!({
-                    "item": item, "kind": kind, "computed": "unsigned",
-                    "why": "подписи нет: пункт не закрыт, а не пройден молча",
-                }),
-            }
+            // ПОДПИСИ ГЕЙТА БОЛЬШЕ НЕТ. Гейт автоматический: он закрыт, когда
+            // выполнены все его условия, и подпись человека под этим ничего не
+            // добавляла — только откладывала. Ветка остаётся отказом, а не
+            // тишиной: род пункта, которого машина не знает, — дефект объявления.
+            json!({
+                "item": item, "kind": kind, "computed": "unknown",
+                "why": format!("род пункта «{kind}» машине не известен: мерить им нечем"),
+            })
         };
         Ok(entry)
 }
@@ -3451,26 +3396,10 @@ pub async fn gate(pool: &Pool, project: &str, phase: Option<&str>) -> Result<Val
 
     // Сам гейт: формулировка из плана и нужна ли ему подпись.
     let heads = client
-        .query(
-            "SELECT g.phase, g.title, g.needs_signature,
-                    s.signed_at::text, s.signed_by, s.wording, s.lifted_by
-               FROM gate_head g
-               LEFT JOIN gate_signature s ON s.project_id = $1 AND s.phase = g.phase",
-            &[&project],
-        )
+        .query("SELECT g.phase, g.title FROM gate_head g", &[])
         .await?;
-    let head_of: std::collections::HashMap<String, (String, bool, Option<String>, String, String, String)> =
-        heads
-            .iter()
-            .map(|r| {
-                (
-                    r.get::<_, String>(0),
-                    (r.get(1), r.get(2), r.get(3), r.get::<_, Option<String>>(4).unwrap_or_default(),
-                     r.get::<_, Option<String>>(5).unwrap_or_default(),
-                     r.get::<_, Option<String>>(6).unwrap_or_default()),
-                )
-            })
-            .collect();
+    let head_of: std::collections::HashMap<String, String> =
+        heads.iter().map(|r| (r.get::<_, String>(0), r.get::<_, String>(1))).collect();
 
     let mut gates: std::collections::BTreeMap<String, Vec<Value>> = std::collections::BTreeMap::new();
     let mut checked_at: std::collections::BTreeMap<String, Option<i64>> = std::collections::BTreeMap::new();
@@ -3578,31 +3507,25 @@ pub async fn gate(pool: &Pool, project: &str, phase: Option<&str>) -> Result<Val
         let failed = items.iter().filter(|i| i["computed"] == "failed").count();
         let unknown = items
             .iter()
-            .filter(|i| i["computed"] == "unknown" || i["computed"] == "unsigned" || i["computed"] == "stale")
+            .filter(|i| i["computed"] == "unknown" || i["computed"] == "stale")
             .count();
-        // Состояние гейта ВЫВОДИТСЯ: все проверки прошли **и** подпись стоит и не
-        // снята. Пройти проверки, не подписав, — это не «пройден»: подпись и есть
-        // то, чем человек берёт на себя сказанное.
+        // Состояние гейта ВЫВОДИТСЯ ЦЕЛИКОМ: все проверки прошли — гейт закрыт.
+        // Прежде здесь стояло «и подпись стоит и не снята», и это противоречило
+        // самому замыслу: гейт автоматический, условия машинные, и человеку
+        // нечего добавить к тому, что уже померено. Подпись только откладывала
+        // закрытие и однажды заставила меня написать правило на понятие,
+        // которого в наборе нет.
         let checked = checked_at.get(&phase).copied().flatten();
-        let head = head_of.get(&phase);
-        let needs = head.map(|h| h.1).unwrap_or(true);
-        let signed_at = head.and_then(|h| h.2.clone());
-        let lifted = head.map(|h| h.5.clone()).unwrap_or_default();
-        let signature_ok = !needs || (signed_at.is_some() && lifted.is_empty());
         let computed = if failed > 0 {
             "failed"
         } else if unknown > 0 {
             "open"
-        } else if !signature_ok {
-            "unsigned"
         } else {
             "passed"
         };
         out.push(json!({
             "gate": phase,
-            "title": head.map(|h| h.0.clone()).unwrap_or_default(),
-            "needsSignature": needs,
-            "signature": head.map(|h| json!({ "at": h.2, "by": h.3, "wording": h.4, "liftedBy": h.5 })),
+            "title": head_of.get(&phase).cloned().unwrap_or_default(),
             "computed": computed,
             "items": items,
             "failedItems": failed,
@@ -8934,77 +8857,6 @@ pub async fn set_step_method(
                "survivesRebuild": true }))
 }
 
-/// Записать подпись гейта — утверждение человека, а не отметку машины.
-pub async fn sign_gate(
-    pool: &Pool,
-    project: &str,
-    phase: &str,
-    signed_at: &str,
-    signed_by: &str,
-    wording: &str,
-    note: &str,
-    docs: &[(String, String)],
-) -> Result<Value, Miss> {
-    if signed_by.trim().is_empty() || wording.trim().is_empty() {
-        return Err(Miss::Db("подпись без подписавшего или без формулировки — не подпись".into()));
-    }
-    let mut client = pool.get().await.expect("пул отдал соединение");
-    let tx = client.transaction().await.map_err(|e| Miss::Db(e.to_string()))?;
-    tx.execute(
-        "INSERT INTO gate_signature (project_id, phase, signed_at, signed_by, wording, note)
-         VALUES ($1,$2,to_date($3, 'YYYY-MM-DD'),$4,$5,$6)
-         ON CONFLICT (project_id, phase) DO UPDATE SET signed_at = EXCLUDED.signed_at,
-           signed_by = EXCLUDED.signed_by, wording = EXCLUDED.wording, note = EXCLUDED.note,
-           lifted_by = ''",
-        &[&project, &phase, &signed_at, &signed_by, &wording, &note],
-    )
-    .await
-    .map_err(|e| Miss::Db(e.to_string()))?;
-    tx.execute("DELETE FROM gate_signature_doc WHERE project_id=$1 AND phase=$2", &[&project, &phase])
-        .await
-        .map_err(|e| Miss::Db(e.to_string()))?;
-    let mut named = Vec::new();
-    for (kind, name) in docs {
-        // Содержание берётся СЕЙЧАС и записывается как то, под чем подписано.
-        // Дальше всякая правка этого документа делает подпись устаревшей, и
-        // сказать можно будет не только «хеш разошёлся», но и какая правка.
-        let row = tx
-            .query(
-                "SELECT content_hash, revision FROM project_documents
-                  WHERE project_id = $1 AND entity_kind = $2 AND entity_name = $3",
-                &[&project, kind, name],
-            )
-            .await
-            .map_err(|e| Miss::Db(e.to_string()))?;
-        let Some(r) = row.first() else {
-            return Err(Miss::NoEntity(kind.clone(), name.clone()));
-        };
-        let (hash, revision): (String, i64) = (r.get(0), r.get(1));
-        tx.execute(
-            "INSERT INTO gate_signature_doc (project_id, phase, entity_kind, entity_id, content_hash, revision)
-             VALUES ($1,$2,$3,$4,$5,$6)",
-            &[&project, &phase, kind, name, &hash, &revision],
-        )
-        .await
-        .map_err(|e| Miss::Db(e.to_string()))?;
-        named.push(json!({ "kind": kind, "id": name, "hash": hash, "revision": revision }));
-    }
-    tx.commit().await.map_err(|e| Miss::Db(e.to_string()))?;
-    Ok(json!({ "phase": phase, "signedAt": signed_at, "signedBy": signed_by, "under": named }))
-}
-
-/// Самотест гейтов: пункт, который не может провалиться, — не проверка.
-///
-/// Повод измерен: пункт `G0` «решение закрывает существующий вопрос» спрашивал
-/// требования, чьё имя равно имени проекта. Таких нет и быть не может — пункт
-/// проходил всегда и не мерил ничего. Зелень, которая не способна покраснеть,
-/// дороже красноты: на ней стоит подпись, а держаться ей не на чем.
-///
-/// Каждому пункту объявляется **проба** — запрос, подсаживающий нарушение.
-/// Самотест открывает транзакцию, исполняет пробу, спрашивает пункт и **всё
-/// откатывает**. Ответов три, и третий обязателен: пункт молчит на подсаженном
-/// (сломан), пункт увидел (жив), пробы нет (самотест не объявлен — и это не
-/// «прошёл»).
 pub async fn gate_selftest(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
     let mut client = pool.get().await.expect("пул отдал соединение");
     let items = client
@@ -9647,13 +9499,13 @@ pub async fn set_gate_item(
     // пункт заводился, а ЗАМЕР ВСЕГО ГЕЙТА падал на первичной записи. Одна
     // невнимательная строка роняла счёт целиком, и связь между ней и отказом
     // приходилось искать глазами.
-    if owner.map(|o| !o.trim().is_empty()).unwrap_or(false) && kind != "signed" {
+    if owner.map(|o| !o.trim().is_empty()).unwrap_or(false) {
         return Ok(json!({
             "status": "owner_without_signature",
             "why": format!(
-                "владелец бывает только у подписного пункта, а этот — «{kind}». \
-                 Запросный пункт судит запрос, и подписывать его некому; \
-                 с владельцем замер всего гейта откажет на правиле таблицы."),
+                "у пункта не бывает владельца: гейт АВТОМАТИЧЕСКИЙ и закрыт, когда \
+                 выполнены его условия. Подписывать машинный замер некому, и род \
+                 «signed» снят вместе с этим — пункт «{kind}» судит свой запрос."),
         }));
     }
 
@@ -9915,12 +9767,6 @@ pub async fn execute_method_upto(
             detail: vec![method.to_owned()],
             why: "команду выполняет харнес: у сервера нет ни репозитория, ни оболочки".into(),
         },
-        "signed" => Verdict {
-            state: "unsigned",
-            violations: 0,
-            detail: vec![],
-            why: "подписи нет: не закрыто, а не пройдено молча".into(),
-        },
         _ => Verdict {
             state: "unknown",
             violations: 0,
@@ -10036,7 +9882,7 @@ async fn compute_next_step(
             //
             // Она остаётся в `unanswerable` со своей причиной — прятать её
             // нельзя, — но текущей работой не объявляется.
-            "unknown" | "unsigned" | "stale" => {
+            "unknown" | "stale" => {
                 unanswerable.push(json!({ "ord": ord, "why": verdict.why, "question": question,
                                           "owner": owner, "touches": touches }));
                 if touches == "corpus" {

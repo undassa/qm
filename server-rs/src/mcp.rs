@@ -202,7 +202,7 @@ impl Mcp {
         tools.push(json!({ "name": "method-set", "description": "объявить способ проверки пункта готовности: query считает сервер, command выполняет харнес",
             "inputSchema": { "type": "object", "properties": { "drop": json!({"type":"boolean","description":"снять объявленное этой же дверью"}),
                 "kind": s("вид владельца"), "id": s("имя владельца; у одиночки пусто"),
-                "ord": json!({"type":"integer"}), "methodKind": s("query · command · signed · unknown"),
+                "ord": json!({"type":"integer"}), "methodKind": s("query · command · unknown"),
                 "method": s("запрос либо команда") }, "required": ["kind", "ord", "methodKind"] } }));
         tools.push(json!({ "name": "links-of", "description": "чем доказано и с чем связано: связи сущности по видам: проверки, истории, задачи, решения — то, что показывает панель раздела",
             "inputSchema": { "type": "object", "properties": { "kind": s("requirement · story · decision"), "id": s("имя") }, "required": ["kind", "id"] } }));
@@ -210,7 +210,7 @@ impl Mcp {
             "inputSchema": { "type": "object", "properties": {} } }));
         tools.push(json!({ "name": "step-method-set", "description": "объявить способ проверки ступени лестницы; переживает пересборку и выкатку",
             "inputSchema": { "type": "object", "properties": { "process": s("процесс, по умолчанию godzy"),
-                "ord": json!({"type":"integer"}), "methodKind": s("query · command · signed"), "method": s("запрос либо команда"),
+                "ord": json!({"type":"integer"}), "methodKind": s("query · command"), "method": s("запрос либо команда"),
                 "run": s("команда, которой видна единица работы ступени; `{имя}` — первое слово находки"),
                 "subject": s("запрос ПРЕДМЕТА ступени: пусто в ответе — «нечем мерить», а не «пройдено»"),
                 "subjectWhy": s("чем объяснить пустой предмет"),
@@ -482,11 +482,6 @@ impl Mcp {
                 "entityKind": s("вид сущности"), "entityId": s("имя сущности"), "reason": s("почему это законно"),
                 "closes": s("задача, которая побег отменит; пусто — побег бессрочный"),
                 "drop": s("true — снять исключение") }, "required": ["rule", "entityId"] } }));
-        tools.push(json!({ "name": "gate-sign", "description": "записать подпись гейта: кто, когда, под какой формулировкой и под какими документами",
-            "inputSchema": { "type": "object", "properties": { "phase": s("гейт"), "signedAt": s("дата подписи"),
-                "signedBy": s("имя человека"), "wording": s("формулировка, под которой стоит подпись"),
-                "note": s("обстоятельства"), "under": { "type": "array", "items": { "type": "object" } } },
-                "required": ["phase", "signedAt", "signedBy", "wording"] } }));
         tools.push(json!({ "name": "author-set", "description": "объявить автора документа: того, кто за него отвечает; пустое имя снимает объявление",
             "inputSchema": { "type": "object", "properties": { "drop": json!({"type":"boolean","description":"снять объявленное этой же дверью"}), "kind": s("вид"), "id": s("имя"), "author": s("автор") }, "required": ["kind"] } }));
         tools.push(json!({ "name": "authors", "description": "кто за какими документами стоит и у скольких автор не объявлен",
@@ -555,9 +550,8 @@ impl Mcp {
             "inputSchema": { "type": "object", "properties": {} } }));
         tools.push(json!({ "name": "gate-item-set", "description": "объявить пункт гейта: запрос, команда или подпись",
             "inputSchema": { "type": "object", "properties": { "id": s("устойчивое имя пункта, латиницей через дефис — им пункт адресуется"), "phase": s("гейт, например G5"), "item": s("заголовок пункта для человека; переписывается свободно, ссылок не рвёт"),
-                "itemKind": s("query · command · signed"), "query": s("запрос для вида query"),
-                "owner": s("кто подписывает, для вида signed"),
-                "probe": s("запрос, подсаживающий нарушение — им самотест роняет пункт"),
+                "itemKind": s("query · command"), "query": s("запрос для вида query"),
+                                "probe": s("запрос, подсаживающий нарушение — им самотест роняет пункт"),
                 "subject": s("запрос ПРЕДМЕТА пункта: пусто в ответе — «неизвестно», а не «пройдено»"),
                 "subjectWhy": s("чем объяснить пустой предмет"),
                 "why": s("почему способа нет — для рода unknown"),
@@ -672,7 +666,7 @@ impl Mcp {
     const WRITES: &[&str] = &[
         "put", "put-section", "rm", "document-add", "reparse", "reproject", "sweep",
         "task-state-push", "code-facts-push", "skills-push", "preflight-push", "worktree-push",
-        "ceiling-set", "blame-set", "derived-copy-set", "field-column-alias", "column-server-filled", "counts-sync", "kind-add", "kind-required", "kind-projection", "frozen-tree-set", "scheme-term-set", "orphans-purge", "surface-source-add", "sensor-spec-add", "agent-set", "donor-add", "guard-add", "gate-sign", "gate-item-set", "method-set", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "step-selftest", "version-close", "phase-gate-set", "exception-set",
+        "ceiling-set", "blame-set", "derived-copy-set", "field-column-alias", "column-server-filled", "counts-sync", "kind-add", "kind-required", "kind-projection", "frozen-tree-set", "scheme-term-set", "orphans-purge", "surface-source-add", "sensor-spec-add", "agent-set", "donor-add", "guard-add", "gate-item-set", "method-set", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "step-selftest", "version-close", "phase-gate-set", "exception-set",
         "author-set", "screen-area-set", "skill-set", "version-freeze",
         "links-rewrite", "links-retarget", "entity-rename",
     ];
@@ -717,7 +711,7 @@ impl Mcp {
         // вызов и отдавал строку таблицы вместо вычисления.
         const RESERVED: &[&str] = &[
             "method-set", "gate-item-set", "question-holders", "preflight-push", "worktree-push",
-            "sensor-specs", "scheme-terms", "frozen-trees", "addresses-declared", "tree-declared", "donors", "skills-push", "skills", "agents", "code-facts-push", "code-facts", "summary", "links-of", "retired-terms", "order", "gate-measure", "gate-item-waive", "gate-selftest", "gate-sign", "links-rewrite", "links-retarget", "reparse", "screen-area-set", "skill-set", "skills-paths", "version-freeze", "version-delta", "generated-check", "principal-allow", "principals", "author-set", "authors", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "step-selftest", "version-close", "phase-gate-set", "exception-set", "next-step", "process-state", "statuses", "task-status", "status-anomaly", "pipeline", "waves", "phases", "coverage", "blocks", "history", "at-revision", "process-history", "progress",
+            "sensor-specs", "scheme-terms", "frozen-trees", "addresses-declared", "tree-declared", "donors", "skills-push", "skills", "agents", "code-facts-push", "code-facts", "summary", "links-of", "retired-terms", "order", "gate-measure", "gate-item-waive", "gate-selftest", "links-rewrite", "links-retarget", "reparse", "screen-area-set", "skill-set", "skills-paths", "version-freeze", "version-delta", "generated-check", "principal-allow", "principals", "author-set", "authors", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "step-selftest", "version-close", "phase-gate-set", "exception-set", "next-step", "process-state", "statuses", "task-status", "status-anomaly", "pipeline", "waves", "phases", "coverage", "blocks", "history", "at-revision", "process-history", "progress",
             "kinds", "kinds-due", "readiness-gaps", "declared-unwritten", "blame-set", "doors", "derived-copy-set", "field-column-alias", "column-server-filled", "holders", "counts-sync", "kind-add", "kind-required", "kind-projection", "kind-reopens", "tree", "document-coverage", "sections", "section", "backlinks", "search", "put",
             "put-section", "rm", "document-add", "reproject", "sweep", "gate", "next-task", "blockers", "events",
             "norm-versions", "measurements", "plan", "readiness", "requirements-of",
@@ -2106,22 +2100,6 @@ impl Mcp {
                     Ok(n) => ok(json!({ "rule": rule, "entity": id, "written": n, "closes": closes,
                                         "dropped": drop, "decidedBy": self.author })),
                     Err(e) => refusal(Miss::Db(e.to_string())),
-                }
-            }
-            "gate-sign" => {
-                let phase = args.get("phase").and_then(|v| v.as_str()).unwrap_or("");
-                let at = args.get("signedAt").and_then(|v| v.as_str()).unwrap_or("");
-                let by = args.get("signedBy").and_then(|v| v.as_str()).unwrap_or("");
-                let wording = args.get("wording").and_then(|v| v.as_str()).unwrap_or("");
-                let note = args.get("note").and_then(|v| v.as_str()).unwrap_or("");
-                let docs: Vec<(String, String)> = Some(rows(&args, "under"))
-                    .map(|l| l.iter().filter_map(|it| Some((
-                        it.get("kind")?.as_str()?.to_owned(),
-                        it.get("id").and_then(|v| v.as_str()).unwrap_or("").to_owned()))).collect())
-                    .unwrap_or_default();
-                match crate::projector::sign_gate(&self.pool, p, phase, at, by, wording, note, &docs).await {
-                    Ok(v) => ok(v),
-                    Err(e) => refusal(e),
                 }
             }
             "links-rewrite" => {
