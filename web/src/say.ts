@@ -63,6 +63,25 @@ const СЛОВАРЬ: Record<string, [string, string]> = {
   "pu.attempt": ["попытка", "attempt"],
   "pu.reading": ["Читаю пульт…", "Reading the console…"],
 
+  // Работа
+  "wk.reading": ["Читаю работу…", "Reading work…"],
+  "wk.closed": ["Закрыто", "Closed"],
+  "wk.queue": ["в очереди предполёта", "in the preflight queue"],
+  "wk.fresh": ["свежих", "fresh"],
+  "wk.stale": ["протухших", "stale"],
+  "wk.never": ["ни разу", "never run"],
+  "wk.waves": ["Волны предполёта", "Preflight waves"],
+  "wk.waveNote": ["доля свежих вердиктов в волне; щелчок оставляет только её",
+                  "share of fresh verdicts per wave; click to keep only it"],
+  "wk.honest": ["У задачи датирован только предполёт: закрытие помечено коммитом, а не датой — путь задачи лента показать не может.",
+                "Only the preflight is dated: a closing is marked by a commit, not a date — the task's path is not something this timeline can show."],
+  "wk.tasks": ["Задачи", "Tasks"],
+  "wk.allWaves": ["все волны", "all waves"],
+  "wk.none": ["В очереди пусто.", "The queue is empty."],
+  "wk.freshOne": ["свеж", "fresh"],
+  "wk.staleOne": ["протух", "stale"],
+  "wk.neverOne": ["ни разу", "never"],
+
   // Корпус
   "co.reading": ["Читаю корпус…", "Reading the corpus…"],
   "co.kinds": ["Роды", "Kinds"],

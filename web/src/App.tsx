@@ -6,6 +6,7 @@ import { ProjectPicker } from "./Projects";
 import { Depends } from "./Depends";
 import { Console } from "./Console";
 import { Corpus } from "./Corpus";
+import { Work } from "./Work";
 import { type Lang, langNow, setLang, say } from "./say";
 import { Reader } from "./Reader";
 import { Readiness } from "./Readiness";
@@ -29,7 +30,6 @@ interface Ctx {
   /** Язык подписей. Проза харнеса не переводится: это слова проекта. */
   lang: Lang;
 }
-import { Tasks } from "./Tasks";
 import { Unknown } from "./Unknown";
 
 /**
@@ -48,7 +48,7 @@ import { Unknown } from "./Unknown";
 const PAGES: { page: string; key: string; view: (id: string, ctx: Ctx) => React.JSX.Element }[] = [
   { page: "pult", key: "nav.pult", view: (id, ctx) => <Console projectId={id} onGo={ctx.onGo} /> },
   { page: "where", key: "nav.where", view: (id, ctx) => <Readiness projectId={id} onFind={ctx.onFind} /> },
-  { page: "tasks", key: "nav.tasks", view: (id) => <Tasks projectId={id} /> },
+  { page: "tasks", key: "nav.tasks", view: (id, ctx) => <Work projectId={id} lang={ctx.lang} /> },
   { page: "unknown", key: "nav.unknown", view: (id, ctx) => <Unknown projectId={id} onFind={ctx.onFind} /> },
   // Раздел — это тип ресурса, а не папка: у требования свои колонки, свои
   // фильтры и свои дыры, и общей таблицей документов их не показать.

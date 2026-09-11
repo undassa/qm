@@ -4604,3 +4604,70 @@ tbody:first-of-type .co-grp th { padding-top: 8px; }
   /* На ленте переключатель стоит последним и не липнет: он не навигация. */
   .lang { margin-top: 0; padding-top: 0; flex: none; }
 }
+
+/* ── Работа ────────────────────────────────────────────────────────────────
+   Лента волн и сами задачи. Щелчок по задаче раскрывает её дровером — список
+   за ним остаётся на месте, и видно, куда вернёшься.                      */
+.work { display: flex; flex-direction: column; max-width: 900px; }
+.wk-head { padding-bottom: 16px; border-bottom: 1px solid var(--line); }
+.wk-say { margin: 0; font-size: 16px; line-height: 1.45; }
+.wk-say .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.wk-say .ok { color: var(--done); }
+.wk-say .bad { color: var(--warn); }
+
+.wk-band { padding: 18px 0 20px; border-bottom: 1px solid var(--line); }
+.wk-band:last-child { border-bottom: 0; }
+.wk-h { display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+.wk-h h2 {
+  margin: 0; font-family: var(--mono); font-weight: 500; font-size: 11px;
+  letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted);
+}
+.wk-note { color: var(--muted); font-size: 11.5px; }
+.wk-cnt { font-family: var(--mono); font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.wk-all { font: inherit; font-size: 11.5px; background: none; border: 0; color: var(--live); cursor: pointer; padding: 0; margin-left: auto; }
+
+/* Дорожка волны: доля свежих слева, протухших справа. */
+.wk-tl { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+.wk-tl li { display: grid; grid-template-columns: 54px minmax(0, 1fr) 62px; gap: 12px; align-items: center; }
+.wk-lane {
+  font: inherit; font-family: var(--mono); font-size: 12.5px; text-align: left;
+  background: none; border: 0; color: var(--live); cursor: pointer; padding: 2px 0;
+}
+.wk-tl li.on .wk-lane { color: var(--ink); font-weight: 600; }
+.wk-track { display: flex; height: 16px; border-radius: 3px; overflow: hidden; background: var(--line-soft); }
+.wk-track i { display: block; }
+.wk-track i.fresh { background: var(--done); opacity: .75; }
+.wk-track i.stale { background: var(--warn); opacity: .45; }
+.wk-tl li.on .wk-track { outline: 1px solid var(--muted); outline-offset: 1px; }
+.wk-gap { color: var(--muted); font-size: 11.5px; margin: 14px 0 0; max-width: 68ch; line-height: 1.5; }
+
+.wk-list { list-style: none; margin: 0; padding: 0; }
+.wk-list li { border-top: 1px solid var(--line-soft); }
+.wk-list li:first-child { border-top: 0; }
+.wk-list button {
+  font: inherit; width: 100%; text-align: left; background: none; border: 0;
+  color: inherit; cursor: pointer; padding: 8px 4px;
+  display: grid; grid-template-columns: 84px minmax(0, 1fr) 62px 84px;
+  gap: 12px; align-items: baseline;
+}
+.wk-list button:hover { background: var(--panel); }
+.wk-id { font-family: var(--mono); font-size: 12.5px; color: var(--live); }
+.wk-t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.wk-state { font-size: 11.5px; color: var(--done); }
+.wk-list li.stale .wk-state { color: var(--warn); }
+.wk-rev { font-family: var(--mono); font-size: 11px; color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+
+@media (max-width: 720px) {
+  .wk-say { font-size: 14.5px; }
+  /* Имя и суть — в две строки; ревизия уходит под них. */
+  .wk-list button {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "id state" "t t" "rev rev";
+    gap: 3px 10px; padding: 10px 4px;
+  }
+  .wk-id { grid-area: id; }
+  .wk-t { grid-area: t; white-space: normal; line-height: 1.35; }
+  .wk-state { grid-area: state; }
+  .wk-rev { grid-area: rev; text-align: left; }
+  .wk-tl li { grid-template-columns: 44px minmax(0, 1fr) 54px; }
+}
