@@ -516,7 +516,18 @@ async fn call_tool_body(
         project,
         author: author.map(|a| a.0 .0).unwrap_or_else(|| "клиент".into()),
     };
-    Ok(Json(mcp.call(&name, &args).await))
+    // ОБОЛОЧКА СНИМАЕТСЯ, как и на чтении. Прежде POST отдавал конверт MCP
+    // целиком, а GET — сам предмет: отказ двери лежал строкой внутри
+    // `content[0].text`, и читающий видел поле `content`, а не `status`.
+    // Запись отчиталась бы успехом на отказе — молчание вместо причины.
+    let out = mcp.call(&name, &args).await;
+    let text = out["content"][0]["text"].as_str().unwrap_or("").to_owned();
+    if out["isError"] == json!(true) {
+        return Err(Failure::Upstream(text));
+    }
+    Ok(Json(
+        serde_json::from_str::<Value>(&text).unwrap_or_else(|_| json!({ "text": text })),
+    ))
 }
 
 async fn call_tool(

@@ -82,6 +82,61 @@ CREATE OR REPLACE VIEW readiness_state AS
   SELECT i.project_id, i.owner_kind, i.owner_id, i.ord, i.text, i.declared, i.method_kind,
          CASE WHEN i.method_kind = 'unknown' THEN 'unknown' ELSE 'computable' END AS state
     FROM readiness_item i;
+
+-- ВЕРДИКТ ГЕЙТА ЦЕЛИКОМ — одной записью, а не пересказом у каждого читателя.
+--
+-- Слово в слово то же правило, что у ручки `gate`: красен хоть один пункт —
+-- `failed`; есть непосчитанный или протухший — `open`; иначе `passed`. Пересказ
+-- расходился уже дважды. `phase_open` читал колонку `state`, куда `waived`
+-- уложен как `unknown`, — и ОТМЕНЁННЫЙ пункт держал бы все последующие фазы,
+-- пока `gate` о том же гейте отвечал «пройден». А `stage` и `redGate`
+-- спрашивали `result->>'computed' <> 'passed'` и ловили бы то же самое.
+--
+-- Гейт БЕЗ ЕДИНОЙ СТРОКИ замера сюда не попадает вовсе, и читатель обязан
+-- считать его непройденным: «не мерили» — это не «пройден». Пустота, принятая
+-- за зелёное, снимает барьер там, где его ни разу не проверяли.
+CREATE OR REPLACE VIEW gate_state AS
+  SELECT g.project_id, g.phase AS gate,
+         CASE
+           WHEN count(*) FILTER (WHERE g.result->>'computed' = 'failed') > 0 THEN 'failed'
+           WHEN count(*) FILTER (WHERE g.result IS NULL
+                                    OR g.result->>'computed' IN ('unknown','stale')) > 0 THEN 'open'
+           ELSE 'passed'
+         END AS computed
+    FROM project_gates g GROUP BY 1, 2;
+
+-- ОТКРЫТА ЛИ ФАЗА — одним местом на всех, кто про это спрашивает.
+--
+-- Спрашивают трое, и порознь: `next-task` («можно ли выдать эту задачу»),
+-- ступени лестницы («чьи задачи считать») и пункты гейтов («не закрыли ли
+-- задачу раньше её гейта»). Три копии условия разошлись бы на первой же правке
+-- цепочки фаз — и разошлись бы молча.
+--
+-- Фаза открыта, когда КАЖДЫЙ предшествующий гейт пройден. Свой гейт при этом не
+-- смотрится: Ф3 открыта и с красным G3 — красен он ровно потому, что в фазе
+-- идёт работа. Гейт, о котором замеров нет, держит: `coalesce` называет его
+-- `open`, а не пропускает молча.
+CREATE OR REPLACE VIEW phase_open AS
+  SELECT pr.id AS project_id, ph.id AS phase, ph.ord, ph.gate, ph.task_kind,
+         NOT EXISTS (SELECT 1 FROM phase p2
+                      WHERE p2.ord < ph.ord AND p2.gate <> ''
+                        AND coalesce((SELECT s.computed FROM gate_state s
+                                       WHERE s.project_id = pr.id AND s.gate = p2.gate),
+                                     'open') <> 'passed') AS open
+    FROM projects pr CROSS JOIN phase ph;
+
+-- Задача и её фаза. Отображение объявлено записью — `phase.task_kind`, дверь
+-- `phase-set`, — а не прозой плана.
+--
+-- `phase` пусто — вид задачи НЕ ОТОБРАЖЁН ни на одну фазу, и это «не
+-- объявлено», а не «можно всё»: `open` тогда тоже пусто, и всякий читатель
+-- обязан отличить пустоту от разрешения.
+CREATE OR REPLACE VIEW task_phase AS
+  SELECT t.project_id, t.id AS task_id, t.kind, t.state,
+         o.phase, o.ord AS phase_ord, o.gate, o.open
+    FROM project_plan_tasks t
+    LEFT JOIN phase_open o
+      ON o.project_id = t.project_id AND o.task_kind <> '' AND o.task_kind = t.kind;
 "#;
 
 const DDL: &str = r#"
@@ -128,23 +183,13 @@ CREATE TABLE IF NOT EXISTS measurement (
 -- Место держится, чтобы связь было куда записать, когда владелец её назовёт.
 -- Пустая таблица честнее заполненной догадками: по ней видно, что работа не
 -- сделана, а не что её сделали неверно.
--- Фазы проекта — цепочка, объявленная самим набором:
---   Ф0 рамка ─G0─► Ф1 требования ─G1─► Ф2 проект ─G2─► Ф3 тесты ─G3─►
---   Ф4 генерация ─G4─► Ф5 выпуск
+-- ПРОЕКТНОЙ КОПИИ ЦЕПОЧКИ ФАЗ ЗДЕСЬ БОЛЬШЕ НЕТ, и это не упущение.
 --
--- Каждой фазе принадлежат три разных вещи, и они считаются по-разному:
--- документы (уровнем плана), гейт (своим номером) и задачи (видом). До сих пор
--- в плане были только вехи кода, и трек проверок в картине не участвовал вовсе —
--- хотя 82 задачи и целая фаза Ф3 держатся на нём.
-CREATE TABLE IF NOT EXISTS project_phase (
-  project_id text NOT NULL,
-  id text NOT NULL,                      -- Ф0…Ф5
-  ord integer NOT NULL,
-  title text NOT NULL,
-  gate text NOT NULL DEFAULT '',         -- гейт, которым фаза закрывается
-  plan_level text NOT NULL DEFAULT '',   -- уровень плана документов
-  task_kind text NOT NULL DEFAULT '',    -- вид задач фазы: red · dev
-  PRIMARY KEY (project_id, id));
+-- `project_phase` объявляла то же, что общая `phase`, и однажды её засеяла. С
+-- тех пор читатели ходили в `phase`, а единственная дверь писала в
+-- `project_phase`: объявленное дверью не читал никто, и привязка гейта к фазе
+-- пропадала молча. Одна запись, одна дверь — `phase` и `phase-set`.
+DROP TABLE IF EXISTS project_phase;
 
 -- Словарь статусов — таблица, а не `CHECK`.
 --
@@ -2302,10 +2347,21 @@ INSERT INTO gate_head (phase, title)
 SELECT DISTINCT ON (phase) phase, title FROM gate ORDER BY phase, project_id
 ON CONFLICT (phase) DO NOTHING;
 
-INSERT INTO phase (id, ord, title, gate, plan_level, task_kind)
-SELECT DISTINCT ON (id) id, ord, title, gate, plan_level, task_kind
-  FROM project_phase ORDER BY id, project_id
-ON CONFLICT (id) DO NOTHING;
+-- Вид задач принадлежит ОДНОЙ фазе, место в цепочке — тоже одной. Две фазы,
+-- назвавшие `dev` своим, сделали бы вопрос «в какой фазе эта задача»
+-- двусмысленным; два одинаковых `ord` — вопрос «какая раньше»: `p2.ord < ph.ord`
+-- ложно в обе стороны, и барьер между такими фазами исчезает молча.
+--
+-- Оба индекса заводятся ОТДЕЛЬНО ОТ ПАКЕТА. Схема накатывается одним
+-- `batch_execute`, то есть одной транзакцией: уникальный индекс, споткнувшийся о
+-- уже стоящую пару одинаковых значений, откатил бы ВСЮ схему и сервер не
+-- поднялся бы. Ограничение здесь желательно, но не ценой запуска.
+DO $$ BEGIN
+  CREATE UNIQUE INDEX IF NOT EXISTS phase_by_task_kind ON phase (task_kind) WHERE task_kind <> '';
+EXCEPTION WHEN others THEN NULL; END $$;
+DO $$ BEGIN
+  CREATE UNIQUE INDEX IF NOT EXISTS phase_by_ord ON phase (ord);
+EXCEPTION WHEN others THEN NULL; END $$;
 
 
 -- Снятые требования: имя, которого больше нет, и почему.
@@ -3057,6 +3113,7 @@ pub async fn next_task(pool: &Pool, project: &str) -> Result<Value, tokio_postgr
                                  AND t2.milestone_id = md.milestone_id
                                  AND t2.state <> 'closed'))
              SELECT o.id, o.milestone_id, o.title, o.kind, o.size,
+                    tp.phase, tp.gate, tp.open,
                     (SELECT count(*) FROM task_requirement r
                       WHERE r.project_id = $1 AND r.task_id = o.id) AS requirements,
                     coalesce((SELECT string_agg(r.requirement_id || ' · ' || coalesce(rq.text, '—'), E'\\n')
@@ -3070,71 +3127,100 @@ pub async fn next_task(pool: &Pool, project: &str) -> Result<Value, tokio_postgr
                                   ON r.project_id = c.project_id AND r.requirement_id = c.requirement_id
                                WHERE c.project_id = $1 AND r.task_id = o.id), '') AS checks
                FROM open o
+               LEFT JOIN task_phase tp ON tp.project_id = $1 AND tp.task_id = o.id
               WHERE o.id NOT IN (SELECT task_id FROM blocked_by_task)
                 AND o.id NOT IN (SELECT task_id FROM blocked_by_milestone)
-              ORDER BY o.milestone_id, o.ord
+              ORDER BY (tp.open IS NOT TRUE), o.milestone_id, o.ord
               LIMIT 1",
             &[&project],
         )
         .await?;
-    // Барьер красной фазы. Правило проекта: весь трек проверок предшествует
-    // всему коду. Состояние красной задачи в базе не лежит — оно выводится из
-    // закрывающего трейлера git, а трейлеров база не знает. Значит закрытость
-    // красной фазы НЕ ПОДТВЕРЖДЕНА, и задачу кода выдавать нельзя: выдать её —
-    // значит поручиться за то, чего не проверял.
-    // Барьер красной фазы: весь трек проверок предшествует всему коду. Теперь
-    // он проверяем — состояние приходит из истории, и открытые красные задачи
-    // называются поимённо. «Состояние неизвестно» больше не ответ: это был не
-    // барьер, а отсутствие источника.
-    // Открытые красные читаются ИЗ ПЛАНА, а не из поданных состояний.
-    //
-    // Читая `task_state` напрямую, барьер завёл бы второй источник того же
-    // факта: подача говорила бы «закрыто», план — «не начата», и барьер снялся
-    // бы при непересобранном плане. Это ровно тот дефект, ради которого
-    // состояние и переносится в одно место. Пойман на себе.
-    let open_red = client
-        .query(
-            "SELECT t.id FROM project_plan_tasks t
-              WHERE t.project_id = $1 AND t.kind = 'red' AND t.state <> 'closed'
-              ORDER BY t.id",
-            &[&project],
-        )
-        .await?;
-    let pushed: i64 = client
-        .query_one("SELECT count(*) FROM task_state WHERE project_id = $1", &[&project])
-        .await?
-        .get(0);
-    if !open_red.is_empty() {
-        let names: Vec<String> = open_red.iter().take(20).map(|r| r.get::<_, String>(0)).collect();
-        return Ok(json!({
-            "task": null,
-            "why": if pushed == 0 {
-                "барьер красной фазы не проверить: состояний из истории никто не подавал"
-            } else {
-                "барьер красной фазы держит: есть незакрытые красные задачи"
-            },
-            "redPhase": {
-                "open": open_red.len(),
-                "openNamed": names,
-                "stateSource": if pushed == 0 { "нет подачи" } else { "история, поданная харнесом" },
-            },
-            "candidate": rows.first().map(|r| r.get::<_, String>(0)),
-        }));
-    }
 
     let Some(r) = rows.first() else {
         return Ok(json!({ "task": null, "why": "незакрытых задач с закрытыми зависимостями нет" }));
     };
+    let id: String = r.get(0);
+    let phase: Option<String> = r.get(5);
+    let gate: Option<String> = r.get(6);
+
+    // БАРЬЕР ФАЗ. Прежде здесь стоял барьер красной фазы: «есть незакрытые
+    // красные — задачи не выдаём». Он мерил не то. На `myack` все 82 красные
+    // задачи закрыты, G3 при этом красен, и барьер пропускал `M0-T12` — задачу
+    // Ф4, фазы, которую G3 ещё не открыл. Заодно он не выдавал и сами красные
+    // задачи: пока хоть одна открыта, ответом было `null` на любую.
+    //
+    // Мерится теперь фаза, а не вид: задача выдаётся, когда её фаза открыта, то
+    // есть когда пройден каждый предшествующий гейт. Ф3 при красном G3 открыта —
+    // красен он оттого, что в ней идёт работа.
+    //
+    // Отказ НАЗЫВАЕТ, чем держится: фазу, её гейт, состояние гейта и его красные
+    // пункты поимённо. Отказ без имён отправляет искать причину руками.
+    if r.get::<_, Option<bool>>(7) != Some(true) {
+        let Some(phase) = phase else {
+            // «Цепочки фаз нет вовсе» и «цепочка есть, а этот вид ей не назван» —
+            // разное, и чинится разным. Один ответ на оба отправлял бы
+            // объявлять вид там, где объявлять его ещё некуда.
+            let phases: i64 = client.query_one("SELECT count(*) FROM phase", &[]).await?.get(0);
+            return Ok(json!({
+                "task": null,
+                "candidate": id,
+                "why": if phases == 0 {
+                    "цепочка фаз не объявлена ни одной фазой: порядок работ сказать нечем, \
+                     и это не «можно всё». Фаза объявляется дверью `phase-set`: \
+                     `phase`, `ord`, `title`, `gate`, `taskKind`".to_owned()
+                } else {
+                    format!("вид задачи «{}» не отображён ни на одну фазу: отображение НЕ ОБЪЯВЛЕНО, \
+                             и это не «можно всё». Объявляется дверью `phase-set` доводом `taskKind`",
+                            r.get::<_, Option<String>>(3).unwrap_or_default())
+                },
+            }));
+        };
+        // Держит первый из предшествующих гейтов, который не пройден: именно он
+        // откроет фазу, и именно его пункты — работа, которую надо взять вместо
+        // этой задачи.
+        let held = client
+            .query_opt(
+                "SELECT p2.gate,
+                        (SELECT string_agg(g.id, ' · ' ORDER BY g.id) FROM project_gates g
+                          WHERE g.project_id = $1 AND g.phase = p2.gate AND g.state = 'failed')
+                   FROM phase p2
+                  WHERE p2.ord < (SELECT ord FROM phase WHERE id = $2) AND p2.gate <> ''
+                    AND coalesce((SELECT s.computed FROM gate_state s
+                                   WHERE s.project_id = $1 AND s.gate = p2.gate), 'open') <> 'passed'
+                  ORDER BY p2.ord LIMIT 1",
+                &[&project, &phase],
+            )
+            .await?;
+        let holder: Option<String> = held.as_ref().map(|h| h.get(0));
+        let named: Option<String> = held.as_ref().and_then(|h| h.get(1));
+        return Ok(json!({
+            "task": null,
+            "candidate": id,
+            "why": format!("задача принадлежит фазе {phase}, а фаза не открыта: {} ещё не пройден",
+                           holder.clone().unwrap_or_else(|| "предшествующий гейт".into())),
+            "phase": {
+                "phase": phase,
+                "gate": gate,
+                "heldBy": holder,
+                // «Красен» и «не мерян» — разное, и складывать их нельзя: пустой
+                // список красных пунктов при непройденном гейте значит, что его
+                // ещё не мерили.
+                "gateState": held.as_ref().map(|_| if named.is_some() { "failed" } else { "open" }),
+                "redItems": named,
+            },
+        }));
+    }
     Ok(json!({
         "task": {
-            "id": r.get::<_, String>(0),
+            "id": id,
             "milestone": r.get::<_, String>(1),
             "title": r.get::<_, String>(2),
             "kind": r.get::<_, Option<String>>(3),
             "size": r.get::<_, Option<String>>(4),
-            "requirements": r.get::<_, i64>(5),
-            "requirementText": r.get::<_, String>(6),
-            "checks": r.get::<_, String>(7),
+            "phase": phase,
+            "requirements": r.get::<_, i64>(8),
+            "requirementText": r.get::<_, String>(9),
+            "checks": r.get::<_, String>(10),
         }
     }))
 }
@@ -7782,6 +7868,84 @@ pub async fn impact(
     }))
 }
 
+/// Пульт: что идёт, что ждёт человека, что поехало.
+///
+/// Три вопроса, ради которых человек открывает проект, — и все три прежде
+/// собирались руками из разных ручек. Работа агентов не отдавалась вовсе:
+/// `project_task_runs` знает, кто над чем сидит, и дверей к нему не было ни
+/// одной.
+pub async fn console(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
+    let client = pool.get().await.expect("пул отдал соединение");
+
+    // Что идёт ПРЯМО СЕЙЧАС: прогон задачи с агентом и состоянием.
+    let runs = client
+        .query(
+            "SELECT r.task_id, r.agent_id, r.state, r.attempt,
+                    coalesce(t.title, ''), coalesce(w.state, ''), coalesce(w.branch, '')
+               FROM project_task_runs r
+               LEFT JOIN project_plan_tasks t
+                 ON t.project_id = r.project_id AND t.id = r.task_id
+               LEFT JOIN project_task_workspaces w
+                 ON w.project_id = r.project_id AND w.task_run_id = r.id
+              WHERE r.project_id = $1 AND r.state <> 'finished'
+              ORDER BY r.updated_at DESC NULLS LAST
+              LIMIT 20",
+            &[&project],
+        )
+        .await?;
+
+    // Что ждёт ЧЕЛОВЕКА: вопрос, отданный владельцу, без человека не сдвинется.
+    let asks = client
+        .query(
+            "SELECT id, title, coalesce(nullif(created_at::text,''), '')
+               FROM project_questions
+              WHERE project_id = $1 AND state = 'open' AND answer_state = 'owner'
+              ORDER BY number DESC LIMIT 40",
+            &[&project],
+        )
+        .await?;
+
+    // Что ПОЕХАЛО: записи, стоявшие на том, что правили после них.
+    let moved = client
+        .query(
+            "SELECT kind, id, coalesce(stale_link, ''), coalesce(why, ''), coalesce(depth, 0)
+               FROM entity_live
+              WHERE project_id = $1 AND live_state = 'reopened'
+              ORDER BY link_changed DESC NULLS LAST LIMIT 40",
+            &[&project],
+        )
+        .await?;
+    let moved_by_kind = client
+        .query(
+            "SELECT kind, count(*)::bigint FROM entity_live
+              WHERE project_id = $1 AND live_state = 'reopened'
+              GROUP BY kind ORDER BY count(*) DESC",
+            &[&project],
+        )
+        .await?;
+
+    Ok(json!({
+        "working": runs.iter().map(|r| json!({
+            "task": r.get::<_, String>(0), "agent": r.get::<_, Option<String>>(1),
+            "state": r.get::<_, String>(2), "attempt": r.get::<_, i32>(3),
+            "title": r.get::<_, String>(4),
+            "workspace": r.get::<_, String>(5), "branch": r.get::<_, String>(6),
+        })).collect::<Vec<_>>(),
+        "asks": asks.iter().map(|r| json!({
+            "id": r.get::<_, String>(0), "title": r.get::<_, String>(1),
+            "since": r.get::<_, String>(2),
+        })).collect::<Vec<_>>(),
+        "moved": moved.iter().map(|r| json!({
+            "kind": r.get::<_, String>(0), "id": r.get::<_, String>(1),
+            "cause": r.get::<_, String>(2), "why": r.get::<_, String>(3),
+            "depth": r.get::<_, i32>(4),
+        })).collect::<Vec<_>>(),
+        "movedByKind": moved_by_kind.iter().map(|r| json!({
+            "kind": r.get::<_, String>(0), "count": r.get::<_, i64>(1) })).collect::<Vec<_>>(),
+        "means": "три полосы пульта: что идёт · что ждёт человека · что поехало",
+    }))
+}
+
 pub async fn holders(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
     let client = pool.get().await.expect("пул отдал соединение");
     let rows = client
@@ -8921,34 +9085,64 @@ pub async fn set_version_state(
     Ok(json!({ "version": version, "state": state, "by": actor }))
 }
 
-/// Привязать гейт к фазе.
-pub async fn set_phase_gate(
+/// Объявить фазу: место в цепочке, заголовок, гейт и вид её задач.
+///
+/// ВИД ЗАДАЧ — ЗАПИСЬ, А НЕ ПРОЗА. «Красная задача принадлежит Ф3, задача кода —
+/// Ф4» жило абзацем в плане проекта, и оттого барьер фаз не мог его прочесть:
+/// `next-task` предлагал задачу Ф4 при красном G3, а ступени звали владельца
+/// отправлять то, что отправлять нельзя. Объявленное здесь читают все трое
+/// через `task_phase`.
+///
+/// Проект, не назвавший отображение, получает пустоту — «не объявлено», — и
+/// читатель обязан звать её словом, а не разрешением.
+#[allow(clippy::too_many_arguments)]
+pub async fn set_phase(
     pool: &Pool,
-    project: &str,
     phase: &str,
-    gate: &str,
+    ord: Option<i32>,
+    title: Option<&str>,
+    gate: Option<&str>,
+    plan_level: Option<&str>,
+    task_kind: Option<&str>,
     drop_it: bool,
 ) -> Result<Value, tokio_postgres::Error> {
     let client = pool.get().await.expect("пул отдал соединение");
-        // Снятие — очистка объявленного, а не удаление строки: строка тут
-        // принадлежит не этому объявлению. Пустое значение и есть «не
-        // объявлено», и читатель обязан звать это словом, а не пустотой.
-        if drop_it {
-            let gone = client
-                .execute("UPDATE project_phase SET gate = '' WHERE project_id = $1 AND id = $2",
-                         &[&project, &phase])
-                .await?;
-            return Ok(json!({ "status": if gone > 0 { "dropped" } else { "not_found" } }));
-        }
-
-    let n = client
+    if drop_it {
+        let gone = client.execute("DELETE FROM phase WHERE id = $1", &[&phase]).await?;
+        return Ok(json!({ "status": if gone > 0 { "dropped" } else { "not_found" }, "phase": phase }));
+    }
+    // Заводится фаза ЦЕЛИКОМ: без места в цепочке «раньше» и «позже» не
+    // существует, а на них держится вся открытость фаз.
+    let known: i64 = client
+        .query_one("SELECT count(*) FROM phase WHERE id = $1", &[&phase])
+        .await?
+        .get(0);
+    if known == 0 && (ord.is_none() || title.is_none()) {
+        return Ok(json!({ "status": "not_found", "phase": phase,
+                          "why": "фазы с таким именем нет, а завести её без `ord` и `title` нельзя: \
+                                  без места в цепочке не считается ни «раньше», ни «позже»" }));
+    }
+    client
         .execute(
-            "UPDATE project_phase SET gate = $3 WHERE project_id = $1 AND id = $2",
-            &[&project, &phase, &gate],
+            "INSERT INTO phase (id, ord, title, gate, plan_level, task_kind)
+             VALUES ($1, coalesce($2, 0), coalesce($3, ''), coalesce($4, ''),
+                     coalesce($5, ''), coalesce($6, ''))
+             ON CONFLICT (id) DO UPDATE SET
+               ord = coalesce($2, phase.ord), title = coalesce($3, phase.title),
+               gate = coalesce($4, phase.gate), plan_level = coalesce($5, phase.plan_level),
+               task_kind = coalesce($6, phase.task_kind)",
+            &[&phase, &ord, &title, &gate, &plan_level, &task_kind],
         )
         .await?;
-    Ok(json!({ "updated": n, "phase": phase, "gate": gate,
-               "why": if n == 0 { "фазы с таким именем нет" } else { "" } }))
+    let r = client
+        .query_one(
+            "SELECT ord, title, gate, plan_level, task_kind FROM phase WHERE id = $1",
+            &[&phase],
+        )
+        .await?;
+    Ok(json!({ "phase": phase, "ord": r.get::<_, i32>(0), "title": r.get::<_, String>(1),
+               "gate": r.get::<_, String>(2), "planLevel": r.get::<_, String>(3),
+               "taskKind": r.get::<_, String>(4) }))
 }
 
 /// Объявить, когда ступень вообще в игре.
@@ -10383,9 +10577,10 @@ pub async fn measure_process(
                    FROM phase ph
                    JOIN project_gates g ON g.project_id = $1 AND g.phase = ph.gate
                   WHERE ph.ord = (SELECT min(p2.ord) FROM phase p2
-                                   WHERE EXISTS (SELECT 1 FROM project_gates x
-                                                  WHERE x.project_id = $1 AND x.phase = p2.gate
-                                                    AND x.result->>'computed' <> 'passed'))
+                                   WHERE p2.gate <> ''
+                                     AND coalesce((SELECT s.computed FROM gate_state s
+                                                    WHERE s.project_id = $1 AND s.gate = p2.gate),
+                                                  'open') <> 'passed')
                     AND g.result->>'computed' = 'failed'
                   ORDER BY g.violations DESC NULLS LAST, g.id",
                 &[&project],
@@ -10407,9 +10602,10 @@ pub async fn measure_process(
                             AND g.result->>'computed' = 'failed') AS нарушений
                    FROM phase ph
                   WHERE ph.ord = (SELECT min(p2.ord) FROM phase p2
-                                   WHERE EXISTS (SELECT 1 FROM project_gates x
-                                                  WHERE x.project_id = $1 AND x.phase = p2.gate
-                                                    AND x.result->>'computed' <> 'passed'))",
+                                   WHERE p2.gate <> ''
+                                     AND coalesce((SELECT s.computed FROM gate_state s
+                                                    WHERE s.project_id = $1 AND s.gate = p2.gate),
+                                                  'open') <> 'passed')",
                 &[&project],
             )
             .await?;
@@ -10448,6 +10644,41 @@ pub async fn measure_process(
                                 куда дошла лестница",
                     })
                 },
+            );
+            // ЖДУТ СВОЕЙ ФАЗЫ — отдельным списком, а не в общем счёте работы.
+            //
+            // Ступени про задачи считают задачи ОТКРЫТЫХ фаз: иначе лестница
+            // звала владельца отправлять 121 задачу фазы, которую гейт ещё не
+            // открыл, и предполёт — освежать по ним вердикты. Спрятать их
+            // совсем нельзя — работа настоящая; поэтому они названы здесь, и
+            // рядом назван гейт, который их откроет.
+            let waiting = client
+                .query(
+                    "SELECT tp.phase, coalesce(h.gate, ''), count(*)
+                       FROM task_phase tp
+                       LEFT JOIN LATERAL (
+                            SELECT p2.gate FROM phase p2
+                             WHERE p2.ord < tp.phase_ord AND p2.gate <> ''
+                               AND coalesce((SELECT s.computed FROM gate_state s
+                                              WHERE s.project_id = tp.project_id
+                                                AND s.gate = p2.gate), 'open') <> 'passed'
+                             ORDER BY p2.ord LIMIT 1) h ON true
+                      WHERE tp.project_id = $1 AND tp.state <> 'closed' AND tp.open IS NOT TRUE
+                      GROUP BY 1, 2 ORDER BY 1",
+                    &[&project],
+                )
+                .await?;
+            o.insert(
+                "waitingForPhase".into(),
+                json!(waiting.iter().map(|r| json!({
+                    "phase": r.get::<_, Option<String>>(0),
+                    "opensWith": r.get::<_, String>(1),
+                    "tasks": r.get::<_, i64>(2),
+                    "why": match r.get::<_, Option<String>>(0) {
+                        None => "вид задачи не отображён ни на одну фазу: отображение не объявлено",
+                        Some(_) => "фаза не открыта: её задачи не работа, пока не пройден названный гейт",
+                    },
+                })).collect::<Vec<_>>()),
             );
         }
     }

@@ -5,6 +5,7 @@ import { chooseProject } from "./project-address";
 import { ProjectPicker } from "./Projects";
 import { Entities } from "./Entities";
 import { Depends } from "./Depends";
+import { Console } from "./Console";
 import { Reader } from "./Reader";
 import { Requirements } from "./Requirements";
 import { Rules } from "./Rules";
@@ -25,6 +26,8 @@ interface Ctx {
   want: Jump | null;
   /** Найти имя и открыть его: тем же взвешенным поиском, что и палитра. */
   onFind: (q: string) => void;
+  /** Открыть другой раздел: пульт отсылает к вопросам и зависимостям. */
+  onGo: (page: string) => void;
 }
 import { Tasks } from "./Tasks";
 import { Decisions } from "./Decisions";
@@ -46,6 +49,7 @@ import { Unknown } from "./Unknown";
  * требование) и **вопросы** (чем закрыт каждый).
  */
 const PAGES: { page: string; title: string; note: string; view: (id: string, ctx: Ctx) => React.JSX.Element }[] = [
+  { page: "pult", title: "Пульт", note: "что идёт и что ждёт", view: (id, ctx) => <Console projectId={id} onGo={ctx.onGo} /> },
   { page: "where", title: "Готовность", note: "фазы и гейты", view: (id, ctx) => <Readiness projectId={id} onFind={ctx.onFind} /> },
   { page: "tasks", title: "Задачи", note: "конвейер", view: (id) => <Tasks projectId={id} /> },
   { page: "unknown", title: "Не знаем", note: "пробелы", view: (id, ctx) => <Unknown projectId={id} onFind={ctx.onFind} /> },
@@ -73,7 +77,7 @@ const asked = (name: string): string | null => new URLSearchParams(window.locati
 export function App(): React.JSX.Element {
   const [projects, setProjects] = useState<Project[]>([]);
   const [project, setProject] = useState<Project | null>(null);
-  const [page, setPage] = useState<string>(asked("page") ?? "where");
+  const [page, setPage] = useState<string>(asked("page") ?? "pult");
   const [unknown, setUnknown] = useState<string>("");
   /** Палитра и то, куда она попросила перейти. */
   const [pal, setPal] = useState(false);
@@ -93,7 +97,7 @@ export function App(): React.JSX.Element {
       const choice = chooseProject(projects, asked("project"));
       if (choice.project) setProject(choice.project);
       setUnknown(choice.unknown);
-      setPage(asked("page") ?? "where");
+      setPage(asked("page") ?? "pult");
     };
     window.addEventListener("popstate", back);
     return () => window.removeEventListener("popstate", back);
@@ -140,7 +144,7 @@ export function App(): React.JSX.Element {
       })
       .catch(() => undefined);
   };
-  const ctx = { want: jump, onFind: find };
+  const ctx = { want: jump, onFind: find, onGo: setPage };
 
   const view = PAGES.find((p) => p.page === page) ?? PAGES[0]!;
 

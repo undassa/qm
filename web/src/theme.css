@@ -4167,3 +4167,207 @@ button.chain-card:disabled { cursor: default; opacity: .55; }
 .dep-mark { font-size: 11px; }
 .dep-hits li.will .dep-mark { color: var(--bad, #c2410c); font-weight: 600; }
 .dep-hits li.wont { opacity: .5; }
+
+/* ── Пульт ─────────────────────────────────────────────────────────────────
+   Главный экран. Раскладка ОДНА на телефон и на стол: различаются не
+   размеры, а строение строки. На узком имя и суть встают в две строки,
+   действие поднимается к имени, причина переоткрытия получает свою.
+   Второго набора разметки для этого не нужно — решает вёрстка.          */
+.pult { display: flex; flex-direction: column; gap: 0; max-width: 900px; }
+
+.pu-head { padding-bottom: 18px; border-bottom: 1px solid var(--line); }
+.pu-say { font-size: 19px; line-height: 1.35; margin: 0; letter-spacing: -0.01em; }
+.pu-say .st { color: var(--warn); font-weight: 600; }
+.pu-say .ok { color: var(--done); font-weight: 600; }
+.pu-say .who { font-family: var(--mono); font-size: 16px; color: var(--live); }
+.pu-sub {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  color: var(--muted);
+  font-size: 12.5px;
+  align-items: baseline;
+}
+.pu-sub .num { color: var(--ink); font-variant-numeric: tabular-nums; }
+.pu-sub .pu-q { flex-basis: 100%; }
+
+/* Лестница — шкала, а не список: тринадцать ступеней читаются краем глаза. */
+.pu-rung { display: flex; gap: 3px; margin-top: 14px; }
+.pu-rung i { flex: 1; height: 5px; border-radius: 1px; background: var(--wait); }
+.pu-rung i.done { background: var(--done); }
+/* `at`, а не `now`: класс `.now` в этом же листе — самостоятельная плашка с
+   рамкой и отступами, и ступень шкалы наследовала её коробку, раздуваясь
+   втрое. Столкновение имён видно только на снимке, не в коде. */
+.pu-rung i.at { background: var(--warn); }
+.pu-rung i.skip { background: var(--line); }
+
+.pu-band { padding: 18px 0 20px; border-bottom: 1px solid var(--line); }
+.pu-band:last-child { border-bottom: 0; }
+.pu-h { display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+.pu-h h2 {
+  margin: 0;
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.pu-cnt {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--wait);
+  color: var(--ink);
+}
+.pu-cnt.hot { background: var(--warn); color: var(--ground); }
+.pu-cnt.calm { opacity: .6; }
+.pu-h .pu-note { color: var(--muted); font-size: 11.5px; }
+
+.pu-runs, .pu-asks, .pu-moved { list-style: none; margin: 0; padding: 0; }
+.pu-runs li, .pu-asks li, .pu-moved li { border-top: 1px solid var(--line-soft); }
+.pu-runs li:first-child, .pu-asks li:first-child, .pu-moved li:first-child { border-top: 0; }
+
+.pu-id { font-family: var(--mono); font-size: 12.5px; color: var(--live); }
+.pu-t { min-width: 0; }
+.pu-kind { color: var(--muted); font-size: 12.5px; }
+.pu-why { color: var(--muted); font-size: 12.5px; min-width: 0; }
+.pu-state { font-size: 12px; color: var(--ready); }
+.pu-meta { color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+
+/* Широко: одна строка. Узко: две. Переключает грид, а не вторая разметка. */
+.pu-runs li { display: grid; gap: 4px 12px; padding: 9px 0; align-items: baseline;
+  grid-template-columns: 88px 104px minmax(0, 1fr) auto; }
+.pu-asks li { display: grid; gap: 4px 12px; padding: 9px 0; align-items: center;
+  grid-template-columns: 66px minmax(0, 1fr) auto; grid-template-areas: "id t act"; }
+.pu-asks .pu-id { grid-area: id; }
+.pu-asks .pu-t { grid-area: t; }
+.pu-asks .pu-do { grid-area: act; }
+.pu-moved li { display: grid; gap: 3px 12px; padding: 8px 0; align-items: baseline;
+  grid-template-columns: 108px 92px minmax(0, 1fr); }
+
+.pu-do {
+  font: inherit;
+  font-size: 12.5px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  border-radius: 5px;
+  padding: 3px 12px;
+  cursor: pointer;
+}
+.pu-do:hover { border-color: var(--muted); }
+.pu-do.key { border-color: transparent; background: var(--ink); color: var(--ground); font-weight: 600; }
+
+.pu-empty { color: var(--muted); font-size: 13px; margin: 0; }
+.pu-empty b { color: var(--done); font-weight: 600; }
+
+.pu-chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 12px; }
+.pu-chip {
+  display: inline-flex; align-items: baseline; gap: 6px;
+  border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; font-size: 12px;
+}
+.pu-chip b { font-family: var(--mono); font-size: 11px; font-weight: 600; }
+.pu-chip.hot { border-color: var(--warn); }
+.pu-chip.hot b { color: var(--warn); }
+
+.pu-more {
+  font: inherit; font-size: 12.5px; background: none; border: 0;
+  color: var(--live); cursor: pointer; padding: 8px 0 0;
+}
+
+@media (max-width: 720px) {
+  .pu-say { font-size: 16px; }
+  .pu-say .who { font-size: 14px; }
+  /* Имя и суть — в две строки, действие поднимается вправо к имени. */
+  .pu-asks li { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "id act" "t t"; }
+  .pu-asks .pu-t { line-height: 1.35; }
+  .pu-runs li { grid-template-columns: 88px minmax(0, 1fr); }
+  .pu-runs .pu-t { grid-column: 1 / -1; }
+  .pu-runs .pu-meta { grid-column: 1 / -1; }
+  /* Причина переоткрытия — своей строкой: иначе на 375 точках её не прочесть. */
+  .pu-moved li { grid-template-columns: auto minmax(0, 1fr); }
+  .pu-moved .pu-why { grid-column: 1 / -1; line-height: 1.35; }
+  .pu-h .pu-note { flex-basis: 100%; }
+}
+
+/* ── Оболочка на телефоне ──────────────────────────────────────────────────
+   На четыре тысячи строк было два медиазапроса: узкой раскладки не делали
+   вовсе. Боковик в 264 точки на экране в 390 забирал две трети, и любой
+   раздел сжимался до ста тридцати — читать нельзя ничего.
+
+   Боковик становится ВЕРХНЕЙ ЛЕНТОЙ: разделы в строку, лента листается
+   вбок внутри себя, страница вбок не едет. Выбранный раздел виден и после
+   перезагрузки — браузер сам подкручивает к нему.                       */
+@media (max-width: 860px) {
+  .app {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    height: 100dvh;
+  }
+  .side {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+    padding: 9px 12px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+  .side::-webkit-scrollbar { display: none; }
+
+  /* Название проекта не листается вместе с разделами: оно якорь. */
+  .side > *:first-child { position: sticky; left: 0; z-index: 2; flex: none; }
+
+  .side .ent.top {
+    flex: none;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0;
+    padding: 5px 11px;
+    border-radius: 7px;
+    white-space: nowrap;
+  }
+  /* Подпись раздела на ленте съедает высоту и ничего не добавляет: имени
+     хватает, а пояснение читают на самом экране. */
+  .side .ent.top .ent-c { display: none; }
+  .side .ent.top .ent-n { font-size: 13.5px; }
+
+  .side-note { flex: none; max-width: 260px; white-space: normal; }
+
+  .main { padding: 16px 14px 56px; }
+}
+
+@media (max-width: 480px) {
+  .main { padding: 14px 12px 48px; }
+}
+
+/* Ответ прямо в пульте: раскрывается в той же строке, а не уводит на другой
+   экран. Отказ двери показывается словами — дверь объясняет, почему не
+   приняла, и проглатывать это объяснение нельзя. */
+.pu-asks li.open { padding-bottom: 14px; }
+.pu-form { grid-column: 1 / -1; margin-top: 8px; display: flex; flex-direction: column; gap: 8px; }
+.pu-draft {
+  font: inherit;
+  font-size: 13.5px;
+  line-height: 1.5;
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  padding: 9px 11px;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+}
+.pu-draft:focus-visible { outline: 2px solid var(--live); outline-offset: 1px; }
+.pu-act { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.pu-do[disabled] { opacity: .45; cursor: default; }
+.pu-hint { color: var(--muted); font-size: 11.5px; }
+.pu-beef { margin: 0; color: var(--warn); font-size: 12.5px; }

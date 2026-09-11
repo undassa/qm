@@ -435,9 +435,12 @@ impl Mcp {
         tools.push(json!({ "name": "version-close", "description": "объявить выпуск закрытым или снова открытым; от закрытого считают, что изменилось после него",
             "inputSchema": { "type": "object", "properties": { "drop": json!({"type":"boolean","description":"снять объявленное этой же дверью"}), "version": s("имя выпуска"),
                 "state": s("closed · open, по умолчанию closed") }, "required": ["version"] } }));
-        tools.push(json!({ "name": "phase-gate-set", "description": "привязать гейт к фазе: чем фаза закрывается",
-            "inputSchema": { "type": "object", "properties": { "drop": json!({"type":"boolean","description":"снять объявленное этой же дверью"}), "phase": s("имя фазы"), "gate": s("имя гейта") },
-                "required": ["phase", "gate"] } }));
+        tools.push(json!({ "name": "phase-set", "description": "объявить фазу: место в цепочке, заголовок, гейт, которым она закрывается, и вид её задач",
+            "inputSchema": { "type": "object", "properties": { "drop": json!({"type":"boolean","description":"снять фазу целиком"}), "phase": s("имя фазы"),
+                "ord": json!({"type":"integer","description":"место в цепочке"}), "title": s("заголовок фазы"),
+                "gate": s("имя гейта"), "planLevel": s("уровни плана документов, через |"),
+                "taskKind": s("вид задач фазы: red · dev; пусто — фаза задач не несёт") },
+                "required": ["phase"] } }));
         tools.push(json!({ "name": "step-when-set", "description": "объявить, когда ступень вообще в игре: запрос условия и причина пропуска",
             "inputSchema": { "type": "object", "properties": { "drop": json!({"type":"boolean","description":"снять объявленное этой же дверью"}), "process": s("процесс, по умолчанию godzy"),
                 "ord": json!({"type":"integer"}), "whenQuery": s("запрос условия; пусто — всегда в игре"),
@@ -612,6 +615,8 @@ impl Mcp {
                 "holds": json!({"type":"array","items":{"type":"string"},
                     "description":"для container: таблицы, где лежат его сущности — проверяются по entity_kind"}) },
                 "required": ["kind", "projection"] } }));
+        tools.push(json!({ "name": "console", "description": "пульт: что делают агенты сейчас, что ждёт ответа человека, что поехало от правок",
+            "inputSchema": { "type": "object", "properties": {} } }));
         tools.push(json!({ "name": "links-graph", "description": "скелет зависимостей: какие роды на каких стоят, сколькими связями, и где сейчас переоткрыто",
             "inputSchema": { "type": "object", "properties": {} } }));
         tools.push(json!({ "name": "impact", "description": "что переоткроется, если эту запись изменить — обход вперёд по тем же связям, что и каскад",
@@ -681,7 +686,7 @@ impl Mcp {
     const WRITES: &[&str] = &[
         "put", "put-section", "rm", "document-add", "reparse", "reproject", "sweep",
         "task-state-push", "code-facts-push", "skills-push", "preflight-push", "worktree-push",
-        "ceiling-set", "blame-set", "derived-copy-set", "field-column-alias", "column-server-filled", "counts-sync", "kind-add", "kind-required", "kind-projection", "frozen-tree-set", "scheme-term-set", "orphans-purge", "surface-source-add", "sensor-spec-add", "agent-set", "donor-add", "guard-add", "gate-item-set", "method-set", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "step-selftest", "version-close", "phase-gate-set", "exception-set",
+        "ceiling-set", "blame-set", "derived-copy-set", "field-column-alias", "column-server-filled", "counts-sync", "kind-add", "kind-required", "kind-projection", "frozen-tree-set", "scheme-term-set", "orphans-purge", "surface-source-add", "sensor-spec-add", "agent-set", "donor-add", "guard-add", "gate-item-set", "method-set", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "step-selftest", "version-close", "phase-set", "exception-set",
         "author-set", "screen-area-set", "skill-set", "version-freeze",
         "links-rewrite", "links-retarget", "entity-rename",
     ];
@@ -690,7 +695,7 @@ impl Mcp {
     ///
     /// Ручки, правящие ОБЩЕЕ объявление: их итог виден каждому набору.
     const SHARED_WRITES: [&'static str; 8] = [
-        "gate-item-set", "gate-item-waive", "phase-gate-set", "step-add", "step-remove",
+        "gate-item-set", "gate-item-waive", "phase-set", "step-add", "step-remove",
         "step-method-set", "step-question-set", "step-probe-set",
     ];
 
@@ -726,7 +731,7 @@ impl Mcp {
         // вызов и отдавал строку таблицы вместо вычисления.
         const RESERVED: &[&str] = &[
             "method-set", "gate-item-set", "question-holders", "preflight-push", "worktree-push",
-            "sensor-specs", "scheme-terms", "frozen-trees", "addresses-declared", "tree-declared", "donors", "skills-push", "skills", "agents", "code-facts-push", "code-facts", "summary", "links-of", "retired-terms", "order", "gate-measure", "gate-item-waive", "gate-selftest", "links-rewrite", "links-retarget", "reparse", "screen-area-set", "skill-set", "skills-paths", "version-freeze", "version-delta", "generated-check", "principal-allow", "principals", "author-set", "authors", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "step-selftest", "version-close", "phase-gate-set", "exception-set", "next-step", "process-state", "statuses", "task-status", "status-anomaly", "pipeline", "waves", "phases", "coverage", "blocks", "history", "at-revision", "process-history", "progress",
+            "sensor-specs", "scheme-terms", "frozen-trees", "addresses-declared", "tree-declared", "donors", "skills-push", "skills", "agents", "code-facts-push", "code-facts", "summary", "links-of", "retired-terms", "order", "gate-measure", "gate-item-waive", "gate-selftest", "links-rewrite", "links-retarget", "reparse", "screen-area-set", "skill-set", "skills-paths", "version-freeze", "version-delta", "generated-check", "principal-allow", "principals", "author-set", "authors", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "step-selftest", "version-close", "phase-set", "exception-set", "next-step", "process-state", "statuses", "task-status", "status-anomaly", "pipeline", "waves", "phases", "coverage", "blocks", "history", "at-revision", "process-history", "progress",
             "kinds", "kinds-due", "readiness-gaps", "declared-unwritten", "blame-set", "doors", "derived-copy-set", "field-column-alias", "column-server-filled", "holders", "counts-sync", "kind-add", "kind-required", "kind-projection", "kind-reopens", "kind-proves", "kind-id-set", "tree", "document-coverage", "sections", "section", "backlinks", "search", "put",
             "put-section", "rm", "document-add", "reproject", "sweep", "gate", "next-task", "blockers", "events",
             "norm-versions", "measurements", "plan", "readiness", "requirements-of",
@@ -1023,6 +1028,10 @@ impl Mcp {
                     Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
                 }
             }
+            "console" => match crate::projector::console(&self.pool, p).await {
+                Ok(v) => ok(v),
+                Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
+            },
             "links-graph" => match crate::projector::links_graph(&self.pool, p).await {
                 Ok(v) => ok(v),
                 Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
@@ -1863,12 +1872,20 @@ impl Mcp {
                     Err(e) => refusal(Miss::Db(e.to_string())),
                 }
             }
-            "phase-gate-set" => {
+            "phase-set" => {
                 let phase = args.get("phase").and_then(|v| v.as_str()).unwrap_or("");
-                let gate = args.get("gate").and_then(|v| v.as_str()).unwrap_or("");
-                match crate::projector::set_phase_gate(&self.pool, p, phase, gate, args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
+                if phase.is_empty() {
+                    return refusal(Miss::Db("фаза без имени не объявляется".into()));
+                }
+                match crate::projector::set_phase(&self.pool, phase,
+                        num(args, "ord").map(|n| n as i32),
+                        args.get("title").and_then(|v| v.as_str()),
+                        args.get("gate").and_then(|v| v.as_str()),
+                        args.get("planLevel").and_then(|v| v.as_str()),
+                        args.get("taskKind").and_then(|v| v.as_str()),
+                        args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
                     Ok(v) => ok(v),
-                    Err(e) => refusal(Miss::Db(e.to_string())),
+                    Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
                 }
             }
             "step-when-set" => {

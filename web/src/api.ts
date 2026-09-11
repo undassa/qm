@@ -485,6 +485,37 @@ export const loadDocuments = (projectId: string) =>
  * Вызов инструмента. Имя и ответ те же, что у MCP: словарь один на обе стороны,
  * иначе интерфейс и харнес спросят разное и разойдутся молча.
  */
+/**
+ * Запись дверью. Веб до сих пор только читал: на сорок пять дверей заведения
+ * приходился один `POST`, и тот для проверки черновика. Правка шла мимо
+ * интерфейса — через `mh call`.
+ *
+ * Отказ двери — это ОТВЕТ, а не сбой: дверь объясняет, почему не приняла, и
+ * объяснение надо показать человеку, а не проглотить.
+ */
+export async function write(
+  projectId: string,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<{ ok: boolean; why: string; got: unknown }> {
+  const res = await fetch(`/api/projects/${projectId}/tool/${name}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify(args),
+  });
+  let got: unknown = null;
+  try {
+    got = await res.json();
+  } catch {
+    return { ok: false, why: "сервер ответил не разбираемым телом", got: null };
+  }
+  const d = got as { why?: string; status?: string; error?: string };
+  if (!res.ok) return { ok: false, why: d?.why ?? d?.error ?? `сервер отказал (${res.status})`, got };
+  // Дверь может принять запрос и отказать по существу — это тоже «не записано».
+  const плохо = d?.status && !["declared", "written", "renamed", "ok", "dropped"].includes(d.status);
+  return { ok: !плохо, why: плохо ? (d.why ?? d.status ?? "") : "", got };
+}
+
 export function tool<T>(projectId: string, name: string, args: Record<string, string | number> = {}): Promise<T> {
   const query = Object.entries(args)
     .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
