@@ -642,6 +642,10 @@ impl Mcp {
             "inputSchema": { "type": "object", "properties": { "kind": s("имя вида"),
                 "id": s("образец, например ^Q-\\d+$"), "why": s("почему — обязательно") },
                 "required": ["kind", "id", "why"] } }));
+        tools.push(json!({ "name": "kind-domain", "description": "объявить область проекта, к которой принадлежит вид: чем он по сути, а не где живёт",
+            "inputSchema": { "type": "object", "properties": { "kind": s("имя вида"),
+                "domain": s("область, например «требования» или «план»"),
+                "why": s("почему — обязательно") }, "required": ["kind", "domain", "why"] } }));
         tools.push(json!({ "name": "kind-proves", "description": "объявить, годится ли род доказательством требования: тест-кейс, правило кода, утверждение",
             "inputSchema": { "type": "object", "properties": { "kind": s("имя вида"),
                 "proves": json!({"type":"boolean"}), "why": s("почему — обязательно") },
@@ -760,7 +764,7 @@ impl Mcp {
         const RESERVED: &[&str] = &[
             "method-set", "gate-item-set", "question-holders", "preflight-push", "worktree-push",
             "sensor-specs", "scheme-terms", "frozen-trees", "addresses-declared", "tree-declared", "donors", "skills-push", "skills", "agents", "code-facts-push", "code-facts", "summary", "links-of", "retired-terms", "order", "gate-measure", "gate-item-waive", "gate-selftest", "links-rewrite", "links-retarget", "reparse", "screen-area-set", "skill-set", "skills-paths", "version-freeze", "version-delta", "generated-check", "principal-allow", "principals", "author-set", "authors", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "version-close", "phase-set", "exception-set", "gate-selftest", "next-step", "process-state", "statuses", "task-status", "status-anomaly", "pipeline", "waves", "phases", "coverage", "blocks", "history", "at-revision", "process-history", "progress",
-            "kinds", "kinds-due", "readiness-gaps", "declared-unwritten", "blame-set", "doors", "derived-copy-set", "field-column-alias", "column-server-filled", "holders", "counts-sync", "kind-add", "kind-required", "kind-projection", "kind-reopens", "kind-proves", "kind-id-set", "tree", "document-coverage", "sections", "section", "backlinks", "search", "put",
+            "kinds", "kinds-due", "readiness-gaps", "declared-unwritten", "blame-set", "doors", "derived-copy-set", "field-column-alias", "column-server-filled", "holders", "counts-sync", "kind-add", "kind-required", "kind-projection", "kind-reopens", "kind-proves", "kind-id-set", "kind-domain", "tree", "document-coverage", "sections", "section", "backlinks", "search", "put",
             "put-section", "rm", "document-add", "reproject", "sweep", "gate", "next-task", "blockers", "events", "task-plan-push",
             "norm-versions", "measurements", "plan", "readiness", "requirements-of",
             "tasks-of", "preflight-queue", "claims", "exceptions",
@@ -827,6 +831,7 @@ impl Mcp {
                         "idPattern": k.id.clone().unwrap_or_default(),
                         "nameIs": k.name_is.clone().unwrap_or_default(),
                         "projection": k.projection.clone().unwrap_or_default(),
+                        "domain": k.domain.clone().unwrap_or_default(),
                         "holds": k.holds.clone().unwrap_or_default()
                     }));
                 }
@@ -1091,6 +1096,13 @@ impl Mcp {
             "kind-id-set" => {
                 let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
                 match crate::projector::set_kind_id(&self.pool, p, kind_arg, &g("id"), &g("why")).await {
+                    Ok(v) => ok(v),
+                    Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
+                }
+            }
+            "kind-domain" => {
+                let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
+                match crate::projector::set_kind_domain(&self.pool, kind_arg, &g("domain"), &g("why")).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
                 }

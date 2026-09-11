@@ -4377,6 +4377,9 @@ button.chain-card:disabled { cursor: default; opacity: .55; }
    родом. Здесь род выбирается — и тринадцать родов получают экран разом.  */
 .corp { display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 26px; align-items: start; }
 
+/* Области — заголовки в списке родов. Между ними воздух, внутри плотно:
+   так видно, что это группы, а не сплошной перечень. */
+.co-kinds section + section { margin-top: 18px; }
 .co-kinds h2, .co-cell h5 {
   margin: 0 0 8px;
   font-family: var(--mono);

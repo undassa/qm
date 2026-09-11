@@ -129,6 +129,17 @@ const РОДЫ: Record<string, [string, string]> = {
   feature: ["фича", "feature"],
   version: ["выпуск", "release"],
   run: ["прогон", "run"],
+  risk: ["риск", "risk"],
+  gate: ["гейт", "gate"],
+};
+
+/** Области проекта. Имя области — слово проекта; перевод его подписывает. */
+const ОБЛАСТИ: Record<string, string> = {
+  "требования": "requirements",
+  "доказательство": "proof",
+  "план": "plan",
+  "знание": "knowledge",
+  "надзор": "oversight",
 };
 
 const КЛЮЧ = "mh-lang";
@@ -165,6 +176,11 @@ export function say(l: Lang, key: string): string {
   const пара = СЛОВАРЬ[key];
   if (!пара) return key;
   return l === "en" ? пара[1] : пара[0];
+}
+
+/** Как зовут область. Необъявленная показывается своим именем. */
+export function domainName(l: Lang, d: string): string {
+  return l === "en" ? (ОБЛАСТИ[d] ?? d) : d;
 }
 
 /** Как зовут род на этом языке. Неизвестный род показывается своим именем. */

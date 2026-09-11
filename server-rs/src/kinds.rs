@@ -24,6 +24,9 @@ pub struct Kind {
     /// `render` · `provenance`. Пусто — не объявлено, и это третье состояние.
     #[serde(default)]
     pub projection: Option<String>,
+    /// Область проекта: чем вид по сути. Объявляется дверью `kind-domain`.
+    #[serde(default)]
+    pub domain: Option<String>,
     /// Таблицы, в которые ложатся сущности этого вида. Проверяются дверью по
     /// связи `entity_kind`: объявление, которого не подтверждают строки, — та
     /// же пустота, только подписанная.
@@ -80,6 +83,14 @@ pub const TABLES: &[(&str, &str, &str, &str)] = &[
     ("article", "project_articles", "number::text", "title"),
     ("run", "project_runs_log", "id", "title"),
     ("gate", "project_gates", "phase", "item"),
+    // Виды, заведённые дверью `kind-add` в эту сессию. Перечень ЗАШИТ, а вид
+    // уже объявил свою таблицу сам — `kind-projection … holds`, и дверь это
+    // объявление проверила по живым строкам. Пока `table_of` читает список, а
+    // не объявление, всякий новый вид будет невидим при живых записях:
+    // `rationale` пропал из корпуса при 381 записи ровно так.
+    ("rationale", "project_rationale", "id", "title"),
+    ("lint-rule", "project_lint_rules", "id", "area"),
+    ("assertion", "project_assertions", "id", "area"),
 ];
 
 pub fn table_of(kind: &str) -> Option<(&'static str, &'static str, &'static str)> {

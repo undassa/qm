@@ -8212,6 +8212,50 @@ pub async fn console(pool: &Pool, project: &str) -> Result<Value, tokio_postgres
     }))
 }
 
+/// Объявить, к какой области проекта принадлежит вид.
+///
+/// Список родов — семнадцать строк по счёту записей, и по нему не видно, что
+/// требование, потребность и история про ОДНО, а задача и этап про другое.
+///
+/// Вывести это не из чего: фаза не годится — почти каждый род судится в
+/// нескольких (требование в G1, G2, G3, G5 и корпусе), а `in` говорит лишь,
+/// в каком документе род живёт. Область — суждение о смысле, и потому она
+/// ОБЪЯВЛЯЕТСЯ с доводом, как проекция и переоткрытие.
+pub async fn set_kind_domain(
+    pool: &Pool, kind: &str, domain: &str, why: &str,
+) -> Result<Value, tokio_postgres::Error> {
+    let client = pool.get().await.expect("пул отдал соединение");
+    if kind.trim().is_empty() || domain.trim().is_empty() || why.trim().is_empty() {
+        return Ok(json!({ "status": "empty", "why": "нужны вид, область и довод" }));
+    }
+    if client
+        .query_opt("SELECT 1 FROM kind_layout WHERE name = $1", &[&kind])
+        .await?
+        .is_none()
+    {
+        return Ok(json!({ "status": "no_kind", "kind": kind, "why": "вид не объявлен" }));
+    }
+    client
+        .execute(
+            "UPDATE kind_layout SET spec = spec || jsonb_build_object('domain', $2::text,
+                                                                      'domain-why', $3::text)
+              WHERE name = $1",
+            &[&kind, &domain, &why],
+        )
+        .await?;
+    let рядом: Vec<String> = client
+        .query(
+            "SELECT name FROM kind_layout WHERE spec->>'domain' = $1 ORDER BY name",
+            &[&domain],
+        )
+        .await?
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    Ok(json!({ "status": "declared", "kind": kind, "domain": domain, "with": рядом,
+               "means": "объявление ОБЩЕЕ: области одни для всех проектов" }))
+}
+
 pub async fn holders(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
     let client = pool.get().await.expect("пул отдал соединение");
     let rows = client

@@ -1,7 +1,7 @@
 import type React from "react";
 import { useEffect, useMemo, useState } from "react";
 import { tool } from "./api";
-import { type Lang, kindName, say } from "./say";
+import { type Lang, domainName, kindName, say } from "./say";
 
 /**
  * Корпус — всё, что знает проект.
@@ -22,7 +22,7 @@ interface Summary {
   numbers: string[];
   rows: Record<string, string | number>[];
 }
-interface KindRow { kind: string; count: number | null; shape: string; projection?: string }
+interface KindRow { kind: string; count: number | null; shape: string; projection?: string; domain?: string }
 interface Ent {
   id: string;
   kind: string;
@@ -238,27 +238,57 @@ export function Corpus({ projectId, lang }: { projectId: string; lang: Lang }): 
     return [...m];
   }, [rows, группа]);
 
+  /**
+   * Роды по областям. Порядок областей — по весу: где записей больше, та и
+   * выше. Роды внутри — тоже по весу, чтобы взгляд шёл сверху вниз.
+   */
+  const области = useMemo(() => {
+    const m = new Map<string, KindRow[]>();
+    for (const k of kinds ?? []) {
+      const d = k.domain ?? "";
+      const было = m.get(d);
+      if (было) было.push(k);
+      else m.set(d, [k]);
+    }
+    return [...m].sort((a, b) => {
+      // Необъявленные — в конец: это недоделка, а не область.
+      if (!a[0]) return 1;
+      if (!b[0]) return -1;
+      return (
+        b[1].reduce((n, k) => n + (k.count ?? 0), 0) - a[1].reduce((n, k) => n + (k.count ?? 0), 0)
+      );
+    });
+  }, [kinds]);
+
   if (!kinds) return <p className="empty">{say(lang, "co.reading")}</p>;
 
   return (
     <div className="corp">
       <nav className="co-kinds">
-        <h2>{say(lang, "co.kinds")}</h2>
-        <ul>
-          {kinds.map((k) => (
-            <li key={k.kind}>
-              <button
-                type="button"
-                className={k.kind === kind ? "on" : ""}
-                onClick={() => setKind(k.kind)}
-              >
-                <span>{kindName(lang, k.kind)}</span>
-                <b>{k.count}</b>
-              </button>
-              <i style={{ transform: `scaleX(${(k.count ?? 0) / (kinds[0]?.count || 1)})` }} />
-            </li>
-          ))}
-        </ul>
+        {/* Список собран по ОБЛАСТЯМ, а не по счёту. Семнадцать строк подряд
+            не говорили, что требование, потребность и история про одно, а
+            задача и этап про другое. Область объявлена дверью `kind-domain`
+            с доводом; вид без области стоит в конце своей строкой. */}
+        {области.map(([область, свои]) => (
+          <section key={область || "—"}>
+            <h2>{область ? domainName(lang, область) : say(lang, "co.kinds")}</h2>
+            <ul>
+              {свои.map((k) => (
+                <li key={k.kind}>
+                  <button
+                    type="button"
+                    className={k.kind === kind ? "on" : ""}
+                    onClick={() => setKind(k.kind)}
+                  >
+                    <span>{kindName(lang, k.kind)}</span>
+                    <b>{k.count}</b>
+                  </button>
+                  <i style={{ transform: `scaleX(${(k.count ?? 0) / (kinds[0]?.count || 1)})` }} />
+                </li>
+              ))}
+            </ul>
+          </section>
+        ))}
       </nav>
 
       <section className="co-main">
