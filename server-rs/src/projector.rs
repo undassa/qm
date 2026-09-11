@@ -9568,13 +9568,24 @@ pub async fn set_step_probe(
 ///
 /// Подсадка живёт внутри транзакции и умирает вместе с ней: набор после
 /// самотеста обязан остаться тем же, чем был.
-pub async fn step_selftest(pool: &Pool, project: &str, process: &str, under: &str) -> Result<Value, tokio_postgres::Error> {
+pub async fn step_selftest(
+    pool: &Pool,
+    project: &str,
+    set_name: &str,
+    process: &str,
+    under: &str,
+) -> Result<Value, tokio_postgres::Error> {
     let mut client = pool.get().await.expect("пул отдал соединение");
     let steps = client
         .query(
+            // НАБОР В ОТБОРЕ, и это не украшение: ключ лестницы — тройка
+            // `(set_name, process, ord)`, и всякий её читатель, кроме этого,
+            // набор называет. Второй набор с одноимённым процессом отдал бы
+            // сюда СВОИ ступени, прогнанные по чужому проекту, и номера в
+            // отчёте задвоились бы.
             "SELECT ord, question, method_kind, method, probe FROM harness_process_step
-              WHERE process = $1 ORDER BY ord",
-            &[&process],
+              WHERE set_name = $1 AND process = $2 ORDER BY ord",
+            &[&set_name, &process],
         )
         .await?;
 
@@ -9830,7 +9841,7 @@ pub async fn gate_selftest(pool: &Pool, project: &str, under: &str) -> Result<Va
     let mut stale: Vec<Value> = Vec::new();
     // Самотест ЗАПИСЫВАЕТ приговор пробе: «ни разу не роняли» должен видеть
     // всякий, кто смотрит гейт, а не только тот, кто позвал самотест.
-    let mut verdict: Vec<(String, String, bool)> = Vec::new();
+    let mut verdict: Vec<(String, String, Option<bool>)> = Vec::new();
     for r in &items {
         let (phase, item): (String, String) = (r.get(0), r.get(1));
         let query: Option<String> = r.get(2);
@@ -9872,7 +9883,7 @@ pub async fn gate_selftest(pool: &Pool, project: &str, under: &str) -> Result<Va
         tx.rollback().await?;
         match saw {
             Ok((was, became)) if became != was => {
-                verdict.push((phase.clone(), item.clone(), true));
+                verdict.push((phase.clone(), item.clone(), Some(true)));
                 alive.push(json!({ "phase": phase, "item": item,
                     "was": was.len(), "became": became.len() }));
             }
@@ -9904,7 +9915,12 @@ pub async fn gate_selftest(pool: &Pool, project: &str, under: &str) -> Result<Va
                     found
                 };
                 if let Some(f) = stale_fact {
-                    verdict.push((phase.clone(), item.clone(), true));
+                    // НЕ СУДИЛИ — значит `null`, а не «проба проверена». Прежде
+                    // сюда шло `true`, и пункт, чей датчик протух насовсем,
+                    // навсегда показывал зелёный приговор пробе, которую никто
+                    // ни разу не ронял. Колонка `null` допускает, и «не судили»
+                    // у неё уже есть.
+                    verdict.push((phase.clone(), item.clone(), None));
                     stale.push(json!({ "phase": phase, "item": item, "fact": f,
                         "why": format!("датчик «{f}» не свеж: правило отказывается судить, и уронить \
                                         его подсадкой нельзя — реагировать нечему. Это не «не роняли», \
@@ -9912,13 +9928,13 @@ pub async fn gate_selftest(pool: &Pool, project: &str, under: &str) -> Result<Va
                     tx_done = true;
                 }
                 if !tx_done {
-                verdict.push((phase.clone(), item.clone(), false));
+                verdict.push((phase.clone(), item.clone(), Some(false)));
                 broken.push(json!({ "phase": phase, "item": item,
                     "why": format!("на подсаженном нарушении ответ пункта не изменился: те же {} строк, слово в слово", was.len()) }));
                 }
             }
             Err(why) => {
-                verdict.push((phase.clone(), item.clone(), false));
+                verdict.push((phase.clone(), item.clone(), Some(false)));
                 broken.push(json!({ "phase": phase, "item": item, "why": why }));
             }
         }
@@ -9926,19 +9942,39 @@ pub async fn gate_selftest(pool: &Pool, project: &str, under: &str) -> Result<Va
 
     // Приговор записывается: «ни разу не роняли» должен видеть всякий, кто
     // смотрит гейт, а не только тот, кто позвал самотест.
-    for (phase, id, ok) in &verdict {
-        client
-            .execute("UPDATE gate_item SET probe_ok = $3 WHERE phase = $1 AND id = $2",
-                     &[phase, id, ok])
-            .await?;
-        client
-            .execute("UPDATE project_gates SET probe_ok = $3 WHERE phase = $1 AND id = $2",
-                     &[phase, id, ok])
-            .await?;
+    //
+    // НО ТОЛЬКО ПРОГОН «КАК ЕСТЬ». Прогоны при крашеных гейтах — диагностика: они
+    // отвечают на вопрос «не зависит ли проба от состояния, которого сама не
+    // форсирует», и состояние это выдумано. Записывая их, колонка становилась
+    // последним-кто-успел: пункт, сломанный как есть и под зелёными, но живой под
+    // красными, сохранялся как проверенный — приговор, обратный тому, что сказал
+    // отчёт. Требование «жив в обоих состояниях» держит скрипт `selftest.sh`,
+    // который роняет прогон; колонка же говорит об одном — о настоящем
+    // состоянии набора.
+    let persist = under.is_empty();
+    if persist {
+        for (phase, id, ok) in &verdict {
+            client
+                .execute("UPDATE gate_item SET probe_ok = $3 WHERE phase = $1 AND id = $2",
+                         &[phase, id, ok])
+                .await?;
+            // ЗАМЕР ПРИНАДЛЕЖИТ ПРОЕКТУ, и без его имени приговор растекался по
+            // всем: `project_gates` ключуется тройкой, а писали сюда парой.
+            // Самотест проекта A перекрашивал одноимённый пункт у B — пробой,
+            // которую у B никто не запускал, и по данным, которых у B нет.
+            client
+                .execute(
+                    "UPDATE project_gates SET probe_ok = $3
+                      WHERE project_id = $4 AND phase = $1 AND id = $2",
+                    &[phase, id, ok, &project],
+                )
+                .await?;
+        }
     }
 
     Ok(json!({
         "under": if under.is_empty() { "как есть" } else { under },
+        "persisted": persist,
         "queryItems": items.len(),
         "alive": alive.len(), "aliveItems": alive,
         "broken": broken.len(), "brokenItems": broken,
@@ -10520,7 +10556,6 @@ pub async fn set_gate_item(
     // роняет ничего, и самотест назовёт такой пункт сломанным; узнать об этом у
     // двери лучше, чем через сто десять пунктов самотеста.
     let probe_text = probe.map(|p| p.to_owned()).unwrap_or_else(|| had.2.clone());
-    let mut probe_runs: Option<bool> = None;
     if !probe_text.trim().is_empty() {
         let text = probe_text.trim().to_owned();
         let tx = client.transaction().await?;
@@ -10535,7 +10570,14 @@ pub async fn set_gate_item(
                 "проба исполнилась и не подсадила ни строки: уронить ею правило нельзя".to_owned()),
             Ok(_) => None,
         };
-        probe_runs = Some(why.is_none());
+        // ПРИГОВОР ПРОБЕ ЗДЕСЬ НЕ ВЫНОСИТСЯ, и `probe_runs` больше никуда не
+        // едет. «Проба подсадила строку» и «правило на подсаженное
+        // отреагировало» — разные утверждения, а колонка была одна, и правка
+        // ЗАГОЛОВКА пункта перекрашивала сломанную самотестом пробу в
+        // проверенную: слабый смысл побеждал сильный на каждой правке. Дверь
+        // по-прежнему отказывает пробе, не подсадившей ничего, — но приговор
+        // выносит самотест, а до него колонка честно пуста.
+        let _ = why.is_none();
         if let (Some(why), Some(_)) = (why, probe) {
             return Ok(json!({ "status": "probe_does_not_plant", "why": why, "probe": text }));
         }
@@ -10559,7 +10601,7 @@ pub async fn set_gate_item(
                              probe_ok = EXCLUDED.probe_ok,
                              subject_query = coalesce($9, gate_item.subject_query),
                              subject_why = coalesce($10, gate_item.subject_why)",
-            &[&phase, &id, &kind, &query, &owner, &probe, &title, &probe_runs,
+            &[&phase, &id, &kind, &query, &owner, &probe, &title, &None::<bool>,
               &subject, &subject_why],
         )
         .await?;
@@ -11619,9 +11661,16 @@ pub async fn waves(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::
                       WHERE q.project_id = t.project_id AND q.task_id = t.id) AS requirements,
                     (SELECT v.verdict FROM preflight_verdict v
                       WHERE v.project_id = t.project_id AND v.task_id = t.id
-                      ORDER BY v.at DESC LIMIT 1) AS preflight
+                      ORDER BY v.at DESC LIMIT 1) AS preflight,
+                    -- ФАЗА — В КАРТОЧКЕ, потому что очередь строят отсюда.
+                    -- Барьер стоит в `next-task`, а диспетчер этапа берёт волну
+                    -- и раздаёт её по исполнителям: доска знала про фазу, а
+                    -- очередь — нет, и мимо барьера уходило ровно то, что он
+                    -- держит.
+                    tp.phase, tp.open AS phase_open
                FROM project_plan_tasks t
                LEFT JOIN red_task r ON r.project_id = t.project_id AND r.id = t.id
+               LEFT JOIN task_phase tp ON tp.project_id = t.project_id AND tp.task_id = t.id
               WHERE t.project_id = $1
               ORDER BY t.milestone_id, t.ord, t.id",
             &[&project],
@@ -11676,6 +11725,10 @@ pub async fn waves(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::
             "kind": kind, "state": r.get::<_, String>(4),
             "checks": r.get::<_, i32>(6), "requirements": r.get::<_, i64>(7),
             "preflight": r.get::<_, Option<String>>(8),
+            "phase": r.get::<_, Option<String>>(9),
+            // Пусто — вид задачи не отображён ни на одну фазу: «не объявлено», а
+            // не «можно раздавать».
+            "phaseOpen": r.get::<_, Option<bool>>(10),
             "wave": wave[i],
             "waits": depends[i].iter().filter(|&&j| tasks[j].get::<_, String>(4) != "closed").count(),
         }));
@@ -11684,11 +11737,22 @@ pub async fn waves(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::
         .iter()
         .filter(|c| c["kind"] == "red" && c["state"] != "closed")
         .count();
+    // Сколько в волне того, что раздавать нельзя. Счёт рядом с карточками, а не
+    // вместо них: спрятать такие задачи значило бы потерять работу, которая
+    // станет работой, как только гейт откроется.
+    let held = cards
+        .iter()
+        .filter(|c| c["state"] != "closed" && c["phaseOpen"] != serde_json::Value::Bool(true))
+        .count();
     Ok(json!({
         "cards": cards,
         "total": cards.len(),
         // Барьер красной фазы: весь трек проверок предшествует всему коду.
         "openRed": open_red,
+        "heldByPhase": held,
+        "why": if held > 0 {
+            "карточки с `phaseOpen` не `true` в очередь не идут: их фаза не открыта либо              вид задачи не отображён ни на одну фазу"
+        } else { "" },
     }))
 }
 

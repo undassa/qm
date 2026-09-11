@@ -1,0 +1,91 @@
+name: проверки
+
+on:
+  push:
+    branches: [main, harness]
+  pull_request:
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server-rs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server-rs
+      - run: cargo build --release --locked
+      - run: cargo test --release --locked
+      # ХРАПОВИК, А НЕ `-D warnings`. Предупреждений в дереве 79, и запрет
+      # немедленно сделал бы работу вечно красной — проверка, к красноте которой
+      # привыкли, хуже отсутствующей. Но и `cargo clippy` без запрета выходит
+      # нулём на любом числе: это украшение. Поэтому линия: не расти.
+      - run: |
+          cargo clippy --release --locked --all-targets 2>&1 | tee /tmp/clippy.txt
+          now=$(grep -c '^warning' /tmp/clippy.txt || true)
+          was=$(cat ../.clippy-baseline)
+          echo "предупреждений $now, линия $was"
+          if [ "$now" -gt "$was" ]; then
+            echo "::error::предупреждений стало больше: было $was, стало $now"
+            exit 1
+          fi
+          if [ "$now" -lt "$was" ]; then
+            echo "::notice::линию можно опустить до $now — правьте .clippy-baseline"
+          fi
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run build
+
+  # Половина харнеса живёт в базе — правила гейтов, их пробы, ступени лестницы и
+  # предметы ступеней. `cargo test` не видит её вовсе, и ровно так пробы ступеней
+  # 9 и 10 сгнили незамеченными: сломались они не от правки, а от того, что
+  # состояние набора изменилось. Единственный сторож этой половины — самотест, и
+  # пока его запускает человек по памяти, сторожа нет.
+  #
+  # Прогон требует живого экземпляра с набором: правила меряют набор, а не схему.
+  # Без секретов работа пропускается, а не падает: молчаливо красная проверка,
+  # которую все привыкли видеть красной, хуже отсутствующей.
+  selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # `id` и ссылки на него — только латиницей: имена шагов GitHub проверяет
+      # образцом `[A-Za-z_][A-Za-z0-9_-]*`, и кириллическое имя роняет разбор
+      # ВСЕГО файла — вместе с работами, которые к нему отношения не имеют.
+      # Заголовки работ при этом остаются какими угодно.
+      - if: ${{ secrets.MH_EDGE_SECRET != '' }}
+        uses: dtolnay/rust-toolchain@stable
+      - if: ${{ secrets.MH_EDGE_SECRET != '' }}
+        run: cargo build --release --locked --bin mh
+        working-directory: server-rs
+      - if: ${{ secrets.MH_EDGE_SECRET != '' }}
+        run: |
+          export PATH="$PWD/server-rs/target/release:$PATH"
+          ./scripts/selftest.sh
+        env:
+          MH_URL: ${{ secrets.MH_URL }}
+          MH_EDGE_SECRET: ${{ secrets.MH_EDGE_SECRET }}
+          MH_PROJECT: ${{ secrets.MH_PROJECT }}
+          MH_PRINCIPAL: ${{ secrets.MH_PRINCIPAL }}
+      - if: ${{ secrets.MH_EDGE_SECRET == '' }}
+        run: |
+          echo "::notice::самотест пропущен: секретов живого экземпляра нет."
+          echo "Заведите MH_URL, MH_EDGE_SECRET, MH_PROJECT, MH_PRINCIPAL —"
+          echo "иначе половину харнеса, живущую в базе, не сторожит ничто."

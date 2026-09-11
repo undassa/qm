@@ -83,6 +83,7 @@ const СЛОВАРЬ: Record<string, [string, string]> = {
   "co.search": ["Искать по имени", "Search by name"],
   "co.cols": ["колонок", "more columns"],
   "co.fold": ["свернуть колонки", "fold columns"],
+  "co.groupBy": ["собрать по", "group by"],
 
   // Зависимости
   "de.skeleton": ["Скелет", "Skeleton"],

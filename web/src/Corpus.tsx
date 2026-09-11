@@ -96,6 +96,8 @@ export function Corpus({ projectId, lang }: { projectId: string; lang: Lang }): 
   const [by, setBy] = useState<string>("");
   /** Показывать все колонки или сводку. Десять колонок разом — сетка, а не список. */
   const [wide, setWide] = useState(false);
+  /** По какой колонке собирать в группы. Пусто — сплошным списком. */
+  const [grp, setGrp] = useState<string | null>(null);
 
   useEffect(() => {
     if (!projectId) return;
@@ -117,6 +119,7 @@ export function Corpus({ projectId, lang }: { projectId: string; lang: Lang }): 
     setSum(null);
     setPick("");
     setBy("");
+    setGrp(null);
     void tool<Summary>(projectId, "summary", { kind }).then(setSum).catch(() => setSum(null));
   }, [projectId, kind]);
 
@@ -178,29 +181,30 @@ export function Corpus({ projectId, lang }: { projectId: string; lang: Lang }): 
    * пятнадцать `CFG`, потом одиннадцать `COR`. Значение показывается на первой
    * строке вереницы, дальше молчит, и на границе ложится линия.
    */
+
   /**
-   * Колонки, идущие ВЕРЕНИЦАМИ: у требований это область — пятнадцать `CFG`,
-   * потом одиннадцать `COR`. В них повтор молчит, и на границе ложится линия.
-   *
-   * Приоритет сюда НЕ попадает, и это важно: он чередуется, а не тянется, и
-   * схлопнутый читается дырами — «О _ _ _ Ж» вместо «О О О О Ж». Схлопывать
-   * можно повтор, но не чередование.
+   * По каким колонкам собирать предлагается. Годится та, где значений заметно
+   * меньше, чем записей: собирать триста шесть заголовков по заголовку —
+   * значит получить триста шесть групп по одной строке.
    */
-  const вереницы = useMemo(() => {
+  const собираемые = useMemo(() => {
     const rs = sum?.rows ?? [];
     const nums = new Set(sum?.numbers ?? []);
-    if (rs.length < 12) return new Set<string>();
-    const годные = (sum?.columns ?? []).filter((k) => {
+    if (rs.length < 8) return [] as string[];
+    return (sum?.columns ?? []).filter((k) => {
       if (nums.has(k)) return false;
-      const v = rs.map((r) => String(r[k] ?? ""));
-      const разных = new Set(v).size;
-      if (разных < 2 || разных > v.length / 4) return false;
-      const скачков = v.filter((x, i) => i > 0 && x !== v[i - 1]).length;
-      return скачков <= разных + 1;
+      const разных = new Set(rs.map((r) => String(r[k] ?? ""))).size;
+      return разных > 1 && разных <= Math.max(3, rs.length / 4);
     });
-    return new Set(годные);
   }, [sum]);
-  const группа = [...вереницы][0] ?? "";
+
+  /**
+   * По какой колонке собирать по умолчанию — первая годная; выбор человека
+   * главнее. Прежде здесь искались ВЕРЕНИЦЫ — подряд идущие одинаковые
+   * значения, — и вопросы не собирались вовсе: состояния у них чередуются.
+   * Сборке порядок строк не нужен: она сама их и собирает.
+   */
+  const группа = grp ?? собираемые[0] ?? "";
 
   const rows = useMemo(() => {
     const r = sum?.rows ?? [];
@@ -216,6 +220,23 @@ export function Corpus({ projectId, lang }: { projectId: string; lang: Lang }): 
         : String(a[by] ?? "").localeCompare(String(b[by] ?? "")),
     );
   }, [sum, q, by]);
+
+  /**
+   * Строки, разложенные по группам. Прежде повтор просто молчал, и размер
+   * группы приходилось считать глазами: пятнадцать `CFG` подряд — это
+   * пятнадцать или двенадцать? Заголовок называет и значение, и счёт.
+   */
+  const группы = useMemo(() => {
+    if (!группа) return [["", rows] as [string, typeof rows]];
+    const m = new Map<string, typeof rows>();
+    for (const r of rows) {
+      const k = String(r[группа] ?? "");
+      const было = m.get(k);
+      if (было) было.push(r);
+      else m.set(k, [r]);
+    }
+    return [...m];
+  }, [rows, группа]);
 
   if (!kinds) return <p className="empty">{say(lang, "co.reading")}</p>;
 
@@ -262,6 +283,23 @@ export function Corpus({ projectId, lang }: { projectId: string; lang: Lang }): 
               <span className="co-cnt">
                 {rows.length} {say(lang, "co.rows")}
               </span>
+              {/* Собирать по колонке — там же, где счёт: это свойство показа,
+                  а не отдельная настройка где-то в стороне. */}
+              {собираемые.length > 0 && (
+                <span className="co-by">
+                  <span className="co-by-l">{say(lang, "co.groupBy")}</span>
+                  {собираемые.map((c) => (
+                    <button
+                      key={c}
+                      type="button"
+                      className={группа === c ? "on" : ""}
+                      onClick={() => setGrp(группа === c ? "" : c)}
+                    >
+                      {подпись(lang, c)}
+                    </button>
+                  ))}
+                </span>
+              )}
               {columns.hidden > 0 && (
                 <button className="co-wide" type="button" onClick={() => setWide(true)}>
                   + {columns.hidden} {say(lang, "co.cols")}
@@ -295,45 +333,43 @@ export function Corpus({ projectId, lang }: { projectId: string; lang: Lang }): 
                     ))}
                   </tr>
                 </thead>
-                <tbody>
-                  {rows.slice(0, 400).map((r, i, all) => (
-                    <tr
-                      key={String(r.id)}
-                      onClick={() => setPick(String(r.id))}
-                      /* Полоса начинается там, где меняется группа: пятнадцать
-                         «CFG» подряд читаются как одна, а не как пятнадцать. */
-                      className={
-                        группа && i > 0 && String(all[i - 1]?.[группа] ?? "") !== String(r[группа] ?? "")
-                          ? "brk"
-                          : ""
-                      }
-                    >
-                      {columns.show.map((c) => (
-                        <td
-                          key={c}
-                          className={
-                            клеть(c, sum.numbers ?? []) +
-                            // Ноль доказательств — не «мало», а «ничем».
-                            (ДОКАЗ.has(c) && Number(r[c] ?? 0) === 0 ? " zero" : "") +
-                            ((sum.numbers ?? []).includes(c) && Number(r[c] ?? 0) === 1 ? " one" : "")
-                          }
-                        >
-                          {c === "id" ? (
-                            <span className="co-id">{String(r[c] ?? "")}</span>
-                          ) : вереницы.has(c) &&
-                            i > 0 &&
-                            String(all[i - 1]?.[c] ?? "") === String(r[c] ?? "") ? (
-                            // Повтор молчит: пятнадцать «CFG» подряд читаются
-                            // как один, а не как пятнадцать.
-                            ""
-                          ) : (
-                            String(r[c] ?? "")
-                          )}
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
+                {группы.map(([имя, свои]) => (
+                  <tbody key={имя || "все"}>
+                    {группа && имя !== "" && (
+                      <tr className="co-grp">
+                        <th colSpan={columns.show.length} scope="colgroup">
+                          <span>{имя}</span>
+                          <b>{свои.length}</b>
+                        </th>
+                      </tr>
+                    )}
+                    {свои.slice(0, 400).map((r) => (
+                      <tr key={String(r.id)} onClick={() => setPick(String(r.id))}>
+                        {columns.show.map((c) => (
+                          <td
+                            key={c}
+                            className={
+                              клеть(c, sum.numbers ?? []) +
+                              (ДОКАЗ.has(c) && Number(r[c] ?? 0) === 0 ? " zero" : "") +
+                              ((sum.numbers ?? []).includes(c) && Number(r[c] ?? 0) === 1 ? " one" : "")
+                            }
+                          >
+                            {c === "id" ? (
+                              <span className="co-id">{String(r[c] ?? "")}</span>
+                            ) : c === группа ? (
+                              // Значение группы стоит в её заголовке; повторять
+                              // его в каждой строке значит говорить дважды.
+                              ""
+                            ) : (
+                              String(r[c] ?? "")
+                            )}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                ))}
+
               </table>
             </div>
           </>

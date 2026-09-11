@@ -450,7 +450,8 @@ impl Mcp {
                 "ord": json!({"type":"integer"}), "probe": s("запрос подсадки") },
                 "required": ["ord", "probe"] } }));
         tools.push(json!({ "name": "step-selftest", "description": "самотест лестницы: каждая ступень роняется подсаженным нарушением в откатываемой транзакции; живой считается та, у которой число выросло — и выросло при всех зелёных гейтах и при всех красных, а не только в сегодняшнем состоянии",
-            "inputSchema": { "type": "object", "properties": { "process": s("процесс, по умолчанию godzy"),
+            "inputSchema": { "type": "object", "properties": { "set": s("набор, по умолчанию godzy"),
+                "process": s("процесс, по умолчанию godzy"),
                 "under": s("green · red — прогнать при всех зелёных либо всех красных гейтах; пусто — как есть") } } }));
         tools.push(json!({ "name": "step-question-set", "description": "переименовать ступень лестницы: условие, которое должно быть верно, чтобы она считалась пройденной",
             "inputSchema": { "type": "object", "properties": { "drop": json!({"type":"boolean","description":"снять объявленное этой же дверью"}), "process": s("процесс, по умолчанию godzy"),
@@ -689,11 +690,18 @@ impl Mcp {
     /// осознанно, а не молча получит право дёргать пересчёт. Забытая здесь
     /// пишущая ручка означает доску, отставшую до следующей правки, — заметно и
     /// поправимо; лишняя означала бы пересчёт на каждый чих.
+    /// Двери, которые ПИШУТ. Только они заказывают пересчёт.
+    ///
+    /// Читающая дверь в этом списке — заказ пересчёта за то, что кто-то
+    /// посмотрел: так здесь стояли `sensors` и `goals`, обе — чистые перечни.
+    /// Обратная ошибка того же рода — `step-selftest`: он работает в
+    /// транзакции, которую всегда откатывает, и писал ноль строк, заказывая
+    /// полный круг каждым прогоном.
     const WRITES: &[&str] = &[
         "put", "put-section", "rm", "document-add", "reparse", "reproject", "sweep",
         "task-state-push", "code-facts-push", "skills-push", "preflight-push", "worktree-push",
         "task-plan-push",
-        "ceiling-set", "blame-set", "derived-copy-set", "field-column-alias", "column-server-filled", "counts-sync", "kind-add", "kind-required", "kind-projection", "frozen-tree-set", "scheme-term-set", "orphans-purge", "surface-source-add", "sensor-spec-add", "agent-set", "donor-add", "guard-add", "gate-item-set", "method-set", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "step-selftest", "version-close", "phase-set", "exception-set",
+        "ceiling-set", "blame-set", "derived-copy-set", "field-column-alias", "column-server-filled", "counts-sync", "kind-add", "kind-required", "kind-projection", "frozen-tree-set", "scheme-term-set", "orphans-purge", "surface-source-add", "sensor-spec-add", "agent-set", "donor-add", "guard-add", "gate-item-set", "method-set", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "version-close", "phase-set", "exception-set", "gate-selftest",
         "author-set", "screen-area-set", "skill-set", "version-freeze",
         "links-rewrite", "links-retarget", "entity-rename",
     ];
@@ -701,16 +709,29 @@ impl Mcp {
     /// Вызов инструмента — и отметка, если он писал.
     ///
     /// Ручки, правящие ОБЩЕЕ объявление: их итог виден каждому набору.
-    const SHARED_WRITES: [&'static str; 8] = [
+    // `gate-selftest` здесь потому, что приговор пробе живёт в `gate_item` —
+    // объявлении, общем на все наборы. `step-selftest` не здесь и не в `WRITES`
+    // вовсе: он работает в транзакции, которую всегда откатывает, и не пишет
+    // ни строки. Пока он числился пишущим, каждый его прогон — а их в проверке
+    // шесть — заказывал полный пересчёт всем проектам ни за чем.
+    const SHARED_WRITES: [&'static str; 9] = [
         "gate-item-set", "gate-item-waive", "phase-set", "step-add", "step-remove",
-        "step-method-set", "step-question-set", "step-probe-set",
+        "step-method-set", "step-question-set", "step-probe-set", "gate-selftest",
     ];
 
     /// Отметка ставится ПОСЛЕ ответа и только на успешный: пересчитывать набор
     /// из-за отказа значит считать то же самое второй раз.
     pub async fn call(&self, name: &str, args: &Value) -> Value {
         let out = self.run(name, args).await;
-        if Self::WRITES.contains(&name) && out.get("error").is_none() {
+        // ОТКАЗ УЗНАЁТСЯ ПО `isError`, а не по ключу `error`, которого отказ не
+        // несёт вовсе: `refusal` отдаёт `{content, isError}`. Условие было верно
+        // ВСЕГДА, и отметку ставил всякий отказ — а для общей двери это
+        // `touch_all`: кривой `gate-item-set`, отвергнутый базой, запускал полный
+        // пересчёт всем проектам разом. Ровно то, чего доводом выше сказано не
+        // делать.
+        let failed = out.get("isError").and_then(|v| v.as_bool()).unwrap_or(false)
+            || out.get("error").is_some();
+        if Self::WRITES.contains(&name) && !failed {
             // Правка ОБЩЕГО объявления метит все наборы: пункт гейта, фаза и
             // ступень лестницы одни на всех, и посчитать их надо всем.
             if Self::SHARED_WRITES.contains(&name) {
@@ -738,7 +759,7 @@ impl Mcp {
         // вызов и отдавал строку таблицы вместо вычисления.
         const RESERVED: &[&str] = &[
             "method-set", "gate-item-set", "question-holders", "preflight-push", "worktree-push",
-            "sensor-specs", "scheme-terms", "frozen-trees", "addresses-declared", "tree-declared", "donors", "skills-push", "skills", "agents", "code-facts-push", "code-facts", "summary", "links-of", "retired-terms", "order", "gate-measure", "gate-item-waive", "gate-selftest", "links-rewrite", "links-retarget", "reparse", "screen-area-set", "skill-set", "skills-paths", "version-freeze", "version-delta", "generated-check", "principal-allow", "principals", "author-set", "authors", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "step-selftest", "version-close", "phase-set", "exception-set", "next-step", "process-state", "statuses", "task-status", "status-anomaly", "pipeline", "waves", "phases", "coverage", "blocks", "history", "at-revision", "process-history", "progress",
+            "sensor-specs", "scheme-terms", "frozen-trees", "addresses-declared", "tree-declared", "donors", "skills-push", "skills", "agents", "code-facts-push", "code-facts", "summary", "links-of", "retired-terms", "order", "gate-measure", "gate-item-waive", "gate-selftest", "links-rewrite", "links-retarget", "reparse", "screen-area-set", "skill-set", "skills-paths", "version-freeze", "version-delta", "generated-check", "principal-allow", "principals", "author-set", "authors", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "version-close", "phase-set", "exception-set", "gate-selftest", "next-step", "process-state", "statuses", "task-status", "status-anomaly", "pipeline", "waves", "phases", "coverage", "blocks", "history", "at-revision", "process-history", "progress",
             "kinds", "kinds-due", "readiness-gaps", "declared-unwritten", "blame-set", "doors", "derived-copy-set", "field-column-alias", "column-server-filled", "holders", "counts-sync", "kind-add", "kind-required", "kind-projection", "kind-reopens", "kind-proves", "kind-id-set", "tree", "document-coverage", "sections", "section", "backlinks", "search", "put",
             "put-section", "rm", "document-add", "reproject", "sweep", "gate", "next-task", "blockers", "events", "task-plan-push",
             "norm-versions", "measurements", "plan", "readiness", "requirements-of",
@@ -1929,7 +1950,8 @@ impl Mcp {
             }
             "step-selftest" => {
                 let process = args.get("process").and_then(|v| v.as_str()).unwrap_or("godzy");
-                match crate::projector::step_selftest(&self.pool, p, process,
+                let set_name = args.get("set").and_then(|v| v.as_str()).unwrap_or("godzy");
+                match crate::projector::step_selftest(&self.pool, p, set_name, process,
                         args.get("under").and_then(|v| v.as_str()).unwrap_or("")).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
