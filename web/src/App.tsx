@@ -54,7 +54,7 @@ const PAGES: { page: string; key: string; view: (id: string, ctx: Ctx) => React.
   // фильтры и свои дыры, и общей таблицей документов их не показать.
   { page: "read", key: "nav.read", view: (id, ctx) => <Reader projectId={id} want={ctx.want} /> },
   { page: "corpus", key: "nav.corpus", view: (id, ctx) => <Corpus projectId={id} lang={ctx.lang} /> },
-  { page: "depends", key: "nav.depends", view: (id) => <Depends projectId={id} /> },
+  { page: "depends", key: "nav.depends", view: (id, ctx) => <Depends projectId={id} lang={ctx.lang} /> },
 ];
 
 /**

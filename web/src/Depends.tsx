@@ -1,6 +1,7 @@
 import type React from "react";
 import { useEffect, useState } from "react";
 import { tool } from "./api";
+import { type Lang, domainName, kindName, say } from "./say";
 
 /**
  * Зависимости набора — то, чего интерфейс не показывал никогда.
@@ -23,7 +24,9 @@ interface Node {
   count: number;
   reopened: number;
   reopens: boolean;
+  domain?: string;
 }
+interface DomEdge { from: string; to: string; links: number; pairs: number }
 interface Edge {
   from: string;
   to: string;
@@ -37,25 +40,14 @@ interface Hit {
   reopens: boolean;
 }
 
-const СЛОВО: Record<string, string> = {
-  requirement: "требование",
-  check: "проверка",
-  story: "история",
-  task: "задача",
-  "red-task": "красная задача",
-  milestone: "этап",
-  question: "вопрос",
-  screen: "экран",
-  need: "потребность",
-  decision: "решение",
-  rationale: "рассуждение",
-  "lint-rule": "правило кода",
-  assertion: "утверждение",
-};
-const зовут = (k: string): string => СЛОВО[k] ?? k;
+/** Род зовётся так, как его зовёт общий словарь: второго перечня не нужно. */
+const зовут = (l: Lang, k: string): string => kindName(l, k);
 
-export function Depends({ projectId }: { projectId: string }): React.JSX.Element {
-  const [graph, setGraph] = useState<{ nodes: Node[]; edges: Edge[] } | null>(null);
+
+export function Depends({ projectId, lang }: { projectId: string; lang: Lang }): React.JSX.Element {
+  const [graph, setGraph] = useState<{ nodes: Node[]; edges: Edge[]; domains?: DomEdge[] } | null>(null);
+  /** Карта областей или карта родов. Области крупнее и отвечают «как устроено». */
+  const [fold, setFold] = useState(true);
   const [kind, setKind] = useState<string>("");
   const [id, setId] = useState<string>("");
   const [hit, setHit] = useState<{ touched: number; reopens: number; items: Hit[] } | null>(null);
@@ -63,7 +55,7 @@ export function Depends({ projectId }: { projectId: string }): React.JSX.Element
 
   useEffect(() => {
     if (!projectId) return;
-    void tool<{ nodes: Node[]; edges: Edge[] }>(projectId, "links-graph").then(setGraph);
+    void tool<{ nodes: Node[]; edges: Edge[]; domains?: DomEdge[] }>(projectId, "links-graph").then(setGraph);
   }, [projectId]);
 
   // Имена берутся у самого набора, а не набираются руками: род уже выбран, и
@@ -91,19 +83,51 @@ export function Depends({ projectId }: { projectId: string }): React.JSX.Element
   if (!graph) return <p className="empty">Читаю связи…</p>;
 
   const max = Math.max(1, ...graph.edges.map((e) => e.links));
+  const домМакс = Math.max(1, ...(graph.domains ?? []).map((e) => e.links));
   const стоящие = graph.edges.filter((e) => e.to === kind);
   const крупнейший = Math.max(1, ...graph.nodes.map((n) => n.count));
 
   return (
     <div className="depends">
       <section className="dep-map">
-        <h2>Скелет</h2>
+        <div className="dep-h">
+          <h2>{say(lang, "de.skeleton")}</h2>
+          {/* Две крупности одной карты: области отвечают «как устроен проект»,
+              роды — «что на чём стоит». Семнадцать рёбер против восьми. */}
+          <span className="dep-fold">
+            <button type="button" className={fold ? "on" : ""} onClick={() => setFold(true)}>
+              {say(lang, "de.byDomain")}
+            </button>
+            <button type="button" className={!fold ? "on" : ""} onClick={() => setFold(false)}>
+              {say(lang, "de.byKind")}
+            </button>
+          </span>
+        </div>
         <p className="dep-note">
-          <b>А → Б</b> значит «А стоит на Б»: правка Б переоткрывает А. Толщина — сколько связей.
+          <b>А → Б</b> {say(lang, "de.rule")}
         </p>
         {/* Свёрнуто по источнику: прежде «этап» стоял в списке пять раз, и
             семнадцать строк читались перечнем, а не картой. Теперь у каждого
             рода одна строка, а на чём он стоит — веером вправо. */}
+        {fold ? (
+          <ul className="dep-edges">
+            {(graph.domains ?? [])
+              .slice()
+              .sort((a, b) => b.links - a.links)
+              .map((e) => (
+                <li key={`${e.from}-${e.to}`} className="dep-row dom">
+                  <span className="dep-node dep-src">{domainName(lang, e.from) || "—"}</span>
+                  <span className="dep-fan">
+                    <span className="dep-dst" title={`${e.pairs}`}>
+                      <i style={{ height: `${1 + Math.round((e.links / домМакс) * 4)}px` }} />
+                      <span>{domainName(lang, e.to) || "—"}</span>
+                      <b>{e.links}</b>
+                    </span>
+                  </span>
+                </li>
+              ))}
+          </ul>
+        ) : (
         <ul className="dep-edges">
           {Array.from(
             graph.edges.reduce((m, e) => {
@@ -121,7 +145,7 @@ export function Depends({ projectId }: { projectId: string }): React.JSX.Element
                   onClick={() => { setKind(from); setId(""); }}
                   type="button"
                 >
-                  {зовут(from)}
+                  {зовут(lang, from)}
                 </button>
                 <span className="dep-fan">
                   {outs
@@ -136,7 +160,7 @@ export function Depends({ projectId }: { projectId: string }): React.JSX.Element
                         title={`${e.links} связей от ${e.sources} записей`}
                       >
                         <i style={{ height: `${1 + Math.round((e.links / max) * 4)}px` }} />
-                        <span>{зовут(e.to)}</span>
+                        <span>{зовут(lang, e.to)}</span>
                         <b>{e.links}</b>
                       </button>
                     ))}
@@ -144,6 +168,7 @@ export function Depends({ projectId }: { projectId: string }): React.JSX.Element
               </li>
             ))}
         </ul>
+        )}
       </section>
 
       <section className="dep-kinds">
@@ -159,7 +184,7 @@ export function Depends({ projectId }: { projectId: string }): React.JSX.Element
                 onClick={() => { setKind(n.kind); setId(""); }}
                 type="button"
               >
-                {зовут(n.kind)}
+                {зовут(lang, n.kind)}
               </button>
               <span className="dep-bar" aria-hidden="true">
                 <i style={{ width: `${Math.max(2, Math.round((n.count / крупнейший) * 100))}%` }} />
@@ -171,7 +196,7 @@ export function Depends({ projectId }: { projectId: string }): React.JSX.Element
         </ul>
         <p className="dep-note dep-legend">
           Переоткрываются при правке связей:{" "}
-          {graph.nodes.filter((n) => n.reopens).map((n) => зовут(n.kind)).join(" · ") || "ни один"}
+          {graph.nodes.filter((n) => n.reopens).map((n) => зовут(lang, n.kind)).join(" · ") || "ни один"}
         </p>
       </section>
 
@@ -181,9 +206,9 @@ export function Depends({ projectId }: { projectId: string }): React.JSX.Element
         {kind && (
           <>
             <p className="dep-note">
-              На <b>{зовут(kind)}</b> стоят:{" "}
+              На <b>{зовут(lang, kind)}</b> стоят:{" "}
               {стоящие.length
-                ? стоящие.map((e) => зовут(e.from)).join(" · ")
+                ? стоящие.map((e) => зовут(lang, e.from)).join(" · ")
                 : "никто — правка не переоткроет ничего"}
             </p>
             <select
@@ -208,7 +233,7 @@ export function Depends({ projectId }: { projectId: string }): React.JSX.Element
               {hit.items.map((h) => (
                 <li key={`${h.kind}-${h.id}`} className={h.reopens ? "will" : "wont"}>
                   <span className="dep-depth">шаг {h.depth}</span>
-                  <span className="dep-kind">{зовут(h.kind)}</span>
+                  <span className="dep-kind">{зовут(lang, h.kind)}</span>
                   <span className="dep-id">{h.id}</span>
                   <span className="dep-mark">{h.reopens ? "переоткроется" : "связано"}</span>
                 </li>

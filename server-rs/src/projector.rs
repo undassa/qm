@@ -8069,13 +8069,32 @@ pub async fn links_graph(pool: &Pool, project: &str) -> Result<Value, tokio_post
             &[&project],
         )
         .await?;
+    // ОБЛАСТИ. Семнадцать родов и семнадцать рёбер — ещё перечень; свёрнутые
+    // до областей, они дают восемь строк, и в них видна архитектура: план
+    // стоит на требованиях, знание на требованиях, доказательство на них же.
+    let dom = client
+        .query("SELECT name, spec->>'domain' FROM kind_layout WHERE spec->>'domain' IS NOT NULL", &[])
+        .await?;
+    let область: std::collections::HashMap<String, String> =
+        dom.iter().map(|r| (r.get(0), r.get(1))).collect();
+    let mut свод: std::collections::BTreeMap<(String, String), (i64, i64)> = Default::default();
+    for r in &edges {
+        let f = область.get(&r.get::<_, String>(0)).cloned().unwrap_or_default();
+        let t = область.get(&r.get::<_, String>(1)).cloned().unwrap_or_default();
+        let e = свод.entry((f, t)).or_insert((0, 0));
+        e.0 += r.get::<_, i64>(2);
+        e.1 += 1;
+    }
     Ok(json!({
         "nodes": nodes.iter().map(|r| json!({
             "kind": r.get::<_, String>(0), "count": r.get::<_, i64>(1),
-            "reopened": r.get::<_, i64>(2), "reopens": r.get::<_, bool>(3) })).collect::<Vec<_>>(),
+            "reopened": r.get::<_, i64>(2), "reopens": r.get::<_, bool>(3),
+            "domain": область.get(&r.get::<_, String>(0)).cloned().unwrap_or_default() })).collect::<Vec<_>>(),
         "edges": edges.iter().map(|r| json!({
             "from": r.get::<_, String>(0), "to": r.get::<_, String>(1),
             "links": r.get::<_, i64>(2), "sources": r.get::<_, i64>(3) })).collect::<Vec<_>>(),
+        "domains": свод.iter().map(|((f, t), (n, pairs))| json!({
+            "from": f, "to": t, "links": n, "pairs": pairs })).collect::<Vec<_>>(),
         "means": "ребро «А → Б» значит «А стоит на Б»: правка Б переоткрывает А",
     }))
 }

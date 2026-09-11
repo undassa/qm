@@ -107,6 +107,8 @@ const СЛОВАРЬ: Record<string, [string, string]> = {
   "de.noReopens": ["ни один", "none"],
   "de.notReopen": ["не переоткрывается", "does not reopen"],
   "de.reopened": ["переоткрыто", "reopened"],
+  "de.byDomain": ["по областям", "by domain"],
+  "de.byKind": ["по родам", "by kind"],
 };
 
 /** Названия родов. Имя вида — слово проекта; перевод лишь подписывает его. */
