@@ -123,7 +123,35 @@ export function Work({ projectId, lang }: { projectId: string; lang: Lang }): Re
     return [...m].sort((a, b) => a[0].localeCompare(b[0]));
   }, [board]);
 
+  /** Причины очереди с числами — дверь называет их словами, а не кодом. */
+  const причины = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const c of queue?.queue ?? []) {
+      const w = c.why ?? "";
+      if (w) m.set(w, (m.get(w) ?? 0) + 1);
+    }
+    return [...m].sort((a, b) => b[1] - a[1]);
+  }, [queue]);
+
+  /** Ступени, в которых не стоит никто: пустые и неизмеримые порознь. */
+  const пустые = useMemo(() => (board?.columns ?? []).filter((c) => !c.at), [board]);
+
+  /** Пропуск один на всех? Тогда его можно назвать, а не пересчитывать глазами. */
+  const единственныйПропуск = useMemo(() => {
+    const н = new Set((board?.tasks ?? []).filter((t) => t.torn).map((t) => t.missed.join(" · ")));
+    return н.size === 1 ? [...н][0] : "";
+  }, [board]);
+  const единственныйЭтап = useMemo(() => {
+    const н = new Set((board?.tasks ?? []).filter((t) => t.torn).map((t) => t.milestone ?? "—"));
+    return н.size === 1 ? [...н][0] : "";
+  }, [board]);
+
   if (!queue || !board) return <p className="empty">{say(lang, "wk.reading")}</p>;
+
+  // Незакрытых — это всего минус стоящие в последней ступени. Ступень берётся
+  // из объявления (`terminal`), а не по имени: набор волен звать её иначе.
+  const незакрытых =
+    board.total - (board.columns[board.columns.length - 1]?.at ?? 0);
 
   const порядок = board.columns.map((c) => c.status);
   // Пропуск отмечается значком, а не строкой под каждой карточкой: колонка
@@ -222,6 +250,30 @@ export function Work({ projectId, lang }: { projectId: string; lang: Lang }): Re
               );
             })}
           </div>
+          {/* Подпись стоит ПОД доской и собирается из данных, а не пишется
+              прозой: «все шестнадцать в M0» — это замер, и если завтра
+              появится семнадцатая в M3, строка обязана сказать другое. */}
+          <p className="wk-gap">
+            {board.torn === 0 ? (
+              say(lang, "wk.noneTorn")
+            ) : (
+              <>
+                {say(lang, "wk.tornFoot")} <b>{board.torn}</b> {say(lang, "wk.onWhole")}.
+                {единственныйПропуск && (
+                  <>
+                    {" "}
+                    {say(lang, "wk.allSame")} <b>{единственныйПропуск}</b>.
+                  </>
+                )}
+                {единственныйЭтап && (
+                  <>
+                    {" "}
+                    {say(lang, "wk.allIn")} <b>{единственныйЭтап}</b>.
+                  </>
+                )}
+              </>
+            )}
+          </p>
         </section>
       )}
 
@@ -259,45 +311,58 @@ export function Work({ projectId, lang }: { projectId: string; lang: Lang }): Re
                   })}
                 </span>
                 <span className="wk-cnt">
-                  {m.torn > 0 ? <span className="bad">{m.torn} ↯ </span> : null}
                   {m.total}
+                  {m.torn > 0 && <span className="bad"> · {m.torn} ↯</span>}
                 </span>
               </li>
             ))}
           </ul>
           <ul className="wk-key">
-            {board.columns.map((c, i) => (
-              // Ступень, в которой никто не стоит, показана погашенной, а не
-              // убрана: пропасть в лестнице — это и есть то, что надо видеть.
-              <li key={c.status} className={c.at ? "" : "off"}>
-                <i className={`st-${i}`} />
-                {c.status}
-                {c.at === null && <em> · {say(lang, "wk.unmeasured")}</em>}
-              </li>
-            ))}
+            {board.columns.map((c, i) => c.at
+              ? (
+                <li key={c.status}>
+                  <i className={`st-${i}`} />
+                  {c.status}
+                </li>
+              )
+              : null)}
           </ul>
+          {/* Ступени, в которых не стоит никто, сведены в одну строку — с
+              цветом их не показать, а назвать надо: пропасть в лестнице и
+              есть то, что надо видеть. «Пусто» и «неизмеримо» тут разные
+              ответы, и они не смешиваются. */}
+          {пустые.length > 0 && (
+            <p className="wk-gap">
+              {say(lang, "wk.unusedHead")}{" "}
+              {пустые.map((c, i) => (
+                <span key={c.status}>
+                  {i > 0 && " · "}
+                  <b>{c.status}</b>{" — "}
+                  {c.at === null ? (
+                    <em>{say(lang, "wk.unmeasured")}</em>
+                  ) : (
+                    say(lang, "wk.empty")
+                  )}
+                </span>
+              ))}
+            </p>
+          )}
         </section>
       )}
 
       {view === "list" && (
         <>
           <section className="wk-band">
+            {/* Счёт очереди стоит при волнах, а не отдельной строкой: волны и
+                есть очередь, а крупная строка спорила с заголовком страницы. */}
             <div className="wk-h">
               <h2>{say(lang, "wk.waves")}</h2>
+              <span className="wk-cnt">
+                {queue.count} {say(lang, "wk.ofUnclosed")} {незакрытых}{" "}
+                {say(lang, "wk.unclosed")}
+              </span>
               <span className="wk-note">{say(lang, "wk.waveNote")}</span>
             </div>
-            <p className="wk-say">
-              {say(lang, "wk.queue")} <span className="num">{queue.count}</span> ·{" "}
-              {say(lang, "wk.fresh")} <span className="num ok">{queue.ready}</span> ·{" "}
-              <span className="bad">
-                {say(lang, "wk.stale")} <span className="num">{queue.stale}</span>
-              </span>
-              {queue.never > 0 && (
-                <>
-                  {" "}· {say(lang, "wk.never")} <span className="num">{queue.never}</span>
-                </>
-              )}
-            </p>
             <ul className="wk-tl">
               {волны.map(([веха, w]) => {
                 const доля = Math.round((w.ready / w.tasks.length) * 100);
@@ -332,24 +397,42 @@ export function Work({ projectId, lang }: { projectId: string; lang: Lang }): Re
             {видно.length === 0 ? (
               <p className="empty">{say(lang, "wk.none")}</p>
             ) : (
-              <ul className="wk-list">
-                {видно.map((c) => (
-                  <li key={c.task} className={c.ready ? "" : "stale"}>
-                    <button type="button" onClick={() => setOpen(c.task)}>
-                      <span className="wk-id">{c.task}</span>
-                      <span className="wk-t">{bare(c.title)}</span>
-                      <span className="wk-state">
-                        {c.ready ? say(lang, "wk.freshOne") : say(lang, "wk.staleOne")}
-                      </span>
-                      <span className="wk-rev">
-                        {c.seenAtRevision == null
-                          ? say(lang, "wk.neverOne")
-                          : `${c.seenAtRevision} → ${c.revision ?? "?"}`}
-                      </span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
+              <>
+                {/* Столбцы названы: без шапки «128 → 129» и «протух» читались
+                    как два не связанных знака. Причина берётся у двери
+                    дословно — «свеж/протух» выбрасывало то, ЧЕМ задача
+                    протухла, а причин три и они разные. */}
+                <div className="wk-thead">
+                  <span>{say(lang, "wk.colTask")}</span>
+                  <span>{say(lang, "wk.colTitle")}</span>
+                  <span>{say(lang, "wk.colWhy")}</span>
+                  <span>{say(lang, "wk.colRev")}</span>
+                </div>
+                <ul className="wk-list">
+                  {видно.map((c) => (
+                    <li key={c.task} className={c.ready ? "" : "stale"}>
+                      <button type="button" onClick={() => setOpen(c.task)}>
+                        <span className="wk-id">{c.task}</span>
+                        <span className="wk-t">{bare(c.title)}</span>
+                        <span className="wk-state bad" title={c.why ?? ""}>{c.why ?? ""}</span>
+                        <span className="wk-rev">
+                          {c.seenAtRevision ?? "—"} → {c.revision ?? "?"}
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+                <p className="wk-gap">
+                  {say(lang, "wk.reasons")}{" "}
+                  {причины.map(([почему, n], i) => (
+                    <span key={почему}>
+                      {i > 0 && " · "}
+                      <b>{n}</b> — {почему}
+                    </span>
+                  ))}
+                  . {say(lang, "wk.clickDrawer")}
+                </p>
+              </>
             )}
           </section>
         </>

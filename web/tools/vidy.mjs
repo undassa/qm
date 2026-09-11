@@ -41,15 +41,24 @@ for (const [name, w] of [['стол', 1440], ['телефон', 390]]) {
     say('доска едет вбок внутри себя', край.need > край.have + 1,
         `нужно ${Math.round(край.need)}, есть ${край.have}`);
   }
+  const дп = (await p.locator('.wk-gap').last().innerText().catch(()=>'')).replace(/\s+/g,' ');
+  say('подпись под доской из данных', дп.includes('↯') && /\d/.test(дп), дп.slice(0,95));
   await p.screenshot({ path: process.env.SHOT + `-доска-${w}.png`, fullPage: w === 390 });
 
   // ── этапы
   await p.locator('.wk-views button').nth(2).click(); await p.waitForTimeout(900);
   const эт = await p.locator('.wk-tl li').count();
   say('этапов', эт >= 8, String(эт));
-  say('легенда', (await p.locator('.wk-key li').count()) === 6, String(await p.locator('.wk-key li').count()));
   const сег = await p.locator('.wk-track i').count();
   say('сегментов полос', сег > 8, String(сег));
+  const лег = (await p.locator('.wk-key li').count());
+  const пуст = (await p.locator('.wk-gap').last().innerText().catch(()=>'')).replace(/\s+/g,' ');
+  say('легенда только по занятым', лег === 4, String(лег));
+  say('незанятые названы строкой', пуст.includes('в работе') && пуст.includes('имплементирована'), пуст.slice(0,95));
+  const сч = (await p.locator('.wk-cnt').first().innerText().catch(()=>'')).replace(/\s+/g,' ');
+  const выс = await p.locator('.wk-tl li').first().boundingBox();
+  say('счёт этапа не переносится', (выс?.height ?? 99) < 30, Math.round(выс?.height ?? 0) + 'px высота дорожки');
+  say('счёт этапа: всего, потом ↯', /^\d+( · \d+ ↯)?$/.test(сч.trim()), сч);
   await p.screenshot({ path: process.env.SHOT + `-этапы-${w}.png` });
 
   // этап уводит на доску отбором
@@ -67,6 +76,15 @@ for (const [name, w] of [['стол', 1440], ['телефон', 390]]) {
   // ── список
   await p.locator('.wk-views button').nth(0).click(); await p.waitForTimeout(800);
   say('список вернулся', (await p.locator('.wk-list li').count()) > 10, String(await p.locator('.wk-list li').count()));
+  const шап = (await p.locator('.wk-thead').innerText().catch(()=>'')).replace(/\s+/g,' ');
+  say('шапка таблицы', w < 560 || шап.split(' ').length >= 4, шап.slice(0,60) || '(скрыта на телефоне)');
+  const видналиШапка = await p.locator('.wk-thead').isVisible().catch(()=>false);
+  say(w >= 560 ? 'шапка таблицы на столе видна' : 'шапка таблицы скрыта на телефоне',
+      w >= 560 ? видналиШапка : !видналиШапка, w >= 560 ? '' : (видналиШапка ? 'ВИДНА — налезает' : 'скрыта'));
+  const прич = (await p.locator('.wk-list li .wk-state').first().innerText().catch(()=>''));
+  say('причина словами, не «протух»', прич.length > 8, прич.slice(0,50));
+  const под = (await p.locator('.wk-gap').last().innerText().catch(()=>'')).replace(/\s+/g,' ');
+  say('разбор причин под списком', под.includes('—'), под.slice(0,90));
   say('страница не едет вбок', await p.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1));
   say('без ошибок', errs.length === 0, errs[0] ?? '');
   await ctx.close();

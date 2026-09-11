@@ -4628,7 +4628,10 @@ tbody:first-of-type .co-grp th { padding-top: 8px; }
 
 /* Дорожка волны: доля свежих слева, протухших справа. */
 .wk-tl { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
-.wk-tl li { display: grid; grid-template-columns: 54px minmax(0, 1fr) 62px; gap: 12px; align-items: center; }
+/* Третий столбец держит «19 · 16 ↯» — при 62px он переносился на вторую
+   строку и ронял выравнивание всей дорожки. */
+.wk-tl li { display: grid; grid-template-columns: 54px minmax(0, 1fr) 92px; gap: 12px; align-items: center; }
+.wk-tl .wk-cnt { white-space: nowrap; }
 .wk-lane {
   font: inherit; font-family: var(--mono); font-size: 12.5px; text-align: left;
   background: none; border: 0; color: var(--live); cursor: pointer; padding: 2px 0;
@@ -4725,21 +4728,50 @@ tbody:first-of-type .co-grp th { padding-top: 8px; }
   .wk-views button { padding: 4px 9px; font-size: 12.5px; }
 }
 
+/* Шапка таблицы очереди повторяет сетку строки — иначе подпись столбца
+   разъезжается со своим столбцом при первой же правке ширин. */
+.wk-thead {
+  display: grid; grid-template-columns: 92px minmax(0, 1fr) 248px 84px;
+  gap: 12px; padding: 0 10px 7px; border-bottom: 1px solid var(--line);
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--muted);
+}
+.wk-thead span:last-child { text-align: right; }
 .wk-list { list-style: none; margin: 0; padding: 0; }
 .wk-list li { border-top: 1px solid var(--line-soft); }
 .wk-list li:first-child { border-top: 0; }
 .wk-list button {
   font: inherit; width: 100%; text-align: left; background: none; border: 0;
-  color: inherit; cursor: pointer; padding: 8px 4px;
-  display: grid; grid-template-columns: 84px minmax(0, 1fr) 62px 84px;
+  color: inherit; cursor: pointer; padding: 6px 10px; line-height: 1.35;
+  /* Та же сетка, что у шапки: столбец «почему» держит целую причину
+     («предполёт был до правки задачи»), и прежние 62px её съедали. */
+  display: grid; grid-template-columns: 92px minmax(0, 1fr) 248px 84px;
   gap: 12px; align-items: baseline;
 }
 .wk-list button:hover { background: var(--panel); }
 .wk-id { font-family: var(--mono); font-size: 12.5px; color: var(--live); }
 .wk-t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
-.wk-state { font-size: 11.5px; color: var(--done); }
-.wk-list li.stale .wk-state { color: var(--warn); }
+.wk-state {
+  font-size: 11.5px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.wk-state.bad { color: var(--warn); }
 .wk-rev { font-family: var(--mono); font-size: 11px; color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+
+/* Телефонная раскладка списка стоит ЗДЕСЬ, а не в общем медиазапросе выше:
+   там она объявлялась раньше базовых правил, весомость совпадала, и
+   побеждала поздняя база — шапка таблицы налезала сама на себя. */
+@media (max-width: 560px) {
+  /* Причина уходит под имя, название — своей строкой, правка — последней. */
+  .wk-thead { display: none; }
+  .wk-list button {
+    grid-template-columns: 92px minmax(0, 1fr);
+    row-gap: 2px; padding: 8px 10px;
+  }
+  .wk-t { grid-column: 1 / -1; grid-row: 2; white-space: normal; }
+  .wk-state { grid-column: 2; grid-row: 1; text-align: right; }
+  .wk-rev { grid-column: 1 / -1; grid-row: 3; text-align: left; }
+}
 
 @media (max-width: 720px) {
   .wk-say { font-size: 14.5px; }
