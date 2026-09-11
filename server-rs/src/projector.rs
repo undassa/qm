@@ -7425,6 +7425,62 @@ fn regex_escape(s: &str) -> String {
         .collect()
 }
 
+/// Завести вид сущности.
+///
+/// Трёх дверей — `kind-required`, `kind-projection`, `kind-reopens` — хватало,
+/// пока виды не заводились: все 57 приехали переносом. А заводить приходится:
+/// у `tot-ade` под одним видом `check` живут три разные вещи — 56 критериев
+/// приёмки, 141 имя правила В КОДЕ и 30 утверждений с пространством имён.
+/// Свести их к общему образцу `TC-ОБЛАСТЬ-nn` значит порвать связь кода с его
+/// же правилами ради формата.
+///
+/// Образец имени ПРОВЕРЯЕТСЯ: неразбираемое выражение молча не поймает ничего,
+/// и вид останется пустым при живых сущностях.
+pub async fn add_kind(
+    pool: &Pool, name: &str, shape: &str, id_pattern: &str, why: &str,
+) -> Result<Value, tokio_postgres::Error> {
+    let client = pool.get().await.expect("пул отдал соединение");
+    if name.trim().is_empty() || why.trim().is_empty() {
+        return Ok(json!({ "status": "empty",
+            "why": "нужны имя вида и довод: вид без довода не оспорить" }));
+    }
+    if !matches!(shape, "document" | "inner") {
+        return Ok(json!({ "status": "unknown_shape", "shape": shape,
+            "vocabulary": ["document", "inner"],
+            "why": "форма вида: `document` — у сущности свой документ, `inner` — она \
+                    объявлена строкой внутри чужого" }));
+    }
+    if client
+        .query_opt("SELECT 1 FROM kind_layout WHERE name = $1", &[&name])
+        .await?
+        .is_some()
+    {
+        return Ok(json!({ "status": "exists", "kind": name,
+            "why": "вид уже объявлен: правьте его дверями `kind-projection`, \
+                    `kind-required`, `kind-reopens`" }));
+    }
+    // Образец проверяется исполнением: `~` на неразбираемом выражении падает,
+    // и лучше отказать сейчас, чем завести вид, который никого не найдёт.
+    if !id_pattern.trim().is_empty()
+        && client.query_one("SELECT 'проба' ~ $1", &[&id_pattern]).await.is_err()
+    {
+        return Ok(json!({ "status": "bad_pattern", "pattern": id_pattern,
+            "why": "образец имени не разбирается: вид с таким образцом не найдёт ни одной \
+                    сущности и промолчит об этом" }));
+    }
+    let spec = json!({ "shape": shape, "id": id_pattern, "why": why });
+    client
+        .execute(
+            "INSERT INTO kind_layout (name, spec, declared_at, declared_by)
+             VALUES ($1, $2, $3, 'kind-add')",
+            &[&name, &spec, &now_ms()],
+        )
+        .await?;
+    Ok(json!({ "status": "declared", "kind": name, "shape": shape, "id": id_pattern,
+               "means": "вид объявлен ОБЩИМ: он виден всем наборам. Чем он становится — \
+                         отдельной дверью `kind-projection`" }))
+}
+
 pub async fn holders(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
     let client = pool.get().await.expect("пул отдал соединение");
     let rows = client
