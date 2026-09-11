@@ -335,6 +335,84 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize)
         &[&project],
     )
     .await?;
+    // ПРОВЕРКИ ИЗ ПРОЗЫ. Проектор читал только ячейки таблиц и только форму
+    // `TC-nn` в обратных кавычках — так пишет `myack`. У `tot-ade` то же
+    // сказано СТРОКОЙ: «*Проверяется:* сценарий `TC-INDEX-01`, гейт
+    // `runtime:single-async`, линты `await_holding_lock`», и проектор их не
+    // видел: 227 записей существовали помимо документов.
+    //
+    // Маркер строки ОБЪЯВЛЕН проектом (`marker.verified-by`), а не зашит:
+    // `myack` этой формы не знает вовсе, и навязывать её ему незачем.
+    //
+    // Имя разбирается по образцу ВИДА: что перед нами — проверка, правило кода
+    // или утверждение, — говорит объявленный образец, а не догадка по форме.
+    let маркеры = crate::scheme::Terms::load(pool, project).await?;
+    if let Some(маркер) = маркеры.one("marker.verified-by") {
+        let образцы = tx
+            .query(
+                "SELECT name, spec->>'id' FROM kind_layout
+                  WHERE name IN ('check','lint-rule','assertion') AND spec->>'id' IS NOT NULL",
+                &[],
+            )
+            .await?;
+        let строки = tx
+            .query(
+                "SELECT d.entity_kind, d.entity_name, l.line
+                   FROM project_documents d
+                   CROSS JOIN LATERAL regexp_split_to_table(d.content, E'\n') l(line)
+                  WHERE d.project_id = $1 AND l.line LIKE '%' || $2 || '%'",
+                &[&project, &маркер],
+            )
+            .await?;
+        let имя = regex::Regex::new(r"`([^`]{2,80})`").expect("образец имени в кавычках");
+        let mut найдено: Vec<(String, String, String, String)> = Vec::new();
+        let mut видели = std::collections::HashSet::new();
+        for r in &строки {
+            let (dk, dn): (String, String) = (r.get(0), r.get(1));
+            let line: String = r.get(2);
+            for c in имя.captures_iter(&line) {
+                let id = c[1].to_owned();
+                for обр in &образцы {
+                    let вид: String = обр.get(0);
+                    let pat: String = обр.get(1);
+                    let подходит: bool = tx.query_one("SELECT $1 ~ $2", &[&id, &pat]).await?.get(0);
+                    if подходит && видели.insert(format!("{вид}\u{1}{id}")) {
+                        найдено.push((вид, id.clone(), dk.clone(), dn.clone()));
+                        break;
+                    }
+                }
+            }
+        }
+        for (таблица, вид) in [("project_lint_rules", "lint-rule"), ("project_assertions", "assertion")] {
+            tx.execute(
+                &format!("DELETE FROM {таблица} WHERE project_id = $1 AND origin = 'projected'"),
+                &[&project],
+            )
+            .await?;
+            for (в, id, dk, dn) in найдено.iter().filter(|x| x.0 == вид) {
+                let _ = в;
+                tx.execute(
+                    &format!(
+                        "INSERT INTO {таблица} (project_id, id, entity_kind, entity_name)
+                         VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING"
+                    ),
+                    &[&project, id, dk, dn],
+                )
+                .await?;
+            }
+        }
+        for (в, id, dk, dn) in найдено.iter().filter(|x| x.0 == "check") {
+            let _ = в;
+            let area = id.split('-').nth(1).unwrap_or("").to_owned();
+            tx.execute(
+                "INSERT INTO project_checks (project_id, id, area, spec, entity_kind, entity_name)
+                 VALUES ($1,$2,$3,'',$4,$5) ON CONFLICT (project_id, id) DO NOTHING",
+                &[&project, id, &area, dk, dn],
+            )
+            .await?;
+        }
+    }
+
     // ОТМЕТКА ИЗМЕНЕНИЯ. Отпечаток записи сверяется с прошлым: совпал — дата
     // держится, разошёлся — ставится новая.
     //

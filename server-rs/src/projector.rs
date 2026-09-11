@@ -1752,6 +1752,33 @@ ALTER TABLE project_requirement_sources ADD COLUMN IF NOT EXISTS origin text NOT
 -- — кладётся колонкой.
 ALTER TABLE project_screens ADD COLUMN IF NOT EXISTS spec text NOT NULL DEFAULT '';
 
+-- ДОМА ПРАВИЛУ КОДА И УТВЕРЖДЕНИЮ. У `tot-ade` под видом `check` лежали три
+-- разные вещи: 56 критериев приёмки, 141 ИМЯ ПРАВИЛА В КОДЕ (11 из 12 найдены
+-- в `crates/`) и 30 утверждений с пространством имён.
+--
+-- Пока дома нет, чинить извлечение нельзя: заработавшая пересборка снесла бы
+-- 171 запись как «устаревшую проекцию» — и это была бы потеря, а не уборка.
+CREATE TABLE IF NOT EXISTS project_lint_rules (
+    project_id  text NOT NULL,
+    id          text NOT NULL,
+    area        text NOT NULL DEFAULT '',
+    entity_kind text NOT NULL DEFAULT '',
+    entity_name text NOT NULL DEFAULT '',
+    section_ord integer,
+    origin      text NOT NULL DEFAULT 'projected',
+    PRIMARY KEY (project_id, id)
+);
+CREATE TABLE IF NOT EXISTS project_assertions (
+    project_id  text NOT NULL,
+    id          text NOT NULL,
+    area        text NOT NULL DEFAULT '',
+    entity_kind text NOT NULL DEFAULT '',
+    entity_name text NOT NULL DEFAULT '',
+    section_ord integer,
+    origin      text NOT NULL DEFAULT 'projected',
+    PRIMARY KEY (project_id, id)
+);
+
 -- КОГДА СТРОКА СУЩНОСТИ МЕНЯЛАСЬ. Прежде это искалось по ревизиям: самая
 -- ранняя запись документа, где текст стоит дословно. Стоило 5,5 секунды при
 -- каждом замере гейта, требовало «различимого» текста и потому выбрасывало
