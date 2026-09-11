@@ -3,13 +3,11 @@ import { useEffect, useState } from "react";
 import { loadProjects, tool, type Project } from "./api";
 import { chooseProject } from "./project-address";
 import { ProjectPicker } from "./Projects";
-import { Entities } from "./Entities";
 import { Depends } from "./Depends";
 import { Console } from "./Console";
+import { Corpus } from "./Corpus";
+import { type Lang, langNow, setLang, say } from "./say";
 import { Reader } from "./Reader";
-import { Requirements } from "./Requirements";
-import { Rules } from "./Rules";
-import { Users } from "./Users";
 import { Readiness } from "./Readiness";
 import { Palette, type Jump } from "./Palette";
 import { Together } from "./Together";
@@ -28,11 +26,10 @@ interface Ctx {
   onFind: (q: string) => void;
   /** Открыть другой раздел: пульт отсылает к вопросам и зависимостям. */
   onGo: (page: string) => void;
+  /** Язык подписей. Проза харнеса не переводится: это слова проекта. */
+  lang: Lang;
 }
 import { Tasks } from "./Tasks";
-import { Decisions } from "./Decisions";
-import { Proof } from "./Proof";
-import { Questions } from "./Questions";
 import { Unknown } from "./Unknown";
 
 /**
@@ -48,22 +45,16 @@ import { Unknown } from "./Unknown";
  * 523 варианта, не показанных нигде), **доказательство** (чем закрыто каждое
  * требование) и **вопросы** (чем закрыт каждый).
  */
-const PAGES: { page: string; title: string; note: string; view: (id: string, ctx: Ctx) => React.JSX.Element }[] = [
-  { page: "pult", title: "Пульт", note: "что идёт и что ждёт", view: (id, ctx) => <Console projectId={id} onGo={ctx.onGo} /> },
-  { page: "where", title: "Готовность", note: "фазы и гейты", view: (id, ctx) => <Readiness projectId={id} onFind={ctx.onFind} /> },
-  { page: "tasks", title: "Задачи", note: "конвейер", view: (id) => <Tasks projectId={id} /> },
-  { page: "unknown", title: "Не знаем", note: "пробелы", view: (id, ctx) => <Unknown projectId={id} onFind={ctx.onFind} /> },
+const PAGES: { page: string; key: string; view: (id: string, ctx: Ctx) => React.JSX.Element }[] = [
+  { page: "pult", key: "nav.pult", view: (id, ctx) => <Console projectId={id} onGo={ctx.onGo} /> },
+  { page: "where", key: "nav.where", view: (id, ctx) => <Readiness projectId={id} onFind={ctx.onFind} /> },
+  { page: "tasks", key: "nav.tasks", view: (id) => <Tasks projectId={id} /> },
+  { page: "unknown", key: "nav.unknown", view: (id, ctx) => <Unknown projectId={id} onFind={ctx.onFind} /> },
   // Раздел — это тип ресурса, а не папка: у требования свои колонки, свои
   // фильтры и свои дыры, и общей таблицей документов их не показать.
-  { page: "rules", title: "Правила", note: "конституция", view: (id, ctx) => <Rules projectId={id} onFind={ctx.onFind} /> },
-  { page: "requirements", title: "Требования", note: "и доказательства", view: (id) => <Requirements projectId={id} /> },
-  { page: "users", title: "Пользователь", note: "путь и истории", view: (id, ctx) => <Users projectId={id} onFind={ctx.onFind} /> },
-  { page: "read", title: "Документы", note: "читать", view: (id, ctx) => <Reader projectId={id} want={ctx.want} /> },
-  { page: "decisions", title: "Архитектура", note: "и отвергнутое", view: (id) => <Decisions projectId={id} /> },
-  { page: "proof", title: "Доказательство", note: "чем закрыто", view: (id) => <Proof projectId={id} /> },
-  { page: "questions", title: "Вопросы", note: "чем закрыт каждый", view: (id, ctx) => <Questions projectId={id} onFind={ctx.onFind} /> },
-  { page: "entities", title: "Сущности", note: "виды", view: (id) => <Entities projectId={id} /> },
-  { page: "depends", title: "Зависимости", note: "что на чём стоит", view: (id) => <Depends projectId={id} /> },
+  { page: "read", key: "nav.read", view: (id, ctx) => <Reader projectId={id} want={ctx.want} /> },
+  { page: "corpus", key: "nav.corpus", view: (id, ctx) => <Corpus projectId={id} lang={ctx.lang} /> },
+  { page: "depends", key: "nav.depends", view: (id) => <Depends projectId={id} /> },
 ];
 
 /**
@@ -78,6 +69,12 @@ export function App(): React.JSX.Element {
   const [projects, setProjects] = useState<Project[]>([]);
   const [project, setProject] = useState<Project | null>(null);
   const [page, setPage] = useState<string>(asked("page") ?? "pult");
+  const [lang, setLangState] = useState<Lang>(langNow());
+  useEffect(() => {
+    const слушать = (): void => setLangState(langNow());
+    window.addEventListener("mh-lang", слушать);
+    return () => window.removeEventListener("mh-lang", слушать);
+  }, []);
   const [unknown, setUnknown] = useState<string>("");
   /** Палитра и то, куда она попросила перейти. */
   const [pal, setPal] = useState(false);
@@ -144,7 +141,7 @@ export function App(): React.JSX.Element {
       })
       .catch(() => undefined);
   };
-  const ctx = { want: jump, onFind: find, onGo: setPage };
+  const ctx = { want: jump, onFind: find, onGo: setPage, lang };
 
   const view = PAGES.find((p) => p.page === page) ?? PAGES[0]!;
 
@@ -185,11 +182,18 @@ export function App(): React.JSX.Element {
                 className={`ent top${p.page === page ? " on" : ""}`}
                 onClick={() => go({ page: p.page })}
               >
-                <span className="ent-n">{p.title}</span>
-                <span className="ent-c">{p.note}</span>
+                <span className="ent-n">{say(lang, p.key)}</span>
+                <span className="ent-c">{say(lang, `${p.key}.note`)}</span>
               </button>
             ))
           : null}
+
+          {/* Язык подписей. Проза харнеса — причины отказов, доводы правил —
+              не переводится: это слова, которыми владеет проект. */}
+          <div className="lang">
+            <button type="button" className={lang === "ru" ? "on" : ""} onClick={() => setLang("ru")}>РУ</button>
+            <button type="button" className={lang === "en" ? "on" : ""} onClick={() => setLang("en")}>EN</button>
+          </div>
       </nav>
 
       <main className="main">
@@ -220,7 +224,7 @@ export function App(): React.JSX.Element {
       {pal && project ? (
         <Palette
           projectId={project.projectId}
-          sections={PAGES.map((p) => ({ page: p.page, title: p.title, note: p.note }))}
+          sections={PAGES.map((p) => ({ page: p.page, title: say(lang, p.key), note: say(lang, `${p.key}.note`) }))}
           onClose={() => setPal(false)}
           onGo={(j) => {
             if (j.page && j.page !== page) { setPage(j.page); go({ page: j.page }); }

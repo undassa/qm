@@ -82,6 +82,25 @@ CREATE OR REPLACE VIEW readiness_state AS
   SELECT i.project_id, i.owner_kind, i.owner_id, i.ord, i.text, i.declared, i.method_kind,
          CASE WHEN i.method_kind = 'unknown' THEN 'unknown' ELSE 'computable' END AS state
     FROM readiness_item i;
+"#;
+
+
+/// Цепочка фаз, вердикт гейта и фаза задачи — СВОЕЙ пачкой, а не в общей.
+///
+/// Форма этих трёх видов ещё меняется, а `CREATE OR REPLACE` отказывает, как
+/// только у вида меняется набор колонок: снимать приходится. Но `DROP VIEW`
+/// берёт ACCESS EXCLUSIVE, и снятие внутри общей пачки — это ход, которым новый
+/// экземпляр встаёт в очередь за чужим `next-task`, читающим `phase_open`, и
+/// держит за собой всю схему. При сине-зелёной выкатке — зависший запуск.
+///
+/// Своя пачка снимает ровно это: ожидание замка касается трёх видов и ничего
+/// больше. Условия на форму здесь НЕТ НАРОЧНО — условие пришлось бы править
+/// вместе с каждой колонкой, а забытое оно роняет запуск. Пересоздание дёшево и
+/// верно всегда.
+const PHASE_VIEWS: &str = r#"
+DROP VIEW IF EXISTS task_phase;
+DROP VIEW IF EXISTS phase_open;
+DROP VIEW IF EXISTS gate_state;
 
 -- ВЕРДИКТ ГЕЙТА ЦЕЛИКОМ — одной записью, а не пересказом у каждого читателя.
 --
@@ -95,8 +114,11 @@ CREATE OR REPLACE VIEW readiness_state AS
 -- Гейт БЕЗ ЕДИНОЙ СТРОКИ замера сюда не попадает вовсе, и читатель обязан
 -- считать его непройденным: «не мерили» — это не «пройден». Пустота, принятая
 -- за зелёное, снимает барьер там, где его ни разу не проверяли.
-CREATE OR REPLACE VIEW gate_state AS
+CREATE VIEW gate_state AS
   SELECT g.project_id, g.phase AS gate,
+         count(*) FILTER (WHERE g.result->>'computed' = 'failed') AS failed,
+         count(*) FILTER (WHERE g.result IS NULL
+                             OR g.result->>'computed' IN ('unknown','stale')) AS open,
          CASE
            WHEN count(*) FILTER (WHERE g.result->>'computed' = 'failed') > 0 THEN 'failed'
            WHEN count(*) FILTER (WHERE g.result IS NULL
@@ -114,12 +136,21 @@ CREATE OR REPLACE VIEW gate_state AS
 --
 -- Фаза открыта, когда КАЖДЫЙ предшествующий гейт пройден. Свой гейт при этом не
 -- смотрится: Ф3 открыта и с красным G3 — красен он ровно потому, что в фазе
--- идёт работа. Гейт, о котором замеров нет, держит: `coalesce` называет его
--- `open`, а не пропускает молча.
-CREATE OR REPLACE VIEW phase_open AS
+-- идёт работа.
+--
+-- ПУСТОЙ ГЕЙТ У ПРЕДШЕСТВЕННИКА ДЕРЖИТ, а не пропускает. Соблазн написать
+-- `p2.gate <> ''` велик и неверен: он превращает «фаза гейта не объявила» в
+-- «проходи», и одна забытая при заведении привязка снимала бы барьер всей
+-- оставшейся цепочки молча. Это ровно та пустота, которую вид задач зовёт «не
+-- объявлено», и звать её здесь иначе значило бы держать два правила на одну
+-- пустоту. Хвостовой фазе это ничего не стоит: предшественником она не бывает.
+--
+-- Гейт, о котором замеров нет, держит по той же причине: `coalesce` называет
+-- его `open`, а не пропускает молча.
+CREATE VIEW phase_open AS
   SELECT pr.id AS project_id, ph.id AS phase, ph.ord, ph.gate, ph.task_kind,
          NOT EXISTS (SELECT 1 FROM phase p2
-                      WHERE p2.ord < ph.ord AND p2.gate <> ''
+                      WHERE p2.ord < ph.ord
                         AND coalesce((SELECT s.computed FROM gate_state s
                                        WHERE s.project_id = pr.id AND s.gate = p2.gate),
                                      'open') <> 'passed') AS open
@@ -131,7 +162,7 @@ CREATE OR REPLACE VIEW phase_open AS
 -- `phase` пусто — вид задачи НЕ ОТОБРАЖЁН ни на одну фазу, и это «не
 -- объявлено», а не «можно всё»: `open` тогда тоже пусто, и всякий читатель
 -- обязан отличить пустоту от разрешения.
-CREATE OR REPLACE VIEW task_phase AS
+CREATE VIEW task_phase AS
   SELECT t.project_id, t.id AS task_id, t.kind, t.state,
          o.phase, o.ord AS phase_ord, o.gate, o.open
     FROM project_plan_tasks t
@@ -627,6 +658,29 @@ CREATE TABLE IF NOT EXISTS task_worktree (
   project_id text NOT NULL, task_id text NOT NULL,
   branch text NOT NULL DEFAULT '', since bigint NOT NULL,
   PRIMARY KEY (project_id, task_id));
+
+-- КАК ИСПОЛНИТЕЛЬ СОБИРАЕТСЯ ДЕЛАТЬ — записью, и записью РАНЬШЕ правки.
+--
+-- «Скажи, как будешь делать, прежде чем напишешь строку» стоит в скилле задачи
+-- отдельной ступенью и не доказывается ничем: прогон, где её пропустили,
+-- выглядит точно как прогон, где её прошли. Из семи дисциплин исполнения
+-- меряются две — «красное прежде зелёного» и «у закрытой задачи назван
+-- коммит», — и ровно эти две в наборе не нарушаются. Общее у них одно: обе
+-- проверяемы ПОРЯДКОМ, а не наличием.
+--
+-- Поэтому у плана своё время. «Подумал сначала» становится тем же, чем стало
+-- «написал проверку сначала»: сравнением двух отметок, а не обещанием.
+--
+-- `task_revision` — та же привязка, что у предполёта: план, написанный до
+-- переписывания задачи, планом для новой задачи не является.
+CREATE TABLE IF NOT EXISTS task_plan (
+  project_id text NOT NULL,
+  task_id text NOT NULL,
+  at bigint NOT NULL,
+  task_revision bigint NOT NULL,
+  body text NOT NULL DEFAULT '',
+  declared_by text NOT NULL DEFAULT '',
+  PRIMARY KEY (project_id, task_id, at));
 
 CREATE TABLE IF NOT EXISTS preflight_verdict (
   project_id text NOT NULL, task_id text NOT NULL, at bigint NOT NULL,
@@ -1668,10 +1722,13 @@ ALTER TABLE project_gates ADD COLUMN IF NOT EXISTS id text NOT NULL DEFAULT '';
 ALTER TABLE gate_item_waiver ADD COLUMN IF NOT EXISTS id text NOT NULL DEFAULT '';
 CREATE UNIQUE INDEX IF NOT EXISTS gate_item_by_id ON gate_item (phase, id) WHERE id <> '';
 CREATE UNIQUE INDEX IF NOT EXISTS project_gates_by_id ON project_gates (project_id, phase, id);
--- Прежний ключ отметки — заголовок. Переписали формулировку, и рядом со старой
--- отметкой легла вторая: гейт считал один пункт дважды. Ключ теперь имя.
-DELETE FROM project_gates g WHERE NOT EXISTS
-  (SELECT 1 FROM gate_item i WHERE i.phase = g.phase AND i.item = g.item);
+-- ЧИСТКИ СИРОТ ПРИ СТАРТЕ ЗДЕСЬ БОЛЬШЕ НЕТ, и это не упущение.
+--
+-- Она сверяла замер с объявлением ПО ЗАГОЛОВКУ — ключом, который перестал быть
+-- ключом, когда им стало имя. Переписанный заголовок делал живой замер сиротой
+-- в её глазах, и она сносила его до того, как пункт успевал померяться заново.
+-- Ту же работу делает теперь `measure_gates`: по имени, в пределах проекта и
+-- каждым кругом, а не раз в перезапуск.
 ALTER TABLE project_gates DROP CONSTRAINT IF EXISTS project_gates_pkey;
 ALTER TABLE project_gates ADD PRIMARY KEY (project_id, phase, id);
 ALTER TABLE project_sensor_spec ADD COLUMN IF NOT EXISTS skip_re text NOT NULL DEFAULT '';
@@ -2495,7 +2552,9 @@ pub async fn ensure(pool: &Pool) -> Result<(), tokio_postgres::Error> {
     let client = pool.get().await.expect("пул отдал соединение");
     client.batch_execute(DDL).await?;
     // Представления заводятся после таблиц: они их читают.
-    client.batch_execute(VIEWS).await
+    client.batch_execute(VIEWS).await?;
+    // Своей пачкой — чтобы ожидание замка на снятии не держало за собой схему.
+    client.batch_execute(PHASE_VIEWS).await
 }
 
 /// Проекции, которые обязаны быть готовы ДО донорской пересборки.
@@ -3180,11 +3239,12 @@ pub async fn next_task(pool: &Pool, project: &str) -> Result<Value, tokio_postgr
         // этой задачи.
         let held = client
             .query_opt(
-                "SELECT p2.gate,
+                "SELECT CASE WHEN p2.gate = '' THEN 'гейт фазы ' || p2.id || ' не объявлен'
+                             ELSE p2.gate END,
                         (SELECT string_agg(g.id, ' · ' ORDER BY g.id) FROM project_gates g
                           WHERE g.project_id = $1 AND g.phase = p2.gate AND g.state = 'failed')
                    FROM phase p2
-                  WHERE p2.ord < (SELECT ord FROM phase WHERE id = $2) AND p2.gate <> ''
+                  WHERE p2.ord < (SELECT ord FROM phase WHERE id = $2)
                     AND coalesce((SELECT s.computed FROM gate_state s
                                    WHERE s.project_id = $1 AND s.gate = p2.gate), 'open') <> 'passed'
                   ORDER BY p2.ord LIMIT 1",
@@ -3193,6 +3253,22 @@ pub async fn next_task(pool: &Pool, project: &str) -> Result<Value, tokio_postgr
             .await?;
         let holder: Option<String> = held.as_ref().map(|h| h.get(0));
         let named: Option<String> = held.as_ref().and_then(|h| h.get(1));
+        // ПРОТУХШИЙ ДАТЧИК — НЕ НАХОДКА, а непрогнанный `mh sense`, и барьер
+        // обязан говорить это сам. Ручка `gate` такую оговорку несёт давно:
+        // пункт, читающий несвежий род фактов, красен не потому, что что-то
+        // нашлось, а потому что мерить сейчас нечем. Пока это красило доску,
+        // цена была в потерянном часе; теперь оно ПРИДЕРЖИВАЕТ РАБОТУ, и отказ
+        // без оговорки отправляет искать находку, которой нет.
+        let stale: Vec<String> = client
+            .query(
+                "SELECT s.fact FROM sensor s
+                  WHERE s.project_id = $1 AND NOT fact_fresh($1, s.fact) ORDER BY s.fact",
+                &[&project],
+            )
+            .await?
+            .iter()
+            .map(|r| r.get::<_, String>(0))
+            .collect();
         return Ok(json!({
             "task": null,
             "candidate": id,
@@ -3207,6 +3283,13 @@ pub async fn next_task(pool: &Pool, project: &str) -> Result<Value, tokio_postgr
                 // ещё не мерили.
                 "gateState": held.as_ref().map(|_| if named.is_some() { "failed" } else { "open" }),
                 "redItems": named,
+                "staleSensors": if stale.is_empty() { Value::Null } else {
+                    json!({ "facts": stale,
+                            "why": "эти роды фактов не свежи. Пункты, читающие их, красны НЕ ПО \
+                                    НАХОДКЕ, а потому что мерить сейчас нечем, — и барьер держит \
+                                    работу за них. Прогоните `mh sense`: может статься, держать \
+                                    нечего" })
+                },
             },
         }));
     }
@@ -3333,7 +3416,20 @@ pub async fn waive_gate_item(
 }
 
 pub async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+    let mut conn = pool.get().await.expect("пул отдал соединение");
+    // ВЕСЬ КРУГ — ОДНОЙ ТРАНЗАКЦИЕЙ, и это не про скорость.
+    //
+    // Строки писались по одной, и всякий, кто читал гейт в это время, складывал
+    // вердикт из пунктов двух разных кругов — состояния, которого не было ни в
+    // один момент. Пока замер кормил только доску, цена была косметической;
+    // барьер фаз решает по нему, выдавать ли работу, и полукруг выдал бы задачу
+    // фазы, гейт которой ещё не дописан. Читатель видит либо прошлый круг
+    // целиком, либо этот целиком.
+    //
+    // Внутри круга порядок при этом сохраняется: пункт, читающий чужие замеры —
+    // а таковы оба пункта про порядок фаз, и `corpus` меряется последним, —
+    // видит свежие числа этого круга, а не прошлого.
+    let client = conn.transaction().await?;
     // Объявление — общее, замер — проектный. Пункты берутся из `gate_item`, и
     // проект, у которого их ещё не было, получает все сразу: гейт отвечает на
     // вопрос «можно ли идти дальше», и ответ не должен зависеть от того, кто как
@@ -3357,6 +3453,7 @@ pub async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, tokio_po
     let now = now_ms();
     let mut measured = 0usize;
     let mut failed = 0usize;
+    let mut unwritten: Vec<Value> = Vec::new();
     for r in &rows {
         let phase: String = r.get(0);
         let item: String = r.get(1);
@@ -3368,6 +3465,21 @@ pub async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, tokio_po
         // Неприменимый пункт НЕ ИСПОЛНЯЕТСЯ. Исполнить и прощать значило бы
         // считать нарушением то, чего в этом проекте не существует: `.sqlx` у
         // проекта без sqlx не «не снята» — её тут не бывает.
+        // ОБЪЯВЛЕННЫЙ ЗАПРОС ИСПОЛНЯЕТСЯ ПОД ТОЧКОЙ ВОЗВРАТА, и без неё круг в
+        // транзакции был бы хуже круга без транзакции.
+        //
+        // Запрос пункта пишет не харнес, а набор, и сломанный среди них —
+        // случай рядовой: ради него и заведены ветка «запрос не выполнился» и
+        // самотест. В транзакции же первая же ошибка переводит её в состояние
+        // aborted, и ВСЁ следующее отказывает: ветка ловит ошибку и идёт
+        // дальше, а ближайшая запись замера роняет круг целиком. Сто двадцать
+        // восемь замеров теряются из-за одного кривого запроса, и каждый
+        // следующий пункт при этом врёт на себя — «запрос не выполнился»
+        // вместо «сосед отравил транзакцию».
+        //
+        // Точка возврата снимается ВСЕГДА, а не по ошибке: замер обязан только
+        // читать, и откат ему нечего терять. Запись замера идёт уже после неё.
+        client.batch_execute("SAVEPOINT замер").await?;
         let entry = if waived.contains(&(phase.clone(), id.clone())) {
             json!({ "item": item, "kind": kind, "computed": "waived",
                     "why": why_waived.get(&(phase.clone(), id.clone())).cloned().unwrap_or_default(),
@@ -3398,6 +3510,10 @@ pub async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, tokio_po
                 measure_item(&client, project, &phase, &item, &kind, query.as_deref(), r).await?
             }
         };
+        // Откат ВСЕГДА: замер обязан только читать, и терять ему нечего. Заодно
+        // он отменяет то, что объявленный запрос успел написать: дверь проверяет
+        // запрос подготовкой, а `INSERT` подготавливается не хуже `SELECT`.
+        client.batch_execute("ROLLBACK TO SAVEPOINT замер; RELEASE SAVEPOINT замер").await?;
         let computed = entry["computed"].as_str().unwrap_or("unknown");
         // В колонке `state` живут только четыре слова — так объявлено ограничением
         // таблицы. Полное слово («не подписан», «подпись устарела») лежит в
@@ -3421,7 +3537,16 @@ pub async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, tokio_po
         let query_col: Option<String> = r.get(3);
         let why_col: String = r.get(4);
         let owner_col: Option<String> = r.get(5);
-        client
+        // ЗАПИСЬ — ПОД СВОЕЙ ТОЧКОЙ ВОЗВРАТА, и это не та же точка, что у замера.
+        //
+        // Ограничения `project_gates` строже, чем `gate_item`: род пункта там
+        // сверяется с четырьмя словами и обязан сходиться с наличием запроса, а
+        // `gate_item` ничего этого не требует. Отказ записи так уже случался —
+        // «new row violates check constraint», четыре пункта из сорока не
+        // мерились вовсе. Тогда это стоило четырёх пунктов; в транзакции без
+        // этой точки стоило бы всего круга.
+        client.batch_execute("SAVEPOINT запись").await?;
+        let written = client
             .execute(
                 // Подписант переносится вместе с родом: у подписного пункта
                 // ограничение таблицы требует имени, и замер без него падал —
@@ -3439,15 +3564,53 @@ pub async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, tokio_po
                 &[&project, &phase, &item, &flat, &violations, &detail, &entry, &now,
                   &kind, &query_col, &why_col, &owner_col, &id],
             )
-            .await?;
-        measured += 1;
+            .await;
+        match written {
+            Ok(_) => {
+                client.batch_execute("RELEASE SAVEPOINT запись").await?;
+                measured += 1;
+            }
+            // Пункт, чью строку не принимает таблица, остаётся НЕПОМЕРЕННЫМ и
+            // назван: прежняя строка его замера не трогается, а круг идёт дальше.
+            Err(e) => {
+                client.batch_execute("ROLLBACK TO SAVEPOINT запись; RELEASE SAVEPOINT запись").await?;
+                if flat == "failed" {
+                    failed -= 1;
+                }
+                unwritten.push(json!({ "phase": phase, "id": id, "why": db_says(&e) }));
+            }
+        }
     }
-    Ok(json!({ "measured": measured, "failed": failed, "at": now }))
+    // СИРОТЫ СНИМАЮТСЯ ТЕМ ЖЕ КРУГОМ.
+    //
+    // Перечень пунктов читается в начале круга; снятие пункта дверью в середине
+    // круга этот перечень не меняет, и замер снятого записывался заново — а
+    // убирала его только чистка при старте. Строка жила до перезапуска,
+    // считалась в состояние гейта и держала фазу закрытой правилом, которого
+    // не найти.
+    //
+    // Это БЕЗОПАСНОЕ направление чистки, и различие тут не словесное. Та, что
+    // однажды ела объявления, снимала ОБЪЯВЛЕНИЯ по отсутствию замеров — и
+    // стирала только что заведённый пункт, у которого замера ещё не было. Эта
+    // снимает ЗАМЕРЫ по отсутствию объявления и не может задеть ничего, кроме
+    // строки, чьего правила больше нет.
+    let orphans = client
+        .execute(
+            "DELETE FROM project_gates g
+              WHERE g.project_id = $1
+                AND NOT EXISTS (SELECT 1 FROM gate_item i WHERE i.phase = g.phase AND i.id = g.id)",
+            &[&project],
+        )
+        .await?;
+    client.commit().await?;
+    Ok(json!({ "measured": measured, "failed": failed, "at": now,
+               "orphansPurged": orphans,
+               "unwritten": unwritten.len(), "unwrittenItems": unwritten }))
 }
 
 /// Один пункт: чем меряют — тем и меряется.
 async fn measure_item(
-    client: &deadpool_postgres::Client,
+    client: &impl deadpool_postgres::GenericClient,
     project: &str,
     phase: &str,
     item: &str,
@@ -3530,7 +3693,15 @@ async fn measure_item(
 }
 
 pub async fn gate(pool: &Pool, project: &str, phase: Option<&str>) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+    let mut conn = pool.get().await.expect("пул отдал соединение");
+    // ВЕРДИКТ И ЕГО ОСНОВАНИЕ ЧИТАЮТСЯ ОДНИМ СНИМКОМ. Числа гейта берутся у
+    // `gate_state`, а пункты, из которых они сложены, — у `project_gates`; это
+    // два запроса, и с тех пор как замер пишется одной транзакцией, они ложатся
+    // по разные стороны её фиксации. Тогда ручка напечатала бы «красных 3» над
+    // перечнем, в котором красного нет ни одного. Пока счёт считался по самому
+    // перечню, такое было невозможно; вернуть эту невозможность стоит одной
+    // транзакции на чтение.
+    let client = conn.transaction().await?;
     // ПЕРЕСБОРКА, УПАВШАЯ НА ПОЛПУТИ, оставляет проекции недособранными. Замер
     // по ним посчитан, лежит и читается как настоящий: гейт отвечал числами,
     // которые не значили ничего, и час ушёл на тридцать одну ложную находку.
@@ -3700,27 +3871,33 @@ pub async fn gate(pool: &Pool, project: &str, phase: Option<&str>) -> Result<Val
         }));
     }
 
+    // Состояние гейта ВЫВОДИТСЯ ЦЕЛИКОМ: все проверки прошли — гейт закрыт.
+    // Прежде здесь стояло «и подпись стоит и не снята», и это противоречило
+    // самому замыслу: гейт автоматический, условия машинные, и человеку нечего
+    // добавить к тому, что уже померено.
+    //
+    // ВЫВОДИТСЯ ОНО ВИДОМ `gate_state`, а не пересчётом здесь. Пересчёт был
+    // вторым описанием одного правила, и разошлось оно дважды: барьер фаз читал
+    // колонку `state`, куда `waived` уложен как `unknown`, и держал фазы за
+    // отменённый пункт, пока эта ручка о том же гейте отвечала «пройден».
+    // Двух описаний больше нет — есть одно, и обе стороны читают его.
+    let verdicts: std::collections::HashMap<String, (String, i64, i64)> = client
+        .query(
+            "SELECT gate, computed, failed, open FROM gate_state WHERE project_id = $1",
+            &[&project],
+        )
+        .await?
+        .iter()
+        .map(|r| (r.get::<_, String>(0),
+                  (r.get::<_, String>(1), r.get::<_, i64>(2), r.get::<_, i64>(3))))
+        .collect();
     let mut out = Vec::new();
     for (phase, items) in gates {
-        let failed = items.iter().filter(|i| i["computed"] == "failed").count();
-        let unknown = items
-            .iter()
-            .filter(|i| i["computed"] == "unknown" || i["computed"] == "stale")
-            .count();
-        // Состояние гейта ВЫВОДИТСЯ ЦЕЛИКОМ: все проверки прошли — гейт закрыт.
-        // Прежде здесь стояло «и подпись стоит и не снята», и это противоречило
-        // самому замыслу: гейт автоматический, условия машинные, и человеку
-        // нечего добавить к тому, что уже померено. Подпись только откладывала
-        // закрытие и однажды заставила меня написать правило на понятие,
-        // которого в наборе нет.
+        let (computed, failed, unknown) = verdicts
+            .get(&phase)
+            .map(|(c, f, u)| (c.as_str(), *f as usize, *u as usize))
+            .unwrap_or(("open", 0, items.len()));
         let checked = checked_at.get(&phase).copied().flatten();
-        let computed = if failed > 0 {
-            "failed"
-        } else if unknown > 0 {
-            "open"
-        } else {
-            "passed"
-        };
         out.push(json!({
             "gate": phase,
             "title": head_of.get(&phase).cloned().unwrap_or_default(),
@@ -3743,6 +3920,7 @@ pub async fn gate(pool: &Pool, project: &str, phase: Option<&str>) -> Result<Val
                     останутся только настоящие.",
         })
     };
+    client.commit().await?;
     match stale {
         Some((_, why, at)) => Ok(json!({
             "gates": out,
@@ -4300,6 +4478,57 @@ pub async fn push_skills(
 /// Ревизия задачи берётся из подачи, а не из текущего документа: вердикт
 /// получен на той ревизии, которая была в тот момент, и «предполёт устарел»
 /// считается сравнением, а не памятью.
+/// Записать план задачи — то, как исполнитель собирается её делать.
+///
+/// Отметка времени ставит СЕРВЕР, а не подающий: «план написан до правки»
+/// доказывается порядком, и порядок, названный тем же, кто его нарушает, ничего
+/// не доказывает. По той же причине правка задачи обесценивает план — он
+/// привязан к правке, которую читал.
+pub async fn push_task_plan(
+    pool: &Pool,
+    project: &str,
+    task: &str,
+    body: &str,
+    actor: &str,
+) -> Result<Value, tokio_postgres::Error> {
+    let client = pool.get().await.expect("пул отдал соединение");
+    if body.trim().is_empty() {
+        return Ok(json!({ "status": "empty",
+                          "why": "план без текста — это отметка о том, что думали, а не то,                                   что придумали. Записывать нечего" }));
+    }
+    let row = client
+        .query_opt(
+            "SELECT d.revision, t.state FROM project_plan_tasks t
+               JOIN project_documents d
+                 ON d.project_id = t.project_id AND d.entity_kind = t.entity_kind
+                AND d.entity_name = t.entity_name
+              WHERE t.project_id = $1 AND t.id = $2",
+            &[&project, &task],
+        )
+        .await?;
+    let Some(row) = row else {
+        return Ok(json!({ "status": "not_found", "task": task,
+                          "why": format!("задачи «{task}» в наборе нет: план не к чему привязать") }));
+    };
+    let revision: i64 = row.get(0);
+    let state: String = row.get(1);
+    // ПЛАН ПОСЛЕ ЗАКРЫТИЯ — не план, а пересказ сделанного. Записывается, но
+    // назван своим словом: правило порядка всё равно его не зачтёт, и узнать об
+    // этом лучше здесь, чем на гейте.
+    let now = now_ms();
+    client
+        .execute(
+            "INSERT INTO task_plan (project_id, task_id, at, task_revision, body, declared_by)
+             VALUES ($1,$2,$3,$4,$5,$6)",
+            &[&project, &task, &now, &revision, &body, &actor],
+        )
+        .await?;
+    Ok(json!({ "task": task, "at": now, "taskRevision": revision, "by": actor,
+               "why": if state == "closed" {
+                   "задача уже закрыта: это пересказ сделанного, а не план. Правило порядка                     его не зачтёт"
+               } else { "" } }))
+}
+
 pub async fn push_preflight(
     pool: &Pool,
     project: &str,
@@ -9122,6 +9351,81 @@ pub async fn set_phase(
                           "why": "фазы с таким именем нет, а завести её без `ord` и `title` нельзя: \
                                   без места в цепочке не считается ни «раньше», ни «позже»" }));
     }
+    // ГЕЙТ ПРОВЕРЯЕТСЯ ПО ИМЕНИ. Опечатка в нём — не описка, а вечный затвор:
+    // гейта с таким именем нет, замеров у него не будет никогда, и всякая
+    // последующая фаза окажется закрыта навсегда отказом, называющим гейт,
+    // которого не найти.
+    //
+    // СПРАШИВАЕТСЯ `gate_item`, а не `gate_head`. Заголовок гейта пишет
+    // единственный посев при старте, из проектной таблицы, — на новой установке
+    // он пуст, и проверка по нему отказывала бы всякому непустому имени. Выход
+    // был бы только один и нигде не названный: пересобрать документ, объявляющий
+    // гейты, и перезапустить процесс. Пункты же пишет живая дверь
+    // `gate-item-set`, и «у гейта есть хоть один объявленный пункт» — ровно то
+    // условие, при котором замеры вообще могут появиться. Заголовок принимается
+    // тоже: объявленный гейт без пунктов — намерение, и оно падает закрытым.
+    if let Some(g) = gate.filter(|g| !g.is_empty()) {
+        let heard: bool = client
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM gate_item WHERE phase = $1)
+                     OR EXISTS (SELECT 1 FROM gate_head WHERE phase = $1)",
+                &[&g],
+            )
+            .await?
+            .get(0);
+        if !heard {
+            return Ok(json!({ "status": "not_found", "phase": phase, "gate": g,
+                              "why": format!("гейта «{g}» в наборе нет ни одним пунктом и ни одним \
+                                              заголовком. Привязать фазу к несуществующему гейту значит \
+                                              закрыть все последующие навсегда: замеров у него не будет \
+                                              никогда. Пункт объявляется дверью `gate-item-set`") }));
+        }
+    }
+    // ПУСТОЙ ГЕЙТ У ФАЗЫ, ЗА КОТОРОЙ ЕСТЬ ДРУГИЕ, — сказан вслух. Читатель
+    // считает такую фазу непройденной и держит на ней всю оставшуюся цепочку;
+    // молчание здесь означало бы, что забытая при заведении привязка
+    // останавливает проект, и никто не сказал об этом ни слова.
+    let tail = match (gate, ord) {
+        (Some(""), _) | (None, _) if known == 0 => client
+            .query_one("SELECT count(*) FROM phase WHERE ord > coalesce($1, 0)", &[&ord])
+            .await?
+            .get::<_, i64>(0),
+        (Some(""), _) => client
+            .query_one("SELECT count(*) FROM phase WHERE ord > (SELECT ord FROM phase WHERE id = $1)",
+                       &[&phase])
+            .await?
+            .get::<_, i64>(0),
+        _ => 0,
+    };
+    // ЗАНЯТОЕ МЕСТО И ЗАНЯТЫЙ ВИД называются словом, а не отказом Postgres.
+    //
+    // Уникальность держат индексы, но заводятся они с проглоченной ошибкой:
+    // база, где пара уже стоит, осталась бы вовсе без индекса, и тогда эта
+    // проверка — единственная. Она же превращает `duplicate key value violates
+    // unique constraint` в имя фазы, которая место занимает.
+    let taken = |what: &str, val: &str| {
+        format!("{what} уже за фазой «{val}»: два одинаковых делают вопрос о порядке \
+                 двусмысленным, и барьер между такими фазами исчезает молча. \
+                 Сперва освободите место у неё")
+    };
+    if let Some(o) = ord {
+        if let Some(row) = client
+            .query_opt("SELECT id FROM phase WHERE ord = $1 AND id <> $2", &[&o, &phase])
+            .await?
+        {
+            return Ok(json!({ "status": "taken", "phase": phase, "ord": o,
+                              "why": taken("место в цепочке", &row.get::<_, String>(0)) }));
+        }
+    }
+    if let Some(k) = task_kind.filter(|k| !k.is_empty()) {
+        if let Some(row) = client
+            .query_opt("SELECT id FROM phase WHERE task_kind = $1 AND id <> $2", &[&k, &phase])
+            .await?
+        {
+            return Ok(json!({ "status": "taken", "phase": phase, "taskKind": k,
+                              "why": taken(&format!("вид задач «{k}»"), &row.get::<_, String>(0)) }));
+        }
+    }
     client
         .execute(
             "INSERT INTO phase (id, ord, title, gate, plan_level, task_kind)
@@ -9142,7 +9446,11 @@ pub async fn set_phase(
         .await?;
     Ok(json!({ "phase": phase, "ord": r.get::<_, i32>(0), "title": r.get::<_, String>(1),
                "gate": r.get::<_, String>(2), "planLevel": r.get::<_, String>(3),
-               "taskKind": r.get::<_, String>(4) }))
+               "taskKind": r.get::<_, String>(4),
+               "why": if tail > 0 && r.get::<_, String>(2).is_empty() {
+                   format!("гейт не объявлен, а за этой фазой стоят ещё {tail}: проходить нечего, \
+                            и читатель держит на ней всю оставшуюся цепочку. Это не «можно всё»")
+               } else { String::new() } }))
 }
 
 /// Объявить, когда ступень вообще в игре.
@@ -9984,6 +10292,26 @@ pub async fn set_gate_item(
         return Ok(json!({ "status": if gone > 0 { "dropped" } else { "not_found" },
                           "phase": phase, "id": id }));
     }
+    // РОД ПУНКТА СВЕРЯЕТСЯ ЗДЕСЬ, а не там, где на нём спотыкается запись.
+    //
+    // Ограничение живёт на `project_gates`, а не на `gate_item`, и до записи
+    // замера род никто не смотрел: дверь принимала любое слово, пункт ложился в
+    // объявление, и падал уже замер — «new row violates check constraint».
+    // Ограничение требует и согласия рода с запросом: запросный пункт без
+    // запроса таблица не принимает, и это тоже лучше сказать здесь.
+    const РОДЫ: [&str; 4] = ["query", "command", "manual", "unknown"];
+    if !РОДЫ.contains(&kind) {
+        return Ok(json!({ "status": "kind_unknown", "phase": phase, "id": id, "itemKind": kind,
+                          "why": format!("рода «{kind}» у пунктов не бывает: замер такого пункта \
+                                          не записался бы вовсе. Бывают {}", РОДЫ.join(" · ")) }));
+    }
+    if (kind == "query") != query.map(|q| !q.trim().is_empty()).unwrap_or(false) {
+        return Ok(json!({ "status": "kind_and_query_disagree", "phase": phase, "id": id,
+                          "itemKind": kind,
+                          "why": "запросный пункт обязан нести запрос, а незапросный — не нести: \
+                                  таблица замеров требует их согласия, и рассогласованный пункт \
+                                  не мерился бы никогда" }));
+    }
     // ПРОБА ОБЯЗАНА БЫТЬ ЗАПРОСОМ. Дверь принимала прозу — «убрать колонку»,
     // «назвать сценарий», «завести задачу», — и такой пункт не роняли ни разу:
     // самотест отвечал «проба не исполнилась: syntax error at or near "убрать"».
@@ -10252,7 +10580,7 @@ pub fn violator(detail: &str) -> String {
 /// репозитория, ни оболочки. Команду прогоняет тот, у кого они есть, и подаёт
 /// итог — как состояния задач.
 pub async fn execute_method(
-    client: &deadpool_postgres::Client,
+    client: &impl deadpool_postgres::GenericClient,
     project: &str,
     method_kind: &str,
     method: &str,
@@ -10267,7 +10595,7 @@ pub async fn execute_method(
 /// чинить по пяти именам из тридцати восьми нельзя. Замер гейта хранится, и
 /// хранить в нём двести имён вместо пяти ничего не стоит.
 pub async fn execute_method_upto(
-    client: &deadpool_postgres::Client,
+    client: &impl deadpool_postgres::GenericClient,
     project: &str,
     method_kind: &str,
     method: &str,
@@ -10577,6 +10905,15 @@ pub async fn measure_process(
                    FROM phase ph
                    JOIN project_gates g ON g.project_id = $1 AND g.phase = ph.gate
                   WHERE ph.ord = (SELECT min(p2.ord) FROM phase p2
+                                   -- ЗДЕСЬ `p2.gate <> ''` НУЖЕН, и это не та же
+                                   -- проверка, что у `phase_open`. Та спрашивает
+                                   -- про ПРЕДШЕСТВЕННИКА — «пустой гейт не
+                                   -- пройден, значит держит»; эта спрашивает про
+                                   -- СОБСТВЕННЫЙ гейт фазы — «где мы». У
+                                   -- хвостовой фазы гейта может не быть законно,
+                                   -- и без этого условия она навсегда становится
+                                   -- первой непройденной: проект, доделавший всё,
+                                   -- никогда не смог бы сказать, что доделал.
                                    WHERE p2.gate <> ''
                                      AND coalesce((SELECT s.computed FROM gate_state s
                                                     WHERE s.project_id = $1 AND s.gate = p2.gate),
@@ -10602,6 +10939,15 @@ pub async fn measure_process(
                             AND g.result->>'computed' = 'failed') AS нарушений
                    FROM phase ph
                   WHERE ph.ord = (SELECT min(p2.ord) FROM phase p2
+                                   -- ЗДЕСЬ `p2.gate <> ''` НУЖЕН, и это не та же
+                                   -- проверка, что у `phase_open`. Та спрашивает
+                                   -- про ПРЕДШЕСТВЕННИКА — «пустой гейт не
+                                   -- пройден, значит держит»; эта спрашивает про
+                                   -- СОБСТВЕННЫЙ гейт фазы — «где мы». У
+                                   -- хвостовой фазы гейта может не быть законно,
+                                   -- и без этого условия она навсегда становится
+                                   -- первой непройденной: проект, доделавший всё,
+                                   -- никогда не смог бы сказать, что доделал.
                                    WHERE p2.gate <> ''
                                      AND coalesce((SELECT s.computed FROM gate_state s
                                                     WHERE s.project_id = $1 AND s.gate = p2.gate),
@@ -10657,8 +11003,11 @@ pub async fn measure_process(
                     "SELECT tp.phase, coalesce(h.gate, ''), count(*)
                        FROM task_phase tp
                        LEFT JOIN LATERAL (
-                            SELECT p2.gate FROM phase p2
-                             WHERE p2.ord < tp.phase_ord AND p2.gate <> ''
+                            SELECT CASE WHEN p2.gate = ''
+                                         THEN 'гейт фазы ' || p2.id || ' не объявлен'
+                                         ELSE p2.gate END AS gate
+                              FROM phase p2
+                             WHERE p2.ord < tp.phase_ord
                                AND coalesce((SELECT s.computed FROM gate_state s
                                               WHERE s.project_id = tp.project_id
                                                 AND s.gate = p2.gate), 'open') <> 'passed'

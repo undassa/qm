@@ -4371,3 +4371,133 @@ button.chain-card:disabled { cursor: default; opacity: .55; }
 .pu-do[disabled] { opacity: .45; cursor: default; }
 .pu-hint { color: var(--muted); font-size: 11.5px; }
 .pu-beef { margin: 0; color: var(--warn); font-size: 12.5px; }
+
+/* ── Корпус ────────────────────────────────────────────────────────────────
+   Шесть разделов читали одну дверь `summary kind=X` и различались зашитым
+   родом. Здесь род выбирается — и тринадцать родов получают экран разом.  */
+.corp { display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 26px; align-items: start; }
+
+.co-kinds h2, .co-cell h5 {
+  margin: 0 0 8px;
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: 11px;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.co-kinds ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+.co-kinds button {
+  font: inherit;
+  width: 100%;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  background: none;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 6px;
+  text-align: left;
+}
+.co-kinds button:hover { background: var(--panel); }
+.co-kinds button.on { background: var(--panel-2, var(--panel)); font-weight: 600; }
+.co-kinds button b { margin-left: auto; font-family: var(--mono); font-size: 11px; font-weight: 500; color: var(--muted); }
+
+.co-top { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.co-q {
+  font: inherit;
+  font-size: 13px;
+  flex: 1;
+  max-width: 320px;
+  padding: 6px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+}
+.co-q:focus-visible { outline: 2px solid var(--live); outline-offset: 1px; }
+.co-cnt { color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+
+/* Таблица листается вбок ВНУТРИ себя: страница вбок не едет никогда. */
+.co-tbl { overflow-x: auto; }
+.co-tbl table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.co-tbl th { text-align: left; padding: 0 12px 7px 0; border-bottom: 1px solid var(--line); }
+.co-tbl th.n, .co-tbl td.n { text-align: right; font-variant-numeric: tabular-nums; }
+.co-tbl th button {
+  font: inherit;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+.co-tbl th button.on { color: var(--live); }
+.co-tbl td { padding: 6px 12px 6px 0; border-bottom: 1px solid var(--line-soft); }
+.co-tbl tbody tr { cursor: pointer; }
+.co-tbl tbody tr:hover td { background: var(--panel); }
+.co-id { font-family: var(--mono); font-size: 12.5px; color: var(--live); }
+
+.co-back { font: inherit; font-size: 12.5px; background: none; border: 0; color: var(--live); cursor: pointer; padding: 0 0 12px; }
+.co-one-top { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+.co-one-id { font-family: var(--mono); font-size: 20px; letter-spacing: -0.01em; }
+.co-pill {
+  font-size: 11px;
+  border-radius: 999px;
+  padding: 2px 9px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+.co-pill.done { border-color: transparent; background: color-mix(in srgb, var(--done) 18%, transparent); color: var(--done); }
+.co-pill.warn { border-color: transparent; background: color-mix(in srgb, var(--warn) 20%, transparent); color: var(--warn); }
+.co-lead { font-size: 15px; margin: 14px 0 0; max-width: 62ch; line-height: 1.55; }
+.co-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0 26px; margin-top: 20px; }
+.co-cell { border-top: 1px solid var(--line); padding: 12px 0 14px; }
+.co-cell ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.co-cell li { display: flex; gap: 8px; align-items: baseline; font-size: 12.5px; }
+.co-dim { color: var(--muted); }
+.co-where { font-family: var(--mono); font-size: 12px; color: var(--live); }
+
+@media (max-width: 860px) {
+  /* Роды становятся лентой поверх таблицы: на узком колонка в 190 точек
+     съедала бы половину экрана. */
+  .corp { grid-template-columns: minmax(0, 1fr); gap: 14px; }
+  .co-kinds ul { flex-direction: row; overflow-x: auto; gap: 6px; scrollbar-width: none; }
+  .co-kinds ul::-webkit-scrollbar { display: none; }
+  .co-kinds button { width: auto; white-space: nowrap; border: 1px solid var(--line); border-radius: 999px; padding: 3px 11px; }
+  .co-q { max-width: none; }
+  .co-one-id { font-size: 17px; }
+  .co-grid { grid-template-columns: minmax(0, 1fr); gap: 0; }
+}
+
+/* Переключатель языка — в подвале боковика: им пользуются раз, а не всё время. */
+/* Имя раздела не сжимается ради пояснения: «Корпус» показывался как «C…»,
+   потому что длинная подпись забирала всю строку. Имя держит своё место,
+   пояснение уступает. */
+.side .ent.top { display: flex; align-items: baseline; gap: 10px; }
+.side .ent.top .ent-n { flex: none; }
+.side .ent.top .ent-c { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
+
+.lang { display: flex; gap: 4px; margin-top: auto; padding-top: 12px; }
+.lang button {
+  font: inherit;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 3px 10px;
+}
+.lang button.on { color: var(--ink); border-color: var(--muted); }
+@media (max-width: 860px) {
+  /* На ленте переключатель стоит последним и не липнет: он не навигация. */
+  .lang { margin-top: 0; padding-top: 0; flex: none; }
+}

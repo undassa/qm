@@ -547,6 +547,10 @@ impl Mcp {
                               "items": { "type": "object" } },
                 "clear": json!({"type":"boolean","description":"снять ВСЕ прежние вердикты, а не только поданные заново"}) },
                 "required": ["verdicts"] } }));
+        tools.push(json!({ "name": "task-plan-push", "description": "записать план задачи — как исполнитель собирается её делать; время ставит сервер, и им доказывается, что план был раньше правки",
+            "inputSchema": { "type": "object", "properties": { "task": s("имя задачи"),
+                "body": s("план: что меняется, чем доказывается, что остаётся нетронутым") },
+                "required": ["task", "body"] } }));
         tools.push(json!({ "name": "worktree-push", "description": "принять открытые рабочие деревья — статус «в работе»; подача полная, пустая законна",
             "inputSchema": { "type": "object", "properties": {
                 "open": { "type": "array", "description": "[{task, branch, since}]", "items": { "type": "object" } } } } }));
@@ -686,6 +690,7 @@ impl Mcp {
     const WRITES: &[&str] = &[
         "put", "put-section", "rm", "document-add", "reparse", "reproject", "sweep",
         "task-state-push", "code-facts-push", "skills-push", "preflight-push", "worktree-push",
+        "task-plan-push",
         "ceiling-set", "blame-set", "derived-copy-set", "field-column-alias", "column-server-filled", "counts-sync", "kind-add", "kind-required", "kind-projection", "frozen-tree-set", "scheme-term-set", "orphans-purge", "surface-source-add", "sensor-spec-add", "agent-set", "donor-add", "guard-add", "gate-item-set", "method-set", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "step-selftest", "version-close", "phase-set", "exception-set",
         "author-set", "screen-area-set", "skill-set", "version-freeze",
         "links-rewrite", "links-retarget", "entity-rename",
@@ -733,7 +738,7 @@ impl Mcp {
             "method-set", "gate-item-set", "question-holders", "preflight-push", "worktree-push",
             "sensor-specs", "scheme-terms", "frozen-trees", "addresses-declared", "tree-declared", "donors", "skills-push", "skills", "agents", "code-facts-push", "code-facts", "summary", "links-of", "retired-terms", "order", "gate-measure", "gate-item-waive", "gate-selftest", "links-rewrite", "links-retarget", "reparse", "screen-area-set", "skill-set", "skills-paths", "version-freeze", "version-delta", "generated-check", "principal-allow", "principals", "author-set", "authors", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "step-selftest", "version-close", "phase-set", "exception-set", "next-step", "process-state", "statuses", "task-status", "status-anomaly", "pipeline", "waves", "phases", "coverage", "blocks", "history", "at-revision", "process-history", "progress",
             "kinds", "kinds-due", "readiness-gaps", "declared-unwritten", "blame-set", "doors", "derived-copy-set", "field-column-alias", "column-server-filled", "holders", "counts-sync", "kind-add", "kind-required", "kind-projection", "kind-reopens", "kind-proves", "kind-id-set", "tree", "document-coverage", "sections", "section", "backlinks", "search", "put",
-            "put-section", "rm", "document-add", "reproject", "sweep", "gate", "next-task", "blockers", "events",
+            "put-section", "rm", "document-add", "reproject", "sweep", "gate", "next-task", "blockers", "events", "task-plan-push",
             "norm-versions", "measurements", "plan", "readiness", "requirements-of",
             "tasks-of", "preflight-queue", "claims", "exceptions",
             "task-state-push", "state-disagreements",
@@ -1213,6 +1218,17 @@ impl Mcp {
                 Ok(v) => ok(v),
                 Err(e) => refusal(Miss::Db(e.to_string())),
             },
+            "task-plan-push" => {
+                let task = args.get("task").and_then(|v| v.as_str()).unwrap_or("");
+                let body = args.get("body").and_then(|v| v.as_str()).unwrap_or("");
+                if task.is_empty() {
+                    return refusal(Miss::Db("план без задачи не записывается".into()));
+                }
+                match crate::projector::push_task_plan(&self.pool, p, task, body, &self.author).await {
+                    Ok(v) => ok(v),
+                    Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
+                }
+            }
             "next-step" => {
                 let process = args.get("process").and_then(|v| v.as_str()).unwrap_or("godzy");
                 match crate::projector::next_step(&self.pool, p, process).await {
