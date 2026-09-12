@@ -4641,6 +4641,47 @@ tbody:first-of-type .co-grp th { padding-top: 8px; }
 .lang button.on { color: var(--ink); border-color: var(--muted); }
 
 
+/* ── Последствия правки на записи ─────────────────────────────────────────
+   Каскад — суть набора, и до сих пор его было видно только общим счётом на
+   «Зависимостях». Здесь он про одну запись: что на ней стоит, что от её
+   правки переоткроется, и чем она связана. */
+.co-imp { border-top: 1px solid var(--line); margin-top: 18px; padding-top: 14px; }
+.co-imp-wait { color: var(--muted); font-size: 12.5px; margin: 18px 0 0; }
+.co-imp-h { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin: 0 0 8px; }
+.co-imp-h:not(:first-child) { margin-top: 20px; }
+.co-imp-h h5 {
+  margin: 0; font-size: 11px; letter-spacing: .1em; text-transform: uppercase;
+  color: var(--muted); font-weight: 500;
+}
+.co-imp-n { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+.co-imp-n b { color: var(--ink); font-weight: 500; }
+.co-imp-n b.warn { color: var(--warn); }
+.co-imp-say { color: var(--muted); font-size: 12px; line-height: 1.5; margin: 8px 0 0; max-width: 66ch; }
+
+.co-imp-steps, .co-imp-sets { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.co-imp-steps li, .co-imp-sets li {
+  display: grid; grid-template-columns: 108px minmax(0, 1fr); gap: 10px; align-items: baseline;
+}
+.co-imp-d, .co-imp-k {
+  font-family: var(--mono); font-size: 11px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.co-imp-items { display: flex; flex-wrap: wrap; gap: 5px; }
+.co-imp-i {
+  font-family: var(--mono); font-size: 11.5px; color: var(--live);
+  border: 1px solid var(--line); border-radius: 999px; padding: 2px 9px;
+  text-decoration: none; display: inline-flex; align-items: baseline; gap: 4px;
+}
+.co-imp-i:hover { border-color: var(--muted); }
+/* Переоткроется — это не «связано», а «встанет в очередь заново». Знак ↻
+   отличает одно от другого без легенды. */
+.co-imp-i.reopens { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); }
+.co-imp-i i { font-style: normal; font-size: 10px; }
+
+@media (max-width: 620px) {
+  .co-imp-steps li, .co-imp-sets li { grid-template-columns: minmax(0, 1fr); gap: 3px; }
+}
+
 /* ── Корпус на телефоне ───────────────────────────────────────────────────
    Таблица в 366 точек делила ширину на шесть колонок, и от заголовка
    оставалось «Кажды…». Прокрутка вбок это не лечит: читать запись, возя её

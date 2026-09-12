@@ -125,7 +125,54 @@ const cellsOf = (line: string): string[] =>
  * Перенос внутри абзаца остаётся переносом строки, потому что в корпусе абзацы
  * свёрстаны вручную.
  */
+/**
+ * Огороженный код: ``` в начале строки открывает, такая же строка закрывает.
+ *
+ * Делить его пустой строкой НЕЛЬЗЯ, а `chunksOf` делит — потому ограды
+ * снимаются раньше, отдельным проходом по строкам. Набор пишет код именно
+ * оградами: разборщик знал только отступ в четыре пробела, и внутри ограды
+ * строки вида `# четыре таблицы` становились заголовками первого уровня —
+ * комментарий шелла выходил кеглем в тридцать точек.
+ *
+ * Незакрытая ограда — код до конца текста, а не проза: в противном случае
+ * одна забытая ограда рассыпала бы остаток документа.
+ */
+const FENCE = /^\s*(```|~~~)/;
+
+function поОградам(body: string): { код: boolean; text: string }[] {
+  const части: { код: boolean; text: string }[] = [];
+  let буфер: string[] = [];
+  let вКоде = false;
+  const слить = (код: boolean): void => {
+    if (буфер.length) части.push({ код, text: буфер.join("\n") });
+    буфер = [];
+  };
+  for (const line of body.split("\n")) {
+    if (FENCE.test(line)) {
+      слить(вКоде);
+      вКоде = !вКоде;
+      continue;
+    }
+    буфер.push(line);
+  }
+  слить(вКоде);
+  return части;
+}
+
 export function toBlocks(body: string): Block[] {
+  const blocks: Block[] = [];
+  for (const часть of поОградам(body)) {
+    if (часть.код) {
+      if (часть.text.trim()) blocks.push({ kind: "code", text: часть.text.replace(/\s+$/, "") });
+      continue;
+    }
+    blocks.push(...прозой(часть.text.replace(/^\n+|\n+$/g, "")));
+  }
+  return blocks;
+}
+
+/** Проза между оградами: всё прежнее разбиение по пустой строке. */
+function прозой(body: string): Block[] {
   const blocks: Block[] = [];
   for (const chunk of chunksOf(body)) {
     const text = chunk.replace(/\s+$/, "");

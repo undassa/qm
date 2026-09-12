@@ -25,6 +25,23 @@ interface Summary {
   rows: Record<string, string | number>[];
 }
 interface KindRow { kind: string; count: number | null; shape: string; projection?: string; domain?: string }
+interface ImpactItem {
+  depth: number;
+  id: string;
+  kind: string;
+  reopens: boolean;
+}
+interface Impact {
+  depth: number;
+  touched: number;
+  reopens: number;
+  means?: string;
+  items: ImpactItem[];
+}
+interface Links {
+  sets?: Record<string, { id: string; kind: string; title?: string }[]>;
+}
+
 interface Ent {
   id: string;
   kind: string;
@@ -313,7 +330,7 @@ export function Corpus({ projectId, lang }: { projectId: string; lang: Lang }): 
         {/* Раскладка одной записи вытесняет таблицу, а не приписывается к ней:
             человек смотрит либо на множество, либо на одну штуку. */}
         {ent ? (
-          <One ent={ent} lang={lang} onBack={() => setPick("")} />
+          <One ent={ent} lang={lang} projectId={projectId} onBack={() => setPick("")} />
         ) : !sum ? (
           <p className="empty">{say(lang, "co.reading")}</p>
         ) : sum.rows.length === 0 ? (
@@ -429,8 +446,138 @@ export function Corpus({ projectId, lang }: { projectId: string; lang: Lang }): 
   );
 }
 
+/**
+ * Что стоит на записи и что переоткроется от её правки.
+ *
+ * Каскад — суть набора: правишь одно, связанное встаёт в очередь заново. До
+ * сих пор это было видно только на «Зависимостях» общим счётом по родам, а на
+ * самой записи — нигде. Двери `impact` и `links-of` считали это с первого дня;
+ * раскладка их не звала.
+ *
+ * Оба ответа даются РАЗНЫМИ словами, когда их нет. «Наборы связей для рода не
+ * объявлены» и «наборы пусты» — не одно и то же, и пустой список вместо
+ * первого соврал бы.
+ */
+function Последствия({
+  projectId,
+  kind,
+  id,
+  lang,
+}: { projectId: string; kind: string; id: string; lang: Lang }): React.JSX.Element {
+  const [imp, setImp] = useState<Impact | null>(null);
+  const [links, setLinks] = useState<Links | null | "нечем">(null);
+
+  useEffect(() => {
+    setImp(null);
+    setLinks(null);
+    if (!projectId || !kind || !id) return;
+    void tool<Impact>(projectId, "impact", { kind, id }).then(setImp).catch(() => setImp(null));
+    // Отказ двери — это «наборы для рода не объявлены», а не пустота.
+    void tool<Links>(projectId, "links-of", { kind, id })
+      .then(setLinks)
+      .catch(() => setLinks("нечем"));
+  }, [projectId, kind, id]);
+
+  const шаги = useMemo(() => {
+    const m = new Map<number, ImpactItem[]>();
+    for (const i of imp?.items ?? []) m.set(i.depth, [...(m.get(i.depth) ?? []), i]);
+    return [...m].sort((a, b) => a[0] - b[0]);
+  }, [imp]);
+
+  const наборы = useMemo(
+    () => Object.entries(links && links !== "нечем" ? (links.sets ?? {}) : {}).filter(([, v]) => v.length),
+    [links],
+  );
+
+  if (!imp) return <p className="co-imp-wait">{say(lang, "im.reading")}</p>;
+
+  return (
+    <section className="co-imp">
+      <div className="co-imp-h">
+        <h5>{say(lang, "im.head")}</h5>
+        {imp.touched > 0 ? (
+          <span className="co-imp-n">
+            <b className={imp.reopens ? "warn" : ""}>{imp.reopens}</b> {say(lang, "im.reopens")} ·{" "}
+            <b>{imp.touched}</b> {say(lang, "im.touched")} · {say(lang, "im.depth")} {imp.depth}
+          </span>
+        ) : null}
+      </div>
+
+      {imp.touched === 0 ? (
+        <p className="co-imp-say">{say(lang, "im.none")}</p>
+      ) : (
+        <>
+          <ul className="co-imp-steps">
+            {шаги.map(([глубина, свои]) => (
+              <li key={глубина}>
+                <span className="co-imp-d">
+                  {say(lang, "im.step")} {глубина}
+                </span>
+                <span className="co-imp-items">
+                  {свои.map((i) => (
+                    // Якорь тот же, что в прозе: слушатель приложения уведёт
+                    // по нему, и вторая машинерия перехода не нужна.
+                    <a
+                      key={`${i.kind}/${i.id}`}
+                      className={`go co-imp-i${i.reopens ? " reopens" : ""}`}
+                      href={`?page=read&kind=${encodeURIComponent(i.kind)}&id=${encodeURIComponent(i.id)}`}
+                      data-kind={i.kind}
+                      data-id={i.id}
+                      title={i.reopens ? say(lang, "im.willReopen") : kindName(lang, i.kind)}
+                    >
+                      {i.id}
+                      {i.reopens ? <i>↻</i> : null}
+                    </a>
+                  ))}
+                </span>
+              </li>
+            ))}
+          </ul>
+          {imp.means ? <p className="co-imp-say">{imp.means}</p> : null}
+        </>
+      )}
+
+      <div className="co-imp-h">
+        <h5>{say(lang, "li.head")}</h5>
+      </div>
+      {links === "нечем" ? (
+        <p className="co-imp-say">{say(lang, "li.none")}</p>
+      ) : наборы.length === 0 ? (
+        <p className="co-imp-say">{say(lang, "li.empty")}</p>
+      ) : (
+        <ul className="co-imp-sets">
+          {наборы.map(([имя, свои]) => (
+            <li key={имя}>
+              <span className="co-imp-k">{имя}</span>
+              <span className="co-imp-items">
+                {свои.map((x) => (
+                  <a
+                    key={`${x.kind}/${x.id}`}
+                    className="go co-imp-i"
+                    href={`?page=read&kind=${encodeURIComponent(x.kind)}&id=${encodeURIComponent(x.id)}`}
+                    data-kind={x.kind}
+                    data-id={x.id}
+                    title={x.title ?? ""}
+                  >
+                    {x.id}
+                  </a>
+                ))}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
 /** Раскладка одной записи: колонки, доказательство, кто на ней стоит, где написана. */
-function One({ ent, lang, onBack }: { ent: Ent; lang: Lang; onBack: () => void }): React.JSX.Element {
+function One({
+  ent,
+  lang,
+  projectId,
+  onBack,
+}: { ent: Ent; lang: Lang; projectId: string; onBack: () => void }): React.JSX.Element {
   const e = ent.entity ?? {};
   // Служебные колонки наружу не идут: они про то, ОТКУДА запись, а не что в ней.
   const скрыть = new Set(["id", "entity_kind", "entity_name", "origin", "section_ord", "project_id"]);
@@ -472,6 +619,8 @@ function One({ ent, lang, onBack }: { ent: Ent; lang: Lang; onBack: () => void }
           dangerouslySetInnerHTML={{ __html: inline(String(v)) }}
         />
       ))}
+
+      <Последствия projectId={projectId} kind={ent.kind} id={ent.id} lang={lang} />
 
       <div className="co-grid">
         <div className="co-cell">

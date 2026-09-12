@@ -1,0 +1,17 @@
+import { chromium } from 'playwright';
+const b = await chromium.launch();
+const P = '308ed7a2-d18f-4a76-a9c4-c792ce7de0d3';
+const ctx = await b.newContext({ viewport: { width: 1440, height: 1100 } });
+ctx.setDefaultTimeout(20000);
+await ctx.setExtraHTTPHeaders({ 'x-mh-edge': process.env.MH_EDGE_SECRET, 'x-mh-principal': 'undassa' });
+const p = await ctx.newPage();
+await p.goto(`http://127.0.0.1:8096/next/?project=${P}&page=corpus`, { waitUntil: 'domcontentloaded' });
+await p.waitForSelector('.co-kinds li button');
+await p.locator('.co-kinds li button', { hasText: 'требование' }).first().click();
+await p.waitForTimeout(1500);
+await p.locator('.co-q').fill('FR-CFG-01'); await p.waitForTimeout(900);
+await p.locator('.co-tbl tbody tr', { hasText: 'FR-CFG-01' }).first().click();
+await p.waitForSelector('.co-imp'); await p.waitForTimeout(1500);
+await p.locator('.co-imp').scrollIntoViewIfNeeded();
+await p.screenshot({ path: process.env.SHOT + '-панель.png' });
+await b.close();

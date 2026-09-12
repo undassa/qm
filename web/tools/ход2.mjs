@@ -35,12 +35,18 @@ if (ссылок) {
   say('назад возвращает в корпус', p.url().includes('page=corpus'));
 }
 console.log('══ Одиночка по ссылке из документа');
-await p.goto(`http://127.0.0.1:8096/next/?project=${P}&page=read&kind=decision&id=ADR-0134`, { waitUntil: 'domcontentloaded' });
+await p.goto(`http://127.0.0.1:8096/next/?project=${P}&page=read&kind=decision&id=ADR-0138`, { waitUntil: 'domcontentloaded' });
 await p.waitForSelector('.doc-secs button');
-await p.locator('.doc-sum button.ghost').click();
-await p.waitForSelector('a.go', { timeout: 30000 }).catch(() => {});
-await p.waitForTimeout(800);
-const вд = await p.locator('a.go').count();
+let ссылок = 0;
+for (let попытка = 0; попытка < 4 && !ссылок; попытка++) {
+  await p.locator('.doc-sum button.ghost').click().catch(() => {});
+  for (let ждём = 0; ждём < 20 && !ссылок; ждём++) {
+    await p.waitForTimeout(700);
+    ссылок = await p.locator('a.go').count();
+  }
+}
+console.log(`     (раскрыто разделов: ${await p.locator('.sec-h.on').count()})`);
+const вд = ссылок;
 say('в читалке ссылки на месте', вд > 0, `${вд} штук`);
 if (вд) {
   const один = p.locator('a.go[data-id=""]').first();
