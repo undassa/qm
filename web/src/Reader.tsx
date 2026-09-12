@@ -53,6 +53,7 @@ export function Reader({
   const [kind, setKind] = useState<KindRow | null>(null);
   const [ids, setIds] = useState<string[] | null>(null);
   const [query, setQuery] = useState("");
+  const [видыОткрыты, setВидыОткрыты] = useState(false);
   const [id, setId] = useState<string>("");
   const [entity, setEntity] = useState<Entity | null>(null);
   const [sections, setSections] = useState<Section[] | null>(null);
@@ -232,14 +233,25 @@ export function Reader({
         </span>
       </div>
 
-      <div className={`reader${kind?.single ? " solo" : ""}`}>
+      <div className={`reader${kind?.single ? " solo" : ""}${видыОткрыты ? " open" : ""}`}>
+        {/* Свёртка видов — для телефона: сорок видов столбиком не оставляли
+            документу ни одной колонки, и текст шёл по десять знаков в строку.
+            На широком экране кнопка спрятана стилем. */}
+        <button type="button" className="rd-fold" onClick={() => setВидыОткрыты((v) => !v)}>
+          <span>{kind?.kind ?? "вид"}</span>
+          <b>{kind ? (kind.single ? "1" : (kind.count ?? "—")) : ""}</b>
+          <i>{видыОткрыты ? "▴" : "▾"}</i>
+        </button>
         <nav className="reader-kinds" aria-label="Виды">
           {kinds.map((k) => (
             <button
               type="button"
               key={k.kind}
               className={`rk${kind?.kind === k.kind ? " on" : ""}${k.count === 0 ? " none" : ""}`}
-              onClick={() => setKind(k)}
+              onClick={() => {
+                setKind(k);
+                setВидыОткрыты(false);
+              }}
             >
               <span>{k.kind}</span>
               <i>{k.single ? "1" : (k.count ?? "—")}</i>

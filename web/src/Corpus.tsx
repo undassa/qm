@@ -91,6 +91,7 @@ export function Corpus({ projectId, lang }: { projectId: string; lang: Lang }): 
   const [kind, setKind] = useState<string>("requirement");
   const [sum, setSum] = useState<Summary | null>(null);
   const [pick, setPick] = useState<string>("");
+  const [родыОткрыты, setРодыОткрыты] = useState(false);
   const [ent, setEnt] = useState<Ent | null>(null);
   const [q, setQ] = useState<string>("");
   const [by, setBy] = useState<string>("");
@@ -264,7 +265,15 @@ export function Corpus({ projectId, lang }: { projectId: string; lang: Lang }): 
 
   return (
     <div className="corp">
-      <nav className="co-kinds">
+      <nav className={`co-kinds${родыОткрыты ? " open" : ""}`}>
+        {/* Свёртка только для телефона: там семнадцать родов занимали весь
+            первый экран, и до самих записей надо было листать. На широком
+            экране кнопка спрятана стилем — список и так стоит сбоку. */}
+        <button type="button" className="co-fold" onClick={() => setРодыОткрыты((v) => !v)}>
+          <span>{kindName(lang, kind)}</span>
+          <b>{kinds.find((k) => k.kind === kind)?.count ?? 0}</b>
+          <i>{родыОткрыты ? "▴" : "▾"}</i>
+        </button>
         {/* Список собран по ОБЛАСТЯМ, а не по счёту. Семнадцать строк подряд
             не говорили, что требование, потребность и история про одно, а
             задача и этап про другое. Область объявлена дверью `kind-domain`
@@ -278,7 +287,10 @@ export function Corpus({ projectId, lang }: { projectId: string; lang: Lang }): 
                   <button
                     type="button"
                     className={k.kind === kind ? "on" : ""}
-                    onClick={() => setKind(k.kind)}
+                    onClick={() => {
+                      setKind(k.kind);
+                      setРодыОткрыты(false);
+                    }}
                   >
                     <span>{kindName(lang, k.kind)}</span>
                     <b>{k.count}</b>
@@ -378,6 +390,8 @@ export function Corpus({ projectId, lang }: { projectId: string; lang: Lang }): 
                         {columns.show.map((c) => (
                           <td
                             key={c}
+                            data-k={c}
+                            data-l={подпись(lang, c)}
                             className={
                               клеть(c, sum.numbers ?? []) +
                               (ДОКАЗ.has(c) && Number(r[c] ?? 0) === 0 ? " zero" : "") +

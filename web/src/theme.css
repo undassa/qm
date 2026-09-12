@@ -4308,13 +4308,14 @@ button.chain-card:disabled { cursor: default; opacity: .55; }
 }
 
 /* ── Оболочка на телефоне ──────────────────────────────────────────────────
-   На четыре тысячи строк было два медиазапроса: узкой раскладки не делали
-   вовсе. Боковик в 264 точки на экране в 390 забирал две трети, и любой
-   раздел сжимался до ста тридцати — читать нельзя ничего.
+   Была лента, листающаяся вбок, и карточка проекта, прилипшая к её левому
+   краю. На экране в 390 точек карточка забирала 215, разделам оставалось 175
+   — виден один «Пульт», остальные шесть за краем и без единого знака, что
+   туда можно доехать. Раздел, о котором нельзя догадаться, всё равно что
+   его нет.
 
-   Боковик становится ВЕРХНЕЙ ЛЕНТОЙ: разделы в строку, лента листается
-   вбок внутри себя, страница вбок не едет. Выбранный раздел виден и после
-   перезагрузки — браузер сам подкручивает к нему.                       */
+   Теперь ничего не прячется. Строка первая: проект и язык. Дальше — разделы
+   пилюлями с переносом, все семь на виду. Прокрутки вбок нет нигде.       */
 @media (max-width: 860px) {
   .app {
     grid-template-columns: minmax(0, 1fr);
@@ -4325,34 +4326,56 @@ button.chain-card:disabled { cursor: default; opacity: .55; }
     border-right: 0;
     border-bottom: 1px solid var(--line);
     flex-direction: row;
+    flex-wrap: wrap;
     align-items: center;
     gap: 6px;
-    padding: 9px 12px;
-    overflow-x: auto;
-    overflow-y: hidden;
-    scrollbar-width: none;
-    -webkit-overflow-scrolling: touch;
+    padding: 8px 12px 10px;
+    overflow: visible;
   }
-  .side::-webkit-scrollbar { display: none; }
 
-  /* Название проекта не листается вместе с разделами: оно якорь. */
-  .side > *:first-child { position: sticky; left: 0; z-index: 2; flex: none; }
+  /* Проект и язык занимают первую строку ЦЕЛИКОМ: ширина карточки считается
+     от ширины языка, и первому разделу на этой строке места не остаётся.
+     Иначе «Пульт» подсаживался к названию проекта и читался его частью.
+     Порядок задаётся здесь: в разметке язык стоит после разделов. */
+  .picker { order: 1; flex: 1 1 auto; min-width: 0; max-width: calc(100% - 92px); }
+  .lang { order: 2; flex: 0 0 auto; margin: 0; padding: 0; }
+  .side .ent.top { order: 3; }
+  .side-note { order: 4; }
+
+  /* Карточка проекта — в одну строку. Столбиком она стоила трёх строк
+     высоты ради слова «ПРОЕКТ», которое ничего не сообщало. */
+  .place {
+    flex-direction: row;
+    align-items: baseline;
+    gap: 8px;
+    margin-bottom: 0;
+    padding: 6px 10px;
+  }
+  .place-k { display: none; }
+  .place-n { font-size: 14px; }
+  .place-s { margin-top: 0; margin-left: auto; white-space: nowrap; }
 
   .side .ent.top {
-    flex: none;
+    /* `width: 100%` базовой строки боковика растягивало пилюлю во всю
+       ширину, и семь разделов вставали столбиком на пол-экрана. */
+    width: auto;
+    flex: 0 0 auto;
     flex-direction: column;
     align-items: flex-start;
     gap: 0;
-    padding: 5px 11px;
-    border-radius: 7px;
+    padding: 6px 11px;
+    border-radius: 8px;
     white-space: nowrap;
+    /* Палец мажет по цели меньше сорока точек: пилюля держит высоту сама. */
+    min-height: 34px;
+    justify-content: center;
   }
-  /* Подпись раздела на ленте съедает высоту и ничего не добавляет: имени
-     хватает, а пояснение читают на самом экране. */
+  /* Подпись раздела съедает высоту и ничего не добавляет: имени хватает,
+     а пояснение читают на самом экране. */
   .side .ent.top .ent-c { display: none; }
   .side .ent.top .ent-n { font-size: 13.5px; }
 
-  .side-note { flex: none; max-width: 260px; white-space: normal; }
+  .side-note { flex: 1 1 100%; max-width: none; white-space: normal; }
 
   .main { padding: 16px 14px 56px; }
 }
@@ -4570,8 +4593,22 @@ tbody:first-of-type .co-grp th { padding-top: 8px; }
   /* Роды становятся лентой поверх таблицы: на узком колонка в 190 точек
      съедала бы половину экрана. */
   .corp { grid-template-columns: minmax(0, 1fr); gap: 14px; }
-  .co-kinds ul { flex-direction: row; overflow-x: auto; gap: 6px; scrollbar-width: none; }
-  .co-kinds ul::-webkit-scrollbar { display: none; }
+  /* Роды ПЕРЕНОСЯТСЯ, а не листаются: лента вбок без единого знака прокрутки
+     прятала «решение», «потребность» и всё, что за краем. */
+  .co-kinds ul { flex-direction: row; flex-wrap: wrap; overflow: visible; gap: 6px; }
+
+  /* Свёрнутый подборщик: видно выбранный род, остальное по нажатию. */
+  .co-fold {
+    display: flex; align-items: baseline; gap: 8px; width: 100%;
+    font: inherit; font-size: 14px; cursor: pointer; text-align: start;
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 9px; padding: 8px 12px; color: var(--ink); min-height: 38px;
+  }
+  .co-fold b { font-family: var(--mono); font-size: 12px; font-weight: 500; color: var(--muted); }
+  .co-fold i { margin-left: auto; font-style: normal; color: var(--muted); }
+  .co-kinds:not(.open) section { display: none; }
+  .co-kinds.open section { margin-top: 12px; }
+  .co-kinds.open section + section { margin-top: 14px; }
   .co-kinds button { width: auto; white-space: nowrap; border: 1px solid var(--line); border-radius: 999px; padding: 3px 11px; }
   .co-q { max-width: none; }
   .co-one-id { font-size: 17px; }
@@ -4603,6 +4640,113 @@ tbody:first-of-type .co-grp th { padding-top: 8px; }
 @media (max-width: 860px) {
   /* На ленте переключатель стоит последним и не липнет: он не навигация. */
   .lang { margin-top: 0; padding-top: 0; flex: none; }
+}
+
+/* ── Корпус на телефоне ───────────────────────────────────────────────────
+   Таблица в 366 точек делила ширину на шесть колонок, и от заголовка
+   оставалось «Кажды…». Прокрутка вбок это не лечит: читать запись, возя её
+   туда-сюда, нельзя.
+
+   Строка становится карточкой: имя, под ним заголовок целиком, под ним
+   остальные колонки подписанными парами. Подписи берутся из самой клетки —
+   шапки на телефоне нет.                                                  */
+@media (max-width: 620px) {
+  .co-top { flex-wrap: wrap; gap: 8px 12px; }
+  .co-q { flex: 1 1 100%; max-width: none; }
+
+  .co-tbl { margin: 0; }
+  .co-tbl thead { display: none; }
+  .co-tbl table { display: block; }
+  .co-tbl tbody { display: block; }
+  .co-tbl tbody tr {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px 10px;
+    padding: 10px 2px; border-bottom: 1px solid var(--line-soft);
+  }
+  .co-tbl td { display: block; padding: 0; border: 0; }
+  /* Пустая клетка не занимает места и не печатает свою подпись. */
+  .co-tbl td:empty { display: none; }
+  /* Табличные хаки ширины (`width: 1%`, `max-width: 0`) переживают смену
+     раскладки и схлопывают клетку в ноль: имя выходило шириной в четыре
+     точки, заголовок — в ноль. Снимаются поимённо, по весу селектора. */
+  .co-tbl td[data-k="id"] {
+    order: 1; flex: 0 0 auto; width: auto; max-width: none; white-space: nowrap;
+  }
+  .co-tbl td[data-k="title"] {
+    order: 2; flex: 1 1 100%; width: auto; max-width: none;
+    white-space: normal; overflow: visible; text-overflow: clip;
+    font-size: 13.5px; line-height: 1.35;
+  }
+  .co-tbl td:not([data-k="id"]):not([data-k="title"]) {
+    order: 3; width: auto; max-width: none; text-align: left;
+    font-size: 11px; color: var(--muted);
+  }
+  .co-tbl td:not([data-k="id"]):not([data-k="title"])::before {
+    content: attr(data-l) " ";
+    font-family: var(--mono); font-size: 9.5px;
+    letter-spacing: .06em; text-transform: uppercase; opacity: .55;
+  }
+  .co-tbl .co-grp th { display: block; width: 100%; }
+}
+
+/* ── Документы на телефоне ────────────────────────────────────────────────
+   Три колонки (виды 168, имена 220, документ) при ширине в 390 точек не
+   оставляли документу ничего: текст шёл по десять знаков в строку. Теперь
+   одна колонка, а сорок видов и список имён сворачиваются до выбранного. */
+@media (max-width: 860px) {
+  .reader, .reader.solo { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+
+  .rd-fold {
+    display: flex; align-items: baseline; gap: 8px; width: 100%;
+    font: inherit; font-size: 14px; cursor: pointer; text-align: start;
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 9px; padding: 8px 12px; color: var(--ink); min-height: 38px;
+  }
+  .rd-fold span { font-family: var(--mono); }
+  .rd-fold b { font-family: var(--mono); font-size: 12px; font-weight: 500; color: var(--muted); }
+  .rd-fold i { margin-left: auto; font-style: normal; color: var(--muted); }
+
+  /* Свёрнуто — виден только документ; раскрыто — виды лентой с переносом. */
+  .reader:not(.open) .reader-kinds { display: none; }
+  .reader.open .reader-kinds {
+    flex-direction: row; flex-wrap: wrap; gap: 5px;
+    max-height: none; overflow: visible;
+  }
+  .reader.open .reader-kinds .rk {
+    width: auto; border: 1px solid var(--line); border-radius: 999px;
+    padding: 4px 10px; min-height: 30px; align-items: center;
+  }
+
+  /* Список имён не тянется во весь рост: он подпись к документу, не он сам. */
+  .reader-list { max-height: 44vh; }
+  .rk-list { max-height: 34vh; }
+  .reader-doc { padding: 14px 14px 18px; }
+}
+
+/* ── «Не знаем» на телефоне ───────────────────────────────────────────────
+   Четыре колонки (число 68, заголовок, полоса 220, стрелка) оставляли
+   заголовку двадцать две точки, и «пункты готовности без способа проверки»
+   показывалось как «п.». Полоса уходит под строку — она сравнение размеров,
+   а не подпись, и своей строкой читается не хуже.                         */
+@media (max-width: 620px) {
+  .u-head {
+    grid-template-columns: auto minmax(0, 1fr) 14px;
+    grid-template-areas: "n t c" "bar bar bar";
+    gap: 6px 10px;
+    align-items: baseline;
+  }
+  .u-n { grid-area: n; font-size: 15px; }
+  .u-t { grid-area: t; white-space: normal; line-height: 1.3; }
+  .u-caret { grid-area: c; }
+  .u-bar { grid-area: bar; }
+  .u-open { padding-left: 4px; }
+}
+
+/* Свёртка родов живёт только на узком экране: сбоку список и так на виду.
+   Объявлена запросом по МИНИМАЛЬНОЙ ширине, а не базовым правилом с
+   перебивкой: базовое стояло за четыреста строк до своей пары, и порядок
+   каскада делал его невидимым. */
+@media (min-width: 861px) {
+  .co-fold, .rd-fold { display: none !important; }
 }
 
 /* ── Работа ────────────────────────────────────────────────────────────────
