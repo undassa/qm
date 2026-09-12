@@ -114,6 +114,23 @@ export function App(): React.JSX.Element {
     window.history.pushState({}, "", url);
   };
 
+  // Ящик разделов на узком экране. Семь разделов — больше пяти, и по обеим
+  // платформенным рекомендациям это модальный ящик за бургером, а не нижняя
+  // панель: та держит до пяти, дальше пункты не помещаются и не попадаются
+  // пальцем. На широком экране состояние ни на что не влияет — там боковик.
+  const [menu, setMenu] = useState(false);
+
+  // Escape закрывает ящик, и это не украшение: модальный слой, из которого
+  // нельзя выйти клавишей, ловит того, кто пришёл с клавиатуры.
+  useEffect(() => {
+    if (!menu) return;
+    const key = (e: KeyboardEvent): void => {
+      if (e.key === "Escape") setMenu(false);
+    };
+    window.addEventListener("keydown", key);
+    return () => window.removeEventListener("keydown", key);
+  }, [menu]);
+
   // Cmd+K на маке, Ctrl+K везде: одна привычка, выученная в других
   // инструментах, здесь работает без обучения.
   useEffect(() => {
@@ -146,12 +163,43 @@ export function App(): React.JSX.Element {
   const view = PAGES.find((p) => p.page === page) ?? PAGES[0]!;
 
   return (
-    <div className="app">
-      <nav className="side" aria-label="Экраны">
+    <div className={`app${menu ? " menu" : ""}`}>
+      {/* Верхняя планка — только для узкого экрана. Держит три вещи: кнопку
+          ящика, имя текущего раздела (иначе за закрытым ящиком непонятно, где
+          ты) и имя проекта. */}
+      <header className="topbar">
+        <button
+          type="button"
+          className="burger"
+          aria-label={say(lang, menu ? "nav.close" : "nav.open")}
+          aria-expanded={menu}
+          aria-controls="разделы"
+          onClick={() => setMenu((v) => !v)}
+        >
+          <span /><span /><span />
+        </button>
+        <b className="topbar-t">{project ? say(lang, view.key) : say(lang, "nav.all")}</b>
+        {project ? <span className="topbar-p">{project.name}</span> : null}
+      </header>
+
+      {/* Затемнение закрывает ящик нажатием мимо — привычный выход. */}
+      {menu ? (
+        <button
+          type="button"
+          className="scrim"
+          aria-label={say(lang, "nav.close")}
+          onClick={() => setMenu(false)}
+        />
+      ) : null}
+
+      <nav className="side" id="разделы" aria-label="Экраны">
         <ProjectPicker
             projects={projects}
             current={project}
-            onPick={(p) => go({ project: p })}
+            onPick={(p) => {
+              go({ project: p });
+              setMenu(false);
+            }}
             onAll={() => {
               setProject(null);
               setUnknown("");
@@ -180,7 +228,10 @@ export function App(): React.JSX.Element {
                 key={p.page}
                 type="button"
                 className={`ent top${p.page === page ? " on" : ""}`}
-                onClick={() => go({ page: p.page })}
+                onClick={() => {
+                  go({ page: p.page });
+                  setMenu(false);
+                }}
               >
                 <span className="ent-n">{say(lang, p.key)}</span>
                 <span className="ent-c">{say(lang, `${p.key}.note`)}</span>

@@ -35,6 +35,8 @@ for (const s of стр) {
       ссылокВНаве: nav ? nav.querySelectorAll('button, a').length : 0,
       мелкихКнопок: кнопки,
       высотаСтр: document.documentElement.scrollHeight,
+      бургер: !!document.querySelector('.burger') && getComputedStyle(document.querySelector('.burger')).display !== 'none',
+      подМеню: Math.round(document.querySelector('.main').getBoundingClientRect().top),
       навВидимых: nav ? [...nav.querySelectorAll('.ent.top')].filter(e => {
         const r = e.getBoundingClientRect();
         return r.left >= -1 && r.right <= win + 1 && r.width > 0;
@@ -54,7 +56,7 @@ for (const s of стр) {
       навЛистается: nav ? nav.scrollWidth > nav.clientWidth + 1 : false,
     };
   });
-  console.log(`${s.padEnd(8)} вбок:${d.едетВбок ? 'ДА ' + d.ширинаДок : 'нет'} · разделов видно ${d.навВидимых}/${d.навВсего} · нав ${d.навВысота}px${d.навЛистается ? ' ЛИСТАЕТСЯ' : ''} · строк пилюль ${d.строкНава} · карта своей строкой:${d.картаНаСвоейСтроке} · мелких:${d.мелкихКнопок} ${d.срезано.length ? '· СРЕЗАНО: ' + d.срезано.join(', ') : ''} · ошибки:${errs.length}`);
+  console.log(`${s.padEnd(8)} вбок:${d.едетВбок ? 'ДА ' + d.ширинаДок : 'нет'} · бургер:${d.бургер} · содержимое с ${d.подМеню}px · мелких:${d.мелкихКнопок} ${d.срезано.length ? '· СРЕЗАНО: ' + d.срезано.join(', ') : ''} · ошибки:${errs.length}`);
   if (d.шире.length) console.log(`         шире экрана: ${d.шире.join(', ')}`);
   await p.screenshot({ path: `${process.env.SHOT}-${s}.png` });
 }

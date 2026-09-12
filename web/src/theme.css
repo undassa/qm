@@ -4308,76 +4308,78 @@ button.chain-card:disabled { cursor: default; opacity: .55; }
 }
 
 /* ── Оболочка на телефоне ──────────────────────────────────────────────────
-   Была лента, листающаяся вбок, и карточка проекта, прилипшая к её левому
-   краю. На экране в 390 точек карточка забирала 215, разделам оставалось 175
-   — виден один «Пульт», остальные шесть за краем и без единого знака, что
-   туда можно доехать. Раздел, о котором нельзя догадаться, всё равно что
-   его нет.
+   Разделов семь. Нижняя панель держит до пяти — дальше пункты не помещаются
+   и не попадаются пальцем; значит модальный ящик за бургером, как и велят обе
+   платформенные рекомендации.
 
-   Теперь ничего не прячется. Строка первая: проект и язык. Дальше — разделы
-   пилюлями с переносом, все семь на виду. Прокрутки вбок нет нигде.       */
+   До этого здесь была лента пилюль с переносом: она хотя бы ничего не прятала,
+   но забирала сто сорок семь точек высоты на каждом экране — за навигацию,
+   которой пользуются раз в несколько минут. Ящик забирает сорок восемь и
+   отдаёт разделам всю ширину, так что к ним возвращаются пояснения.        */
+.topbar { display: none; }
+.scrim { display: none; }
+
 @media (max-width: 860px) {
   .app {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto minmax(0, 1fr);
     height: 100dvh;
   }
-  .side {
-    border-right: 0;
-    border-bottom: 1px solid var(--line);
-    flex-direction: row;
-    flex-wrap: wrap;
+
+  .topbar {
+    display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 8px 12px 10px;
-    overflow: visible;
+    gap: 12px;
+    padding: 0 8px 0 4px;
+    height: 48px;
+    border-bottom: 1px solid var(--line);
+    background: var(--ground);
+  }
+  .topbar-t { font-size: 15px; font-weight: 600; }
+  .topbar-p {
+    margin-left: auto; font-family: var(--mono); font-size: 11.5px;
+    color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
 
-  /* Проект и язык занимают первую строку ЦЕЛИКОМ: ширина карточки считается
-     от ширины языка, и первому разделу на этой строке места не остаётся.
-     Иначе «Пульт» подсаживался к названию проекта и читался его частью.
-     Порядок задаётся здесь: в разметке язык стоит после разделов. */
-  .picker { order: 1; flex: 1 1 auto; min-width: 0; max-width: calc(100% - 92px); }
-  .lang { order: 2; flex: 0 0 auto; margin: 0; padding: 0; }
-  .side .ent.top { order: 3; }
-  .side-note { order: 4; }
-
-  /* Карточка проекта — в одну строку. Столбиком она стоила трёх строк
-     высоты ради слова «ПРОЕКТ», которое ничего не сообщало. */
-  .place {
-    flex-direction: row;
-    align-items: baseline;
-    gap: 8px;
-    margin-bottom: 0;
-    padding: 6px 10px;
+  /* Кнопка — сорок четыре точки в обе стороны: меньше палец не берёт. */
+  .burger {
+    display: flex; flex-direction: column; justify-content: center; gap: 4px;
+    width: 44px; height: 44px; padding: 0 11px;
+    background: none; border: 0; cursor: pointer; border-radius: 8px; flex: none;
   }
-  .place-k { display: none; }
-  .place-n { font-size: 14px; }
-  .place-s { margin-top: 0; margin-left: auto; white-space: nowrap; }
+  .burger span { display: block; height: 2px; border-radius: 2px; background: var(--ink); }
+  .burger:hover { background: var(--panel); }
 
-  .side .ent.top {
-    /* `width: 100%` базовой строки боковика растягивало пилюлю во всю
-       ширину, и семь разделов вставали столбиком на пол-экрана. */
-    width: auto;
-    flex: 0 0 auto;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 0;
-    padding: 6px 11px;
-    border-radius: 8px;
-    white-space: nowrap;
-    /* Палец мажет по цели меньше сорока точек: пилюля держит высоту сама. */
-    min-height: 34px;
-    justify-content: center;
+  .scrim {
+    display: block; position: fixed; inset: 0; z-index: 30;
+    background: color-mix(in srgb, #000 55%, transparent);
+    border: 0; padding: 0; cursor: pointer;
   }
-  /* Подпись раздела съедает высоту и ничего не добавляет: имени хватает,
-     а пояснение читают на самом экране. */
-  .side .ent.top .ent-c { display: none; }
-  .side .ent.top .ent-n { font-size: 13.5px; }
 
-  .side-note { flex: 1 1 100%; max-width: none; white-space: normal; }
+  /* Ящик. Закрытый он убран за край и НЕ достижим ни пальцем, ни табом:
+     `visibility` снимает его из порядка обхода, чего `transform` не делает. */
+  .side {
+    position: fixed; top: 0; bottom: 0; left: 0; z-index: 40;
+    width: min(300px, 84vw);
+    background: var(--ground);
+    border-right: 1px solid var(--line);
+    padding: 12px 10px 20px;
+    transform: translateX(-100%);
+    visibility: hidden;
+    transition: transform .2s ease, visibility .2s;
+  }
+  .app.menu .side { transform: none; visibility: visible; }
+
+  /* Внутри ящика места вдоволь: пояснения разделов возвращаются. */
+  .side .ent.top { padding: 9px 10px; min-height: 44px; }
+  .side .ent.top .ent-c { display: block; }
 
   .main { padding: 16px 14px 56px; }
+}
+
+/* Человек, попросивший не двигать картинку, получает ящик без выезда. */
+@media (prefers-reduced-motion: reduce) {
+  .side { transition: none; }
 }
 
 @media (max-width: 480px) {
@@ -4637,10 +4639,7 @@ tbody:first-of-type .co-grp th { padding-top: 8px; }
   padding: 3px 10px;
 }
 .lang button.on { color: var(--ink); border-color: var(--muted); }
-@media (max-width: 860px) {
-  /* На ленте переключатель стоит последним и не липнет: он не навигация. */
-  .lang { margin-top: 0; padding-top: 0; flex: none; }
-}
+
 
 /* ── Корпус на телефоне ───────────────────────────────────────────────────
    Таблица в 366 точек делила ширину на шесть колонок, и от заголовка
