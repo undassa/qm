@@ -47,14 +47,17 @@ export function safeHref(raw: string): string | null {
  * значило бы завести переход в никуда, а он хуже отсутствия перехода — по
  * нему щёлкают.
  */
-const INNER = /^([a-z][a-z0-9-]{1,30}):([A-Za-z0-9][A-Za-z0-9_.\/-]{0,80})$/;
+// Имя необязательно: одиночке его негде взять. Набор пишет `glossary:`,
+// `traceability:`, `coverage:` — вид назван, имени у него нет и быть не может,
+// и таких ссылок больше тысячи. Требуя имя, образец выбрасывал их все.
+const INNER = /^([a-z][a-z0-9-]{1,30}):([A-Za-z0-9][A-Za-z0-9_.\/-]{0,80})?$/;
 
 export function innerHref(raw: string): { kind: string; id: string } | null {
   const m = INNER.exec(raw.trim());
-  if (!m || !m[1] || !m[2]) return null;
+  if (!m || !m[1]) return null;
   // `http`, `https`, `mailto` — не виды набора, и притворяться ими нельзя.
   if (["http", "https", "mailto", "ftp", "data", "javascript"].includes(m[1])) return null;
-  return { kind: m[1], id: m[2] };
+  return { kind: m[1], id: m[2] ?? "" };
 }
 
 /**

@@ -691,6 +691,11 @@ CREATE TABLE IF NOT EXISTS task_worktree (
 ALTER TABLE project_decision_links ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'projected';
 ALTER TABLE project_feature_stories ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'projected';
 ALTER TABLE project_story_requirements ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'projected';
+-- И ещё две того же рода: у `project_screen_references` есть дверь
+-- `screen-reference-add`, у `task_requirement` — `task-requirement-add`, и обе
+-- проекции стирались целиком.
+ALTER TABLE project_screen_references ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'projected';
+ALTER TABLE task_requirement ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'projected';
 
 CREATE TABLE IF NOT EXISTS task_plan (
   project_id text NOT NULL,
@@ -2643,7 +2648,10 @@ pub async fn rebuild_before(pool: &Pool, project: &str) -> Result<Value, tokio_p
             &[&project],
         )
         .await?;
-    tx.execute("DELETE FROM task_requirement WHERE project_id = $1", &[&project]).await?;
+    // Объявленное дверью `task-requirement-add` переживает пересборку: своё
+    // выводится из поля «Требования», чужое объявлено и выводиться неоткуда.
+    tx.execute("DELETE FROM task_requirement WHERE project_id = $1 AND origin = 'projected'",
+               &[&project]).await?;
     let links = tx
         .execute(
             "INSERT INTO task_requirement (project_id, task_id, requirement_id)
@@ -2817,6 +2825,21 @@ pub async fn rebuild(pool: &Pool, project: &str) -> Result<Value, tokio_postgres
     //
     // Вставка идёт ПОСЛЕ донорской пересборки, которая свои строки удаляет и
     // пишет заново; поэтому красные добавляются здесь, в том же вызове.
+    //
+    // СНОС — ЗДЕСЬ ЖЕ, а не в чужом проходе. `NOT EXISTS` делал вставку
+    // однократной: строка, однажды легшая в план, больше не обновлялась НИКОГДА.
+    // Снятый документ красной задачи уходил из `red_task`, а его строка в плане
+    // оставалась призраком — её считали пункты гейта и на неё ссылались
+    // переписанные ссылки. Исправленная «Пара» или «Веха» не доезжала по той же
+    // причине: заголовок и веха замирали на первом значении.
+    //
+    // Снос вплотную к вставке, в одной транзакции: окна, в которое план виден
+    // без трека проверок, нет — и призраков нет.
+    tx.execute(
+        "DELETE FROM project_plan_tasks WHERE project_id = $1 AND entity_kind = 'red-task'",
+        &[&project],
+    )
+    .await?;
     let red_in_plan = tx
         .execute(
             "INSERT INTO project_plan_tasks
@@ -2826,8 +2849,6 @@ pub async fn rebuild(pool: &Pool, project: &str) -> Result<Value, tokio_postgres
                     'red-task', r.id, '', 'red', 'not_started', ''
                FROM red_task r
               WHERE r.project_id = $1
-                AND NOT EXISTS (SELECT 1 FROM project_plan_tasks t
-                                 WHERE t.project_id = r.project_id AND t.id = r.id)
                 -- Красная задача, не назвавшая существующей вехи, роняла ВЕСЬ
                 -- пересчёт о внешний ключ: набор tot объявляет её вехой ноль
                 -- раз из семидесяти семи. Пропуск здесь виден в числе строк, а
@@ -3708,11 +3729,20 @@ pub async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, tokio_po
     // стирала только что заведённый пункт, у которого замера ещё не было. Эта
     // снимает ЗАМЕРЫ по отсутствию объявления и не может задеть ничего, кроме
     // строки, чьего правила больше нет.
+    // ПОРЯДОК КЛЮЧА — И ЗДЕСЬ. Круг выше берёт строки `ORDER BY phase, id`, а эта
+    // чистка шла в порядке кучи и целилась ровно в то, чего круг не трогал: у
+    // сироты нет объявления, значит её замок берётся последним и не по ключу.
+    // Этого хватает на цикл — сосед держит строку, которую хочет эта, и ждёт ту,
+    // что она уже держит.
     let orphans = client
         .execute(
-            "DELETE FROM project_gates g
-              WHERE g.project_id = $1
-                AND NOT EXISTS (SELECT 1 FROM gate_item i WHERE i.phase = g.phase AND i.id = g.id)",
+            "DELETE FROM project_gates
+              WHERE (phase, id) IN (SELECT g.phase, g.id FROM project_gates g
+                                     WHERE g.project_id = $1
+                                       AND NOT EXISTS (SELECT 1 FROM gate_item i
+                                                        WHERE i.phase = g.phase AND i.id = g.id)
+                                     ORDER BY g.phase, g.id FOR UPDATE)
+                AND project_id = $1",
             &[&project],
         )
         .await?;
@@ -4231,7 +4261,7 @@ pub async fn preflight_queue(pool: &Pool, project: &str) -> Result<Value, tokio_
             "SELECT t.id, t.title, d.revision,
                     (SELECT max(v.task_revision) FROM preflight_verdict v
                       WHERE v.project_id = t.project_id AND v.task_id = t.id) AS seen_revision,
-                    coalesce(r.ready, false) AS ready
+                    coalesce(r.ready, false) AS ready, t.entity_kind
                FROM project_plan_tasks t
                JOIN project_documents d ON d.project_id = t.project_id AND d.entity_kind = t.entity_kind AND d.entity_name = t.entity_name
                LEFT JOIN task_ready r ON r.project_id = t.project_id AND r.task_id = t.id
@@ -4263,6 +4293,7 @@ pub async fn preflight_queue(pool: &Pool, project: &str) -> Result<Value, tokio_
                 "revision": revision,
                 "seenAtRevision": seen.filter(|v| *v > 0),
                 "ready": r.get::<_, bool>(4),
+                "kind": r.get::<_, String>(5),
                 "why": why,
             }));
         }
@@ -6476,7 +6507,8 @@ pub async fn declare_task_requirement(
     }
     let client = pool.get().await.expect("пул отдал соединение");
     client.execute(
-        "INSERT INTO task_requirement (project_id, task_id, requirement_id) VALUES ($1,$2,$3)
+        "INSERT INTO task_requirement (project_id, task_id, requirement_id, origin)
+         VALUES ($1,$2,$3,'declared')
          ON CONFLICT DO NOTHING", &[&project, &task, &requirement]).await?;
     Ok(json!({ "status": "declared", "task": task, "requirement": requirement }))
 }
@@ -6509,8 +6541,8 @@ pub async fn declare_screen_reference(
     };
     let screen = screen.as_str();
     client.execute(
-        "INSERT INTO project_screen_references (project_id, source, source_kind, screen_id)
-         VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING",
+        "INSERT INTO project_screen_references (project_id, source, source_kind, screen_id, origin)
+         VALUES ($1,$2,$3,$4,'declared') ON CONFLICT DO NOTHING",
         &[&project, &source, &source_kind, &screen]).await?;
     Ok(json!({ "status": "declared", "source": source, "screen": screen }))
 }
@@ -9951,33 +9983,46 @@ async fn force_gates(
     //
     // `FOR UPDATE` в подзапросе и задаёт порядок: без него `ORDER BY` в UPDATE
     // не выразить вовсе.
+    // Отбор без `FOR UPDATE`: предзахват ниже уже держит каждую строку проекта, и
+    // повторять порядок внутри правки незачем.
     let (sql, order) = match under {
         "green" => (
             "UPDATE project_gates
                 SET state = 'passed',
                     result = jsonb_set(coalesce(result, '{}'::jsonb), '{computed}', '\"passed\"')
-              WHERE (phase, id) IN (SELECT phase, id FROM project_gates
-                                     WHERE project_id = $1 AND state <> 'passed'
-                                     ORDER BY phase, id FOR UPDATE)
-                AND project_id = $1",
+              WHERE project_id = $1 AND state <> 'passed'",
             true,
         ),
         // Красным гейт делает ОДНА красная строка: трогать весь замер незачем.
         "red" => (
-            "UPDATE project_gates
+            "UPDATE project_gates g
                 SET state = 'failed',
                     result = jsonb_set(coalesce(result, '{}'::jsonb), '{computed}', '\"failed\"')
-              WHERE (phase, id) IN (SELECT g2.phase, g2.id FROM project_gates g2
-                                     WHERE g2.project_id = $1
-                                       AND g2.id = (SELECT min(x.id) FROM project_gates x
-                                                     WHERE x.project_id = $1 AND x.phase = g2.phase)
-                                     ORDER BY g2.phase, g2.id FOR UPDATE)
-                AND project_id = $1",
+              WHERE g.project_id = $1
+                AND g.id = (SELECT min(x.id) FROM project_gates x
+                             WHERE x.project_id = $1 AND x.phase = g.phase)",
             true,
         ),
         _ => ("", false),
     };
     if order {
+        // ЗАМКИ — НА ВСЕ СТРОКИ ПРОЕКТА И В ПОРЯДКЕ КЛЮЧА, правка — по-прежнему на
+        // немногие. Сузив правку, я сузил и захват, и встретился со сборщиком,
+        // идущим тем же ключом, в тупике: `deadlock detected` в пробе
+        // `phase-loop`.
+        //
+        // Что это ЗАКРЫВАЕТ: наблюдавшуюся инверсию по `project_gates` этого
+        // проекта. Чего оно НЕ ДАЁТ — полного порядка, и обещать его тут нельзя.
+        // Проба пункта — данные: её пишет оператор дверью и исполняет эта же
+        // транзакция следом, по каким угодно таблицам и в каком угодно порядке.
+        // Сверх того `gate_item` общий на все наборы, а предзахват — по одному
+        // проекту. Полным порядок делает только замок вокруг КАЖДОЙ транзакции,
+        // пишущей гейт, а не выборка внутри одной.
+        tx.execute(
+            "SELECT 1 FROM project_gates WHERE project_id = $1 ORDER BY phase, id FOR UPDATE",
+            &[&project],
+        )
+        .await?;
         tx.execute(sql, &[&project]).await?;
     }
     Ok(())
@@ -9985,6 +10030,11 @@ async fn force_gates(
 
 pub async fn gate_selftest(pool: &Pool, project: &str, under: &str) -> Result<Value, tokio_postgres::Error> {
     let mut client = pool.get().await.expect("пул отдал соединение");
+    // Замка проекта здесь нет по той же причине, что и у круга пересчёта, — см.
+    // довод в `watch.rs`. Пока аренды со сроком нет, «сломан» у самотеста
+    // означает либо настоящую беду пробы, либо то, что под ней шёл пересчёт;
+    // различить их прогон не умеет, и второй прогон подряд — единственное, чем
+    // сегодня отличают одно от другого.
     let items = client
         .query(
             "SELECT phase, id, query, probe FROM gate_item
@@ -10865,6 +10915,59 @@ impl Verdict {
 /// «`US-FEED-04` → `SCR-FEED-02`». Первое слово — тот, о ком нарушение, и
 /// исключение объявляется на него. Разбирать глубже нечего: если запросу
 /// понадобится другая единица, он обязан поставить её первой.
+/// Меняет ли объявляемое исключение ответ правила — и если нет, чем помочь.
+///
+/// Возвращает `None`, когда ключ рабочий, и слово отказа, когда нет. Ответ
+/// правила спрашивается ДО и ПОСЛЕ подсадки исключения в откатываемой
+/// транзакции: набор после проверки остаётся тем же, чем был.
+///
+/// Отказ несёт то, чего не хватало: выражение ключа этого правила и первые
+/// находки как есть. По ним ключ виден без чтения SQL.
+pub async fn exception_changes_answer(
+    pool: &Pool,
+    project: &str,
+    rule: &str,
+    entity: &str,
+) -> Result<Option<String>, tokio_postgres::Error> {
+    let mut client = pool.get().await.expect("пул отдал соединение");
+    let Some(row) = client
+        .query_opt("SELECT query FROM gate_item WHERE id = $1 AND kind = 'query'", &[&rule])
+        .await?
+    else {
+        return Ok(None);
+    };
+    let Some(sql) = row.get::<_, Option<String>>(0) else { return Ok(None) };
+    let tx = client.transaction().await?;
+    let before = answer_of(&tx, &sql, project).await;
+    tx.execute(
+        "INSERT INTO rule_exception (project_id, rule, entity_kind, entity_id, reason, decided_by)
+         VALUES ($1,$2,'',$3,'проба ключа','проба')
+         ON CONFLICT (project_id, rule, entity_kind, entity_id) DO NOTHING",
+        &[&project, &rule, &entity],
+    )
+    .await?;
+    let after = answer_of(&tx, &sql, project).await;
+    tx.rollback().await?;
+    let (Ok(before), Ok(after)) = (before, after) else { return Ok(None) };
+    if before.len() != after.len() {
+        return Ok(None);
+    }
+    // Правило и так молчит — объявлять исключение не на что.
+    if before.is_empty() {
+        return Ok(Some(format!(
+            "правило «{rule}» сейчас не находит ничего: исключать нечего, и записанное легло бы \
+             мимо. Объявляйте, когда находка есть"
+        )));
+    }
+    let ключ = exception_key(&sql).unwrap_or_else(|| "не объявлен".to_owned());
+    let примеры: Vec<&str> = before.iter().take(6).map(String::as_str).collect();
+    Ok(Some(format!(
+        "ключ «{entity}» не совпал ни с одной находкой правила «{rule}»: ответ его не изменился, \
+         и записанное исключение было бы мёртвым. Ключ этого правила — `{ключ}`. Находки сейчас: {}",
+        примеры.join(" | ")
+    )))
+}
+
 pub fn violator(detail: &str) -> String {
     detail
         .split_whitespace()

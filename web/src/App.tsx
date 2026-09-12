@@ -69,6 +69,11 @@ export function App(): React.JSX.Element {
   const [projects, setProjects] = useState<Project[]>([]);
   const [project, setProject] = useState<Project | null>(null);
   const [page, setPage] = useState<string>(asked("page") ?? "pult");
+  // Вид и имя в адресе — тот же переход, открытый ссылкой извне. Без этого
+  // скопированный адрес открывал читалку пустой.
+  const [jump0] = useState<Jump | null>(
+    asked("kind") ? { page: "read", kind: asked("kind") ?? "", id: asked("id") ?? "" } : null,
+  );
   const [lang, setLangState] = useState<Lang>(langNow());
   useEffect(() => {
     const слушать = (): void => setLangState(langNow());
@@ -78,7 +83,7 @@ export function App(): React.JSX.Element {
   const [unknown, setUnknown] = useState<string>("");
   /** Палитра и то, куда она попросила перейти. */
   const [pal, setPal] = useState(false);
-  const [jump, setJump] = useState<Jump | null>(null);
+  const [jump, setJump] = useState<Jump | null>(jump0);
 
   useEffect(() => {
     void loadProjects().then((list) => {
@@ -95,6 +100,9 @@ export function App(): React.JSX.Element {
       if (choice.project) setProject(choice.project);
       setUnknown(choice.unknown);
       setPage(asked("page") ?? "pult");
+      // Кнопка «назад» возвращает и цель ссылки, иначе шаг назад открывал
+      // читалку пустой.
+      setJump(asked("kind") ? { page: "read", kind: asked("kind") ?? "", id: asked("id") ?? "" } : null);
     };
     window.addEventListener("popstate", back);
     return () => window.removeEventListener("popstate", back);
@@ -113,6 +121,41 @@ export function App(): React.JSX.Element {
     }
     window.history.pushState({}, "", url);
   };
+
+  /**
+   * Ссылка внутрь набора работает ОТОВСЮДУ, а не только из «Документов».
+   *
+   * Обработчик стоял у статьи читалки, и в ней ссылки ходили. В дровере задачи
+   * и в записи корпуса тот же якорь уводил браузер по своему `href`
+   * (`?page=read&kind=…&id=…`) — полной перезагрузкой и БЕЗ проекта в адресе:
+   * открывалась заглушка «раздел назван, но проект не назван».
+   *
+   * Слушатель один и стоит на документе — по той же причине, по какой он стоял
+   * у статьи, а не у каждого абзаца. Читалка свой щелчок помечает
+   * `preventDefault` и ведёт след возвратов сама; сюда доходит только то, что
+   * она не взяла.
+   */
+  useEffect(() => {
+    const клик = (e: MouseEvent): void => {
+      if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey) return;
+      const a = (e.target as HTMLElement | null)?.closest?.("a.go") as HTMLAnchorElement | null;
+      if (!a) return;
+      const kind = a.dataset["kind"] ?? "";
+      if (!kind) return;
+      e.preventDefault();
+      const id = a.dataset["id"] ?? "";
+      setPage("read");
+      setJump({ page: "read", kind, id });
+      const url = new URL(window.location.href);
+      url.searchParams.set("page", "read");
+      url.searchParams.set("kind", kind);
+      if (id) url.searchParams.set("id", id);
+      else url.searchParams.delete("id");
+      window.history.pushState({}, "", url);
+    };
+    document.addEventListener("click", клик);
+    return () => document.removeEventListener("click", клик);
+  }, []);
 
   // Ящик разделов на узком экране. Семь разделов — больше пяти, и по обеим
   // платформенным рекомендациям это модальный ящик за бургером, а не нижняя

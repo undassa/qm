@@ -141,13 +141,14 @@ export function Reader({
    * Реагируем на СМЕНУ просьбы, а не на её наличие: иначе всякая перерисовка
    * возвращала бы читателя туда, откуда он уже ушёл.
    */
-  const asked = want?.kind && want?.id ? `${want.kind}/${want.id}` : "";
+  const asked = want?.kind ? `${want.kind}/${want.id ?? ""}` : "";
   const [wasAsked, setWasAsked] = useState("");
   useEffect(() => {
     if (!asked || asked === wasAsked || !kinds) return;
     setWasAsked(asked);
     const row = kinds.find((k) => k.kind === want?.kind);
     if (!row) { setFailed(`вида «${want?.kind}» в наборе нет`); return; }
+    setFailed("");
     setKind(row);
     void loadIds(projectId, row.kind).then(setIds).catch(() => setIds([]));
     show(row, want?.id);

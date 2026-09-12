@@ -2,6 +2,8 @@ import type React from "react";
 import { useEffect, useMemo, useState } from "react";
 import { tool } from "./api";
 import { type Lang, domainName, kindName, say } from "./say";
+import { inline } from "./markdown";
+import { Markdown } from "./Markdown";
 
 /**
  * Корпус — всё, что знает проект.
@@ -27,6 +29,10 @@ interface Ent {
   id: string;
   kind: string;
   entity?: Record<string, unknown>;
+  // Половина родов отдаёт не колонки, а тело: у вопроса, решения и задачи
+  // запись — это написанный текст, и колонок у неё нет. Раскладка его
+  // выбрасывала, и запись стояла пустой при тринадцати тысячах знаков.
+  content?: string;
   live?: { state: string; why?: string; through?: number; cause?: string };
   relations?: { links?: Record<string, number>; backlinks?: number };
   saidIn?: {
@@ -444,7 +450,7 @@ function One({ ent, lang, onBack }: { ent: Ent; lang: Lang; onBack: () => void }
         <span className="co-one-id">{ent.id}</span>
         {короткое.map(([k, v]) => (
           <span key={k} className="co-pill">
-            {подпись(lang, k)} {String(v)}
+            {подпись(lang, k)} <b dangerouslySetInnerHTML={{ __html: inline(String(v)) }} />
           </span>
         ))}
         {жив && (
@@ -454,10 +460,17 @@ function One({ ent, lang, onBack }: { ent: Ent; lang: Lang; onBack: () => void }
         )}
       </div>
 
+      {ent.content ? <Markdown body={ent.content} /> : null}
+
       {длинное.map(([k, v]) => (
-        <p key={k} className="co-lead">
-          {String(v)}
-        </p>
+        <p
+          key={k}
+          className="co-lead"
+          // Проза записи — размеченная: в ней живут ссылки на другие записи,
+          // и голым текстом они читались как «(decision:ADR-0156)». Разметка
+          // та же, что в читалке; щелчок ловит слушатель приложения.
+          dangerouslySetInnerHTML={{ __html: inline(String(v)) }}
+        />
       ))}
 
       <div className="co-grid">

@@ -19,6 +19,9 @@ import { type Lang, say } from "./say";
 interface Card {
   task: string;
   title: string;
+  // Род сущности отдаёт сама дверь. Зеркало проверок — `red-task`, и звать
+  // его `task` значило получить отказ и пустой дровер.
+  kind?: string;
   ready: boolean;
   revision: number | null;
   seenAtRevision: number | null;
@@ -475,7 +478,7 @@ export function Work({ projectId, lang }: { projectId: string; lang: Lang }): Re
       {open_ && (
         <EntityDrawer
           projectId={projectId}
-          kind="task"
+          kind={видно.find((c) => c.task === open_)?.kind ?? "task"}
           id={open_}
           title={open_}
           subtitle={
