@@ -53,7 +53,7 @@ const PAGES: { page: string; key: string; view: (id: string, ctx: Ctx) => React.
   // Раздел — это тип ресурса, а не папка: у требования свои колонки, свои
   // фильтры и свои дыры, и общей таблицей документов их не показать.
   { page: "read", key: "nav.read", view: (id, ctx) => <Reader projectId={id} want={ctx.want} /> },
-  { page: "corpus", key: "nav.corpus", view: (id, ctx) => <Corpus projectId={id} lang={ctx.lang} /> },
+  { page: "corpus", key: "nav.corpus", view: (id, ctx) => <Corpus projectId={id} lang={ctx.lang} want={ctx.want} /> },
   { page: "depends", key: "nav.depends", view: (id, ctx) => <Depends projectId={id} lang={ctx.lang} /> },
 ];
 
@@ -72,7 +72,9 @@ export function App(): React.JSX.Element {
   // Вид и имя в адресе — тот же переход, открытый ссылкой извне. Без этого
   // скопированный адрес открывал читалку пустой.
   const [jump0] = useState<Jump | null>(
-    asked("kind") ? { page: "read", kind: asked("kind") ?? "", id: asked("id") ?? "" } : null,
+    asked("kind")
+      ? { page: asked("page") ?? "read", kind: asked("kind") ?? "", id: asked("id") ?? "" }
+      : null,
   );
   const [lang, setLangState] = useState<Lang>(langNow());
   useEffect(() => {
@@ -102,7 +104,11 @@ export function App(): React.JSX.Element {
       setPage(asked("page") ?? "pult");
       // Кнопка «назад» возвращает и цель ссылки, иначе шаг назад открывал
       // читалку пустой.
-      setJump(asked("kind") ? { page: "read", kind: asked("kind") ?? "", id: asked("id") ?? "" } : null);
+      setJump(
+        asked("kind")
+          ? { page: asked("page") ?? "read", kind: asked("kind") ?? "", id: asked("id") ?? "" }
+          : null,
+      );
     };
     window.addEventListener("popstate", back);
     return () => window.removeEventListener("popstate", back);

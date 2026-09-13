@@ -36,17 +36,23 @@ if (ссылок) {
 }
 console.log('══ Одиночка по ссылке из документа');
 await p.goto(`http://127.0.0.1:8096/next/?project=${P}&page=read&kind=decision&id=ADR-0138`, { waitUntil: 'domcontentloaded' });
+await p.waitForFunction(
+  () => (document.querySelector('.doc-head')?.textContent ?? '').includes('ADR-0138'),
+  null, { timeout: 25000 });
 await p.waitForSelector('.doc-secs button');
-let ссылок = 0;
-for (let попытка = 0; попытка < 4 && !ссылок; попытка++) {
+let вЧиталке = 0;
+for (let попытка = 0; попытка < 4 && !вЧиталке; попытка++) {
   await p.locator('.doc-sum button.ghost').click().catch(() => {});
-  for (let ждём = 0; ждём < 20 && !ссылок; ждём++) {
+  for (let ждём = 0; ждём < 20 && !вЧиталке; ждём++) {
     await p.waitForTimeout(700);
-    ссылок = await p.locator('a.go').count();
+    вЧиталке = await p.locator('a.go').count();
   }
 }
 console.log(`     (раскрыто разделов: ${await p.locator('.sec-h.on').count()})`);
-const вд = ссылок;
+const непрочтён = await p.locator('.side-note.warn').count();
+if (непрочтён) console.log(`     НЕ ПРОЧИТАЛОСЬ разделов: ${непрочтён}`);
+say('все раскрытые разделы прочитались', непрочтён === 0, `${непрочтён} с отказом`);
+const вд = вЧиталке;
 say('в читалке ссылки на месте', вд > 0, `${вд} штук`);
 if (вд) {
   const один = p.locator('a.go[data-id=""]').first();

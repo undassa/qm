@@ -1,5 +1,5 @@
 import type React from "react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   loadBacklinks,
   loadEntityByName,
@@ -59,6 +59,8 @@ export function Reader({
   const [sections, setSections] = useState<Section[] | null>(null);
   /** Что открыто и что уже прочитано — по якорю раздела; `""` — документ без разделов. */
   const [open, setOpen] = useState<Set<string>>(new Set());
+  // Разделы, чьё тело не прочиталось: отказ — это не пустота.
+  const [bad, setBad] = useState<Set<string>>(new Set());
   const [body, setBody] = useState<Map<string, DocBlock[]>>(new Map());
   const [links, setLinks] = useState<Backlink[]>([]);
   const [failed, setFailed] = useState("");
@@ -106,16 +108,36 @@ export function Reader({
    * не лучше, чем не открытый вовсе. Приходит **оглавление с весом** — сколько
    * в разделе блоков, знаков, таблиц, — а текст берётся разделом по требованию.
    */
+  /**
+   * Какой документ показан СЕЙЧАС. Ответы приходят вразнобой: читалка сперва
+   * открывает одиночку по умолчанию, а следом — просимый ссылкой, и медленный
+   * ответ первого перетирал оглавление второго. Дальше «раскрыть всё» слало
+   * якоря ЧУЖОГО документа под нынешним родом и без имени — сервер отвечал
+   * отказом на каждый, а страница показывала «собственного текста нет».
+   */
+  const показан = useRef("");
+  const разбор = (метка: string): [string, string] => {
+    const i = метка.indexOf("/");
+    return i < 0 ? [метка, ""] : [метка.slice(0, i), метка.slice(i + 1)];
+  };
+
   function show(k: KindRow, name?: string): void {
+    const этот = `${k.kind}/${name ?? ""}`;
+    показан.current = этот;
     setFailed("");
     setId(name ?? "");
     setOpen(new Set());
     setBody(new Map());
+    setBad(new Set());
     setSections(null);
     setLinks([]);
     void loadEntityByName(projectId, k.kind, name, true)
-      .then(setEntity)
-      .catch((e: unknown) => setFailed(String(e)));
+      .then((e) => {
+        if (показан.current === этот) setEntity(e);
+      })
+      .catch((e: unknown) => {
+        if (показан.current === этот) setFailed(String(e));
+      });
     // ВНУТРЕННИЙ вид разделов НЕ ИМЕЕТ. Проверка `TC-BUS-04` — строка таблицы
     // внутри `test-cases`, и спросить у неё разделы значит получить разделы
     // КОНТЕЙНЕРА: все триста шестьдесят проверок открывались одним и тем же
@@ -124,12 +146,16 @@ export function Reader({
     else
       void loadSections(projectId, k.kind, name)
         .then((all) => {
+          // Ответ по документу, с которого уже ушли, не показывается.
+          if (показан.current !== этот) return;
           setSections(all);
           // Документ без заголовков разделить нечем — он и есть один раздел.
           if (!all.length) void read(k.kind, name ?? "", "");
           else if (all[0]) void read(k.kind, name ?? "", all[0].anchor);
         })
-        .catch(() => setSections([]));
+        .catch(() => {
+          if (показан.current === этот) setSections([]);
+        });
     void loadBacklinks(projectId, k.kind, name)
       .then((d) => setLinks(d.backlinks))
       .catch(() => setLinks([]));
@@ -183,17 +209,35 @@ export function Reader({
   }
 
   /** Блоки раздела — собственные: вложенные подразделы открываются своими строками. */
+  /**
+   * Тело раздела.
+   *
+   * Отказ запроса ЗАПОМИНАЕТСЯ отдельно. Прежде он превращался в пустой список
+   * блоков, а пустой список рисуется словами «собственного текста нет» — и
+   * непрочитанный раздел был неотличим от пустого. Под нагрузкой так пропадал
+   * весь текст документа, и страница уверенно показывала, что его нет.
+   */
   async function read(k: string, name: string, a: string): Promise<void> {
+    const этот = `${k}/${name}`;
     setOpen((o) => new Set(o).add(a));
     if (body.has(a)) return;
-    const d = await loadBlocks(projectId, k, name || undefined, a || undefined, true).catch(() => ({
-      blocks: [] as DocBlock[],
-    }));
-    setBody((m) => new Map(m).set(a, d.blocks));
+    setBad((b) => {
+      if (!b.has(a)) return b;
+      const n = new Set(b);
+      n.delete(a);
+      return n;
+    });
+    try {
+      const d = await loadBlocks(projectId, k, name || undefined, a || undefined, true);
+      if (показан.current === этот) setBody((m) => new Map(m).set(a, d.blocks));
+    } catch {
+      if (показан.current === этот) setBad((b) => new Set(b).add(a));
+    }
   }
 
   function toggle(a: string): void {
     if (!kind) return;
+    const [, имяДок] = разбор(показан.current);
     if (open.has(a)) {
       setOpen((o) => {
         const n = new Set(o);
@@ -202,13 +246,15 @@ export function Reader({
       });
       return;
     }
-    void read(kind.kind, id, a);
+    void read(kind.kind, имяДок, a);
   }
 
   /** Целиком — по явной просьбе, а не по умолчанию. */
   function all(): void {
     if (!kind || !sections) return;
-    for (const s of sections) void read(kind.kind, id, s.anchor);
+    const [род, имя] = разбор(показан.current);
+    if (род !== kind.kind) return;
+    for (const s of sections) void read(kind.kind, имя, s.anchor);
   }
 
   if (!kinds) return <p className="empty">Читаю виды…</p>;
@@ -366,7 +412,21 @@ export function Reader({
                           </span>
                         </button>
                         {open.has(s.anchor) ? (
-                          body.has(s.anchor) ? (
+                          bad.has(s.anchor) ? (
+                            <p className="side-note warn">
+                              Раздел не прочитался.{" "}
+                              <button
+                                type="button"
+                                className="ghost"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (kind) void read(kind.kind, разбор(показан.current)[1], s.anchor);
+                                }}
+                              >
+                                ещё раз
+                              </button>
+                            </p>
+                          ) : body.has(s.anchor) ? (
                             own(body.get(s.anchor)!).length ? (
                               <Blocks blocks={own(body.get(s.anchor)!)} />
                             ) : (

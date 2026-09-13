@@ -1,5 +1,5 @@
 import type React from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { tool } from "./api";
 import { type Lang, domainName, kindName, say } from "./say";
 import { inline } from "./markdown";
@@ -109,12 +109,54 @@ const клеть = (c: string, numbers: string[]): string =>
 
 const подпись = (l: Lang, c: string): string => (КОЛОНКА[c] ? (l === "en" ? КОЛОНКА[c][1] : КОЛОНКА[c][0]) : c);
 
-export function Corpus({ projectId, lang }: { projectId: string; lang: Lang }): React.JSX.Element {
+export function Corpus({
+  projectId,
+  lang,
+  want,
+}: {
+  projectId: string;
+  lang: Lang;
+  /** Что просят открыть: род и имя из адреса. Тот же словарь, что у читалки. */
+  want?: { page?: string; kind?: string; id?: string } | null;
+}): React.JSX.Element {
   const [kinds, setKinds] = useState<KindRow[] | null>(null);
-  const [kind, setKind] = useState<string>("requirement");
+  const [kind, setKind] = useState<string>(
+    want?.kind && (want.page ?? "corpus") === "corpus" ? want.kind : "requirement",
+  );
   const [sum, setSum] = useState<Summary | null>(null);
-  const [pick, setPick] = useState<string>("");
+  const [pick, setPick] = useState<string>(
+    want?.id && (want.page ?? "corpus") === "corpus" ? want.id : "",
+  );
   const [родыОткрыты, setРодыОткрыты] = useState(false);
+
+  // Просьба извне — вставленный адрес или кнопка «назад». Реагируем на СМЕНУ
+  // просьбы, а не на её наличие: иначе всякая перерисовка возвращала бы
+  // человека туда, откуда он уже ушёл.
+  const просят =
+    want?.kind && (want.page ?? "corpus") === "corpus" ? `${want.kind}/${want.id ?? ""}` : "";
+  const [былаПросьба, setБылаПросьба] = useState(просят);
+  useEffect(() => {
+    if (просят === былаПросьба) return;
+    setБылаПросьба(просят);
+    if (!просят) return;
+    setKind(want?.kind ?? "requirement");
+    setPick(want?.id ?? "");
+  }, [просят, былаПросьба, want]);
+
+  // Выбор записывается в адрес — затем ссылка и даётся. `replace`, а не
+  // `push`: перебор родов не должен набивать историю, из которой потом
+  // выбираться по одному шагу назад.
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    if (url.searchParams.get("page") !== "corpus") return;
+    const былоРод = url.searchParams.get("kind") ?? "";
+    const былоИмя = url.searchParams.get("id") ?? "";
+    if (былоРод === kind && былоИмя === pick) return;
+    url.searchParams.set("kind", kind);
+    if (pick) url.searchParams.set("id", pick);
+    else url.searchParams.delete("id");
+    window.history.replaceState({}, "", url);
+  }, [kind, pick]);
   const [ent, setEnt] = useState<Ent | null>(null);
   const [q, setQ] = useState<string>("");
   const [by, setBy] = useState<string>("");
@@ -138,10 +180,17 @@ export function Corpus({ projectId, lang }: { projectId: string; lang: Lang }): 
     );
   }, [projectId]);
 
+  // Прежний род помнится, чтобы отличить СМЕНУ рода от первой отрисовки.
+  // Выбранная запись снимается при смене — под новым родом она бессмысленна,
+  // — но не на первом заходе: там её мог назвать адрес, и безусловный сброс
+  // стирал именно то, ради чего ссылку и дали.
+  const прежнийРод = useRef<string | null>(null);
   useEffect(() => {
     if (!projectId || !kind) return;
+    const сменился = прежнийРод.current !== null && прежнийРод.current !== kind;
+    прежнийРод.current = kind;
     setSum(null);
-    setPick("");
+    if (сменился) setPick("");
     setBy("");
     setGrp(null);
     void tool<Summary>(projectId, "summary", { kind }).then(setSum).catch(() => setSum(null));
