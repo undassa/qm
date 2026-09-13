@@ -1,4 +1,5 @@
 import type React from "react";
+import { type Lang, say } from "./say";
 import { useEffect, useRef, useState } from "react";
 import {
   loadBacklinks,
@@ -45,9 +46,11 @@ function kb(chars: number): string {
 export function Reader({
   projectId,
   want,
+  lang,
 }: {
   projectId: string;
   want?: { kind?: string; id?: string } | null;
+  lang: Lang;
 }): React.JSX.Element {
   const [kinds, setKinds] = useState<KindRow[] | null>(null);
   const [kind, setKind] = useState<KindRow | null>(null);
@@ -257,7 +260,7 @@ export function Reader({
     for (const s of sections) void read(kind.kind, имя, s.anchor);
   }
 
-  if (!kinds) return <p className="empty">Читаю виды…</p>;
+  if (!kinds) return <p className="empty">{say(lang, "rr.readingKinds")}</p>;
 
   const shown = (ids ?? []).filter((x) => x.toLowerCase().includes(query.trim().toLowerCase()));
   const tables = (sections ?? []).reduce((n, s) => n + s.tables, 0);
@@ -267,14 +270,14 @@ export function Reader({
     <>
       <div className="head">
         <div>
-          <h1>Документы</h1>
-          <div className="prov">вид · сущность · что написано</div>
+          <h1>{say(lang, "rr.head")}</h1>
+          <div className="prov">{say(lang, "rr.sub")}</div>
         </div>
         <span className="prov">
           {kind ? (
             <>
               <b>{kind.kind}</b>
-              {kind.single ? " · одиночка" : ` · ${kind.count ?? "—"}`}
+              {kind.single ? ` · ${say(lang, "rr.single")}` : ` · ${kind.count ?? "—"}`}
             </>
           ) : null}
         </span>
@@ -289,7 +292,7 @@ export function Reader({
           <b>{kind ? (kind.single ? "1" : (kind.count ?? "—")) : ""}</b>
           <i>{видыОткрыты ? "▴" : "▾"}</i>
         </button>
-        <nav className="reader-kinds" aria-label="Виды">
+        <nav className="reader-kinds" aria-label={say(lang, "rr.kinds")}>
           {kinds.map((k) => (
             <button
               type="button"
@@ -309,16 +312,16 @@ export function Reader({
         {kind?.single ? null : (
         <div className="reader-list">
           {ids === null ? (
-            <p className="empty">Читаю имена…</p>
+            <p className="empty">{say(lang, "rr.readingNames")}</p>
           ) : (
             <>
               <input
                 className="rows-search"
                 type="search"
                 value={query}
-                placeholder="искать по имени…"
+                placeholder={say(lang, "rr.searchName")}
                 onChange={(e) => setQuery(e.target.value)}
-                aria-label="Поиск по имени"
+                aria-label={say(lang, "rr.searchNameAria")}
               />
               <div className="rk-list">
                 {shown.slice(0, 300).map((name) => (
@@ -359,11 +362,10 @@ export function Reader({
                 </button>
               ) : null}
           {failed ? (
-            <p className="empty">
-              Не читается: <code>{failed}</code>
+            <p className="empty">{say(lang, "rr.unreadable")}<code>{failed}</code>
             </p>
           ) : !entity ? (
-            <p className="empty">Выберите сущность слева.</p>
+            <p className="empty">{say(lang, "rr.pickLeft")}</p>
           ) : (
             <>
               <div className="doc-head">
@@ -378,7 +380,7 @@ export function Reader({
               </div>
 
               {sections === null ? (
-                <p className="empty">Читаю оглавление…</p>
+                <p className="empty">{say(lang, "rr.readingToc")}</p>
               ) : sections.length ? (
                 <>
                   <div className="doc-sum">
@@ -388,9 +390,7 @@ export function Reader({
                       {kb(sections.reduce((n, s) => n + s.chars, 0))}
                       {tables ? ` · ${tables} ${plural(tables, "таблица", "таблицы", "таблиц")}` : ""}
                     </span>
-                    <button type="button" className="ghost" onClick={all}>
-                      раскрыть всё
-                    </button>
+                    <button type="button" className="ghost" onClick={all}>{say(lang, "rr.openAll")}</button>
                   </div>
                   <div className="doc-secs">
                     {sections.map((s) => (
@@ -422,18 +422,16 @@ export function Reader({
                                   e.stopPropagation();
                                   if (kind) void read(kind.kind, разбор(показан.current)[1], s.anchor);
                                 }}
-                              >
-                                ещё раз
-                              </button>
+                              >{say(lang, "rr.again")}</button>
                             </p>
                           ) : body.has(s.anchor) ? (
                             own(body.get(s.anchor)!).length ? (
                               <Blocks blocks={own(body.get(s.anchor)!)} />
                             ) : (
-                              <p className="side-note">Собственного текста нет — только подразделы ниже.</p>
+                              <p className="side-note">{say(lang, "rr.noOwnText")}</p>
                             )
                           ) : (
-                            <p className="empty">Читаю…</p>
+                            <p className="empty">{say(lang, "rr.reading")}</p>
                           )
                         ) : null}
                       </section>
@@ -447,7 +445,7 @@ export function Reader({
                 // Внутренняя сущность — строка предметной таблицы: текста у неё нет,
                 // и подставлять его неоткуда. Зато есть место, где она записана, и
                 // оно называется: без него строка висит в воздухе.
-                <Row row={entity.entity as Record<string, unknown>} />
+                <Row row={entity.entity as Record<string, unknown>} lang={lang} />
               ) : (
                 <p className="empty">{(entity as { why?: string }).why ?? "Текста нет."}</p>
               )}
@@ -510,7 +508,7 @@ export function Reader({
  * Пустые поля названы, но не показаны значениями: «поля нет» и «поле пустое» —
  * разное, и молчание про второе читается как первое.
  */
-function Row({ row }: { row: Record<string, unknown> }): React.JSX.Element {
+function Row({ row, lang }: { row: Record<string, unknown>; lang: Lang }): React.JSX.Element {
   const where = String(row["entity_kind"] ?? "");
   const whereName = String(row["entity_name"] ?? "");
   const skip = new Set(["entity_kind", "entity_name"]);
@@ -519,8 +517,7 @@ function Row({ row }: { row: Record<string, unknown> }): React.JSX.Element {
   return (
     <div className="row-view">
       {where ? (
-        <p className="row-where">
-          записано в <b>{where}</b>
+        <p className="row-where">{say(lang, "rr.writtenIn")}<b>{where}</b>
           {whereName ? <> · {whereName}</> : null}
         </p>
       ) : null}

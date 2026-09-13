@@ -1,4 +1,5 @@
 import type React from "react";
+import { type Lang, say } from "./say";
 import { useEffect, useState } from "react";
 import { loadSections, loadBlocks, loadEntityByName, loadBacklinks } from "./api";
 import { Blocks, type DocBlock } from "./Blocks";
@@ -41,6 +42,7 @@ export function EntityDrawer({
   inner,
   onClose,
   onFind,
+  lang,
 }: {
   projectId: string;
   kind: string;
@@ -51,6 +53,7 @@ export function EntityDrawer({
   inner?: boolean | undefined;
   onClose: () => void;
   onFind?: ((q: string) => void) | undefined;
+  lang: Lang;
 }): React.JSX.Element {
   const [sections, setSections] = useState<Section[] | null>(null);
   const [body, setBody] = useState<Map<string, DocBlock[]>>(new Map());
@@ -114,12 +117,11 @@ export function EntityDrawer({
   );
 
   return (
-    <Drawer title={title} subtitle={subtitle ?? `${kind} · ${id}`} onClose={onClose}>
+    <Drawer lang={lang} title={title} subtitle={subtitle ?? `${kind} · ${id}`} onClose={onClose}>
       {inner ? (
         <>
           {where ? (
-            <p className="row-where">
-              записано в <b>{where}</b>
+            <p className="row-where">{say(lang, "rr.writtenIn")}<b>{where}</b>
             </p>
           ) : null}
           <dl className="ent-row">
@@ -132,12 +134,12 @@ export function EntityDrawer({
           </dl>
         </>
       ) : sections === null ? (
-        <p className="empty">Читаю документ…</p>
+        <p className="empty">{say(lang, "dr.reading")}</p>
       ) : failed ? (
-        <p className="empty">Не читается: <code>{failed}</code></p>
+        <p className="empty">{say(lang, "rr.unreadable")}<code>{failed}</code></p>
       ) : sections.length === 0 && !body.get("")?.length ? (
         <>
-          <p className="note">Документа нет — только объявленные поля.</p>
+          <p className="note">{say(lang, "dr.noDoc")}</p>
           <dl className="ent-row">
             {shownFields.map(([f, v]) => (
               <div key={f}>

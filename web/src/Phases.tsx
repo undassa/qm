@@ -1,4 +1,5 @@
 import type React from "react";
+import { type Lang, say } from "./say";
 import { tool } from "./api";
 import { useEffect, useState } from "react";
 
@@ -21,7 +22,11 @@ export interface Phase {
   tasks: { closed: number; open: number; total: number } | null;
 }
 
-export function Phases({ projectId }: { projectId: string }): React.JSX.Element {
+export function Phases({ projectId,
+  lang,
+}: { projectId: string;
+  lang: Lang;
+}): React.JSX.Element {
   const [phases, setPhases] = useState<Phase[] | null>(null);
 
   useEffect(() => {
@@ -29,7 +34,7 @@ export function Phases({ projectId }: { projectId: string }): React.JSX.Element 
     void tool<{ phases: Phase[] }>(projectId, "phases").then((d) => setPhases(d.phases));
   }, [projectId]);
 
-  if (!phases) return <p className="empty">Читаю фазы…</p>;
+  if (!phases) return <p className="empty">{say(lang, "ph.reading")}</p>;
 
   return (
     <div className="phases">
@@ -53,18 +58,17 @@ export function Phases({ projectId }: { projectId: string }): React.JSX.Element 
                 </div>
               ) : null}
               {p.tasks ? (
-                <div className="phase-l">
-                  задачи <b>{p.tasks.closed}</b>/{p.tasks.total}
+                <div className="phase-l">{say(lang, "ph.tasks")}<b>{p.tasks.closed}</b>/{p.tasks.total}
                 </div>
               ) : null}
-              {!p.documents && !p.tasks ? <div className="phase-l">своего счёта нет</div> : null}
+              {!p.documents && !p.tasks ? <div className="phase-l">{say(lang, "ph.noCount")}</div> : null}
             </div>
             {p.gate ? (
               <div className={`gatepin g-${state}`} title={`гейт ${p.gate}: ${p.gateState ?? "—"}`}>
                 {p.gate}
               </div>
             ) : i < phases.length - 1 ? (
-              <div className="gatepin g-none" title="гейта нет">
+              <div className="gatepin g-none" title={say(lang, "ph.noGate")}>
                 —
               </div>
             ) : null}

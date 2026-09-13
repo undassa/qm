@@ -1,4 +1,5 @@
 import type React from "react";
+import { type Lang, say } from "./say";
 import { useState } from "react";
 import { tool } from "./api";
 import { Live } from "./Live";
@@ -86,13 +87,7 @@ interface NextStep {
   says?: string;
 }
 
-/** Слово и тон состояния — один словарь на всю страницу. */
-const WORD: Record<string, string> = {
-  passed: "пройден",
-  failed: "провален",
-  unknown: "мерить нечем",
-  waived: "снят с этого проекта",
-};
+/** Тон состояния — цвет, а не слово: слово живёт в общем словаре. */
 const TONE: Record<string, string> = {
   passed: "ok",
   failed: "bad",
@@ -114,9 +109,11 @@ function tally(g?: Gate): { passed: number; failed: number; other: number; total
 
 export function Readiness({
   projectId,
+  lang,
   onFind,
 }: {
   projectId: string;
+  lang: Lang;
   onFind?: ((q: string) => void) | undefined;
 }): React.JSX.Element {
   const [phaseOnly, setPhaseOnly] = useState<string | null>(null);
@@ -145,7 +142,7 @@ export function Readiness({
     [projectId],
   );
 
-  if (!live.data) return <p className="empty">Считаю готовность…</p>;
+  if (!live.data) return <p className="empty">{say(lang, "rd.reading")}</p>;
   const { gates, phases, steps, next, tiles, pipeline, stale, staleWhy } = live.data;
   const byGate = new Map(gates.map((g) => [g.gate, g]));
   const gateOfPhase = new Map(phases.filter((p) => p.gate).map((p) => [p.gate as string, p]));
@@ -190,13 +187,15 @@ export function Readiness({
     <>
       <div className="head">
         <div>
-          <h1>Готовность</h1>
-          <div className="prov">чему верить · где стоим · что держит · что не прошло</div>
+          <h1>{say(lang, "rd.head")}</h1>
+          <div className="prov">{say(lang, "rd.sub")}</div>
         </div>
         <span className="prov">
-          <Live at={live.at} again={live.again} />{" "}
-          <b>{passed}</b> из <b>{all.length}</b> пунктов прошли
-          {violations > 0 ? <> · <b className="bad-n">{violations}</b> нарушений</> : null}
+          <Live lang={lang} at={live.at} again={live.again} />{" "}
+          <b>{passed}</b> {say(lang, "rd.of")} <b>{all.length}</b> {say(lang, "rd.itemsPassed")}
+          {violations > 0 ? (
+            <> · <b className="bad-n">{violations}</b> {say(lang, "rd.violations")}</>
+          ) : null}
         </span>
       </div>
 
@@ -214,8 +213,7 @@ export function Readiness({
               <b>зелёное у них ничего не значит</b>
             </>
           ) : (
-            <>
-              Все <b>{probed.length}</b> правил роняются подсадкой: каждое проверено сломом, а не
+            <>{say(lang, "rd.all")}<b>{probed.length}</b> правил роняются подсадкой: каждое проверено сломом, а не
               тем, что запрос ничего не вернул
             </>
           )}
@@ -265,7 +263,7 @@ export function Readiness({
                 {t.total > 0 ? `${t.passed}/${t.total}` : "пунктов нет"}
                 {t.failed > 0 ? <em> · {t.violations} нарушений</em> : null}
               </span>
-              {isHere ? <span className="rail-here">здесь</span> : null}
+              {isHere ? <span className="rail-here">{say(lang, "rd.here")}</span> : null}
             </button>
           );
         })}
@@ -274,14 +272,13 @@ export function Readiness({
       {/* ── Что держит прямо сейчас ─────────────────────────────────────── */}
       {next?.at ? (
         <section className="holds">
-          <div className="holds-k">держит сейчас</div>
+          <div className="holds-k">{say(lang, "rd.holdsNow")}</div>
           <div className="holds-body">
             <div className="holds-q">
               <b>Ступень {next.at.ord}</b> · {next.at.question ?? "—"}
             </div>
             {next.at.run ? (
-              <div className="holds-run">
-                запустить <code>{next.at.run}</code>
+              <div className="holds-run">{say(lang, "rd.run")}<code>{next.at.run}</code>
                 {next.at.owner ? <span className="holds-who"> · {next.at.owner}</span> : null}
               </div>
             ) : null}
@@ -302,17 +299,13 @@ export function Readiness({
       ) : null}
 
       {/* ── Что не прошло: все гейты разом ──────────────────────────────── */}
-      <h2 className="pick-h">
-        Что не прошло
-        <span className="pick-g">
+      <h2 className="pick-h">{say(lang, "rd.failedHead")}<span className="pick-g">
           {phaseOnly ? `только ${phaseOnly}` : "все фазы разом"} · тяжёлое сверху
         </span>
       </h2>
 
       <div className="tabs">
-        <button type="button" className={phaseOnly === null ? "on" : ""} onClick={() => setPhaseOnly(null)}>
-          все фазы
-        </button>
+        <button type="button" className={phaseOnly === null ? "on" : ""} onClick={() => setPhaseOnly(null)}>{say(lang, "rd.allPhases")}</button>
         {here ? (
           <button type="button" className={phaseOnly === here ? "on" : ""} onClick={() => setPhaseOnly(here)}>
             где стоим · {here}
@@ -329,11 +322,12 @@ export function Readiness({
       </div>
 
       {shownItems.length === 0 ? (
-        <p className="empty ok-note">Здесь всё пройдено.</p>
+        <p className="empty ok-note">{say(lang, "rd.allPassed")}</p>
       ) : (
         <ul className="items">
           {shownItems.map((i) => (
             <ItemRow
+              lang={lang}
               key={`${i.gate}·${i.item}`}
               item={i}
               phase={gateOfPhase.get(i.gate)?.phase ?? i.gate}
@@ -346,14 +340,12 @@ export function Readiness({
       )}
 
       {/* ── Лестница входа ──────────────────────────────────────────────── */}
-      <Ladder steps={steps} at={next?.at?.ord} />
+      <Ladder lang={lang} steps={steps} at={next?.at?.ord} />
 
       {/* ── Сколько прошли — три числа, никогда одно ────────────────────── */}
       {tiles.length > 0 ? (
         <>
-          <h2 className="pick-h">
-            Счёт по предметам
-            <span className="pick-g">третье число — «не отвечается», и складывать его некуда</span>
+          <h2 className="pick-h">{say(lang, "rd.bySubject")}<span className="pick-g">третье число — «не отвечается», и складывать его некуда</span>
           </h2>
           <div className="tilestrip">
             {tiles.map((t) => (
@@ -380,9 +372,7 @@ export function Readiness({
       {/* ── Конвейер задач ──────────────────────────────────────────────── */}
       {pipeline.length > 0 ? (
         <section className="pipe">
-          <h2 className="pick-h">
-            Конвейер задач
-            <span className="pick-g">каждая ступень — своё доказательство, а не отметка</span>
+          <h2 className="pick-h">{say(lang, "rd.pipeline")}<span className="pick-g">каждая ступень — своё доказательство, а не отметка</span>
           </h2>
           <ol className="pipe-rows">
             {pipeline.map((s2, n) => (
@@ -414,12 +404,14 @@ function ItemRow({
   item: i,
   phase,
   open,
+  lang,
   onShow,
   onFind,
 }: {
   item: Item & { gate: string };
   phase: string;
   open: boolean;
+  lang: Lang;
   onShow: () => void;
   onFind?: ((q: string) => void) | undefined;
 }): React.JSX.Element {
@@ -436,7 +428,7 @@ function ItemRow({
             <b className="never" title="пробу не удалось исполнить: правило ни разу не роняли">не роняли</b>
           ) : null}
           {i.probeRuns === false ? " · " : null}
-          {WORD[i.computed] ?? i.computed}
+          {say(lang, `gate.${i.computed}`)}
           {(i.violations ?? 0) > 0 ? <b> · {i.violations}</b> : null}
           {(i.excepted ?? 0) > 0 ? <em> · {i.excepted} с причиной</em> : null}
         </span>
@@ -448,7 +440,7 @@ function ItemRow({
             <p className="item-why never-why">
               Пробу этого пункта исполнить нельзя — она записана прозой, а не запросом. Значит правило
               не роняли ни разу, и его зелёное ничего не доказывает.
-              {i.probe ? <> Что записано: <code>{i.probe}</code></> : null}
+              {i.probe ? <>{say(lang, "rd.written")}<code>{i.probe}</code></> : null}
             </p>
           ) : null}
           {i.means ? <p className="item-why">{i.means}</p> : null}
@@ -471,17 +463,16 @@ function ItemRow({
               ) : null}
             </ul>
           ) : (
-            <p className="note">Находок нет.</p>
+            <p className="note">{say(lang, "rd.noFindings")}</p>
           )}
 
           {/* Чем адресуется находка — рядом с находкой, а не в чужой памяти. */}
           <div className="item-key">
             {i.exceptionKey ? (
               <>
-                <span className="item-k">ключ исключения</span>
+                <span className="item-k">{say(lang, "rd.exKey")}</span>
                 <code>{i.exceptionKey}</code>
-                <span className="item-hint">
-                  объявить: <code>mh call exception-set rule={i.id ?? i.item} entityId=«ключ» reason=…</code>
+                <span className="item-hint">{say(lang, "rd.declare")}<code>mh call exception-set rule={i.id ?? i.item} entityId=«ключ» reason=…</code>
                 </span>
               </>
             ) : (
@@ -510,7 +501,7 @@ function ItemRow({
  * обрезанный на середине, перестаёт быть вопросом. Здесь строки: места по
  * ширине хватает всем, и порядок читается сверху вниз, как он и работает.
  */
-function Ladder({ steps, at }: { steps: Step[]; at: number | undefined }): React.JSX.Element | null {
+function Ladder({ steps, at, lang }: { steps: Step[]; at: number | undefined; lang: Lang }): React.JSX.Element | null {
   if (steps.length === 0) return null;
   // Сторона названа в `touches`: `corpus` или `repository`. Слова здесь свои,
   // и подставлять их наугад нельзя — ступень, попавшая не на ту сторону, врёт
@@ -522,9 +513,7 @@ function Ladder({ steps, at }: { steps: Step[]; at: number | undefined }): React
   ];
   return (
     <section className="rungs-wrap">
-      <h2 className="pick-h">
-        Лестница входа
-        <span className="pick-g">{steps.length} ступеней · сперва набор, потом репозиторий</span>
+      <h2 className="pick-h">{say(lang, "rd.ladder")}<span className="pick-g">{steps.length} ступеней · сперва набор, потом репозиторий</span>
       </h2>
       {groups.map(([name, group]) =>
         group.length === 0 ? null : (
@@ -545,7 +534,7 @@ function Ladder({ steps, at }: { steps: Step[]; at: number | undefined }): React
                       <span className="rung-num">{s.ord}</span>
                       <span className="rung-q">{s.question}</span>
                       {s.owner ? <span className="rung-o">{s.owner}</span> : null}
-                      {now ? <span className="rung-now">здесь</span> : null}
+                      {now ? <span className="rung-now">{say(lang, "rd.here")}</span> : null}
                     </li>
                   );
                 })}

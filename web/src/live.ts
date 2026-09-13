@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { type Lang, say } from "./say";
 
 /**
  * Живой запрос: страница обновляет себя сама.
@@ -67,10 +68,12 @@ export function useLive<T>(load: () => Promise<T>, deps: unknown[], everyMs = 15
 }
 
 /** «7 сек назад» — короче и честнее, чем «только что». */
-export function ago(at: number | null, now = Date.now()): string {
-  if (at === null) return "ещё не читали";
+export function ago(at: number | null, now = Date.now(), l: Lang = "ru"): string {
+  if (at === null) return say(l, "lv.never");
   const sec = Math.max(0, Math.round((now - at) / 1000));
-  if (sec < 60) return `${sec} сек назад`;
+  if (sec < 60) return `${sec} ${say(l, "lv.sec")} ${say(l, "lv.ago")}`;
   const min = Math.round(sec / 60);
-  return min < 60 ? `${min} мин назад` : `${Math.round(min / 60)} ч назад`;
+  return min < 60
+    ? `${min} ${say(l, "lv.min")} ${say(l, "lv.ago")}`
+    : `${Math.round(min / 60)} ${say(l, "lv.hour")} ${say(l, "lv.ago")}`;
 }

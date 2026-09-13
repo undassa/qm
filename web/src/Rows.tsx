@@ -1,4 +1,5 @@
 import type React from "react";
+import { type Lang, say } from "./say";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 /**
@@ -48,6 +49,7 @@ export function useRows<T>(
   textOf: (item: T) => string,
   slices: readonly Slice<T>[],
   onOpen: (item: T) => void,
+  lang: Lang,
 ): RowsView<T> {
   const [query, setQuery] = useState("");
   const [slice, setSlice] = useState<Slice<T>>(slices[0]!);
@@ -126,9 +128,9 @@ export function useRows<T>(
         className="rows-search"
         type="search"
         value={query}
-        placeholder="искать по номеру и по смыслу…"
+        placeholder={say(lang, "rw.byNumber")}
         onChange={(e) => setQuery(e.target.value)}
-        aria-label="Поиск"
+        aria-label={say(lang, "rw.searchAria")}
       />
       {slices.length > 1 ? (
         <span className="rows-slices">
@@ -156,9 +158,8 @@ export function useRows<T>(
         )}
       </span>
       <span className="rows-hint">
-        <kbd>/</kbd> искать · <kbd>j</kbd>
-        <kbd>k</kbd> ходить · <kbd>↵</kbd> открыть
-      </span>
+        <kbd>/</kbd>{say(lang, "rw.search")}<kbd>j</kbd>
+        <kbd>k</kbd>{say(lang, "rw.walk")}<kbd>↵</kbd>{say(lang, "rw.open")}</span>
     </div>
   );
 

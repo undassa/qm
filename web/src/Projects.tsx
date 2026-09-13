@@ -1,4 +1,5 @@
 import type React from "react";
+import { type Lang, say } from "./say";
 import { useEffect, useRef, useState } from "react";
 import type { Project } from "./api";
 import { dayOf, plural } from "./findings";
@@ -20,7 +21,9 @@ export function ProjectPicker({
   current,
   onAll,
   onPick,
+  lang,
 }: {
+  lang: Lang;
   projects: Project[];
   current: Project | null;
   /** Вернуться к сводке: показать все проекты разом. */
@@ -73,7 +76,7 @@ export function ProjectPicker({
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
         aria-haspopup="listbox"
-        title="Выбрать проект"
+        title={say(lang, "pj.pick")}
       >
         <span className="place-k">{projects.length > 1 ? `проект · ${projects.length}` : "проект"}</span>
         {/* «Все проекты» — законное состояние, а не «ещё не выбрал»: без выбора
@@ -85,7 +88,7 @@ export function ProjectPicker({
       </button>
 
       {open ? (
-        <ul className="picks" role="listbox" aria-label="Проекты">
+        <ul className="picks" role="listbox" aria-label={say(lang, "pj.head")}>
           {/* Возврат к сводке — первой строкой: уйдя в проект, вернуться было
               нечем, а сводка и есть ответ на «что у нас вообще». */}
           <li className={current ? "" : "at"}>
@@ -99,8 +102,8 @@ export function ProjectPicker({
                 setOpen(false);
               }}
             >
-              <b>все проекты</b>
-              <span>сводка</span>
+              <b>{say(lang, "pj.all")}</b>
+              <span>{say(lang, "pj.summary")}</span>
             </button>
           </li>
           {projects.map((p, i) => (

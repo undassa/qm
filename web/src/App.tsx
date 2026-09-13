@@ -46,13 +46,13 @@ import { Unknown } from "./Unknown";
  * требование) и **вопросы** (чем закрыт каждый).
  */
 const PAGES: { page: string; key: string; view: (id: string, ctx: Ctx) => React.JSX.Element }[] = [
-  { page: "pult", key: "nav.pult", view: (id, ctx) => <Console projectId={id} onGo={ctx.onGo} /> },
-  { page: "where", key: "nav.where", view: (id, ctx) => <Readiness projectId={id} onFind={ctx.onFind} /> },
+  { page: "pult", key: "nav.pult", view: (id, ctx) => <Console projectId={id} lang={ctx.lang} onGo={ctx.onGo} /> },
+  { page: "where", key: "nav.where", view: (id, ctx) => <Readiness projectId={id} lang={ctx.lang} onFind={ctx.onFind} /> },
   { page: "tasks", key: "nav.tasks", view: (id, ctx) => <Work projectId={id} lang={ctx.lang} /> },
-  { page: "unknown", key: "nav.unknown", view: (id, ctx) => <Unknown projectId={id} onFind={ctx.onFind} /> },
+  { page: "unknown", key: "nav.unknown", view: (id, ctx) => <Unknown projectId={id} lang={ctx.lang} onFind={ctx.onFind} /> },
   // Раздел — это тип ресурса, а не папка: у требования свои колонки, свои
   // фильтры и свои дыры, и общей таблицей документов их не показать.
-  { page: "read", key: "nav.read", view: (id, ctx) => <Reader projectId={id} want={ctx.want} /> },
+  { page: "read", key: "nav.read", view: (id, ctx) => <Reader projectId={id} lang={ctx.lang} want={ctx.want} /> },
   { page: "corpus", key: "nav.corpus", view: (id, ctx) => <Corpus projectId={id} lang={ctx.lang} want={ctx.want} /> },
   { page: "depends", key: "nav.depends", view: (id, ctx) => <Depends projectId={id} lang={ctx.lang} /> },
 ];
@@ -241,8 +241,9 @@ export function App(): React.JSX.Element {
         />
       ) : null}
 
-      <nav className="side" id="разделы" aria-label="Экраны">
+      <nav className="side" id="разделы" aria-label={say(lang, "ap.screens")}>
         <ProjectPicker
+            lang={lang}
             projects={projects}
             current={project}
             onPick={(p) => {
@@ -263,8 +264,7 @@ export function App(): React.JSX.Element {
           />
 
         {unknown ? (
-          <p className="side-note warn">
-            В ссылке назван проект <code>{unknown}</code> — здесь такого нет. Открыт{" "}
+          <p className="side-note warn">{say(lang, "ap.namedProject")}<code>{unknown}</code> — здесь такого нет. Открыт{" "}
             <b>{project?.name ?? "первый из списка"}</b>.
           </p>
         ) : null}
@@ -298,7 +298,7 @@ export function App(): React.JSX.Element {
 
       <main className="main">
         {projects.length === 0 ? (
-          <p className="empty">Читаю проекты…</p>
+          <p className="empty">{say(lang, "tg.reading")}</p>
         ) : project ? (
           view.view(project.projectId, ctx)
         ) : (
@@ -311,18 +311,18 @@ export function App(): React.JSX.Element {
                 сводку значит ответить не на тот вопрос: человек шёл по ссылке
                 в «Задачи», и ему надо сказать, чего в ссылке не хватило. */}
             {asked("page") ? (
-              <p className="side-note warn">
-                В ссылке назван раздел <code>{asked("page")}</code>, но не назван проект. Разделы
+              <p className="side-note warn">{say(lang, "ap.namedPage")}<code>{asked("page")}</code>, но не назван проект. Разделы
                 показывают ОДИН проект: выберите его ниже, и раздел откроется.
               </p>
             ) : null}
-            <Together onPick={(p) => go({ project: p, page: asked("page") ?? page })} />
+            <Together lang={lang} onPick={(p) => go({ project: p, page: asked("page") ?? page })} />
           </>
         )}
       </main>
 
       {pal && project ? (
         <Palette
+          lang={lang}
           projectId={project.projectId}
           sections={PAGES.map((p) => ({ page: p.page, title: say(lang, p.key), note: say(lang, `${p.key}.note`) }))}
           onClose={() => setPal(false)}

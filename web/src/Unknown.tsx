@@ -1,4 +1,5 @@
 import type React from "react";
+import { type Lang, say } from "./say";
 import { useState } from "react";
 import { tool, type Tile } from "./api";
 import { Provenance } from "./Provenance";
@@ -54,7 +55,11 @@ interface Kindof {
   body: React.ReactNode;
 }
 
-export function Unknown({ projectId, onFind }: { projectId: string; onFind?: (q: string) => void }): React.JSX.Element {
+export function Unknown({ projectId, onFind,
+  lang,
+}: { projectId: string; onFind?: (q: string) => void;
+  lang: Lang;
+}): React.JSX.Element {
   const [open, setOpen] = useState<string>("");
 
   const live = useLive(
@@ -75,7 +80,7 @@ export function Unknown({ projectId, onFind }: { projectId: string; onFind?: (q:
     [projectId],
   );
 
-  if (!live.data) return <p className="empty">Собираю неизвестное…</p>;
+  if (!live.data) return <p className="empty">{say(lang, "un.reading")}</p>;
   const { tiles, statuses, claims, due, gaps } = live.data;
 
   const withoutFact = statuses.filter((s) => !s.hasFact || s.sourceCheck);
@@ -95,10 +100,10 @@ export function Unknown({ projectId, onFind }: { projectId: string; onFind?: (q:
         <table className="rows u-tab">
           <thead>
             <tr>
-              <th>владелец</th>
-              <th className="n">пунктов</th>
-              <th className="n">без способа</th>
-              <th className="n">владельцев</th>
+              <th>{say(lang, "un.owner")}</th>
+              <th className="n">{say(lang, "un.items")}</th>
+              <th className="n">{say(lang, "un.noMethod")}</th>
+              <th className="n">{say(lang, "un.owners")}</th>
             </tr>
           </thead>
           <tbody>
@@ -160,9 +165,9 @@ export function Unknown({ projectId, onFind }: { projectId: string; onFind?: (q:
         <table className="rows u-tab">
           <thead>
             <tr>
-              <th>где сказано</th>
-              <th>про что</th>
-              <th className="n">заявлено</th>
+              <th>{say(lang, "un.saidWhere")}</th>
+              <th>{say(lang, "un.about")}</th>
+              <th className="n">{say(lang, "un.claimed")}</th>
             </tr>
           </thead>
           <tbody>
@@ -203,7 +208,7 @@ export function Unknown({ projectId, onFind }: { projectId: string; onFind?: (q:
       count: gateUnknown,
       says: "пункт объявлен, а способа его посчитать нет — он не зелёный и не красный",
       closes: "объявить запрос пункту либо снять пункт с этого проекта с причиной",
-      body: <p className="note">Эти пункты видны в «Готовности» — там же их состояние и причина.</p>,
+      body: <p className="note">{say(lang, "un.seeReadiness")}</p>,
     },
   ].filter((k) => k.count > 0);
 
@@ -214,21 +219,19 @@ export function Unknown({ projectId, onFind }: { projectId: string; onFind?: (q:
     <>
       <div className="head">
         <div>
-          <h1>Чего мы не знаем</h1>
-          <div className="prov">не «нет», а «нечем ответить» — это разные вещи</div>
+          <h1>{say(lang, "un.head")}</h1>
+          <div className="prov">{say(lang, "un.sub")}</div>
         </div>
         <span className="prov">
-          <Live at={live.at} again={live.again} /> <b className="bad-n">{total}</b> без способа проверки
-        </span>
+          <Live lang={lang} at={live.at} again={live.again} /> <b className="bad-n">{total}</b> {say(lang, "un.noMethodFull")}</span>
       </div>
 
-      <p className="lede">
-        Пустой ответ — факт. <b>Отсутствие способа — не факт, а пробел</b>, и он обязан быть виден. Всё, что
+      <p className="lede">{say(lang, "un.emptyIsFact")}<b>{say(lang, "un.gapNotFact")}</b>, и он обязан быть виден. Всё, что
         ниже, сегодня не проверяется ничем; пока это так, зелёное рядом значит меньше, чем кажется.
       </p>
 
       {kinds.length === 0 ? (
-        <p className="empty ok-note">Незакрытых пробелов нет: у каждого пункта есть способ проверки.</p>
+        <p className="empty ok-note">{say(lang, "un.none")}</p>
       ) : null}
 
       {/*
@@ -267,7 +270,7 @@ export function Unknown({ projectId, onFind }: { projectId: string; onFind?: (q:
                   {/* Чем закрывается — рядом с пробелом, а не в чужой памяти.
                       Пробел без способа его закрыть — жалоба, а не работа. */}
                   <p className="u-closes">
-                    <span className="u-k">закрывается</span> {k.closes}
+                    <span className="u-k">{say(lang, "un.closedBy")}</span> {k.closes}
                   </p>
                   {k.body}
                 </div>

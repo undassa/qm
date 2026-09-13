@@ -1,4 +1,5 @@
 import type React from "react";
+import { type Lang, say } from "./say";
 
 /**
  * Цепочка прослеживаемости — схемой, а не таблицей.
@@ -32,9 +33,13 @@ const LINKS: { key: string; title: string; says: string }[] = [
 
 const num = (r: Row, k: string): number => Number(r[k] ?? 0);
 
-export function Chain({ rows, onPick }: { rows: Row[]; onPick?: (ids: string[]) => void }): React.JSX.Element {
+export function Chain({ rows, onPick,
+  lang,
+}: { rows: Row[]; onPick?: (ids: string[]) => void;
+  lang: Lang;
+}): React.JSX.Element {
   const total = rows.length;
-  if (total === 0) return <p className="empty">Требований нет — цепочку строить не из чего.</p>;
+  if (total === 0) return <p className="empty">{say(lang, "ch.none")}</p>;
 
   const links = LINKS.map((l) => {
     const has = rows.filter((r) => num(r, l.key) > 0);
@@ -65,12 +70,12 @@ export function Chain({ rows, onPick }: { rows: Row[]; onPick?: (ids: string[]) 
                     type="button"
                     className="chain-lost"
                     onClick={() => onPick?.(l.lost.map((r) => r.id))}
-                    title="показать эти требования"
+                    title={say(lang, "ch.show")}
                   >
                     рвётся у {l.lost.length}
                   </button>
                 ) : (
-                  <div className="chain-ok">не рвётся</div>
+                  <div className="chain-ok">{say(lang, "ch.whole")}</div>
                 )}
                 <div className="chain-s">{l.says}</div>
               </div>
@@ -82,11 +87,11 @@ export function Chain({ rows, onPick }: { rows: Row[]; onPick?: (ids: string[]) 
       <div className="chain-sum">
         <div className="chain-card ok">
           <b>{whole.length}</b>
-          <span>цепочка целая</span>
+          <span>{say(lang, "ch.wholeSay")}</span>
         </div>
         <div className={`chain-card${total - whole.length - orphan.length > 0 ? " warn" : ""}`}>
           <b>{total - whole.length - orphan.length}</b>
-          <span>не хватает звена</span>
+          <span>{say(lang, "ch.missing")}</span>
         </div>
         <button
           type="button"
@@ -95,7 +100,7 @@ export function Chain({ rows, onPick }: { rows: Row[]; onPick?: (ids: string[]) 
           disabled={orphan.length === 0}
         >
           <b>{orphan.length}</b>
-          <span>не связаны ни с чем</span>
+          <span>{say(lang, "ch.orphan")}</span>
         </button>
       </div>
     </section>

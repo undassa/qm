@@ -1,4 +1,5 @@
 import type React from "react";
+import { type Lang, say } from "./say";
 import { useEffect, useState } from "react";
 import { tool, type NextStep, type Tile } from "./api";
 import { Bar } from "./Bar";
@@ -21,7 +22,7 @@ interface Pipeline {
   pipeline: { status: string; title: string; reached: number | null; unknown: number; why?: string }[];
 }
 
-export function Where({ projectId }: { projectId: string }): React.JSX.Element {
+export function Where({ projectId, lang }: { projectId: string; lang: Lang }): React.JSX.Element {
   const [step, setStep] = useState<NextStep | null>(null);
   const [tiles, setTiles] = useState<Tile[] | null>(null);
   const [pipeline, setPipeline] = useState<Pipeline | null>(null);
@@ -43,8 +44,8 @@ export function Where({ projectId }: { projectId: string }): React.JSX.Element {
     setFailed(live.failed);
   }, [live.data, live.failed]);
 
-  if (failed) return <p className="empty">Сервер не отвечает: <code>{failed}</code>.</p>;
-  if (!step || !tiles || !pipeline) return <p className="empty">Смотрю, где мы…</p>;
+  if (failed) return <p className="empty">{say(lang, "wh.noServer")}<code>{failed}</code>.</p>;
+  if (!step || !tiles || !pipeline) return <p className="empty">{say(lang, "wh.reading")}</p>;
 
   const at = step.at;
   // Статусы конвейера, факт которых никто не пишет, — то же незнание, что и в
@@ -55,33 +56,33 @@ export function Where({ projectId }: { projectId: string }): React.JSX.Element {
     <>
       <div className="head">
         <div>
-          <h1>Где мы</h1>
-          <div className="prov">первая невыполненная ступень, и что она держит</div>
+          <h1>{say(lang, "wh.head")}</h1>
+          <div className="prov">{say(lang, "wh.sub")}</div>
         </div>
         <span className="prov">
-          <Live at={live.at} again={live.again} /> процесс {step.process}
+          <Live lang={lang} at={live.at} again={live.again} /> процесс {step.process}
           {/* Положение СОХРАНЕНО, а не посчитано на этот заход. Пока работник
               считает заново, страница показывает прошлое — и говорит об этом,
               иначе агент примет устаревшее за нынешнее. */}
-          {step.stale ? <b className="disagree"> · набор изменился, пересчёт идёт</b> : null}
+          {step.stale ? <b className="disagree">{say(lang, "wh.recount")}</b> : null}
         </span>
       </div>
 
-      <Phases projectId={projectId} />
+      <Phases lang={lang} projectId={projectId} />
 
       {at ? (
         <div className="now">
-          <span className="now-k">ступень</span>
+          <span className="now-k">{say(lang, "wh.step")}</span>
           <span className="now-q">
             {at.ord} · {at.question}
           </span>
-          <span className="now-k">запустить</span>
+          <span className="now-k">{say(lang, "wh.run")}</span>
           <span className="now-run">
             {at.owner ? `${at.ownerKind === "agent" ? "субагент" : "скилл"} ${at.owner}` : "владельца нет: ступень закрывает человек"}
           </span>
           {at.why ? (
             <>
-              <span className="now-k">почему</span>
+              <span className="now-k">{say(lang, "wh.why")}</span>
               <span className="now-why">{at.why}</span>
             </>
           ) : null}
@@ -89,7 +90,7 @@ export function Where({ projectId }: { projectId: string }): React.JSX.Element {
               молчит о причине: идти чинить некуда. */}
           {at.detail?.length ? (
             <>
-              <span className="now-k">держит</span>
+              <span className="now-k">{say(lang, "wh.holds")}</span>
               <span className="now-why">
                 {at.detail.slice(0, 5).map((d) => (
                   <code key={d} className="held">{d}</code>
@@ -100,7 +101,7 @@ export function Where({ projectId }: { projectId: string }): React.JSX.Element {
               </span>
             </>
           ) : null}
-          <span className="now-k">сторона</span>
+          <span className="now-k">{say(lang, "wh.side")}</span>
           <span className="now-why">
             {at.touches === "corpus" ? "читает набор" : "пишет в репозиторий"}
             {step.corpusPhaseOpen && at.touches === "repository"
@@ -109,20 +110,19 @@ export function Where({ projectId }: { projectId: string }): React.JSX.Element {
           </span>
         </div>
       ) : (
-        <p className="note">Невыполненных ступеней нет.</p>
+        <p className="note">{say(lang, "wh.none")}</p>
       )}
 
-      <p className="note">
-        Пройдено <b>{step.passed.length}</b> · пропущено с причиной <b>{step.skipped.length}</b> ·{" "}
+      <p className="note">{say(lang, "wh.done")}<b>{step.passed.length}</b>{say(lang, "wh.skipped")}<b>{step.skipped.length}</b> ·{" "}
         <b className="tile-u">не отвечается {step.unanswerable.length}</b>. Три списка, а не один: слипшись, они дают
         зелень, которая ничего не мерит.
       </p>
 
       <div className="tiles">
         <div className="tile">
-          <div className="tile-t">чего мы не знаем</div>
+          <div className="tile-t">{say(lang, "wh.unknown")}</div>
           <div className="tile-n tile-u">{unknown}</div>
-          <div className="tile-s">пунктов и статусов без способа проверки</div>
+          <div className="tile-s">{say(lang, "wh.unknownNote")}</div>
         </div>
         {tiles.map((t) => (
           <div className="tile" key={t.tile}>

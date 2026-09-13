@@ -477,6 +477,7 @@ export function Work({ projectId, lang }: { projectId: string; lang: Lang }): Re
 
       {open_ && (
         <EntityDrawer
+          lang={lang}
           projectId={projectId}
           kind={видно.find((c) => c.task === open_)?.kind ?? "task"}
           id={open_}

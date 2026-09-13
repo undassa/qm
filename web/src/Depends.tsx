@@ -80,7 +80,7 @@ export function Depends({ projectId, lang }: { projectId: string; lang: Lang }):
     ).then(setHit);
   }, [projectId, kind, id]);
 
-  if (!graph) return <p className="empty">Читаю связи…</p>;
+  if (!graph) return <p className="empty">{say(lang, "dp.reading")}</p>;
 
   const max = Math.max(1, ...graph.edges.map((e) => e.links));
   const домМакс = Math.max(1, ...(graph.domains ?? []).map((e) => e.links));
@@ -172,7 +172,7 @@ export function Depends({ projectId, lang }: { projectId: string; lang: Lang }):
       </section>
 
       <section className="dep-kinds">
-        <h2>Роды</h2>
+        <h2>{say(lang, "dp.kinds")}</h2>
         {/* Пометка стоит там, где есть что сказать. Прежде «не переоткрывается»
             повторялось шесть раз подряд и читалось как тревога, хотя это
             обычное состояние: у проверки и рассуждения состояния нет вовсе. */}
@@ -201,12 +201,11 @@ export function Depends({ projectId, lang }: { projectId: string; lang: Lang }):
       </section>
 
       <section className="dep-what">
-        <h2>Что переоткроется</h2>
-        {!kind && <p className="empty">Выберите род на карте.</p>}
+        <h2>{say(lang, "dp.willReopen")}</h2>
+        {!kind && <p className="empty">{say(lang, "dp.pickKind")}</p>}
         {kind && (
           <>
-            <p className="dep-note">
-              На <b>{зовут(lang, kind)}</b> стоят:{" "}
+            <p className="dep-note">{say(lang, "dp.on")}<b>{зовут(lang, kind)}</b> стоят:{" "}
               {стоящие.length
                 ? стоящие.map((e) => зовут(lang, e.from)).join(" · ")
                 : "никто — правка не переоткроет ничего"}
@@ -216,7 +215,7 @@ export function Depends({ projectId, lang }: { projectId: string; lang: Lang }):
               value={id}
               onChange={(e) => setId(e.target.value)}
             >
-              <option value="">— выберите запись —</option>
+              <option value="">{say(lang, "dp.pickRecord")}</option>
               {ids.slice(0, 500).map((x) => (
                 <option key={x} value={x}>{x}</option>
               ))}
@@ -225,8 +224,7 @@ export function Depends({ projectId, lang }: { projectId: string; lang: Lang }):
         )}
         {hit && (
           <div className="dep-hit">
-            <p className="dep-sum">
-              затронуто <b>{hit.touched}</b> · из них переоткроется{" "}
+            <p className="dep-sum">{say(lang, "dp.touched")}<b>{hit.touched}</b> · из них переоткроется{" "}
               <b className={hit.reopens > 0 ? "bad" : ""}>{hit.reopens}</b>
             </p>
             <ul className="dep-hits">
@@ -240,7 +238,7 @@ export function Depends({ projectId, lang }: { projectId: string; lang: Lang }):
               ))}
             </ul>
             {hit.touched === 0 && (
-              <p className="empty">На этой записи не стоит никто: правка никого не затронет.</p>
+              <p className="empty">{say(lang, "dp.nobody")}</p>
             )}
           </div>
         )}

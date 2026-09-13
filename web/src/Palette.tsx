@@ -1,4 +1,5 @@
 import type React from "react";
+import { type Lang, say } from "./say";
 import { useEffect, useRef, useState } from "react";
 import { tool } from "./api";
 
@@ -40,11 +41,13 @@ export function Palette({
   sections,
   onGo,
   onClose,
+  lang,
 }: {
   projectId: string;
   sections: Section[];
   onGo: (j: Jump) => void;
   onClose: () => void;
+  lang: Lang;
 }): React.JSX.Element {
   const [q, setQ] = useState("");
   const [hits, setHits] = useState<Hit[]>([]);
@@ -118,15 +121,15 @@ export function Palette({
 
   return (
     <div className="pal-scrim" onClick={onClose} role="presentation">
-      <div className="pal" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Палитра">
+      <div className="pal" onClick={(e) => e.stopPropagation()} role="dialog" aria-label={say(lang, "pl.head")}>
         <input
           ref={box}
           className="pal-in"
           value={q}
           onChange={(e) => { setQ(e.target.value); setAt(0); }}
           onKeyDown={keys}
-          placeholder="раздел или имя сущности — ADR-0138, Q-372, M0-T12…"
-          aria-label="Что открыть"
+          placeholder={say(lang, "pl.hint")}
+          aria-label={say(lang, "pl.what")}
         />
         <div className="pal-list">
           {rows.length === 0 ? (
@@ -149,10 +152,10 @@ export function Palette({
           )}
         </div>
         <div className="pal-foot">
-          <span>↑↓ выбрать</span>
-          <span>↵ открыть</span>
-          <span>esc закрыть</span>
-          {busy ? <span className="pal-busy">ищу…</span> : null}
+          <span>{say(lang, "pl.pick")}</span>
+          <span>{say(lang, "pl.open")}</span>
+          <span>{say(lang, "pl.esc")}</span>
+          {busy ? <span className="pal-busy">{say(lang, "pl.searching")}</span> : null}
         </div>
       </div>
     </div>

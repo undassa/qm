@@ -1,4 +1,5 @@
 import type React from "react";
+import { type Lang, say } from "./say";
 import { useEffect, useRef } from "react";
 
 /**
@@ -11,11 +12,13 @@ export function Drawer({
   subtitle,
   onClose,
   children,
+  lang,
 }: {
   title: string;
   subtitle?: string;
   onClose: () => void;
   children: React.ReactNode;
+  lang: Lang;
 }): React.JSX.Element {
   const panel = useRef<HTMLDivElement>(null);
   const returnTo = useRef<Element | null>(null);
@@ -41,7 +44,7 @@ export function Drawer({
             <h2>{title}</h2>
             {subtitle ? <div className="prov">{subtitle}</div> : null}
           </div>
-          <button type="button" className="drawer-close" onClick={onClose} aria-label="Закрыть">
+          <button type="button" className="drawer-close" onClick={onClose} aria-label={say(lang, "dr.close")}>
             ✕
           </button>
         </header>
