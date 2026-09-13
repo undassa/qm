@@ -4641,6 +4641,35 @@ tbody:first-of-type .co-grp th { padding-top: 8px; }
 .lang button.on { color: var(--ink); border-color: var(--muted); }
 
 
+/* Поиск виден, а не угадывается. На столе — строкой над разделами, с
+   сочетанием на ней же; на телефоне — знаком в верхней планке, потому что
+   ⌘K там нажать нечем. */
+.side-find {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  font: inherit; font-size: 12.5px; cursor: pointer; text-align: start;
+  background: none; border: 1px solid var(--line); border-radius: 8px;
+  color: var(--muted); padding: 6px 10px; margin-bottom: 10px;
+}
+.side-find:hover { color: var(--ink); border-color: var(--muted); }
+.side-find kbd {
+  margin-left: auto; font-family: var(--mono); font-size: 10.5px;
+  border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; color: var(--muted);
+}
+.find { display: none; }
+
+@media (max-width: 860px) {
+  .side-find { display: none; }
+  .find {
+    display: flex; align-items: center; justify-content: center;
+    width: 40px; height: 40px; flex: none; margin-left: auto;
+    font-size: 19px; line-height: 1; cursor: pointer;
+    background: none; border: 0; border-radius: 8px; color: var(--muted);
+  }
+  .find:hover { background: var(--panel); color: var(--ink); }
+  /* Имя проекта уступает кнопке: искать нужнее, чем ещё раз прочесть имя. */
+  .topbar-p { display: none; }
+}
+
 /* ── Последствия правки на записи ─────────────────────────────────────────
    Каскад — суть набора, и до сих пор его было видно только общим счётом на
    «Зависимостях». Здесь он про одну запись: что на ней стоит, что от её
@@ -4934,6 +4963,9 @@ tbody:first-of-type .co-grp th { padding-top: 8px; }
 }
 .wk-list button:hover { background: var(--panel); }
 .wk-id { font-family: var(--mono); font-size: 12.5px; color: var(--live); }
+/* Зеркало проверок — не вторая задача, а пара к первой. Значок это и
+   говорит; отдельной колонки пара не заслуживает. */
+.wk-pair { font-style: normal; color: var(--muted); margin-right: 5px; font-size: 11px; }
 .wk-t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 .wk-state {
   font-size: 11.5px; color: var(--muted);

@@ -12,6 +12,7 @@ import {
   type Entity,
   type KindRow,
   type Section,
+  tool,
 } from "./api";
 import { Blocks, type DocBlock } from "./Blocks";
 import { Provenance } from "./Provenance";
@@ -66,6 +67,9 @@ export function Reader({
   const [bad, setBad] = useState<Set<string>>(new Set());
   const [body, setBody] = useState<Map<string, DocBlock[]>>(new Map());
   const [links, setLinks] = useState<Backlink[]>([]);
+  /** Куда ведёт сам документ. Входящие видны давно, исходящие — нет, и узнать
+      их можно было только раскрыв все разделы и вычитав прозу. */
+  const [out, setOut] = useState<Record<string, { id: string; kind: string; title?: string }[]> | null>(null);
   const [failed, setFailed] = useState("");
   /**
    * След перехода: куда щёлкали, оттуда можно вернуться.
@@ -159,6 +163,19 @@ export function Reader({
         .catch(() => {
           if (показан.current === этот) setSections([]);
         });
+    setOut(null);
+    void tool<{ sets?: Record<string, { id: string; kind: string; title?: string }[]> }>(
+      projectId,
+      "links-of",
+      name ? { kind: k.kind, id: name } : { kind: k.kind },
+    )
+      .then((d) => {
+        if (показан.current === этот) setOut(d.sets ?? {});
+      })
+      // Отказ двери — «наборы для рода не объявлены», и это не пустота.
+      .catch(() => {
+        if (показан.current === этот) setOut(null);
+      });
     void loadBacklinks(projectId, k.kind, name)
       .then((d) => setLinks(d.backlinks))
       .catch(() => setLinks([]));
@@ -452,6 +469,30 @@ export function Reader({
 
               {/* Одна сущность может ссылаться дважды — это одна ссылающаяся
                   сущность, а не две. Число ссылок сохраняется рядом. */}
+              {out && Object.values(out).some((v) => v.length) ? (
+                <div className="backs">
+                  <h3 className="rows-group">{say(lang, "rr.pointsTo")}</h3>
+                  <div className="backs-list">
+                    {Object.entries(out)
+                      .filter(([, v]) => v.length)
+                      .flatMap(([, v]) => v)
+                      .slice(0, 60)
+                      .map((x) => (
+                        <a
+                          key={`${x.kind}/${x.id}`}
+                          className="go back"
+                          href={`?page=read&kind=${encodeURIComponent(x.kind)}&id=${encodeURIComponent(x.id)}`}
+                          data-kind={x.kind}
+                          data-id={x.id}
+                          title={x.title ?? ""}
+                        >
+                          {x.id || x.kind}
+                        </a>
+                      ))}
+                  </div>
+                </div>
+              ) : null}
+
               {links.length ? (
                 <div className="backs">
                   <h3 className="rows-group">

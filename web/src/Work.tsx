@@ -449,7 +449,12 @@ export function Work({ projectId, lang }: { projectId: string; lang: Lang }): Re
                   {видно.map((c) => (
                     <li key={c.task} className={c.ready ? "" : "stale"}>
                       <button type="button" onClick={() => setOpen(c.task)}>
-                        <span className="wk-id">{c.task}</span>
+                        <span className="wk-id">
+                          {c.kind === "red-task" && (
+                            <i className="wk-pair" title={say(lang, "wk.mirror")}>⇄</i>
+                          )}
+                          {c.task}
+                        </span>
                         <span className="wk-t">{bare(c.title)}</span>
                         <span className="wk-state bad" title={c.why ?? ""}>{c.why ?? ""}</span>
                         <span className="wk-rev">

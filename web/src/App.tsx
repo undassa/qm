@@ -1,5 +1,5 @@
 import type React from "react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { loadProjects, tool, type Project } from "./api";
 import { chooseProject } from "./project-address";
 import { ProjectPicker } from "./Projects";
@@ -8,6 +8,7 @@ import { Console } from "./Console";
 import { Corpus } from "./Corpus";
 import { Work } from "./Work";
 import { type Lang, langNow, setLang, say } from "./say";
+import { useFocusTrap } from "./focus";
 import { Reader } from "./Reader";
 import { Readiness } from "./Readiness";
 import { Palette, type Jump } from "./Palette";
@@ -168,6 +169,11 @@ export function App(): React.JSX.Element {
   // панель: та держит до пяти, дальше пункты не помещаются и не попадаются
   // пальцем. На широком экране состояние ни на что не влияет — там боковик.
   const [menu, setMenu] = useState(false);
+  // Ловушка фокуса ставится только на узком экране: там ящик модальный. На
+  // широком боковик — часть страницы, и запирать в нём обход было бы вредом.
+  const ящик = useRef<HTMLElement | null>(null);
+  const узко = typeof window !== "undefined" && window.matchMedia("(max-width: 860px)").matches;
+  useFocusTrap(ящик, menu && узко);
 
   // Escape закрывает ящик, и это не украшение: модальный слой, из которого
   // нельзя выйти клавишей, ловит того, кто пришёл с клавиатуры.
@@ -228,7 +234,17 @@ export function App(): React.JSX.Element {
           <span /><span /><span />
         </button>
         <b className="topbar-t">{project ? say(lang, view.key) : say(lang, "nav.all")}</b>
-        {project ? <span className="topbar-p">{project.name}</span> : null}
+        {project ? (
+          <button
+            type="button"
+            className="find"
+            aria-label={say(lang, "pl.call")}
+            title={`${say(lang, "pl.call")} · ⌘K`}
+            onClick={() => setPal(true)}
+          >
+            ⌕
+          </button>
+        ) : null}
       </header>
 
       {/* Затемнение закрывает ящик нажатием мимо — привычный выход. */}
@@ -241,7 +257,7 @@ export function App(): React.JSX.Element {
         />
       ) : null}
 
-      <nav className="side" id="разделы" aria-label={say(lang, "ap.screens")}>
+      <nav className="side" id="разделы" ref={ящик} aria-label={say(lang, "ap.screens")}>
         <ProjectPicker
             lang={lang}
             projects={projects}
@@ -262,6 +278,13 @@ export function App(): React.JSX.Element {
               window.history.pushState({}, "", url);
             }}
           />
+
+        {project ? (
+          <button type="button" className="side-find" onClick={() => setPal(true)}>
+            <span>⌕ {say(lang, "pl.call")}</span>
+            <kbd>⌘K</kbd>
+          </button>
+        ) : null}
 
         {unknown ? (
           <p className="side-note warn">{say(lang, "ap.namedProject")}<code>{unknown}</code> — здесь такого нет. Открыт{" "}

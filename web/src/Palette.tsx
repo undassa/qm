@@ -1,6 +1,7 @@
 import type React from "react";
 import { type Lang, say } from "./say";
 import { useEffect, useRef, useState } from "react";
+import { useFocusTrap } from "./focus";
 import { tool } from "./api";
 
 /**
@@ -54,10 +55,17 @@ export function Palette({
   const [busy, setBusy] = useState(false);
   const [at, setAt] = useState(0);
   const box = useRef<HTMLInputElement>(null);
+  const слой = useRef<HTMLDivElement | null>(null);
+  useFocusTrap(слой, true);
 
   useEffect(() => {
     box.current?.focus();
-  }, []);
+    const выход = (e: KeyboardEvent): void => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", выход);
+    return () => document.removeEventListener("keydown", выход);
+  }, [onClose]);
 
   // Спрашиваем сервер не на каждую букву: набирающий имя делает восемь нажатий
   // за секунду, и восемь запросов на них — это восемь ответов не про то, что
@@ -121,7 +129,14 @@ export function Palette({
 
   return (
     <div className="pal-scrim" onClick={onClose} role="presentation">
-      <div className="pal" onClick={(e) => e.stopPropagation()} role="dialog" aria-label={say(lang, "pl.head")}>
+      <div
+        className="pal"
+        ref={слой}
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label={say(lang, "pl.head")}
+      >
         <input
           ref={box}
           className="pal-in"

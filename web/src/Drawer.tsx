@@ -1,11 +1,13 @@
 import type React from "react";
 import { type Lang, say } from "./say";
 import { useEffect, useRef } from "react";
+import { useFocusTrap } from "./focus";
 
 /**
  * Дровер: предмет раскрывается сбоку, а список за ним остаётся на месте — не
  * теряется, куда ты вернёшься. Закрывается Escape и щелчком по подложке;
- * фокус уходит внутрь и возвращается туда, откуда пришёл.
+ * фокус уходит внутрь, держится в нём по Tab и возвращается туда, откуда
+ * пришёл.
  */
 export function Drawer({
   title,
@@ -21,19 +23,14 @@ export function Drawer({
   lang: Lang;
 }): React.JSX.Element {
   const panel = useRef<HTMLDivElement>(null);
-  const returnTo = useRef<Element | null>(null);
+  useFocusTrap(panel, true);
 
   useEffect(() => {
-    returnTo.current = document.activeElement;
-    panel.current?.focus();
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
     document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      if (returnTo.current instanceof HTMLElement) returnTo.current.focus();
-    };
+    return () => document.removeEventListener("keydown", onKey);
   }, [onClose]);
 
   return (
