@@ -140,6 +140,8 @@ export function Readiness({
         pipeline: pi.pipeline ?? [],
       })),
     [projectId],
+    undefined,
+    lang,
   );
 
   if (!live.data) return <p className="empty">{say(lang, "rd.reading")}</p>;

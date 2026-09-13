@@ -1,5 +1,6 @@
 import type React from "react";
 import { type Lang, say } from "./say";
+import { отказом } from "./otkaz";
 import { useEffect, useRef, useState } from "react";
 import {
   loadBacklinks,
@@ -143,7 +144,7 @@ export function Reader({
         if (показан.current === этот) setEntity(e);
       })
       .catch((e: unknown) => {
-        if (показан.current === этот) setFailed(String(e));
+        if (показан.current === этот) setFailed(отказом(lang, e));
       });
     // ВНУТРЕННИЙ вид разделов НЕ ИМЕЕТ. Проверка `TC-BUS-04` — строка таблицы
     // внутри `test-cases`, и спросить у неё разделы значит получить разделы
@@ -379,7 +380,7 @@ export function Reader({
                 </button>
               ) : null}
           {failed ? (
-            <p className="empty">{say(lang, "rr.unreadable")}<code>{failed}</code>
+            <p className="empty">{say(lang, "rr.unreadable")} {failed}
             </p>
           ) : !entity ? (
             <p className="empty">{say(lang, "rr.pickLeft")}</p>

@@ -56,9 +56,45 @@ export interface ChainJoint {
 
 export type Row = Record<string, unknown>;
 
+/**
+ * Отказ двери со СЛОВАМИ двери.
+ *
+ * Дверь объясняет каждый отказ и обычно говорит, чем его закрыть: «нет такой
+ * сущности: task R-M1-T33. Если она объявлена дверью, а документа нет, —
+ * `declared-unwritten` покажет такие имена». Прежде тело ответа выбрасывалось,
+ * и человек видел `502 /api/projects/…/tool/sections` — код и путь, из
+ * которых нельзя понять ни что случилось, ни что делать.
+ *
+ * Слова двери не переводятся: это слова проекта, как и всё, что приходит с
+ * сервера. Переводится только то, чего дверь не сказала.
+ */
+export class Отказ extends Error {
+  readonly status: number;
+  constructor(сказано: string, status: number) {
+    super(сказано);
+    this.status = status;
+    this.name = "Отказ";
+  }
+}
+
 async function get<T>(path: string): Promise<T> {
-  const res = await fetch(path, { headers: { accept: "application/json" } });
-  if (!res.ok) throw new Error(`${res.status} ${path}`);
+  let res: Response;
+  try {
+    res = await fetch(path, { headers: { accept: "application/json" } });
+  } catch {
+    // Сети нет вовсе — это не отказ двери, и сказать за неё нечего.
+    throw new Отказ("", 0);
+  }
+  if (!res.ok) {
+    const тело = await res.text().catch(() => "");
+    let сказано = "";
+    try {
+      сказано = String((JSON.parse(тело) as { message?: string }).message ?? "");
+    } catch {
+      сказано = "";
+    }
+    throw new Отказ(сказано, res.status);
+  }
   return (await res.json()) as T;
 }
 
@@ -509,8 +545,9 @@ export async function write(
   } catch {
     return { ok: false, why: "сервер ответил не разбираемым телом", got: null };
   }
-  const d = got as { why?: string; status?: string; error?: string };
-  if (!res.ok) return { ok: false, why: d?.why ?? d?.error ?? `сервер отказал (${res.status})`, got };
+  const d = got as { why?: string; status?: string; error?: string; message?: string };
+  if (!res.ok)
+    return { ok: false, why: d?.message ?? d?.why ?? d?.error ?? `сервер отказал (${res.status})`, got };
   // Дверь может принять запрос и отказать по существу — это тоже «не записано».
   const плохо = d?.status && !["declared", "written", "renamed", "ok", "dropped"].includes(d.status);
   return { ok: !плохо, why: плохо ? (d.why ?? d.status ?? "") : "", got };

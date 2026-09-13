@@ -9,6 +9,7 @@ import { Corpus } from "./Corpus";
 import { Work } from "./Work";
 import { type Lang, langNow, setLang, say } from "./say";
 import { useFocusTrap } from "./focus";
+import { отказом } from "./otkaz";
 import { Reader } from "./Reader";
 import { Readiness } from "./Readiness";
 import { Palette, type Jump } from "./Palette";
@@ -88,14 +89,18 @@ export function App(): React.JSX.Element {
   const [pal, setPal] = useState(false);
   const [jump, setJump] = useState<Jump | null>(jump0);
 
+  const [беда, setБеда] = useState("");
   useEffect(() => {
-    void loadProjects().then((list) => {
-      setProjects(list);
-      const choice = chooseProject(list, asked("project"));
-      setProject(choice.project);
-      setUnknown(choice.unknown);
-    });
-  }, []);
+    void loadProjects()
+      .then((list) => {
+        setБеда("");
+        setProjects(list);
+        const choice = chooseProject(list, asked("project"));
+        setProject(choice.project);
+        setUnknown(choice.unknown);
+      })
+      .catch((e: unknown) => setБеда(отказом(lang, e)));
+  }, [lang]);
 
   useEffect(() => {
     const back = (): void => {
@@ -321,7 +326,7 @@ export function App(): React.JSX.Element {
 
       <main className="main">
         {projects.length === 0 ? (
-          <p className="empty">{say(lang, "tg.reading")}</p>
+          <p className="empty">{беда || say(lang, "tg.reading")}</p>
         ) : project ? (
           view.view(project.projectId, ctx)
         ) : (

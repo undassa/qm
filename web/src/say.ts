@@ -257,6 +257,11 @@ const СЛОВАРЬ: Record<string, [string, string]> = {
   "pl.searching": ["ищу…", "searching…"],
   "pl.head": ["Палитра", "Palette"],
   "pl.call": ["Искать", "Search"],
+  // Отказ без слов двери: сказать за неё нечего, но и молчать нельзя.
+  "er.noNet": ["Сервер не ответил — сети нет или он не запущен.",
+               "The server did not answer — no network, or it is not running."],
+  "er.silent": ["Дверь отказала и не объяснила почему.",
+                "The door refused and did not say why."],
   "wk.mirror": ["зеркало проверок", "check mirror"],
   "rr.pointsTo": ["Ведёт на", "Points to"],
   "rr.pointsNone": ["Ни на что не ссылается.", "Points to nothing."],

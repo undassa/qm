@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { отказом } from "./otkaz";
 import { type Lang, say } from "./say";
 
 /**
@@ -27,7 +28,12 @@ export interface Live<T> {
   again: () => void;
 }
 
-export function useLive<T>(load: () => Promise<T>, deps: unknown[], everyMs = 15000): Live<T> {
+export function useLive<T>(
+  load: () => Promise<T>,
+  deps: unknown[],
+  everyMs = 15000,
+  l: Lang = "ru",
+): Live<T> {
   const [data, setData] = useState<T | null>(null);
   const [at, setAt] = useState<number | null>(null);
   const [failed, setFailed] = useState("");
@@ -43,7 +49,7 @@ export function useLive<T>(load: () => Promise<T>, deps: unknown[], everyMs = 15
         setAt(Date.now());
         setFailed("");
       })
-      .catch((e: unknown) => setFailed(String(e)));
+      .catch((e: unknown) => setFailed(отказом(l, e)));
   }, []);
 
   useEffect(() => {

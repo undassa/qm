@@ -35,6 +35,8 @@ export function Where({ projectId, lang }: { projectId: string; lang: Lang }): R
       tool<Pipeline>(projectId, "pipeline"),
     ]).then(([s, p, pl]) => ({ step: s, tiles: p.tiles, pipeline: pl })),
     [projectId],
+    undefined,
+    lang,
   );
   useEffect(() => {
     if (!live.data) return;
@@ -44,7 +46,7 @@ export function Where({ projectId, lang }: { projectId: string; lang: Lang }): R
     setFailed(live.failed);
   }, [live.data, live.failed]);
 
-  if (failed) return <p className="empty">{say(lang, "wh.noServer")}<code>{failed}</code>.</p>;
+  if (failed) return <p className="empty">{failed}</p>;
   if (!step || !tiles || !pipeline) return <p className="empty">{say(lang, "wh.reading")}</p>;
 
   const at = step.at;

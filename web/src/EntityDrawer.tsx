@@ -1,5 +1,6 @@
 import type React from "react";
 import { type Lang, say } from "./say";
+import { отказом } from "./otkaz";
 import { useEffect, useState } from "react";
 import { loadSections, loadBlocks, loadEntityByName, loadBacklinks } from "./api";
 import { Blocks, type DocBlock } from "./Blocks";
@@ -86,7 +87,7 @@ export function EntityDrawer({
         })
         .catch((e: unknown) => {
           setSections([]);
-          setFailed(String(e));
+          setFailed(отказом(lang, e));
         });
     }
 
@@ -136,7 +137,7 @@ export function EntityDrawer({
       ) : sections === null ? (
         <p className="empty">{say(lang, "dr.reading")}</p>
       ) : failed ? (
-        <p className="empty">{say(lang, "rr.unreadable")}<code>{failed}</code></p>
+        <p className="empty">{say(lang, "rr.unreadable")} {failed}</p>
       ) : sections.length === 0 && !body.get("")?.length ? (
         <>
           <p className="note">{say(lang, "dr.noDoc")}</p>
