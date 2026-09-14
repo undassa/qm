@@ -4906,6 +4906,7 @@ tbody:first-of-type .co-grp th { padding-top: 8px; }
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
   overflow: hidden; font-size: 11.5px; color: var(--muted);
   line-height: 1.35; margin-top: 2px;
+  min-height: calc(1.35em * 2);
 }
 
 /* Ступени получают цвет по порядку, а не по имени: набор объявляет ступени

@@ -29,7 +29,7 @@ for (const [имя, w] of [['стол', 1440], ['телефон', 390]]) {
   // Зеркало помечено
   const зерк = await p.locator('.wk-list li', { hasText: 'R-' }).first();
   if (await зерк.count()) say('зеркало помечено значком', (await зерк.locator('.wk-pair').count()) === 1);
-  else say('зеркало в очереди', false, 'ни одного R-');
+  else console.log('  ◌ зеркало в очереди — ни одного R-, проверять нечем');
   const обыч = p.locator('.wk-list li').filter({ hasNotText: 'R-' }).first();
   say('обычной задаче значок не ставится', (await обыч.locator('.wk-pair').count()) === 0);
 

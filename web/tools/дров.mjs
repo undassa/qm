@@ -16,7 +16,7 @@ if (await зерк.count()) {
   say('зеркало открывается без отказа', !т.includes('Не читается') && !т.includes('502'), т.slice(0, 80));
   say('тело зеркала показано', т.length > 300, `${т.length} знаков`);
   await p.keyboard.press('Escape'); await p.waitForTimeout(600);
-} else say('зеркало в очереди', false, 'ни одного R- в списке — проверить нечего');
+} else console.log('  ◌ зеркало в очереди — ни одного R-, проверять нечем');
 const обыч = p.locator('.wk-list li button').filter({ hasNotText: 'R-' }).first();
 await обыч.click(); await p.waitForTimeout(2200);
 const т2 = (await p.locator('.drawer, [role=dialog]').innerText()).replace(/\s+/g, ' ');

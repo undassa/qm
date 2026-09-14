@@ -1,0 +1,12 @@
+import { chromium } from 'playwright';
+const b = await chromium.launch();
+const P = '308ed7a2-d18f-4a76-a9c4-c792ce7de0d3';
+const ctx = await b.newContext({ viewport: { width: 1560, height: 900 } });
+ctx.setDefaultTimeout(20000);
+await ctx.setExtraHTTPHeaders({ 'x-mh-edge': process.env.MH_EDGE_SECRET, 'x-mh-principal': 'undassa' });
+const p = await ctx.newPage();
+await p.goto(`http://127.0.0.1:8096/next/?project=${P}&page=tasks`, { waitUntil: 'domcontentloaded' });
+await p.waitForSelector('.wk-views button'); await p.waitForTimeout(1600);
+await p.locator('.wk-views button').nth(1).click(); await p.waitForTimeout(1200);
+await p.locator('.work').screenshot({ path: process.env.SHOT + '-жив-доска.png' });
+await b.close();

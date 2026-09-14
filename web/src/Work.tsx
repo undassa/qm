@@ -61,6 +61,12 @@ interface Board {
   tasks: Task[];
 }
 
+/**
+ * Сколько карточек показывать в колонке. Три — как в макете: колонки встают
+ * вровень, и вся доска видна одним взглядом. Остальные названы числом рядом.
+ */
+const ВИДНО = 3;
+
 type View = "list" | "board" | "steps";
 
 /** Название задачи без её же имени в начале: «M1-T7 · Выдержка» → «Выдержка». */
@@ -263,11 +269,11 @@ export function Work({ projectId, lang }: { projectId: string; lang: Lang }): Re
                   ) : свои.length === 0 ? (
                     <p className="wk-why">{say(lang, "wk.passed")}</p>
                   ) : (
-                    <ul className="wk-cards">{свои.slice(0, 12).map(карточка)}</ul>
+                    <ul className="wk-cards">{свои.slice(0, ВИДНО).map(карточка)}</ul>
                   )}
-                  {свои.length > 12 && (
+                  {свои.length > ВИДНО && (
                     <p className="wk-why">
-                      {say(lang, "wk.more")} {свои.length - 12}
+                      {say(lang, "wk.more")} {свои.length - ВИДНО}
                     </p>
                   )}
                 </div>
