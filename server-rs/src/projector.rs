@@ -4141,7 +4141,7 @@ pub async fn gate(pool: &Pool, project: &str, phase: Option<&str>) -> Result<Val
     // Числа при этом НЕ ПРЯЧУТСЯ: спрятать их значило бы потерять и то, что
     // всё-таки посчиталось. Они отдаются вместе со словом о том, что доверять
     // им нельзя, — и это слово стоит первым.
-    let stale = last_reproject(pool, project).await.filter(|(ok, _, _)| !*ok);
+    let stale = last_reproject(&client, project).await.filter(|(ok, _, _)| !*ok);
     // ПРОТУХШИЙ ДАТЧИК — НЕ НАХОДКА, А НЕПРОГНАННЫЙ `mh sense`. Первый запуск
     // после смены бинарника даёт пригоршню краснот «датчик подавал и ПРОТУХ», и
     // человек, не знающий этого, идёт их чинить. Само поведение верное — но
@@ -9153,8 +9153,10 @@ pub async fn note_reproject(pool: &Pool, project: &str, ok: bool, why: &str) {
 }
 
 /// Что известно о последней пересборке: `None` — не пересобирали ни разу.
-pub async fn last_reproject(pool: &Pool, project: &str) -> Option<(bool, String, i64)> {
-    let client = pool.get().await.ok()?;
+pub async fn last_reproject(
+    client: &impl deadpool_postgres::GenericClient,
+    project: &str,
+) -> Option<(bool, String, i64)> {
     let row = client
         .query_opt("SELECT ok, why, at FROM reproject_state WHERE project_id = $1", &[&project])
         .await
@@ -12262,21 +12264,7 @@ async fn лестница_держит(
         })));
     };
     let шаг = position(client, project, "godzy").await?;
-    if шаг["checkedAt"].is_null() || !шаг["openWork"].is_array() {
-        return Ok(Some(json!({
-            "why": "положение лестницы этим кодом ни разу не считали: держит ли она задачи, сказать нечем, и это не «можно всё»",
-        })));
-    }
-    let срывается = client
-        .query_opt("SELECT dirty_at > $2 FROM gate_dirty WHERE project_id = $1", &[&project, &now_ms()])
-        .await?
-        .is_some_and(|r| r.get::<_, bool>(0));
-    if срывается {
-        return Ok(Some(json!({
-            "why": "пересчёт набора срывается и ждёт повтора: положение лестницы устарело, и держит ли она задачи, сказать нечем",
-            "stale": true,
-        })));
-    }
+    let срыв = last_reproject(client, project).await.filter(|(ok, _, _)| !*ok).map(|(_, why, _)| why);
     let красные_раньше: Vec<String> = client
         .query(
             "SELECT g.phase || ' · ' || g.item FROM project_gates g
@@ -12289,11 +12277,24 @@ async fn лестница_держит(
         .iter()
         .map(|r| r.get(0))
         .collect();
-    let Some((ступень, держат, всего)) = держащая_ступень(&шаг, i64::from(задачная), &красные_раньше) else {
-        return Ok(None);
-    };
+    Ok(решение_лестницы(&шаг, i64::from(задачная), &красные_раньше, срыв.as_deref()))
+}
+
+fn решение_лестницы(шаг: &Value, задачная: i64, красные_раньше: &[String], срыв: Option<&str>) -> Option<Value> {
+    if шаг["checkedAt"].is_null() || !шаг["openWork"].is_array() {
+        return Some(json!({
+            "why": "положение лестницы этим кодом ни разу не считали: держит ли она задачи, сказать нечем, и это не «можно всё»",
+        }));
+    }
+    if let Some(срыв) = срыв {
+        return Some(json!({
+            "why": format!("последний пересчёт набора сорвался, и положению лестницы верить нельзя: {срыв}"),
+            "stale": true,
+        }));
+    }
+    let (ступень, держат, всего) = держащая_ступень(шаг, задачная, красные_раньше)?;
     let at = &шаг["at"];
-    Ok(Some(json!({
+    Some(json!({
         "ord": ступень["ord"],
         "owner": ступень["owner"],
         "question": ступень["question"],
@@ -12306,7 +12307,7 @@ async fn лестница_держит(
             "ступень {} не пройдена, владелец `{}`: «{}». Задачи не запрашиваются, пока не пройдены все \
              ступени до {задачная}-й — сперва то, что держит эта",
             ступень["ord"], ступень["owner"].as_str().unwrap_or(""), ступень["question"].as_str().unwrap_or("")),
-    })))
+    }))
 }
 
 fn держащая_ступень(шаг: &Value, задачная: i64, красные_раньше: &[String]) -> Option<(Value, Vec<String>, i64)> {
@@ -12340,7 +12341,7 @@ fn держащая_ступень(шаг: &Value, задачная: i64, кра
 
 #[cfg(test)]
 mod лестница {
-    use super::держащая_ступень;
+    use super::{держащая_ступень, решение_лестницы};
     use serde_json::json;
 
     #[test]
@@ -12376,9 +12377,9 @@ mod лестница {
         let шаг = json!({ "unanswerable": [], "openWork": [
             { "ord": 6, "state": "failed", "kind": "gate", "touches": "corpus", "violations": 4 },
         ]});
-        let красные = vec!["corpus · x".to_owned()];
+        let красные = vec!["corpus · x".to_owned(), "corpus · y".to_owned()];
         let (ступень, держат, всего) = держащая_ступень(&шаг, 9, &красные).unwrap();
-        assert_eq!((ступень["ord"].as_i64(), держат, всего), (Some(6), красные, 1));
+        assert_eq!((ступень["ord"].as_i64(), держат, всего), (Some(6), красные, 2));
     }
 
     #[test]
@@ -12391,6 +12392,29 @@ mod лестница {
             ],
         });
         assert!(держащая_ступень(&шаг, 9, &[]).is_none());
+    }
+
+    #[test]
+    fn корпусная_после_неотвечаемой_корпусной_держит() {
+        let шаг = json!({
+            "unanswerable": [{ "ord": 4, "touches": "corpus" }],
+            "openWork": [
+                { "ord": 5, "state": "failed", "kind": "question", "touches": "corpus", "violations": 2,
+                  "detail": ["Q-1 — открыт", "Q-2 — открыт"] },
+            ],
+        });
+        let (ступень, держат, всего) = держащая_ступень(&шаг, 9, &[]).unwrap();
+        assert_eq!((ступень["ord"].as_i64(), держат.len(), всего), (Some(5), 2, 2));
+    }
+
+    #[test]
+    fn сорвавшийся_пересчёт_и_непосчитанное_положение_держат() {
+        let чистое = json!({ "checkedAt": 1, "unanswerable": [], "openWork": [] });
+        assert!(решение_лестницы(&чистое, 9, &[], None).is_none());
+        let сорвался = решение_лестницы(&чистое, 9, &[], Some("relation x does not exist")).unwrap();
+        assert!(сорвался["why"].as_str().unwrap().contains("relation x does not exist"));
+        assert!(решение_лестницы(&json!({ "checkedAt": 1 }), 9, &[], None).is_some());
+        assert!(решение_лестницы(&json!({ "openWork": [] }), 9, &[], None).is_some());
     }
 }
 

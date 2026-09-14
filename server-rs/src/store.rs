@@ -143,6 +143,7 @@ pub async fn create(
     .await?;
     write_structure(&tx, project, kind, name, content).await?;
     tx.commit().await?;
+    drop(client);
     crate::watch::touch(pool, project, "заведён документ").await;
     let mut ответ = json!({ "status": "created", "kind": kind, "name": name,
                             "revision": revision, "bytes": bytes });
@@ -247,6 +248,7 @@ pub async fn put(
     // её удаляет и пишет заново. Дописанное в проекцию теряется молча, а лог,
     // теряющий записи, хуже отсутствующего.
     tx.commit().await?;
+    drop(client);
     // Документ изменился — гейты пора мерить заново. Отметка ставится после
     // фиксации: помеченная до неё правка, не дошедшая до базы, заставила бы
     // считать набор, который остался прежним.
@@ -336,6 +338,7 @@ pub async fn remove(pool: &Pool, project: &str, kind: &str, name: &str) -> Resul
         .await?;
     }
     tx.commit().await?;
+    drop(client);
     if gone > 0 {
         crate::watch::touch(pool, project, "документ снят").await;
     }

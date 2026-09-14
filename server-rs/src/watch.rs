@@ -73,7 +73,10 @@ pub fn spawn(pool: Pool) {
 }
 
 async fn round(pool: &Pool) -> Result<(), tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+    let Ok(client) = pool.get().await else {
+        tracing::warn!("пул не отдал сборщику соединение");
+        return Ok(());
+    };
     let due = client
         .query(
             // ТОЛЬКО НАСТОЯЩИЕ НАБОРЫ. Отметка ставится по имени набора, а имя
@@ -122,23 +125,22 @@ async fn round(pool: &Pool) -> Result<(), tokio_postgres::Error> {
         // истекает. Она же нужна и тем, кто пишет проекции мимо сборщика:
         // `finish_write` делает это на КАЖДУЮ правку документа. Пока её нет,
         // гонка остаётся — названной, а не прикрытой.
-        let measured: Result<serde_json::Value, tokio_postgres::Error> = async {
-            crate::reproject::reproject(pool, &project).await?;
-            crate::projector::rebuild_before(pool, &project).await?;
-            crate::projector::rebuild(pool, &project).await?;
-            // Порядок обязателен и он такой: проекции, гейты, лестница, фазы.
-            // Ступени 4, 7 и 10 читают состояние пунктов гейта, фаза — состояние
-            // своего гейта. Посчитанные раньше, они прочли бы прошлый круг и
-            // разошлись бы с доской на один шаг — расхождение, невидимое глазом.
-            let out = crate::projector::measure_gates(pool, &project).await?;
-            crate::projector::measure_process(pool, &project, "godzy", "godzy").await?;
-            crate::projector::measure_phases(pool, &project).await?;
-            Ok(out)
-        }
-        .await;
+        let measured = {
+            let (pool, project) = (pool.clone(), project.clone());
+            match tokio::spawn(async move { recount(&pool, &project).await }).await {
+                Ok(Ok(out)) => Ok(out),
+                Ok(Err(e)) => Err(crate::projector::db_says(&e)),
+                Err(e) => Err(format!("пересчёт упал: {e}")),
+            }
+        };
         let spent = began.elapsed().as_millis() as i32;
+        crate::projector::note_reproject(pool, &project, measured.is_ok(), measured.as_ref().err().map_or("", String::as_str))
+            .await;
         let retry_at = measured.is_err().then(|| crate::projector::now_ms() + RETRY_MS);
-        let client = pool.get().await.expect("пул отдал соединение");
+        let Ok(client) = pool.get().await else {
+            tracing::warn!("пул не отдал сборщику соединение: отметка набора {project} не записана");
+            continue;
+        };
         if let Err(e) = client
             .execute(
                 "UPDATE gate_dirty SET ran_at = $2, ran_ms = $3,
@@ -160,4 +162,18 @@ async fn round(pool: &Pool) -> Result<(), tokio_postgres::Error> {
         }
     }
     Ok(())
+}
+
+async fn recount(pool: &Pool, project: &str) -> Result<serde_json::Value, tokio_postgres::Error> {
+    crate::reproject::reproject(pool, project).await?;
+    crate::projector::rebuild_before(pool, project).await?;
+    crate::projector::rebuild(pool, project).await?;
+    // Порядок обязателен и он такой: проекции, гейты, лестница, фазы.
+    // Ступени 4, 7 и 10 читают состояние пунктов гейта, фаза — состояние
+    // своего гейта. Посчитанные раньше, они прочли бы прошлый круг и
+    // разошлись бы с доской на один шаг — расхождение, невидимое глазом.
+    let out = crate::projector::measure_gates(pool, project).await?;
+    crate::projector::measure_process(pool, project, "godzy", "godzy").await?;
+    crate::projector::measure_phases(pool, project).await?;
+    Ok(out)
 }
