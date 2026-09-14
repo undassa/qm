@@ -650,20 +650,7 @@ CREATE TABLE IF NOT EXISTS project_task_tree_leaf (
   exempt boolean NOT NULL DEFAULT false,
   PRIMARY KEY (project_id, task_id, ord));
 
-CREATE TABLE IF NOT EXISTS rule_exception (
-  project_id text NOT NULL, rule text NOT NULL,
-  entity_kind text NOT NULL, entity_id text NOT NULL,
-  reason text NOT NULL, decided_by text NOT NULL DEFAULT '',
-  -- Побег бывает двух родов, и разница — не в тоне причины. Один снимает
-  -- находку навсегда: значение подтверждено не секретом. Другой терпит её до
-  -- задачи, которая её уберёт. Второй без имени этой задачи вырождается в
-  -- первый: причина «пока так» стареет молча. Отсюда колонка, а не проза.
-  closes text NOT NULL DEFAULT '',
-  -- Откуда строка: 'projected' — вынута из документа, 'declared' — объявлена
-  -- дверью. Без этого пересборка сносила таблицу целиком и объявленные побеги
-  -- исчезали молча: гейт наутро краснел находками, которые вчера разобрали.
-  origin text NOT NULL DEFAULT 'declared',
-  PRIMARY KEY (project_id, rule, entity_kind, entity_id));
+DROP TABLE IF EXISTS rule_exception;
 
 -- Вердикт предполёта знает ревизию, на которой получен: «предполёт устарел» —
 -- сравнение ревизий, а не память.
@@ -1847,15 +1834,7 @@ CREATE TABLE IF NOT EXISTS reproject_state (
   ok boolean NOT NULL,
   why text NOT NULL DEFAULT '');
 
-CREATE TABLE IF NOT EXISTS rule_ceiling (
-  project_id text NOT NULL,
-  rule text NOT NULL,
-  ceiling integer NOT NULL,
-  why text NOT NULL DEFAULT '',
-  origin text NOT NULL DEFAULT 'declared',
-  PRIMARY KEY (project_id, rule));
-ALTER TABLE rule_exception ADD COLUMN IF NOT EXISTS closes text NOT NULL DEFAULT '';
-ALTER TABLE rule_exception ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'declared';
+DROP TABLE IF EXISTS rule_ceiling;
 ALTER TABLE project_feature_requirements ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'declared';
 ALTER TABLE project_milestone_requirements ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'declared';
 ALTER TABLE project_screen_requirements ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'declared';
@@ -3175,33 +3154,6 @@ pub async fn rebuild(pool: &Pool, project: &str) -> Result<Value, tokio_postgres
         )
         .await?;
 
-    // ── Исключение из правила ────────────────────────────────────────────────
-    // Правило: таблица `COVERAGE.md` с шапкой «История · Почему». Исключение,
-    // объявленное прозой, неотличимо от дыры для всякой считающей ручки: она
-    // либо соврёт про четыре дыры, либо спрячет настоящую пятую, когда та
-    // появится.
-    tx.execute("DELETE FROM rule_exception WHERE project_id = $1 AND origin = 'projected'",
-               &[&project]).await?;
-    let exceptions = tx
-        .execute(
-            "INSERT INTO rule_exception (project_id, rule, entity_kind, entity_id, reason, decided_by, origin)
-             SELECT $1, 'история без требования', 'story',
-                    max(CASE WHEN c.col = 0 THEN c.value END),
-                    coalesce(max(CASE WHEN c.col = 1 THEN c.value END), ''),
-                    'COVERAGE', 'projected'
-               FROM project_document_cells c
-              WHERE c.project_id = $1 AND c.entity_kind = 'coverage'
-                AND c.row_ord > 0
-                AND c.block_ord IN (SELECT block_ord FROM project_document_cells h
-                                     WHERE h.project_id = $1 AND h.entity_kind = 'coverage'
-                                       AND h.row_ord = 0 AND h.col = 0 AND h.value = 'История')
-              GROUP BY c.row_ord
-             HAVING max(CASE WHEN c.col = 0 THEN c.value END) ~ '^US-[A-Z]+-[0-9]+$'
-             ON CONFLICT DO NOTHING",
-            &[&project],
-        )
-        .await?;
-
     // ── Над чем считано заявленное число ─────────────────────────────────────
     // Без этого сверка кричит волком: `172` считано по ФАЙЛАМ решений, а таблица
     // держит записи; `272` — по функциональным, а таблица держит FR и NFR
@@ -3421,7 +3373,6 @@ pub async fn rebuild(pool: &Pool, project: &str) -> Result<Value, tokio_postgres
         "entity_event": events,
         "norm_version": versions,
         "measurement": measurements,
-        "rule_exception": exceptions,
         "claim_subject": subjects,
         "red_task": red,
         "red_in_plan": red_in_plan,
@@ -4009,41 +3960,9 @@ async fn measure_item(
                 sql => {
                     let since: i64 = r.try_get("since").unwrap_or(0);
                     let v = execute_method_upto(client, project, "query", sql.unwrap_or(""), 200, since).await;
-                    // Объявленные исключения ВЫЧИТАЮТСЯ — и остаются видны.
-                    //
-                    // Молча вычесть нельзя: исключение, которого не видно, — это
-                    // дыра с разрешением. Поэтому чисел три: сколько нарушений
-                    // осталось, сколько прощено объявленным исключением и
-                    // сколько исключений объявлено на то, чего уже нет, —
-                    // последнее значит, что исключение пора снять.
-                    let allowed = client
-                        .query(
-                            "SELECT entity_id, reason FROM rule_exception
-                              WHERE project_id = $1 AND rule = $2",
-                            &[&project, &item],
-                        )
-                        .await
-                        .unwrap_or_default();
-                    let names: std::collections::HashMap<String, String> = allowed
-                        .iter()
-                        .map(|r| (r.get::<_, String>(0), r.get::<_, String>(1)))
-                        .collect();
-                    let (excepted, rest): (Vec<&String>, Vec<&String>) =
-                        v.detail.iter().partition(|d| names.contains_key(&violator(d)));
-                    // Нарушения показываются пятью строками, а исключения — все:
-                    // их немного, и каждое кто-то однажды объявил.
-                    let hit: std::collections::HashSet<String> =
-                        v.detail.iter().map(|d| violator(d)).collect();
-                    let stale: Vec<&String> = names.keys().filter(|n| !hit.contains(*n)).collect();
-                    let left = v.violations.saturating_sub(excepted.len());
-                    let state = if v.state == "failed" && left == 0 { "passed" } else { v.state };
                     json!({
                         "item": item, "kind": kind,
-                        "computed": state, "violations": left, "detail": rest,
-                        "excepted": excepted.len(),
-                        "exceptedNames": excepted,
-                        "staleExceptions": stale.len(),
-                        "staleExceptionNames": stale,
+                        "computed": v.state, "violations": v.violations, "detail": v.detail,
                         // `why` исполнителя — про то, ПОЧЕМУ запрос не выполнился;
                         // `means` — про то, что пункт вообще меряет. Второе
                         // объявляется вместе с пунктом и до сих пор наружу не
@@ -4197,14 +4116,6 @@ pub async fn gate(pool: &Pool, project: &str, phase: Option<&str>) -> Result<Val
             // «Пробу не проверяли» и «проба не роняет» — разное, и оба не
             // «зелёное»: пункт, который ни разу не уронили, никто не проверял.
             m.insert("probeRuns".into(), json!(r.get::<_, Option<bool>>(10)));
-            // Чем адресуется исключение к находке этого пункта. `null` — пункт
-            // исключений не читает, и объявлять их ему бессмысленно; это
-            // разное с «читает, но ключ такой-то», и путать нельзя.
-            let q: Option<String> = r.get(7);
-            m.insert(
-                "exceptionKey".into(),
-                json!(q.as_deref().and_then(exception_key)),
-            );
             // ЧЕЙ ПРЕДМЕТ СПОРА. Находка остаётся красной, но счёт разделён:
             // «одиннадцать нарушений» смешивало своё с чужим, и по одному числу
             // нельзя было решить, работа это набора или слепота сервера.
@@ -4446,13 +4357,6 @@ pub async fn tasks_of_story(pool: &Pool, project: &str, story: &str) -> Result<V
             &[&project, &story],
         )
         .await?;
-    let exception = client
-        .query(
-            "SELECT reason, decided_by FROM rule_exception
-              WHERE project_id = $1 AND entity_kind = 'story' AND entity_id = $2",
-            &[&project, &story],
-        )
-        .await?;
     let requirements: i64 = client
         .query_one(
             "SELECT count(*) FROM project_story_requirements WHERE project_id = $1 AND story_id = $2",
@@ -4464,11 +4368,6 @@ pub async fn tasks_of_story(pool: &Pool, project: &str, story: &str) -> Result<V
         "story": story,
         "tasks": rows.iter().map(|r| r.get::<_, String>(0)).collect::<Vec<_>>(),
         "requirements": requirements,
-        // Исключение — это ответ, а не дыра и не пустота. Ручка, которая
-        // молчит здесь, заставит агента считать историю незакрытой.
-        "exception": exception.first().map(|e| json!({
-            "reason": e.get::<_, String>(0), "declaredIn": e.get::<_, String>(1)
-        })),
     }))
 }
 
@@ -8786,84 +8685,6 @@ pub async fn set_field_alias(
                "means": "пара читается ВСЕМИ правилами имён разом: побега на каждое больше не нужно" }))
 }
 
-pub async fn exceptions_with_holes(
-    pool: &Pool,
-    project: &str,
-    rule: &str,
-) -> Result<Value, tokio_postgres::Error> {
-    let mut client = pool.get().await.expect("пул отдал соединение");
-    let rows = client
-        .query(
-            "SELECT e.rule, e.entity_kind, e.entity_id, e.reason, e.decided_by
-               FROM rule_exception e
-              WHERE e.project_id = $1 AND ($2 = '' OR e.rule = $2)
-              ORDER BY e.rule, e.entity_id",
-            &[&project, &rule],
-        )
-        .await?;
-    // Запросы пунктов — по одному на семейство, а не на побег: побегов двести с
-    // лишним, семейств шестнадцать.
-    let mut queries: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    for r in client
-        .query("SELECT id, query FROM gate_item WHERE query IS NOT NULL AND query <> ''", &[])
-        .await?
-        .iter()
-    {
-        queries.insert(r.get(0), r.get(1));
-    }
-    let families: std::collections::BTreeSet<String> =
-        rows.iter().map(|r| r.get::<_, String>(0)).collect();
-    // Находки семейства БЕЗ побегов: что правило сказало бы, если бы их не было.
-    let mut found: std::collections::HashMap<String, Option<Vec<String>>> =
-        std::collections::HashMap::new();
-    for f in &families {
-        let Some(sql) = queries.get(f) else {
-            found.insert(f.clone(), None);
-            continue;
-        };
-        let tx = client.transaction().await?;
-        let seen = match tx
-            .execute("DELETE FROM rule_exception WHERE project_id = $1 AND rule = $2", &[&project, f])
-            .await
-        {
-            Ok(_) => match tx.query(sql.as_str(), &[&project]).await {
-                Ok(rs) => Some(
-                    rs.iter().map(|r| r.try_get::<_, String>(0).unwrap_or_default()).collect(),
-                ),
-                Err(_) => None,
-            },
-            Err(_) => None,
-        };
-        tx.rollback().await?;
-        found.insert(f.clone(), seen);
-    }
-    let items: Vec<Value> = rows
-        .iter()
-        .map(|r| {
-            let f: String = r.get(0);
-            let id: String = r.get(2);
-            // Находка НАЧИНАЕТСЯ с того, кем она названа: `violator` берёт то же
-            // первое слово, и составной ключ стоит в начале строки целиком.
-            let hole = found.get(&f).map(|seen| {
-                seen.as_ref().map(|d| !d.iter().any(|x| x.starts_with(&id) || x.contains(&id)))
-            });
-            json!({
-                "rule": f, "kind": r.get::<_, String>(1), "id": id,
-                "reason": r.get::<_, String>(3), "declaredIn": r.get::<_, String>(4),
-                // Дыры уже нет, а побег стоит: его пора снять. `null` — правило
-                // не читается, и судить нечем.
-                "holeGone": hole.flatten(),
-            })
-        })
-        .collect();
-    let stale = items.iter().filter(|i| i["holeGone"] == json!(true)).count();
-    let unknown = items.iter().filter(|i| i["holeGone"] == Value::Null).count();
-    Ok(json!({
-        "exceptions": items, "count": items.len(), "toRetire": stale, "unjudged": unknown,
-        "means": "устаревшим считается побег, чья находка ВЕРНУЛАСЬ БЫ, сними его: \
-                  правило исполняется без побегов своего семейства и откатывается",
-    }))
-}
 
 pub async fn declared_unwritten(
     pool: &Pool,
@@ -8986,93 +8807,6 @@ pub async fn readiness_gaps(pool: &Pool, project: &str) -> Result<Value, tokio_p
     }))
 }
 
-/// Чем правило сравнивает исключение — выражением из его же запроса.
-///
-/// `exception-set` требует `entityId`, и чем он должен быть, не было сказано
-/// нигде: ключ выясняли перебором. У `contract-field` это `Absence.from`, у
-/// `domain-check` — пара целиком, у `milestone-names-its-parts` не подходило
-/// ничто, потому что правило исключений не читает вовсе.
-///
-/// Ответ достаётся из САМОГО запроса, а не из второй записи о нём: вторая
-/// разошлась бы с первой при первой же правке правила.
-/// Имя, ПОД КОТОРЫМ правило читает исключения, — из его же запроса.
-///
-/// Имя пункта и имя правила в `rule_exception` совпадают не всегда: пункт
-/// зовётся `retired-term-in-corpus`, а исключения ищет по `retired-term`. Дверь
-/// на такое отвечала «правило исключений не читает» — и это неправда: читает,
-/// под другим именем. Отказ, называющий не ту причину, отправляет искать то,
-/// чего нет; здесь он назовёт верное имя.
-pub fn exception_rule(query: &str) -> Option<String> {
-    let at = query.find("e.rule = ")?;
-    let rest = &query[at + "e.rule = ".len()..];
-    let rest = rest.trim_start().strip_prefix('\'')?;
-    let end = rest.find('\'')?;
-    Some(rest[..end].to_owned())
-}
-
-pub fn exception_key(query: &str) -> Option<String> {
-    let at = query.find("e.entity_id")?;
-    let rest = &query[at + "e.entity_id".len()..];
-    let rest = rest.trim_start().strip_prefix('=')?.trim_start();
-    // Ключ берётся ЦЕЛИКОМ, до конца выражения. У части правил он составной:
-    // `с.nfr || ' → ' || с.файл`, и первое слово такого ключа не совпадёт ни с
-    // чем — частичный ответ здесь хуже отсутствия ответа, потому что по нему
-    // объявят исключение, которое не сработает.
-    //
-    // Конец — закрывающая скобка условия либо слово, продолжающее запрос.
-    let mut depth = 0i32;
-    let mut end = rest.len();
-    for (i, c) in rest.char_indices() {
-        match c {
-            '(' => depth += 1,
-            ')' if depth == 0 => { end = i; break }
-            ')' => depth -= 1,
-            _ => {
-                if depth == 0 {
-                    let tail = &rest[i..];
-                    for w in [" AND ", " OR ", " ORDER ", " GROUP ", " LIMIT ", "\n"] {
-                        if tail.starts_with(w) { end = i; break }
-                    }
-                    if end == i { break }
-                }
-            }
-        }
-    }
-    let key = rest[..end].trim();
-    if key.is_empty() { None } else { Some(key.to_owned()) }
-}
-
-#[cfg(test)]
-mod ключ_тесты {
-    use super::exception_key;
-
-    #[test]
-    fn ключ_берётся_из_запроса() {
-        let q = "SELECT f.name FROM code_fact f WHERE NOT EXISTS (SELECT 1 FROM rule_exception e \
-                 WHERE e.rule = 'x' AND e.entity_id = f.name) ORDER BY 1";
-        assert_eq!(exception_key(q).as_deref(), Some("f.name"));
-    }
-
-    #[test]
-    fn пробелы_вокруг_равенства_не_мешают() {
-        assert_eq!(exception_key("e.entity_id   =   tc.task_id AND x").as_deref(), Some("tc.task_id"));
-    }
-
-    /// Составной ключ берётся целиком: первое его слово не совпадёт ни с чем, и
-    /// объявленное по нему исключение не сработает — а выглядеть будет рабочим.
-    #[test]
-    fn составной_ключ_берётся_целиком() {
-        let q = "... e.entity_id = с.nfr || ' → ' || с.файл) ORDER BY 1";
-        assert_eq!(exception_key(q).as_deref(), Some("с.nfr || ' → ' || с.файл"));
-    }
-
-    /// Правило без чтения исключений и правило с ключом — разное. Пустая строка
-    /// вместо `None` совпала бы с пустым значением и прочиталась как «ключ есть».
-    #[test]
-    fn правило_без_исключений_ключа_не_имеет() {
-        assert_eq!(exception_key("SELECT 1 FROM project_gates"), None);
-    }
-}
 
 /// Записать исход пересборки: удалась или упала и чем.
 ///
@@ -9107,57 +8841,6 @@ pub async fn last_reproject(
     Some((row.get(0), row.get(1), row.get(2)))
 }
 
-/// Объявить потолок долга: сколько находок правила сегодня терпимо и почему.
-///
-/// Гейт, краснеющий в день, когда его завели, назавтра выключают. Потолок даёт
-/// правилу приехать в проект, где долг уже есть: держит он не долг, а его РОСТ.
-pub async fn set_ceiling(
-    pool: &Pool, project: &str, rule: &str, ceiling: i32, why: &str, drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
-    if rule.trim().is_empty() {
-        return Ok(json!({ "status": "nameless", "why": "потолок без правила не объявляется" }));
-    }
-    let client = pool.get().await.expect("пул отдал соединение");
-    if drop_it {
-        let gone = client
-            .execute("DELETE FROM rule_ceiling WHERE project_id = $1 AND rule = $2", &[&project, &rule])
-            .await?;
-        return Ok(json!({ "status": if gone > 0 { "dropped" } else { "not_found" }, "rule": rule }));
-    }
-    // ПРАВИЛО ОБЯЗАНО ЧИТАТЬ ПОТОЛОК. `ceiling-set rule=column-input ceiling=41`
-    // отвечал «declared» и не делал ничего: запрос пункта не соединялся с
-    // `rule_ceiling`. Потолок, который никто не читает, — обещание, данное в
-    // пустоту.
-    let reads: i64 = client
-        .query_one(
-            "SELECT count(*) FROM gate_item
-              WHERE kind = 'query' AND query LIKE '%' || $1 || '%' AND query LIKE '%rule_ceiling%'",
-            &[&rule],
-        )
-        .await?
-        .get(0);
-    if reads == 0 {
-        return Ok(json!({
-            "status": "rule_ignores_ceiling",
-            "why": format!(
-                "правило «{rule}» потолка не читает: ни один пункт гейта не соединяет свой запрос с \
-                 `rule_ceiling` по этому имени. Записанное здесь ничего бы не держало."
-            ),
-        }));
-    }
-    // Потолок без причины — это разрешение, выданное неизвестно кем и зачем.
-    // Через полгода его никто не решится опустить: непонятно, что он держит.
-    if why.trim().is_empty() {
-        return Ok(json!({ "status": "no_reason",
-                          "why": "потолок без причины — дыра с разрешением: назовите, что он держит" }));
-    }
-    client.execute(
-        "INSERT INTO rule_ceiling (project_id, rule, ceiling, why, origin)
-         VALUES ($1,$2,$3,$4,'declared')
-         ON CONFLICT (project_id, rule) DO UPDATE SET ceiling = EXCLUDED.ceiling, why = EXCLUDED.why",
-        &[&project, &rule, &ceiling, &why]).await?;
-    Ok(json!({ "status": "declared", "rule": rule, "ceiling": ceiling }))
-}
 
 /// Чем снимать факты: перечень объявленных датчиков для клиента.
 pub async fn sensor_specs(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
@@ -11204,84 +10887,6 @@ impl Verdict {
     }
 }
 
-/// Имя сущности из строки нарушения: первое слово до пробела.
-///
-/// Запросы гейтов складывают строку вида «`US-DET-01` — заголовок» или
-/// «`US-FEED-04` → `SCR-FEED-02`». Первое слово — тот, о ком нарушение, и
-/// исключение объявляется на него. Разбирать глубже нечего: если запросу
-/// понадобится другая единица, он обязан поставить её первой.
-/// Меняет ли объявляемое исключение ответ правила — и если нет, чем помочь.
-///
-/// Возвращает `None`, когда ключ рабочий, и слово отказа, когда нет. Ответ
-/// правила спрашивается ДО и ПОСЛЕ подсадки исключения в откатываемой
-/// транзакции: набор после проверки остаётся тем же, чем был.
-///
-/// Отказ несёт то, чего не хватало: выражение ключа этого правила и первые
-/// находки как есть. По ним ключ виден без чтения SQL.
-pub async fn exception_changes_answer(
-    pool: &Pool,
-    project: &str,
-    rule: &str,
-    entity: &str,
-) -> Result<Option<String>, tokio_postgres::Error> {
-    let mut client = pool.get().await.expect("пул отдал соединение");
-    let Some(row) = client
-        .query_opt("SELECT query, since FROM gate_item WHERE id = $1 AND kind = 'query'", &[&rule])
-        .await?
-    else {
-        return Ok(None);
-    };
-    let Some(sql) = row.get::<_, Option<String>>(0) else { return Ok(None) };
-    // УЖЕ ЗАПИСАННОЕ ИСКЛЮЧЕНИЕ ДОКАЗЫВАТЬ НЕ НАДО — ОНО УЖЕ РАБОТАЕТ.
-    //
-    // Проба сажает нарушение и смотрит, изменился ли ответ правила. Но если
-    // исключение по этому ключу уже лежит, правило эту находку УЖЕ не отдаёт:
-    // проба ничего не меняет, ответ тот же, и дверь отказывает словами «ключ не
-    // совпал ни с одной находкой» — прямой неправдой. Своя же запись двери —
-    // `DO UPDATE SET reason, decided_by, closes`: она затем и upsert, чтобы
-    // довод можно было дописать, а задачу-закрывателя привязать позже.
-    let уже: bool = client
-        .query_one(
-            "SELECT EXISTS (SELECT 1 FROM rule_exception
-                             WHERE project_id = $1 AND rule = $2 AND entity_id = $3)",
-            &[&project, &rule, &entity],
-        )
-        .await?
-        .get(0);
-    if уже {
-        return Ok(None);
-    }
-    let tx = client.transaction().await?;
-    let since: i64 = row.get(1);
-    let before = answer_of(&tx, &sql, project, since).await;
-    tx.execute(
-        "INSERT INTO rule_exception (project_id, rule, entity_kind, entity_id, reason, decided_by)
-         VALUES ($1,$2,'',$3,'проба ключа','проба')
-         ON CONFLICT (project_id, rule, entity_kind, entity_id) DO NOTHING",
-        &[&project, &rule, &entity],
-    )
-    .await?;
-    let after = answer_of(&tx, &sql, project, since).await;
-    tx.rollback().await?;
-    let (Ok(before), Ok(after)) = (before, after) else { return Ok(None) };
-    if before.len() != after.len() {
-        return Ok(None);
-    }
-    // Правило и так молчит — объявлять исключение не на что.
-    if before.is_empty() {
-        return Ok(Some(format!(
-            "правило «{rule}» сейчас не находит ничего: исключать нечего, и записанное легло бы \
-             мимо. Объявляйте, когда находка есть"
-        )));
-    }
-    let ключ = exception_key(&sql).unwrap_or_else(|| "не объявлен".to_owned());
-    let примеры: Vec<&str> = before.iter().take(6).map(String::as_str).collect();
-    Ok(Some(format!(
-        "ключ «{entity}» не совпал ни с одной находкой правила «{rule}»: ответ его не изменился, \
-         и записанное исключение было бы мёртвым. Ключ этого правила — `{ключ}`. Находки сейчас: {}",
-        примеры.join(" | ")
-    )))
-}
 
 /// Роли словаря: что спрашивают проекции, что объявлено и что молчит.
 ///
@@ -11968,7 +11573,7 @@ pub async fn measure_process(
 /// доступа к базе.
 ///
 /// Это дословно тот дефект, который у пункта гейта закрыт: пункт отдаёт `id`,
-/// `query`, `probe`, `exceptionKey`, `probeRuns`. Лестница того же не получила,
+/// `query`, `probe`, `probeRuns`. Лестница того же не получила,
 /// и расхождение двух ручек об одном предмете — ступень 4 говорит «пройдена»,
 /// `plan` говорит «пять ненаписанных» — разрешалось чтением кода, а не вопросом
 /// к харнесу.
@@ -12273,99 +11878,6 @@ fn держащая_ступень(шаг: &Value, задачная: i64, кра
                 ))
             }
         })
-}
-
-#[cfg(test)]
-mod лестница {
-    use super::{держащая_ступень, решение_лестницы};
-    use serde_json::json;
-
-    #[test]
-    fn проваленная_корпусная_и_неотвечаемые_не_те_не_освобождают_красную() {
-        let шаг = json!({
-            "corpusPhaseOpen": true,
-            "unanswerable": [{ "ord": 7, "touches": "repository" }, { "ord": 12, "touches": "corpus" }],
-            "openWork": [
-                { "ord": 6, "state": "failed", "kind": "gate", "touches": "corpus", "violations": 1,
-                  "detail": ["G4 · все задачи кода закрыты"] },
-                { "ord": 8, "state": "failed", "kind": "milestone", "touches": "repository", "violations": 1,
-                  "detail": ["M3 — задач нет"] },
-            ],
-        });
-        let (ступень, держат, всего) = держащая_ступень(&шаг, 9, &[]).unwrap();
-        assert_eq!((ступень["ord"].as_i64(), держат, всего), (Some(8), vec!["M3 — задач нет".to_owned()], 1));
-    }
-
-    #[test]
-    fn ступени_от_задачной_не_держат() {
-        let шаг = json!({
-            "unanswerable": [],
-            "openWork": [
-                { "ord": 9, "state": "failed", "kind": "task", "touches": "repository", "violations": 3 },
-                { "ord": 11, "state": "failed", "kind": "gate", "touches": "repository", "violations": 2 },
-            ],
-        });
-        assert!(держащая_ступень(&шаг, 9, &["corpus · x".to_owned()]).is_none());
-    }
-
-    #[test]
-    fn корпус_держит_гейтовую_ступень() {
-        let шаг = json!({ "unanswerable": [], "openWork": [
-            { "ord": 6, "state": "failed", "kind": "gate", "touches": "corpus", "violations": 4 },
-        ]});
-        let красные = vec!["corpus · x".to_owned(), "corpus · y".to_owned()];
-        let (ступень, держат, всего) = держащая_ступень(&шаг, 9, &красные).unwrap();
-        assert_eq!((ступень["ord"].as_i64(), держат, всего), (Some(6), красные, 2));
-    }
-
-    #[test]
-    fn репозиторная_после_неотвечаемой_корпусной_не_держит() {
-        let шаг = json!({
-            "corpusPhaseOpen": true,
-            "unanswerable": [{ "ord": 4, "touches": "corpus" }],
-            "openWork": [
-                { "ord": 8, "state": "failed", "kind": "milestone", "touches": "repository", "violations": 1 },
-            ],
-        });
-        assert!(держащая_ступень(&шаг, 9, &[]).is_none());
-    }
-
-    #[test]
-    fn корпусная_после_неотвечаемой_корпусной_держит() {
-        let шаг = json!({
-            "unanswerable": [{ "ord": 4, "touches": "corpus" }],
-            "openWork": [
-                { "ord": 5, "state": "failed", "kind": "question", "touches": "corpus", "violations": 2,
-                  "detail": ["Q-1 — открыт", "Q-2 — открыт"] },
-            ],
-        });
-        let (ступень, держат, всего) = держащая_ступень(&шаг, 9, &[]).unwrap();
-        assert_eq!((ступень["ord"].as_i64(), держат.len(), всего), (Some(5), 2, 2));
-    }
-
-    #[test]
-    fn непосчитанное_положение_держит_а_устаревшее_решает_по_последнему() {
-        let устаревшее = json!({ "checkedAt": 1, "stale": true, "unanswerable": [], "openWork": [] });
-        assert!(решение_лестницы(&устаревшее, 9, &[]).is_none());
-        assert!(решение_лестницы(&json!({ "checkedAt": 1 }), 9, &[]).is_some());
-        assert!(решение_лестницы(&json!({ "openWork": [] }), 9, &[]).is_some());
-    }
-
-    #[test]
-    fn первая_единица_только_у_текущей_ступени() {
-        let шаг = |at: i64| {
-            json!({ "checkedAt": 1, "stale": false, "unanswerable": [],
-                    "at": { "ord": at, "first": { "name": "Q-1" } },
-                    "openWork": [{ "ord": 5, "state": "failed", "kind": "question", "touches": "corpus", "violations": 1,
-                                   "detail": ["Q-1 — открыт"] }] })
-        };
-        let держит = решение_лестницы(&шаг(5), 9, &[]).unwrap();
-        assert_eq!(
-            (держит["first"]["name"].as_str(), держит["holding"][0].as_str()),
-            (Some("Q-1"), Some("Q-1 — открыт"))
-        );
-        assert!(решение_лестницы(&шаг(4), 9, &[]).unwrap()["first"].is_null());
-    }
 }
 
 pub async fn next_step(pool: &Pool, project: &str, process: &str) -> Result<Value, tokio_postgres::Error> {
@@ -13418,4 +12930,97 @@ async fn снимок_гейта(
         .iter()
         .map(|r| ((r.get(0), r.get(1)), (r.get(2), r.get(3), r.get(4))))
         .collect())
+}
+
+#[cfg(test)]
+mod лестница {
+    use super::{держащая_ступень, решение_лестницы};
+    use serde_json::json;
+
+    #[test]
+    fn проваленная_корпусная_и_неотвечаемые_не_те_не_освобождают_красную() {
+        let шаг = json!({
+            "corpusPhaseOpen": true,
+            "unanswerable": [{ "ord": 7, "touches": "repository" }, { "ord": 12, "touches": "corpus" }],
+            "openWork": [
+                { "ord": 6, "state": "failed", "kind": "gate", "touches": "corpus", "violations": 1,
+                  "detail": ["G4 · все задачи кода закрыты"] },
+                { "ord": 8, "state": "failed", "kind": "milestone", "touches": "repository", "violations": 1,
+                  "detail": ["M3 — задач нет"] },
+            ],
+        });
+        let (ступень, держат, всего) = держащая_ступень(&шаг, 9, &[]).unwrap();
+        assert_eq!((ступень["ord"].as_i64(), держат, всего), (Some(8), vec!["M3 — задач нет".to_owned()], 1));
+    }
+
+    #[test]
+    fn ступени_от_задачной_не_держат() {
+        let шаг = json!({
+            "unanswerable": [],
+            "openWork": [
+                { "ord": 9, "state": "failed", "kind": "task", "touches": "repository", "violations": 3 },
+                { "ord": 11, "state": "failed", "kind": "gate", "touches": "repository", "violations": 2 },
+            ],
+        });
+        assert!(держащая_ступень(&шаг, 9, &["corpus · x".to_owned()]).is_none());
+    }
+
+    #[test]
+    fn корпус_держит_гейтовую_ступень() {
+        let шаг = json!({ "unanswerable": [], "openWork": [
+            { "ord": 6, "state": "failed", "kind": "gate", "touches": "corpus", "violations": 4 },
+        ]});
+        let красные = vec!["corpus · x".to_owned(), "corpus · y".to_owned()];
+        let (ступень, держат, всего) = держащая_ступень(&шаг, 9, &красные).unwrap();
+        assert_eq!((ступень["ord"].as_i64(), держат, всего), (Some(6), красные, 2));
+    }
+
+    #[test]
+    fn репозиторная_после_неотвечаемой_корпусной_не_держит() {
+        let шаг = json!({
+            "corpusPhaseOpen": true,
+            "unanswerable": [{ "ord": 4, "touches": "corpus" }],
+            "openWork": [
+                { "ord": 8, "state": "failed", "kind": "milestone", "touches": "repository", "violations": 1 },
+            ],
+        });
+        assert!(держащая_ступень(&шаг, 9, &[]).is_none());
+    }
+
+    #[test]
+    fn корпусная_после_неотвечаемой_корпусной_держит() {
+        let шаг = json!({
+            "unanswerable": [{ "ord": 4, "touches": "corpus" }],
+            "openWork": [
+                { "ord": 5, "state": "failed", "kind": "question", "touches": "corpus", "violations": 2,
+                  "detail": ["Q-1 — открыт", "Q-2 — открыт"] },
+            ],
+        });
+        let (ступень, держат, всего) = держащая_ступень(&шаг, 9, &[]).unwrap();
+        assert_eq!((ступень["ord"].as_i64(), держат.len(), всего), (Some(5), 2, 2));
+    }
+
+    #[test]
+    fn непосчитанное_положение_держит_а_устаревшее_решает_по_последнему() {
+        let устаревшее = json!({ "checkedAt": 1, "stale": true, "unanswerable": [], "openWork": [] });
+        assert!(решение_лестницы(&устаревшее, 9, &[]).is_none());
+        assert!(решение_лестницы(&json!({ "checkedAt": 1 }), 9, &[]).is_some());
+        assert!(решение_лестницы(&json!({ "openWork": [] }), 9, &[]).is_some());
+    }
+
+    #[test]
+    fn первая_единица_только_у_текущей_ступени() {
+        let шаг = |at: i64| {
+            json!({ "checkedAt": 1, "stale": false, "unanswerable": [],
+                    "at": { "ord": at, "first": { "name": "Q-1" } },
+                    "openWork": [{ "ord": 5, "state": "failed", "kind": "question", "touches": "corpus", "violations": 1,
+                                   "detail": ["Q-1 — открыт"] }] })
+        };
+        let держит = решение_лестницы(&шаг(5), 9, &[]).unwrap();
+        assert_eq!(
+            (держит["first"]["name"].as_str(), держит["holding"][0].as_str()),
+            (Some("Q-1"), Some("Q-1 — открыт"))
+        );
+        assert!(решение_лестницы(&шаг(4), 9, &[]).unwrap()["first"].is_null());
+    }
 }

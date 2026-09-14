@@ -42,12 +42,6 @@ interface Item {
   detail?: string[];
   why?: string;
   means?: string;
-  excepted?: number;
-  /** Чем адресуется находка этого правила. `null` — правило исключений не читает. */
-  exceptionKey?: string | null;
-  /** Объявленные исключения, под которые сегодня ничего не подходит. */
-  staleExceptions?: number;
-  staleExceptionNames?: string[];
 }
 interface Gate {
   gate: string;
@@ -168,8 +162,6 @@ export function Readiness({
   // предусмотрена, — у подписных пунктов её и не бывает.
   const probed = all.filter((i) => i.probeRuns !== null && i.probeRuns !== undefined);
   const never = probed.filter((i) => i.probeRuns === false);
-  const staleEx = all.reduce((n, i) => n + (i.staleExceptions ?? 0), 0);
-  const noKey = all.filter((i) => i.computed === "failed" && !i.exceptionKey).length;
 
   const shownItems = all
     .filter((i) => (phaseOnly ? gateOfPhase.get(i.gate)?.phase === phaseOnly || (phaseOnly === "corpus" && !gateOfPhase.has(i.gate)) : true))
@@ -220,19 +212,6 @@ export function Readiness({
               тем, что запрос ничего не вернул
             </>
           )}
-        </div>
-        <div className="trust-side">
-          {staleEx > 0 ? (
-            <span title="исключение объявлено, а находки под него сегодня нет">
-              <b>{staleEx}</b> исключений впустую
-            </span>
-          ) : null}
-          {noKey > 0 ? (
-            <span title="правило не соединяется с таблицей исключений: объявить исключение по нему нельзя">
-              <b>{noKey}</b> красных без ключа исключения
-            </span>
-          ) : null}
-          {staleEx === 0 && noKey === 0 ? <span className="ok">исключения все действующие</span> : null}
         </div>
       </div>
 
@@ -395,14 +374,7 @@ export function Readiness({
   );
 }
 
-/**
- * Пункт гейта: состояние, находки и ЧЕМ ИХ АДРЕСОВАТЬ.
- *
- * Ключ исключения приходит из самого запроса пункта. Прежде его выясняли
- * перебором: `exception-set` требовал `entityId`, и чем он должен быть, не было
- * сказано нигде. `null` значит «правило исключений не читает» — это другое, чем
- * «читает, ключ такой-то», и путать нельзя.
- */
+/** Пункт гейта: состояние, находки и запрос правила. */
 function ItemRow({
   item: i,
   phase,
@@ -433,7 +405,6 @@ function ItemRow({
           {i.probeRuns === false ? " · " : null}
           {say(lang, `gate.${i.computed}`)}
           {(i.violations ?? 0) > 0 ? <b> · {i.violations}</b> : null}
-          {(i.excepted ?? 0) > 0 ? <em> · {i.excepted} с причиной</em> : null}
         </span>
         <span className="item-caret" aria-hidden="true">{open ? "▾" : "▸"}</span>
       </button>
@@ -449,13 +420,6 @@ function ItemRow({
           {i.means ? <p className="item-why">{i.means}</p> : null}
           {i.why && !i.means ? <p className="item-why">{i.why}</p> : null}
 
-          {(i.staleExceptions ?? 0) > 0 ? (
-            <p className="item-why never-why">
-              {i.staleExceptions} исключений объявлено впустую: находки, ради которой их записали,
-              сегодня нет. {(i.staleExceptionNames ?? []).slice(0, 4).join(" · ")}
-            </p>
-          ) : null}
-
           {has ? (
             <ul className="item-finds">
               {(i.detail ?? []).slice(0, 40).map((d, n) => (
@@ -469,20 +433,7 @@ function ItemRow({
             <p className="note">{say(lang, "rd.noFindings")}</p>
           )}
 
-          {/* Чем адресуется находка — рядом с находкой, а не в чужой памяти. */}
           <div className="item-key">
-            {i.exceptionKey ? (
-              <>
-                <span className="item-k">{say(lang, "rd.exKey")}</span>
-                <code>{i.exceptionKey}</code>
-                <span className="item-hint">{say(lang, "rd.declare")}<code>mh call exception-set rule={i.id ?? i.item} entityId=«ключ» reason=…</code>
-                </span>
-              </>
-            ) : (
-              <span className="item-hint">
-                Правило не соединяется с таблицей исключений — объявить исключение по нему нельзя.
-              </span>
-            )}
             {i.query ? (
               <button type="button" className="item-q" onClick={() => setShowQuery(!showQuery)}>
                 {showQuery ? "▾" : "▸"} запрос правила

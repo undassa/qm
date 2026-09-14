@@ -144,8 +144,6 @@ const СЛОВАРЬ: Record<string, [string, string]> = {
   "rd.neverFell": ["не роняли", "never fell"],
   "rd.written": ["Что записано:", "What is recorded:"],
   "rd.noFindings": ["Находок нет.", "No findings."],
-  "rd.exKey": ["ключ исключения", "exception key"],
-  "rd.declare": ["объявить:", "declare:"],
   "rd.ladder": ["Лестница входа", "Entry ladder"],
   "rd.noItems": ["пунктов нет", "no items"],
   // ── Пульт ───────────────────────────────────────────────────────────────

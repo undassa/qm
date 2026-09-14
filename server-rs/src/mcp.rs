@@ -488,11 +488,6 @@ impl Mcp {
             "inputSchema": { "type": "object", "properties": {} } }));
         tools.push(json!({ "name": "tree-declared", "description": "объявленное дерево: путь и состояние из таблицы предмета file-tree",
             "inputSchema": { "type": "object", "properties": {} } }));
-        tools.push(json!({ "name": "exception-set", "description": "объявить исключение из правила гейта: правило, сущность, причина, кто решил",
-            "inputSchema": { "type": "object", "properties": { "rule": s("имя правила — оно же имя пункта гейта"),
-                "entityKind": s("вид сущности"), "entityId": s("имя сущности"), "reason": s("почему это законно"),
-                "closes": s("задача, которая побег отменит; пусто — побег бессрочный"),
-                "drop": s("true — снять исключение") }, "required": ["rule", "entityId"] } }));
         tools.push(json!({ "name": "author-set", "description": "объявить автора документа: того, кто за него отвечает; пустое имя снимает объявление",
             "inputSchema": { "type": "object", "properties": { "drop": json!({"type":"boolean","description":"снять объявленное этой же дверью"}), "kind": s("вид"), "id": s("имя"), "author": s("автор") }, "required": ["kind"] } }));
         tools.push(json!({ "name": "authors", "description": "кто за какими документами стоит и у скольких автор не объявлен",
@@ -575,13 +570,6 @@ impl Mcp {
                 "since": s("с какого мгновения (мс) пункт судит: факт раньше него им не судится. Нужно ПРАВИЛАМ ПОРЯДКА — «план записан до закрытия» не может судить закрытие, случившееся прежде самого правила. Запрос читает границу как `$2`; пусто — судит всё"),
                 "why": s("почему способа нет — для рода unknown"),
                 "drop": json!({"type":"boolean","description":"снять пункт вместе с его замерами"}) }, "required": ["phase", "id", "itemKind"] } }));
-        tools.push(json!({ "name": "ceiling-set", "description": "объявить потолок долга правила: сколько находок сегодня терпимо и почему; держит не долг, а его рост",
-            "inputSchema": { "type": "object", "properties": {
-                "rule": s("имя правила — оно же род факта"),
-                "ceiling": json!({"type":"integer","description":"сколько находок терпимо"}),
-                "why": s("что этот потолок держит; без причины дверь отказывает"),
-                "drop": json!({"type":"boolean","description":"снять объявленное этой же дверью"}) },
-                "required": ["rule"] } }));
         tools.push(json!({ "name": "requirements-of", "description": "требования задачи; объявленное отсутствие доезжает фразой, а не пустотой",
             "inputSchema": { "type": "object", "properties": { "id": s("имя задачи") }, "required": ["id"] } }));
         tools.push(json!({ "name": "tasks-of", "description": "задачи истории через требования; исключение называется исключением",
@@ -590,8 +578,6 @@ impl Mcp {
             "inputSchema": { "type": "object", "properties": {} } }));
         tools.push(json!({ "name": "claims", "description": "где расходятся числа: заявленные набором числа против факта, с оговоркой о том, что считается",
             "inputSchema": { "type": "object", "properties": {} } }));
-        tools.push(json!({ "name": "exceptions", "description": "объявленные исключения из правил и те, что пора снять",
-            "inputSchema": { "type": "object", "properties": { "rule": s("правило") } } }));
         tools.push(json!({ "name": "gate", "description": "состояние гейта, вычисленное сейчас: запрос выполняется, подпись сверяется хешем",
             "inputSchema": { "type": "object", "properties": { "id": s("имя гейта, например G2; без него — все") } } }));
         tools.push(json!({ "name": "next-task", "description": "следующая незакрытая задача с закрытыми зависимостями, со всем контекстом внутри",
@@ -608,7 +594,7 @@ impl Mcp {
             "inputSchema": { "type": "object", "properties": { "name": s("имя позиции плана") } } }));
         tools.push(json!({ "name": "blame-set", "description": "чей предмет спора у находки: не читает сервер или работа набора; находка остаётся красной",
             "inputSchema": { "type": "object", "properties": { "rule": s("имя пункта гейта"),
-                "entityId": s("ключ находки — тот же, что отдаёт `exceptionKey`"),
+                "entityId": s("ключ находки"),
                 "blame": s("harness · corpus"), "fixedBy": s("чем это чинится — обязательно"),
                 "why": s("довод"), "drop": json!({"type":"boolean"}) },
                 "required": ["rule", "entityId", "blame", "fixedBy"] } }));
@@ -713,7 +699,7 @@ impl Mcp {
         "put", "put-section", "rm", "document-add", "reparse", "reproject", "sweep",
         "task-state-push", "code-facts-push", "skills-push", "preflight-push", "worktree-push",
         "task-plan-push",
-        "ceiling-set", "blame-set", "derived-copy-set", "field-column-alias", "column-server-filled", "counts-sync", "kind-add", "kind-required", "kind-projection", "frozen-tree-set", "scheme-term-set", "orphans-purge", "surface-source-add", "sensor-spec-add", "agent-set", "donor-add", "guard-add", "gate-item-set", "method-set", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "version-close", "phase-set", "exception-set", "gate-selftest",
+        "blame-set", "derived-copy-set", "field-column-alias", "column-server-filled", "counts-sync", "kind-add", "kind-required", "kind-projection", "frozen-tree-set", "scheme-term-set", "orphans-purge", "surface-source-add", "sensor-spec-add", "agent-set", "donor-add", "guard-add", "gate-item-set", "method-set", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "version-close", "phase-set", "gate-selftest",
         "author-set", "screen-area-set", "skill-set", "version-freeze",
         "links-rewrite", "links-retarget", "entity-rename",
     ];
@@ -776,11 +762,11 @@ impl Mcp {
         // вызов и отдавал строку таблицы вместо вычисления.
         const RESERVED: &[&str] = &[
             "method-set", "gate-item-set", "question-holders", "preflight-push", "worktree-push",
-            "sensor-specs", "scheme-terms", "scheme-roles", "frozen-trees", "addresses-declared", "tree-declared", "donors", "skills-push", "skills", "agents", "code-facts-push", "code-facts", "summary", "links-of", "retired-terms", "order", "gate-measure", "gate-selftest", "links-rewrite", "links-retarget", "reparse", "screen-area-set", "skill-set", "skills-paths", "version-freeze", "version-delta", "generated-check", "principal-allow", "principals", "author-set", "authors", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "version-close", "phase-set", "exception-set", "gate-selftest", "next-step", "process-state", "statuses", "task-status", "status-anomaly", "pipeline", "board", "waves", "phases", "coverage", "blocks", "history", "at-revision", "process-history", "progress",
+            "sensor-specs", "scheme-terms", "scheme-roles", "frozen-trees", "addresses-declared", "tree-declared", "donors", "skills-push", "skills", "agents", "code-facts-push", "code-facts", "summary", "links-of", "retired-terms", "order", "gate-measure", "gate-selftest", "links-rewrite", "links-retarget", "reparse", "screen-area-set", "skill-set", "skills-paths", "version-freeze", "version-delta", "generated-check", "principal-allow", "principals", "author-set", "authors", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "version-close", "phase-set", "gate-selftest", "next-step", "process-state", "statuses", "task-status", "status-anomaly", "pipeline", "board", "waves", "phases", "coverage", "blocks", "history", "at-revision", "process-history", "progress",
             "kinds", "kinds-due", "readiness-gaps", "declared-unwritten", "blame-set", "doors", "derived-copy-set", "field-column-alias", "column-server-filled", "holders", "counts-sync", "kind-add", "kind-required", "kind-projection", "kind-reopens", "kind-proves", "kind-id-set", "kind-domain", "tree", "document-coverage", "sections", "section", "backlinks", "search", "put",
             "put-section", "rm", "document-add", "reproject", "sweep", "gate", "next-task", "what-if", "blockers", "events", "task-plan-push",
             "norm-versions", "measurements", "plan", "readiness", "requirements-of",
-            "tasks-of", "preflight-queue", "claims", "exceptions",
+            "tasks-of", "preflight-queue", "claims",
             "task-state-push", "state-disagreements",
         ];
         let reserved = RESERVED.contains(&name);
@@ -2203,128 +2189,6 @@ impl Mcp {
                     Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
                 }
             }
-            "exception-set" => {
-                // Исключение объявляется для ЛЮБОГО правила, а не для одного
-                // разобранного из таблицы в документе. Оно названо — правило,
-                // сущность, причина, кто решил, — и видно в ответе гейта тремя
-                // числами. Молча вычтенное исключение — дыра с разрешением.
-                let rule = args.get("rule").and_then(|v| v.as_str()).unwrap_or("");
-                let kind = args.get("entityKind").and_then(|v| v.as_str()).unwrap_or("");
-                let id = args.get("entityId").and_then(|v| v.as_str()).unwrap_or("");
-                let reason = args.get("reason").and_then(|v| v.as_str()).unwrap_or("");
-                // Задача, которая побег отменит. Пусто — побег бессрочный.
-                let closes = args.get("closes").and_then(|v| v.as_str()).unwrap_or("");
-                let drop = args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false);
-                if !drop {
-                    return refusal(Miss::Refused(
-                        "исключение не объявляется: сущность, которая есть и не проходит проверку, только чинится; \
-                         если сущность правилу не принадлежит — чинится правило, а не список исключений".into()));
-                }
-                if rule.is_empty() || id.is_empty() {
-                    return refusal(Miss::Refused("исключение без правила или без сущности не объявляется".into()));
-                }
-
-                // ПРАВИЛО ОБЯЗАНО ЧИТАТЬ ИСКЛЮЧЕНИЯ. Дверь отвечала «written: 1»
-                // и не делала НИЧЕГО: запрос пункта не соединялся с
-                // `rule_exception`, и записанный человеком довод исчезал без
-                // следа — следующий проход писал его заново.
-                //
-                // Проверяется по самому запросу: если он не поминает
-                // `rule_exception`, исключение к нему бессмысленно, и молчать об
-                // этом хуже, чем отказать.
-                if !drop {
-                    let reads = self
-                        .pool
-                        .get()
-                        .await
-                        .expect("пул отдал соединение")
-                        .query(
-                            "SELECT count(*) FROM gate_item
-                              WHERE kind = 'query' AND query LIKE '%' || $1 || '%'
-                                AND query LIKE '%rule_exception%'",
-                            &[&rule],
-                        )
-                        .await
-                        .map(|r| r.first().map(|x| x.get::<_, i64>(0)).unwrap_or(0))
-                        .unwrap_or(0);
-                    if reads == 0 {
-                        // НЕ ЧИТАЕТ — ИЛИ ЧИТАЕТ ПОД ДРУГИМ ИМЕНЕМ, и это разное.
-                        // Пункт `retired-term-in-corpus` ищет исключения по имени
-                        // `retired-term`; отказ говорил «не читает», отправляя
-                        // искать то, чего нет. Верное имя лежит в самом запросе —
-                        // спросим его, раз уж отказываем.
-                        let под_именем = self
-                            .pool
-                            .get()
-                            .await
-                            .expect("пул отдал соединение")
-                            .query_opt(
-                                "SELECT query FROM gate_item WHERE id = $1 AND kind = 'query'",
-                                &[&rule],
-                            )
-                            .await
-                            .ok()
-                            .flatten()
-                            .and_then(|r| r.get::<_, Option<String>>(0))
-                            .and_then(|q| {
-                                crate::projector::exception_rule(&q).map(|имя| {
-                                    let ключ = crate::projector::exception_key(&q)
-                                        .unwrap_or_else(|| "не объявлен".to_owned());
-                                    format!(
-                                        "пункт «{rule}» читает исключения под именем «{имя}», \
-                                         ключ — `{ключ}`. Зовите дверь с `rule={имя}`"
-                                    )
-                                })
-                            });
-                        return refusal(Miss::Refused(под_именем.unwrap_or_else(|| format!(
-                            "правило «{rule}» исключений не читает: ни один пункт гейта не соединяет \
-                             свой запрос с `rule_exception` по этому имени. Записанное здесь исчезло бы \
-                             без следа. Сперва научите пункт читать исключения — потом объявляйте."
-                        ))));
-                    }
-                }
-                if reason.trim().is_empty() && !drop {
-                    return refusal(Miss::Refused("исключение без причины — это дыра с разрешением, а не решение".into()));
-                }
-                // КЛЮЧ ПРОВЕРЯЕТСЯ ОТВЕТОМ ПРАВИЛА, а не формой.
-                //
-                // Ключи у правил разные и разными быть обязаны: `f.name`, `r.id`,
-                // `l.kind || ':' || l.id`, `tc.task_id || ':' || tc.check_id`.
-                // Плохо не это, а то, что узнать ключ можно было только чтением
-                // SQL: `closed-rests-on-current` печатает находку как
-                // «milestone M0 — …», а ждёт `milestone:M0`, и дверь на «M0»
-                // молча отвечала `declared`. Побег ложился мимо, пункт оставался
-                // красным, и почему — не говорил никто.
-                //
-                // Форму ключа здесь не разбираем вовсе: исключение обязано
-                // ИЗМЕНИТЬ ответ правила. Это тот же приём, которым самотест
-                // судит пробу, и он не зависит от того, из чего ключ склеен.
-                if !drop {
-                    match crate::projector::exception_changes_answer(&self.pool, p, rule, id).await {
-                        Ok(Some(что)) => return refusal(Miss::Refused(что)),
-                        Ok(None) => {}
-                        Err(e) => return refusal(Miss::Db(crate::projector::db_says(&e))),
-                    }
-                }
-                let client = self.pool.get().await.expect("пул отдал соединение");
-                let done = if drop {
-                    client.execute("DELETE FROM rule_exception WHERE project_id=$1 AND rule=$2 AND entity_id=$3",
-                                   &[&p, &rule, &id]).await
-                } else {
-                    client.execute(
-                        "INSERT INTO rule_exception (project_id, rule, entity_kind, entity_id, reason, decided_by, closes)
-                         VALUES ($1,$2,$3,$4,$5,$6,$7)
-                         ON CONFLICT (project_id, rule, entity_kind, entity_id)
-                           DO UPDATE SET reason = EXCLUDED.reason, decided_by = EXCLUDED.decided_by,
-                                         closes = EXCLUDED.closes",
-                        &[&p, &rule, &kind, &id, &reason, &self.author, &closes]).await
-                };
-                match done {
-                    Ok(n) => ok(json!({ "rule": rule, "entity": id, "written": n, "closes": closes,
-                                        "dropped": drop, "decidedBy": self.author })),
-                    Err(e) => refusal(Miss::Db(e.to_string())),
-                }
-            }
             "links-rewrite" => {
                 let apply = args.get("apply").map(|v| v == "true" || v == true).unwrap_or(false);
                 match crate::projector::rewrite_links(&self.pool, p, !apply).await {
@@ -2480,22 +2344,6 @@ impl Mcp {
                 Ok(v) => ok(v),
                 Err(e) => refusal(Miss::Db(e.to_string())),
             },
-            "ceiling-set" => {
-                let rule = args.get("rule").and_then(|v| v.as_str()).unwrap_or("");
-                let ceiling = num(args, "ceiling")
-                    .or_else(|| args.get("ceiling").and_then(|v| v.as_str()).and_then(|t| t.parse().ok()))
-                    .unwrap_or(0) as i32;
-                let why = args.get("why").and_then(|v| v.as_str()).unwrap_or("");
-                let drop = args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false);
-                if !drop {
-                    return refusal(Miss::Refused(
-                        "потолок долга не объявляется: сущность, которая есть и не проходит проверку, только чинится".into()));
-                }
-                match crate::projector::set_ceiling(&self.pool, p, rule, ceiling, why, drop).await {
-                    Ok(v) => ok(v),
-                    Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
-                }
-            }
             "gate-item-set" => {
                 let phase = args.get("phase").and_then(|v| v.as_str()).unwrap_or("");
                 // `id` адресует пункт, `item` — заголовок для человека. Прежде
@@ -2559,7 +2407,7 @@ impl Mcp {
                 Ok(v) => ok(v),
                 Err(e) => refusal(Miss::Db(e.to_string())),
             },
-            "frozen-trees" | "addresses-declared" | "tree-declared" | "exceptions" => match self.ask(name, kind_arg, id, args).await {
+            "frozen-trees" | "addresses-declared" | "tree-declared" => match self.ask(name, kind_arg, id, args).await {
                 Ok(v) => ok(v),
                 Err(e) => refusal(e),
             },
@@ -2920,12 +2768,6 @@ impl Mcp {
                     })
                     .collect();
                 Ok(json!({ "count": paths.len(), "paths": paths }))
-            }
-            "exceptions" => {
-                let rule = args.get("rule").and_then(|v| v.as_str()).unwrap_or("");
-                crate::projector::exceptions_with_holes(&self.pool, p, rule)
-                    .await
-                    .map_err(|e| Miss::Db(crate::projector::db_says(&e)))
             }
             "plan" => {
                 let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
