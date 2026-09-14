@@ -729,6 +729,28 @@ ALTER TABLE gate_item ADD COLUMN IF NOT EXISTS since bigint NOT NULL DEFAULT 0;
 -- их и подаёт. Ноль — «не сказано», и правило тогда падает обратно на `seen_at`:
 -- подающий старой сборки не должен ломаться молча.
 ALTER TABLE task_state ADD COLUMN IF NOT EXISTS closed_at bigint NOT NULL DEFAULT 0;
+
+-- СДЕЛАННОЕ НЕ В СВОЙ ЧЕРЁД — ЭТО ДОЛГ, И ДОЛГ ЗАПИСЫВАЕТСЯ.
+--
+-- Задача, закрытая при закрытой фазе, нарушила порядок: гейт, который эту фазу
+-- открывает, тогда не был пройден, и то, на что работа опиралась, ещё не стояло.
+-- Границы фаз двигать нельзя — двигается способ выйти: делать то, что фазой
+-- ниже, а сделанное раньше срока ПЕРЕДЕЛЫВАТЬ.
+--
+-- Считать это на лету нельзя: правило видит долг, пока фаза закрыта, и теряет
+-- его в тот самый миг, когда гейт зеленеет, — то есть ровно тогда, когда
+-- переделывать становится можно. Поэтому долг замечается и лежит.
+--
+-- Гасится он одним: задача закрыта ЗАНОВО, коммитом позже того, которым долг
+-- замечен. Не словом, не побегом и не позеленевшим гейтом.
+CREATE TABLE IF NOT EXISTS task_redo (
+  project_id text NOT NULL,
+  task_id    text NOT NULL,
+  noticed_at bigint NOT NULL,
+  phase      text NOT NULL DEFAULT '',
+  gate       text NOT NULL DEFAULT '',
+  PRIMARY KEY (project_id, task_id)
+);
 ALTER TABLE project_feature_stories ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'projected';
 ALTER TABLE project_story_requirements ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'projected';
 -- И ещё две того же рода: у `project_screen_references` есть дверь
@@ -3066,6 +3088,32 @@ pub async fn rebuild(pool: &Pool, project: &str) -> Result<Value, tokio_postgres
         )
         .await?;
 
+    // Долг замечается ЗДЕСЬ, сразу после состояний: фаза уже известна, гейт
+    // измерен прошлым кругом, и это последний момент, когда «закрыта при
+    // закрытой фазе» ещё видно.
+    tx.execute(
+        "INSERT INTO task_redo (project_id, task_id, noticed_at, phase, gate)
+         SELECT tp.project_id, tp.task_id,
+                coalesce(nullif(ts.closed_at, 0), ts.seen_at, $2), coalesce(tp.phase, ''),
+                coalesce(tp.gate, '')
+           FROM task_phase tp
+           LEFT JOIN task_state ts ON ts.project_id = tp.project_id AND ts.task_id = tp.task_id
+          WHERE tp.project_id = $1 AND tp.state = 'closed' AND tp.open IS FALSE
+         ON CONFLICT (project_id, task_id) DO NOTHING",
+        &[&project, &now_ms()],
+    )
+    .await?;
+    // Переделанное снимается: закрыта заново, коммитом позже замеченного долга.
+    tx.execute(
+        "DELETE FROM task_redo r
+          WHERE r.project_id = $1
+            AND EXISTS (SELECT 1 FROM task_state ts
+                         WHERE ts.project_id = r.project_id AND ts.task_id = r.task_id
+                           AND ts.state = 'closed' AND ts.closed_at > r.noticed_at)",
+        &[&project],
+    )
+    .await?;
+
     // ── Пункт готовности ─────────────────────────────────────────────────────
     // Переносятся ВСЕ пункты со способом `unknown`. Это ничего не проверяет — и
     // сразу даёт число, которого нет: сколько пунктов готовности не имеют
@@ -3441,6 +3489,40 @@ pub async fn next_task(pool: &Pool, project: &str) -> Result<Value, tokio_postgr
         .await?;
 
     let Some(r) = rows.first() else {
+        // ПЕРЕДЕЛКА — ТОЖЕ РАБОТА, и когда другой не осталось, она и есть ответ.
+        //
+        // Задача, закрытая при закрытой фазе, опиралась на то, чего ещё не
+        // стояло. Пока фаза закрыта, брать её нельзя — тот же барьер; открылась
+        // — её надо переделать, и сказать об этом больше некому: в плане она
+        // числится закрытой и в перечень незакрытых не попадает никогда.
+        let долг = client
+            .query(
+                "SELECT r.task_id, r.phase, r.gate, t.title
+                   FROM task_redo r
+                   JOIN task_phase tp ON tp.project_id = r.project_id AND tp.task_id = r.task_id
+                   LEFT JOIN project_plan_tasks t
+                     ON t.project_id = r.project_id AND t.id = r.task_id
+                  WHERE r.project_id = $1 AND tp.open IS TRUE
+                  ORDER BY r.task_id",
+                &[&project],
+            )
+            .await?;
+        if let Some(первая) = долг.first() {
+            return Ok(json!({
+                "task": {
+                    "id": первая.get::<_, String>(0),
+                    "title": первая.get::<_, Option<String>>(3),
+                    "phase": первая.get::<_, String>(1),
+                    "gate": первая.get::<_, String>(2),
+                    "redo": true,
+                },
+                "why": format!(
+                    "незакрытых задач нет, но {} закрыты не в свой черёд: их фаза тогда не была                      открыта, и то, на что работа опиралась, ещё не стояло. Фаза открыта сейчас —                      переделать их можно и нужно. Долг гасится НОВЫМ закрывающим коммитом, а не                      словом", долг.len()),
+                "redo": долг.iter().map(|r| json!({
+                    "id": r.get::<_, String>(0), "phase": r.get::<_, String>(1),
+                    "gate": r.get::<_, String>(2) })).collect::<Vec<_>>(),
+            }));
+        }
         return Ok(json!({ "task": null, "why": "незакрытых задач с закрытыми зависимостями нет" }));
     };
     let id: String = r.get(0);
@@ -3536,6 +3618,19 @@ pub async fn next_task(pool: &Pool, project: &str) -> Result<Value, tokio_postgr
                                     нечего" })
                 },
             },
+            // ОТКАЗ ОБЯЗАН НАЗЫВАТЬ РАБОТУ, А НЕ ТОЛЬКО ПРЕПЯТСТВИЕ.
+            //
+            // Барьер отвечал `task: null` и перечислял красные пункты — и на
+            // этом обрывался. У `myack` задачи ложатся только в Ф3 и Ф4, обе
+            // закрыты, а работа Ф0–Ф2 задачей не бывает вовсе: открытой задачи
+            // нет ни одной, и спрашивающий упирался в тупик. Границы фаз при
+            // этом двигать нельзя — двигается способ выйти: делать то, что
+            // фазой НИЖЕ, а сделанное не в свой черёд переделывать.
+            //
+            // Что делать фазой ниже, лестница знает и без нас — она это и
+            // считает. Держать здесь второй ответ на тот же вопрос значило бы
+            // завести два порядка работ, расходящихся молча.
+            "instead": шаг_вместо(pool, project).await?,
         }));
     }
     Ok(json!({
@@ -12052,6 +12147,22 @@ pub async fn process_state(
         "steps": out,
         "means": "состояние ступени считается ТЕМ ЖЕ исполнителем, что у пункта гейта; \
                   `skipped` — условие ступени не выполнено, и это не «пройдено»",
+    }))
+}
+
+/// Чем заняться, пока фаза закрыта: ближайшая ступень лестницы.
+///
+/// Лестница — тот же вопрос «что делать дальше», только не про задачу, а про
+/// процесс, и держащий гейт стоит на ней ступенью. Ответ берётся у неё целиком,
+/// чтобы двух порядков работ не было.
+async fn шаг_вместо(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
+    let шаг = next_step(pool, project, "godzy").await?;
+    Ok(json!({
+        "why": "фаза закрыта, но работа есть: её называет лестница — это работа фазы НИЖЕ, та самая, что откроет гейт",
+        "step": шаг["at"]["question"],
+        "ord": шаг["at"]["ord"],
+        "first": шаг["at"]["first"],
+        "state": шаг["at"]["state"],
     }))
 }
 
