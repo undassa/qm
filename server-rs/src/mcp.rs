@@ -2321,7 +2321,7 @@ impl Mcp {
             }
             "links-rewrite" => {
                 let apply = args.get("apply").map(|v| v == "true" || v == true).unwrap_or(false);
-                match crate::projector::rewrite_links(&self.pool, &self.kinds, p, !apply).await {
+                match crate::projector::rewrite_links(&self.pool, p, !apply).await {
                 Ok(v) => ok(v),
                 Err(e) => refusal(Miss::Db(e.to_string())),
                 }

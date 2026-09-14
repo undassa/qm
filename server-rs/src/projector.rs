@@ -3512,7 +3512,7 @@ pub async fn next_task(pool: &Pool, project: &str) -> Result<Value, tokio_postgr
                    LEFT JOIN project_plan_tasks t
                      ON t.project_id = r.project_id AND t.id = r.task_id
                   WHERE r.project_id = $1 AND tp.open IS TRUE
-                  ORDER BY r.task_id",
+                  ORDER BY t.milestone_id, t.ord, r.task_id",
                 &[&project],
             )
             .await?;
@@ -3531,7 +3531,10 @@ pub async fn next_task(pool: &Pool, project: &str) -> Result<Value, tokio_postgr
                     "redo": true,
                 },
                 "why": format!(
-                    "незакрытых задач нет, но {} закрыты не в свой черёд: их фаза тогда не была                      открыта, и то, на что работа опиралась, ещё не стояло. Фаза открыта сейчас —                      переделать их можно и нужно. Долг гасится НОВЫМ закрывающим коммитом, а не                      словом", долг.len()),
+                    "незакрытых задач нет, но {} закрыты не в свой черёд: их фаза тогда не была \
+                     открыта, и то, на что работа опиралась, ещё не стояло. Фаза открыта сейчас — \
+                     переделать их можно и нужно. Долг гасится НОВЫМ закрывающим коммитом, а не \
+                     словом", долг.len()),
                 "redo": долг.iter().map(|r| json!({
                     "id": r.get::<_, String>(0), "phase": r.get::<_, String>(1),
                     "gate": r.get::<_, String>(2) })).collect::<Vec<_>>(),
@@ -3542,9 +3545,6 @@ pub async fn next_task(pool: &Pool, project: &str) -> Result<Value, tokio_postgr
     let id: String = r.get(0);
     let phase: Option<String> = r.get(5);
     let gate: Option<String> = r.get(6);
-    if let Some(держит) = лестница_держит(&client, project, gate.as_deref().unwrap_or("")).await? {
-        return Ok(json!({ "task": null, "candidate": id, "why": держит["why"], "ladder": держит }));
-    }
 
     // БАРЬЕР ФАЗ. Прежде здесь стоял барьер красной фазы: «есть незакрытые
     // красные — задачи не выдаём». Он мерил не то. На `myack` все 82 красные
@@ -3650,6 +3650,9 @@ pub async fn next_task(pool: &Pool, project: &str) -> Result<Value, tokio_postgr
             "instead": шаг_вместо(&client, project).await?,
         }));
     }
+    if let Some(держит) = лестница_держит(&client, project, gate.as_deref().unwrap_or("")).await? {
+        return Ok(json!({ "task": null, "candidate": id, "why": держит["why"], "ladder": держит }));
+    }
     // ДОЛГ ВИДЕН СРАЗУ, А НЕ В КОНЦЕ ОЧЕРЕДИ.
     //
     // Предъявлять переделки только когда незакрытых задач не осталось значит
@@ -3661,7 +3664,8 @@ pub async fn next_task(pool: &Pool, project: &str) -> Result<Value, tokio_postgr
         .query(
             "SELECT r.task_id FROM task_redo r
                JOIN task_phase tp ON tp.project_id = r.project_id AND tp.task_id = r.task_id
-              WHERE r.project_id = $1 AND tp.open IS TRUE ORDER BY r.task_id",
+               LEFT JOIN project_plan_tasks t ON t.project_id = r.project_id AND t.id = r.task_id
+              WHERE r.project_id = $1 AND tp.open IS TRUE ORDER BY t.milestone_id, t.ord, r.task_id",
             &[&project],
         )
         .await?;
@@ -3926,7 +3930,7 @@ pub async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, tokio_po
                         } else { w },
                         "means": r.get::<_, String>(4) })
             } else {
-                measure_item(&client, project, &phase, &item, &kind, query.as_deref(), r).await?
+                measure_item(&client, project, &item, &kind, query.as_deref(), r).await?
             }
         };
         // Откат ВСЕГДА: замер обязан только читать, и терять ему нечего. Заодно
@@ -4040,7 +4044,6 @@ pub async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, tokio_po
 async fn measure_item(
     client: &impl deadpool_postgres::GenericClient,
     project: &str,
-    phase: &str,
     item: &str,
     kind: &str,
     query: Option<&str>,
@@ -4048,7 +4051,6 @@ async fn measure_item(
 ) -> Result<Value, tokio_postgres::Error> {
     let item = item.to_owned();
     let kind = kind.to_owned();
-    let phase = phase.to_owned();
         let why_col: String = r.try_get("why").unwrap_or_default();
         let entry = if kind == "unknown" || kind == "manual" {
             json!({ "item": item, "kind": kind, "computed": "unknown",
@@ -10822,7 +10824,6 @@ pub async fn retarget_links(
 
 pub async fn rewrite_links(
     pool: &Pool,
-    kinds: &crate::kinds::Kinds,
     project: &str,
     dry: bool,
 ) -> Result<Value, tokio_postgres::Error> {
@@ -12233,26 +12234,6 @@ async fn шаг_вместо(
     }))
 }
 
-/// Пункты ступени, которые держат задачу своего гейта: всё, кроме этого гейта.
-///
-/// «Свой гейт не смотрится» — то же правило, что у `phase_open`: G4 красен
-/// ровно потому, что в Ф4 идёт работа. Ступень 6 считает корпус ВМЕСТЕ с первым
-/// непройденным гейтом фаз, и в нём `dev-tasks-closed` — «все задачи кода
-/// закрыты». Держи лестница задачу всей ступенью, круг был бы полный: ступень
-/// красна, пока задачи не закрыты, а задачи не выдаются, пока ступень красна.
-fn чужие_пункты(detail: &Value, свой_гейт: &str) -> Vec<String> {
-    detail
-        .as_array()
-        .map(|d| {
-            d.iter()
-                .filter_map(Value::as_str)
-                .filter(|x| x.split_once(" · ").is_none_or(|(гейт, _)| свой_гейт.is_empty() || гейт != свой_гейт))
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 /// Держит ли лестница выдачу задач — и чем.
 ///
 /// `next-step` и `next-task` — разные вопросы, «где мы и что держит» против «что
@@ -12279,19 +12260,38 @@ async fn лестница_держит(
         })));
     };
     let шаг = position(client, project, "godzy").await?;
+    if шаг["checkedAt"].is_null() {
+        return Ok(Some(json!({
+            "why": "положение лестницы ни разу не считали: держит ли она задачи, сказать нечем, и это не «можно всё»",
+        })));
+    }
     let at = &шаг["at"];
-    // Держит только ПРОВАЛЕННАЯ ступень. Неотвечаемая текущей не бывает — это
-    // решение записано у самой лестницы: дефект сервера не останавливает проект,
-    // чьи задачи готовы.
-    if at["state"] != "failed" {
-        return Ok(None);
-    }
     let ord = at["ord"].as_i64().unwrap_or(i64::MAX);
-    if ord >= i64::from(задачная) {
+    if at.is_null() || ord >= i64::from(задачная) {
         return Ok(None);
     }
-    let чужие = чужие_пункты(&at["detail"], свой_гейт);
-    if чужие.is_empty() {
+    let (чужие, всего): (Vec<String>, i64) = if at["kind"] == "gate" {
+        let rows = client
+            .query(
+                "SELECT g.phase || ' · ' || g.item FROM project_gates g
+                  WHERE g.project_id = $1 AND g.state = 'failed'
+                    AND g.phase NOT IN (SELECT ph.gate FROM phase ph
+                                         WHERE ph.ord >= (SELECT min(p2.ord) FROM phase p2
+                                                           WHERE $2 <> '' AND p2.gate = $2))
+                  ORDER BY g.phase, g.item",
+                &[&project, &свой_гейт],
+            )
+            .await?;
+        let все: Vec<String> = rows.iter().map(|r| r.get(0)).collect();
+        let n = все.len() as i64;
+        (все, n)
+    } else {
+        (
+            serde_json::from_value(at["detail"].clone()).unwrap_or_default(),
+            at["violations"].as_i64().unwrap_or(1),
+        )
+    };
+    if всего == 0 {
         return Ok(None);
     }
     Ok(Some(json!({
@@ -12300,7 +12300,7 @@ async fn лестница_держит(
         "question": at["question"],
         "first": at["first"],
         "holding": чужие.iter().take(5).collect::<Vec<_>>(),
-        "holdingCount": чужие.len(),
+        "holdingCount": всего,
         "stale": шаг["stale"],
         "why": format!(
             "лестница на ступени {ord}, владелец `{}`: «{}». Задачи не запрашиваются, пока лестница не \
@@ -13357,24 +13357,4 @@ async fn снимок_гейта(
         .iter()
         .map(|r| ((r.get(0), r.get(1)), (r.get(2), r.get(3), r.get(4))))
         .collect())
-}
-
-#[cfg(test)]
-mod лестница {
-    use super::чужие_пункты;
-    use serde_json::json;
-
-    #[test]
-    fn свой_гейт_задачу_не_держит() {
-        let ступень = json!(["G4 · все задачи кода закрыты", "corpus · на документ кто-нибудь ссылается"]);
-        assert_eq!(чужие_пункты(&ступень, "G4"), vec!["corpus · на документ кто-нибудь ссылается"]);
-        assert!(чужие_пункты(&json!(["G4 · все задачи кода закрыты"]), "G4").is_empty());
-    }
-
-    #[test]
-    fn без_гейта_держит_всё() {
-        let ступень = json!(["G4 · все задачи кода закрыты", "migration-table — ни разу не подавал"]);
-        assert_eq!(чужие_пункты(&ступень, "").len(), 2);
-        assert_eq!(чужие_пункты(&ступень, "G4"), vec!["migration-table — ни разу не подавал"]);
-    }
 }
