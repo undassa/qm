@@ -1141,6 +1141,11 @@ ALTER TABLE harness_process_step ADD COLUMN IF NOT EXISTS probe text NOT NULL DE
 -- первым словом находки. Пусто — команды нет, и это видно: `next-step` не
 -- выдумывает её за набор.
 ALTER TABLE harness_process_step ADD COLUMN IF NOT EXISTS work_run text NOT NULL DEFAULT '';
+-- ВИД ЕДИНИЦЫ РАБОТЫ СТУПЕНИ: документ, вопрос, гейт, задача. Без него ответ
+-- `next-step` неисполним без догадки — `name` и `run` есть, а что это за имя,
+-- вызывающий угадывал. И второе, важнее: `next-task` должен знать, с какой
+-- ступени лестница начинает выдавать задачи, а знать это было неоткуда.
+ALTER TABLE harness_process_step ADD COLUMN IF NOT EXISTS unit text NOT NULL DEFAULT '';
 -- НАД ЧЕМ ступень меряет. Ступень «в плане документов не осталось ненаписанных»
 -- проходится, когда плана нет ВОВСЕ: пустой перечень отвечает «нарушений нет», и
 -- лестница объявляет пройденным то, чего не смотрела. Предмет объявляется, а не
@@ -3512,6 +3517,11 @@ pub async fn next_task(pool: &Pool, project: &str) -> Result<Value, tokio_postgr
             )
             .await?;
         if let Some(первая) = долг.first() {
+            let свой: String = первая.get(2);
+            if let Some(держит) = лестница_держит(&client, project, &свой).await? {
+                return Ok(json!({ "task": null, "candidate": первая.get::<_, String>(0), "redo": true,
+                                  "why": держит["why"], "ladder": держит }));
+            }
             return Ok(json!({
                 "task": {
                     "id": первая.get::<_, String>(0),
@@ -3532,6 +3542,9 @@ pub async fn next_task(pool: &Pool, project: &str) -> Result<Value, tokio_postgr
     let id: String = r.get(0);
     let phase: Option<String> = r.get(5);
     let gate: Option<String> = r.get(6);
+    if let Some(держит) = лестница_держит(&client, project, gate.as_deref().unwrap_or("")).await? {
+        return Ok(json!({ "task": null, "candidate": id, "why": держит["why"], "ladder": держит }));
+    }
 
     // БАРЬЕР ФАЗ. Прежде здесь стоял барьер красной фазы: «есть незакрытые
     // красные — задачи не выдаём». Он мерил не то. На `myack` все 82 красные
@@ -3634,7 +3647,7 @@ pub async fn next_task(pool: &Pool, project: &str) -> Result<Value, tokio_postgr
             // Что делать фазой ниже, лестница знает и без нас — она это и
             // считает. Держать здесь второй ответ на тот же вопрос значило бы
             // завести два порядка работ, расходящихся молча.
-            "instead": шаг_вместо(pool, project).await?,
+            "instead": шаг_вместо(&client, project).await?,
         }));
     }
     // ДОЛГ ВИДЕН СРАЗУ, А НЕ В КОНЦЕ ОЧЕРЕДИ.
@@ -10188,6 +10201,9 @@ pub async fn set_step_question(
                "why": if n == 0 { "ступени с таким номером нет" } else { "" } }))
 }
 
+/// Виды единицы работы ступени. Перечень закрыт: слово вне него дверь не примет.
+const ЕДИНИЦЫ: [&str; 8] = ["document", "link", "version", "question", "gate", "sensor", "milestone", "task"];
+
 pub async fn set_step_method(
     pool: &Pool,
     set_name: &str,
@@ -10198,6 +10214,8 @@ pub async fn set_step_method(
     // Команда, которой видна единица работы этой ступени. `None` — не трогать
     // уже объявленную.
     run: Option<&str>,
+    // Вид единицы работы ступени. `None` — не трогать объявленный.
+    unit: Option<&str>,
     // Запрос предмета ступени и слово о пустом предмете. `None` — не трогать.
     subject: Option<&str>,
     subject_why: Option<&str>,
@@ -10232,6 +10250,15 @@ pub async fn set_step_method(
     // объявлявший одну лишь команду, СТИРАЛ запрос ступени: ступень оставалась
     // объявленной, отвечала «мерить нечем» и молчала об этом. Проверено на себе
     // дважды за один проход — на шестой ступени и на одиннадцатой.
+    // Слово вида сверяется с перечнем: опечатка `tasks` вместо `task` молча сняла
+    // бы барьер лестницы — задачная ступень перестала бы находиться.
+    let unit: Option<&str> = unit.map(str::trim).filter(|u| !u.is_empty());
+    if let Some(u) = unit {
+        if !ЕДИНИЦЫ.contains(&u) {
+            return Ok(json!({ "status": "unknown_unit", "unit": u,
+                              "why": format!("вида единицы «{u}» не бывает; бывают: {}", ЕДИНИЦЫ.join(" · ")) }));
+        }
+    }
     let method: Option<&str> = if method.trim().is_empty() { None } else { Some(method) };
     client
         .execute(
@@ -10252,9 +10279,10 @@ pub async fn set_step_method(
                     method = coalesce($5, method),
                     work_run = coalesce($6, work_run),
                     subject_query = coalesce($7, subject_query),
-                    subject_why = coalesce($8, subject_why)
+                    subject_why = coalesce($8, subject_why),
+                    unit = coalesce($9, unit)
               WHERE set_name = $1 AND process = $2 AND ord = $3",
-            &[&set_name, &process, &ord, &method_kind, &method, &run, &subject, &subject_why],
+            &[&set_name, &process, &ord, &method_kind, &method, &run, &subject, &subject_why, &unit],
         )
         .await?;
     Ok(json!({ "updated": n, "methodKind": method_kind, "declaredBy": declared_by,
@@ -11574,7 +11602,7 @@ async fn compute_next_step(
     let steps = client
         .query(
             "SELECT ord, question, method_kind, method, when_query, when_why, owner_kind, owner,
-                    touches, work_run, subject_query, subject_why
+                    touches, work_run, subject_query, subject_why, unit
                FROM harness_process_step
               WHERE set_name = $1 AND process = $2 ORDER BY ord",
             &[&set_name, &process],
@@ -11620,6 +11648,7 @@ async fn compute_next_step(
         let work_run: String = row.get(9);
         let subject_query: String = row.get(10);
         let subject_why: String = row.get(11);
+        let unit: String = row.get(12);
 
         // Условие ступени проверяется первым: пропущенная ступень не «пройдена».
         if !when_query.trim().is_empty() {
@@ -11693,6 +11722,7 @@ async fn compute_next_step(
             "owner": owner,
             "touches": touches,
             "run": here_run,
+            "kind": unit,
         }));
 
         if at.is_none() {
@@ -11701,7 +11731,7 @@ async fn compute_next_step(
             if touches == "repository" && corpus_open {
                 at = Some(json!({
                     "ord": ord, "question": question, "state": "held",
-                    "ownerKind": owner_kind, "owner": owner, "touches": touches,
+                    "ownerKind": owner_kind, "owner": owner, "touches": touches, "kind": unit,
                     "why": "ступень пишет в репозиторий, а фаза набора ещё открыта",
                 }));
             } else {
@@ -11725,7 +11755,12 @@ async fn compute_next_step(
                     "ord": ord, "question": question, "state": verdict.state,
                     "ownerKind": owner_kind, "owner": owner, "touches": touches,
                     "why": verdict.why, "violations": verdict.violations, "detail": verdict.detail,
-                    "first": json!({ "unit": first, "name": name, "run": run }),
+                    // Команда и вид стоят у ступени так же, как у всякой открытой
+                    // работы в `openWork`. Прежде `run` жил только внутри `first`,
+                    // и читающий `at.run` находил пустоту рядом с заполненной
+                    // командой: два ответа на один вопрос, один из них пустой.
+                    "run": run, "kind": unit,
+                    "first": json!({ "unit": first, "name": name, "run": run, "kind": unit }),
                 }));
             }
         }
@@ -12184,8 +12219,11 @@ pub async fn process_state(
 /// Лестница — тот же вопрос «что делать дальше», только не про задачу, а про
 /// процесс, и держащий гейт стоит на ней ступенью. Ответ берётся у неё целиком,
 /// чтобы двух порядков работ не было.
-async fn шаг_вместо(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
-    let шаг = next_step(pool, project, "godzy").await?;
+async fn шаг_вместо(
+    client: &impl deadpool_postgres::GenericClient,
+    project: &str,
+) -> Result<Value, tokio_postgres::Error> {
+    let шаг = position(client, project, "godzy").await?;
     Ok(json!({
         "why": "фаза закрыта, но работа есть: её называет лестница — это работа фазы НИЖЕ, та самая, что откроет гейт",
         "step": шаг["at"]["question"],
@@ -12195,8 +12233,96 @@ async fn шаг_вместо(pool: &Pool, project: &str) -> Result<Value, tokio_
     }))
 }
 
+/// Пункты ступени, которые держат задачу своего гейта: всё, кроме этого гейта.
+///
+/// «Свой гейт не смотрится» — то же правило, что у `phase_open`: G4 красен
+/// ровно потому, что в Ф4 идёт работа. Ступень 6 считает корпус ВМЕСТЕ с первым
+/// непройденным гейтом фаз, и в нём `dev-tasks-closed` — «все задачи кода
+/// закрыты». Держи лестница задачу всей ступенью, круг был бы полный: ступень
+/// красна, пока задачи не закрыты, а задачи не выдаются, пока ступень красна.
+fn чужие_пункты(detail: &Value, свой_гейт: &str) -> Vec<String> {
+    detail
+        .as_array()
+        .map(|d| {
+            d.iter()
+                .filter_map(Value::as_str)
+                .filter(|x| x.split_once(" · ").is_none_or(|(гейт, _)| свой_гейт.is_empty() || гейт != свой_гейт))
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Держит ли лестница выдачу задач — и чем.
+///
+/// `next-step` и `next-task` — разные вопросы, «где мы и что держит» против «что
+/// брать внутри волны», и сливать их нельзя. Но без связи вторая дверь была
+/// способом обойти порядок, не заметив, что обходишь: лестница стояла на
+/// корпусном гейте, а `next-task` называл кодовую задачу.
+async fn лестница_держит(
+    client: &impl deadpool_postgres::GenericClient,
+    project: &str,
+    свой_гейт: &str,
+) -> Result<Option<Value>, tokio_postgres::Error> {
+    let задачная: Option<i32> = client
+        .query_one(
+            "SELECT min(ord) FROM harness_process_step
+              WHERE set_name = 'godzy' AND process = 'godzy' AND unit = 'task'",
+            &[],
+        )
+        .await?
+        .get(0);
+    let Some(задачная) = задачная else {
+        return Ok(Some(json!({
+            "why": "задачная ступень лестницы не объявлена: где по порядку начинаются задачи, сказать \
+                    нечем, и это не «можно всё». Объявляется дверью `step-method-set` доводом `unit=task`",
+        })));
+    };
+    let шаг = position(client, project, "godzy").await?;
+    let at = &шаг["at"];
+    // Держит только ПРОВАЛЕННАЯ ступень. Неотвечаемая текущей не бывает — это
+    // решение записано у самой лестницы: дефект сервера не останавливает проект,
+    // чьи задачи готовы.
+    if at["state"] != "failed" {
+        return Ok(None);
+    }
+    let ord = at["ord"].as_i64().unwrap_or(i64::MAX);
+    if ord >= i64::from(задачная) {
+        return Ok(None);
+    }
+    let чужие = чужие_пункты(&at["detail"], свой_гейт);
+    if чужие.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(json!({
+        "ord": ord,
+        "owner": at["owner"],
+        "question": at["question"],
+        "first": at["first"],
+        "holding": чужие.iter().take(5).collect::<Vec<_>>(),
+        "holdingCount": чужие.len(),
+        "stale": шаг["stale"],
+        "why": format!(
+            "лестница на ступени {ord}, владелец `{}`: «{}». Задачи не запрашиваются, пока лестница не \
+             дойдёт до {задачная}-й — сперва то, что держит ступень",
+            at["owner"].as_str().unwrap_or(""), at["question"].as_str().unwrap_or("")),
+    })))
+}
+
 pub async fn next_step(pool: &Pool, project: &str, process: &str) -> Result<Value, tokio_postgres::Error> {
     let client = pool.get().await.expect("пул отдал соединение");
+    position(&client, project, process).await
+}
+
+/// Сохранённое положение лестницы — на уже взятом соединении.
+///
+/// Кто держит своё соединение, второго из пула не берёт: слотов восемь, срока
+/// ожидания нет, и вложенный захват — это тупик, а не медленность.
+async fn position(
+    client: &impl deadpool_postgres::GenericClient,
+    project: &str,
+    process: &str,
+) -> Result<Value, tokio_postgres::Error> {
     let row = client
         .query_opt(
             "SELECT p.result, p.checked_at,
@@ -13150,7 +13276,7 @@ async fn примерить(
     rebuild(pool, копия).await?;
     // Порядок тот же, что у сборщика: проекции, гейты, лестница, фазы.
     measure_gates(pool, копия).await?;
-    measure_process(pool, копия, author, author).await?;
+    measure_process(pool, копия, "godzy", "godzy").await?;
     measure_phases(pool, копия).await?;
     let после = снимок_гейта(pool, копия).await?;
 
@@ -13231,4 +13357,24 @@ async fn снимок_гейта(
         .iter()
         .map(|r| ((r.get(0), r.get(1)), (r.get(2), r.get(3), r.get(4))))
         .collect())
+}
+
+#[cfg(test)]
+mod лестница {
+    use super::чужие_пункты;
+    use serde_json::json;
+
+    #[test]
+    fn свой_гейт_задачу_не_держит() {
+        let ступень = json!(["G4 · все задачи кода закрыты", "corpus · на документ кто-нибудь ссылается"]);
+        assert_eq!(чужие_пункты(&ступень, "G4"), vec!["corpus · на документ кто-нибудь ссылается"]);
+        assert!(чужие_пункты(&json!(["G4 · все задачи кода закрыты"]), "G4").is_empty());
+    }
+
+    #[test]
+    fn без_гейта_держит_всё() {
+        let ступень = json!(["G4 · все задачи кода закрыты", "migration-table — ни разу не подавал"]);
+        assert_eq!(чужие_пункты(&ступень, "").len(), 2);
+        assert_eq!(чужие_пункты(&ступень, "G4"), vec!["migration-table — ни разу не подавал"]);
+    }
 }

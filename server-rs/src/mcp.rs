@@ -215,9 +215,9 @@ impl Mcp {
             "inputSchema": { "type": "object", "properties": { "process": s("процесс, по умолчанию godzy"),
                 "ord": json!({"type":"integer"}), "methodKind": s("query · command"), "method": s("запрос либо команда"),
                 "run": s("команда, которой видна единица работы ступени; `{имя}` — первое слово находки"),
+                "unit": s("вид единицы работы: document · link · version · question · gate · sensor · milestone · task. Ступень `task` — та, с которой лестница выдаёт задачи: до неё `next-task` отказывает"),
                 "subject": s("запрос ПРЕДМЕТА ступени: пусто в ответе — «нечем мерить», а не «пройдено»"),
                 "subjectWhy": s("чем объяснить пустой предмет"),
-                "since": s("с какого мгновения (мс) пункт судит: факт раньше него им не судится. Нужно ПРАВИЛАМ ПОРЯДКА — «план записан до закрытия» не может судить закрытие, случившееся прежде самого правила. Запрос читает границу как `$2`; пусто — судит всё"),
                 "drop": json!({"type":"boolean"}) },
                 "required": ["ord", "methodKind"] } }));
         tools.push(json!({ "name": "document-add", "description": "завести новый документ объявленного вида; правит существующий — `put`, и заводить он отказывается",
@@ -576,6 +576,7 @@ impl Mcp {
                                 "probe": s("запрос, подсаживающий нарушение — им самотест роняет пункт"),
                 "subject": s("запрос ПРЕДМЕТА пункта: пусто в ответе — «неизвестно», а не «пройдено»"),
                 "subjectWhy": s("чем объяснить пустой предмет"),
+                "since": s("с какого мгновения (мс) пункт судит: факт раньше него им не судится. Нужно ПРАВИЛАМ ПОРЯДКА — «план записан до закрытия» не может судить закрытие, случившееся прежде самого правила. Запрос читает границу как `$2`; пусто — судит всё"),
                 "why": s("почему способа нет — для рода unknown"),
                 "drop": json!({"type":"boolean","description":"снять пункт вместе с его замерами"}) }, "required": ["phase", "id", "itemKind"] } }));
         tools.push(json!({ "name": "ceiling-set", "description": "объявить потолок долга правила: сколько находок сегодня терпимо и почему; держит не долг, а его рост",
@@ -1485,6 +1486,7 @@ impl Mcp {
                 let drop = args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false);
                 match crate::projector::set_step_method(&self.pool, set_name, process, ord, mk, method,
                                                   args.get("run").and_then(|v| v.as_str()),
+                                                  args.get("unit").and_then(|v| v.as_str()),
                                                   args.get("subject").and_then(|v| v.as_str()),
                                                   args.get("subjectWhy").and_then(|v| v.as_str()),
                                                         &self.author, drop).await {
