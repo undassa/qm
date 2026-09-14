@@ -142,9 +142,8 @@ pub async fn create(
     )
     .await?;
     write_structure(&tx, project, kind, name, content).await?;
+    crate::watch::mark(&tx, project, "заведён документ").await?;
     tx.commit().await?;
-    drop(client);
-    crate::watch::touch(pool, project, "заведён документ").await;
     let mut ответ = json!({ "status": "created", "kind": kind, "name": name,
                             "revision": revision, "bytes": bytes });
     // Слово говорится только когда есть что сказать: всегда пустое `why` веб
@@ -247,12 +246,11 @@ pub async fn put(
     // не летопись, а ПРОЕКЦИЯ того, что документы говорят о себе, и пересборка
     // её удаляет и пишет заново. Дописанное в проекцию теряется молча, а лог,
     // теряющий записи, хуже отсутствующего.
+    // Документ изменился — гейты пора мерить заново. Отметка ставится в той же
+    // транзакции: она фиксируется вместе с правкой или не фиксируется вовсе, и
+    // второго соединения из пула не просит.
+    crate::watch::mark(&tx, project, "правка документа").await?;
     tx.commit().await?;
-    drop(client);
-    // Документ изменился — гейты пора мерить заново. Отметка ставится после
-    // фиксации: помеченная до неё правка, не дошедшая до базы, заставила бы
-    // считать набор, который остался прежним.
-    crate::watch::touch(pool, project, "правка документа").await;
     Ok(json!({ "status": "written", "revision": revision, "bytes": bytes }))
 }
 
@@ -337,11 +335,10 @@ pub async fn remove(pool: &Pool, project: &str, kind: &str, name: &str) -> Resul
         )
         .await?;
     }
-    tx.commit().await?;
-    drop(client);
     if gone > 0 {
-        crate::watch::touch(pool, project, "документ снят").await;
+        crate::watch::mark(&tx, project, "документ снят").await?;
     }
+    tx.commit().await?;
     Ok(json!({ "status": if gone > 0 { "deleted" } else { "not_found" } }))
 }
 

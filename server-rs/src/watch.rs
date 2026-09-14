@@ -52,20 +52,26 @@ pub async fn touch(pool: &Pool, project: &str, reason: &str) {
             return;
         }
     };
-    let now = crate::projector::now_ms();
     // Ошибка здесь не роняет правку намеренно: пометка — не часть правки. Уронить
     // записанный документ из-за неудавшейся отметки значило бы обменять
     // сохранённое на своевременность пересчёта.
-    if let Err(e) = client
+    if let Err(e) = mark(&client, project, reason).await {
+        tracing::warn!("отметка «пересчитать» набора {project} потеряна: {e}");
+    }
+}
+
+pub async fn mark(
+    client: &impl deadpool_postgres::GenericClient,
+    project: &str,
+    reason: &str,
+) -> Result<u64, tokio_postgres::Error> {
+    client
         .execute(
             "INSERT INTO gate_dirty(project_id, dirty_at, reason) VALUES ($1,$2,$3)
              ON CONFLICT (project_id) DO UPDATE SET dirty_at = $2, reason = $3",
-            &[&project, &now, &reason],
+            &[&project, &crate::projector::now_ms(), &reason],
         )
         .await
-    {
-        tracing::warn!("отметка «пересчитать» набора {project} потеряна: {e}");
-    }
 }
 
 /// Работник: смотрит отметку и, если набор менялся, пересчитывает.

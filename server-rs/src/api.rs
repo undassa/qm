@@ -594,8 +594,20 @@ pub fn routes(app: App) -> Router {
         .route("/api/projects/:project/entity/section", axum::routing::patch(put_entity_section))
         .route("/api/projects/:project/entity/backlinks", get(entity_backlinks))
         .layer(middleware::from_fn_with_state(app.clone(), require_identity))
-        .layer(tower_http::catch_panic::CatchPanicLayer::new())
+        .layer(tower_http::catch_panic::CatchPanicLayer::custom(panic_response))
         .with_state(app)
+}
+
+fn panic_response(panic: Box<dyn std::any::Any + Send + 'static>) -> Response {
+    let said = panic
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| panic.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+        .unwrap_or_default();
+    Failure::Upstream(format!(
+        "сервер упал посреди запроса: {said}. Запись могла успеть зафиксироваться — сверьте ревизию, прежде чем повторять"
+    ))
+    .into_response()
 }
 
 #[cfg(test)]
