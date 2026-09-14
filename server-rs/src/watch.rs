@@ -21,6 +21,7 @@ use deadpool_postgres::Pool;
 /// смотреть незачем, а реже — заметно человеку.
 const TICK: std::time::Duration = std::time::Duration::from_secs(2);
 const RETRY_MS: i64 = 60_000;
+const TRYON_ABANDONED_MS: i64 = 600_000;
 
 /// Отметить, что набор изменился и гейты пора мерить заново.
 ///
@@ -61,6 +62,7 @@ pub async fn touch(pool: &Pool, project: &str, reason: &str) {
 /// Работник: смотрит отметку и, если набор менялся, пересчитывает.
 pub fn spawn(pool: Pool) {
     tokio::spawn(async move {
+        forget_abandoned_tryons(&pool).await;
         touch_all(&pool, "запуск").await;
         loop {
             tokio::time::sleep(TICK).await;
@@ -163,7 +165,35 @@ async fn round(pool: &Pool) -> Result<(), tokio_postgres::Error> {
     Ok(())
 }
 
-async fn recount(pool: &Pool, project: &str) -> Result<serde_json::Value, tokio_postgres::Error> {
+async fn forget_abandoned_tryons(pool: &Pool) {
+    let Ok(client) = pool.get().await else { return };
+    let cutoff = crate::projector::now_ms() - TRYON_ABANDONED_MS;
+    let rows = match client
+        .query(
+            "SELECT DISTINCT project_id FROM project_documents
+              WHERE project_id LIKE 'примерка·%'
+                AND CASE WHEN split_part(project_id, '·', 3) ~ '^[0-9]+$'
+                         THEN split_part(project_id, '·', 3)::bigint < $1 ELSE false END",
+            &[&cutoff],
+        )
+        .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!("брошенные примерки не найдены: {e}");
+            return;
+        }
+    };
+    for r in &rows {
+        let copy: String = r.get(0);
+        match client.query_one("SELECT project_forget($1)", &[&copy]).await {
+            Ok(n) => tracing::info!("брошенная примерка {copy} снята: строк {}", n.get::<_, i64>(0)),
+            Err(e) => tracing::warn!("брошенная примерка {copy} не снялась: {e}"),
+        }
+    }
+}
+
+pub(crate) async fn recount(pool: &Pool, project: &str) -> Result<serde_json::Value, tokio_postgres::Error> {
     crate::reproject::reproject(pool, project).await?;
     crate::projector::rebuild_before(pool, project).await?;
     crate::projector::rebuild(pool, project).await?;

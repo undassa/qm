@@ -2031,6 +2031,16 @@ BEGIN
        AND coalesce(c.column_default, '') NOT LIKE 'nextval%'
      GROUP BY c.table_name, п.уровень
     HAVING bool_or(c.column_name = 'project_id')
+       AND NOT EXISTS (
+         SELECT 1 FROM pg_index i
+          WHERE i.indrelid = ('public.' || quote_ident(c.table_name))::regclass AND i.indisunique
+            AND NOT EXISTS (
+              SELECT 1 FROM pg_attribute a
+               WHERE a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+                 AND (a.attname = 'project_id'
+                      OR EXISTS (SELECT 1 FROM pg_attrdef d
+                                  WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum
+                                    AND pg_get_expr(d.adbin, d.adrelid) LIKE 'nextval%'))))
      ORDER BY coalesce(п.уровень, 0), c.table_name
   LOOP
     EXECUTE format('INSERT INTO %I (%s) SELECT %s FROM %I WHERE project_id = $1',
@@ -13297,9 +13307,8 @@ pub async fn blocks(
 /// сделаю так». Агент правит вслепую и цену узнаёт после — отсюда и реестр
 /// вопросов, работающий переполнением: спросить дешевле, чем проверить.
 ///
-/// Сравнивается не с «сейчас», а с самой копией ДО правки: замеры приезжают
-/// вместе с ней, и обе стороны сравнения посчитаны одним кругом одного кода.
-/// Свежесть при этом не выдумывается — несвежее «до» названо словом.
+/// Сравнивается не с «сейчас», а с самой копией ДО правки: обе стороны
+/// пересчитаны на копии одним кругом одного кода.
 pub async fn what_if(
     pool: &Pool,
     kinds: &std::sync::Arc<crate::kinds::Kinds>,
@@ -13308,7 +13317,13 @@ pub async fn what_if(
     tool: &str,
     args: &Value,
 ) -> Result<Value, tokio_postgres::Error> {
-    let копия = format!("примерка·{project}·{}", now_ms());
+    static НОМЕР: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let копия = format!(
+        "примерка·{project}·{}·{}-{}",
+        now_ms(),
+        std::process::id(),
+        НОМЕР.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
     let сделано = примерить(pool, kinds, project, &копия, author, tool, args).await;
     // КОПИЯ СНИМАЕТСЯ ВСЕГДА, и число снятого называется: молчаливая уборка,
     // которая не отработала, оставляет набор-призрак в каждой таблице сразу.
@@ -13356,6 +13371,7 @@ async fn примерить(
         let client = pool.get().await.expect("пул отдал соединение");
         client.execute("DELETE FROM gate_dirty WHERE project_id = $1", &[&копия]).await?;
     }
+    crate::watch::recount(pool, копия).await?;
     let до = снимок_гейта(pool, копия).await?;
 
     // Дверь зовётся по копии ТЕМ ЖЕ кодом: у примерки нет своей ветки, которая
@@ -13386,18 +13402,13 @@ async fn примерить(
         }));
     }
 
-    crate::reproject::reproject(pool, копия).await?;
-    rebuild_before(pool, копия).await?;
-    rebuild(pool, копия).await?;
-    // Порядок тот же, что у сборщика: проекции, гейты, лестница, фазы.
-    measure_gates(pool, копия).await?;
-    measure_process(pool, копия, "godzy", "godzy").await?;
-    measure_phases(pool, копия).await?;
+    crate::watch::recount(pool, копия).await?;
     let после = снимок_гейта(pool, копия).await?;
 
     let mut стало_красным = Vec::new();
     let mut погасло = Vec::new();
     let mut сдвинулось = Vec::new();
+    let mut сменилось = Vec::new();
     let mut не_с_чем_сравнить = Vec::new();
     for ((фаза, пункт), (было, было_найдено, _)) in &до {
         let Some((стало, стало_найдено, чем)) = после.get(&(фаза.clone(), пункт.clone())) else {
@@ -13420,6 +13431,7 @@ async fn примерить(
             ("failed", "passed") => погасло.push(json!({ "пункт": имя })),
             ("failed", "failed") if было_найдено != стало_найдено => сдвинулось.push(json!({
                 "пункт": имя, "было": было_найдено, "стало": стало_найдено })),
+            _ if было != стало => сменилось.push(json!({ "пункт": имя, "было": было, "стало": стало })),
             _ => {}
         }
     }
@@ -13439,6 +13451,7 @@ async fn примерить(
         "стало красным": стало_красным,
         "погасло": погасло,
         "сдвинулось": сдвинулось,
+        "сменилось": сменилось,
         "цена": {
             "строк скопировано": строк,
             "мс": начало.elapsed().as_millis() as i64,

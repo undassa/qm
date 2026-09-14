@@ -735,6 +735,11 @@ impl Mcp {
         "step-method-set", "step-question-set", "step-probe-set", "gate-selftest",
     ];
 
+    const TRY_ON: &[&str] = &[
+        "put", "put-section", "rm", "document-add",
+        "task-state-push", "task-plan-push", "preflight-push", "code-facts-push", "worktree-push",
+    ];
+
     /// Отметка ставится ПОСЛЕ ответа и только на успешный: пересчитывать набор
     /// из-за отказа значит считать то же самое второй раз.
     pub async fn call(&self, name: &str, args: &Value) -> Value {
@@ -2588,9 +2593,11 @@ impl Mcp {
                 // их на копии ушла бы в ЖИВОЕ, а снятие копии её не отменило бы:
                 // снимать нечего, строка лежит в общей таблице. Тихая правка
                 // прибора под видом примерки хуже, чем её отсутствие.
-                if Self::SHARED_WRITES.contains(&tool.as_str()) {
+                if !Self::TRY_ON.contains(&tool.as_str()) {
                     return refusal(Miss::Refused(format!(
-                        "дверь «{tool}» правит ОБЩЕЕ — то, что принадлежит харнесу, а не набору.                          Копия копирует только набор, и эта правка ушла бы в живое, а снятие                          копии её не вернуло бы. Примерять можно правки набора")));
+                        "дверь «{tool}» не примеряется: примерять можно только двери, про которые проверено, \
+                         что они пишут лишь в таблицы набора — правка общего ушла бы в живое, и снятие \
+                         копии её не вернуло бы. Примеряются: {}", Self::TRY_ON.join(" · "))));
                 }
                 let inner = args.get("args").cloned().unwrap_or_else(|| json!({}));
                 match crate::projector::what_if(
