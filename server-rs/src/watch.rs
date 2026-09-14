@@ -117,8 +117,7 @@ async fn round(pool: &Pool) -> Result<(), tokio_postgres::Error> {
         // подряд — ожидающие держат слоты, держащий не может взять следующий, и
         // это уже не ожидание, а тупик. Такое место в пересборке было и без
         // всякого замка: `plan` брала второе соединение, не отпустив первого с
-        // открытой транзакцией. Оно убрано — читает та же транзакция, — и
-        // других вложенных захватов в пересборке нет.
+        // открытой транзакцией. Оно убрано — читает та же транзакция.
         //
         // Правильная форма — не замок сессии, а аренда с концом: отметка в
         // `gate_dirty` со сроком, которую переживает падение и которая сама
@@ -134,9 +133,8 @@ async fn round(pool: &Pool) -> Result<(), tokio_postgres::Error> {
             }
         };
         let spent = began.elapsed().as_millis() as i32;
-        crate::projector::note_reproject(pool, &project, measured.is_ok(), measured.as_ref().err().map_or("", String::as_str))
-            .await;
         let retry_at = measured.is_err().then(|| crate::projector::now_ms() + RETRY_MS);
+        let failure = format!("срыв пересчёта: {}", measured.as_ref().err().map_or("", String::as_str));
         let Ok(client) = pool.get().await else {
             tracing::warn!("пул не отдал сборщику соединение: отметка набора {project} не записана");
             continue;
@@ -144,9 +142,10 @@ async fn round(pool: &Pool) -> Result<(), tokio_postgres::Error> {
         if let Err(e) = client
             .execute(
                 "UPDATE gate_dirty SET ran_at = $2, ran_ms = $3,
+                        reason = CASE WHEN $4::bigint IS NOT NULL AND dirty_at <= $2 THEN $5 ELSE reason END,
                         dirty_at = CASE WHEN $4::bigint IS NOT NULL AND dirty_at <= $2 THEN $4 ELSE dirty_at END
                   WHERE project_id = $1",
-                &[&project, &taken, &spent, &retry_at],
+                &[&project, &taken, &spent, &retry_at, &failure],
             )
             .await
         {

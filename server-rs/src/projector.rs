@@ -12264,7 +12264,16 @@ async fn лестница_держит(
         })));
     };
     let шаг = position(client, project, "godzy").await?;
-    let срыв = last_reproject(client, project).await.filter(|(ok, _, _)| !*ok).map(|(_, why, _)| why);
+    let пересчёт = if шаг["stale"] == true {
+        client
+            .query_opt("SELECT reason, dirty_at, ran_ms FROM gate_dirty WHERE project_id = $1", &[&project])
+            .await?
+            .map_or(Value::Null, |r| {
+                json!({ "reason": r.get::<_, String>(0), "dirtyAt": r.get::<_, i64>(1), "lastMs": r.get::<_, Option<i32>>(2) })
+            })
+    } else {
+        Value::Null
+    };
     let красные_раньше: Vec<String> = client
         .query(
             "SELECT g.phase || ' · ' || g.item FROM project_gates g
@@ -12277,19 +12286,23 @@ async fn лестница_держит(
         .iter()
         .map(|r| r.get(0))
         .collect();
-    Ok(решение_лестницы(&шаг, i64::from(задачная), &красные_раньше, срыв.as_deref()))
+    Ok(решение_лестницы(&шаг, i64::from(задачная), &красные_раньше, &пересчёт))
 }
 
-fn решение_лестницы(шаг: &Value, задачная: i64, красные_раньше: &[String], срыв: Option<&str>) -> Option<Value> {
+fn решение_лестницы(шаг: &Value, задачная: i64, красные_раньше: &[String], пересчёт: &Value) -> Option<Value> {
     if шаг["checkedAt"].is_null() || !шаг["openWork"].is_array() {
         return Some(json!({
             "why": "положение лестницы этим кодом ни разу не считали: держит ли она задачи, сказать нечем, и это не «можно всё»",
         }));
     }
-    if let Some(срыв) = срыв {
+    if шаг["stale"] == true {
         return Some(json!({
-            "why": format!("последний пересчёт набора сорвался, и положению лестницы верить нельзя: {срыв}"),
+            "why": format!(
+                "положение лестницы старше последней правки (повод пересчёта: «{}»): решать по прошлому нельзя — \
+                 спросите снова, когда пересчёт закончится",
+                пересчёт["reason"].as_str().unwrap_or("")),
             "stale": true,
+            "recount": пересчёт,
         }));
     }
     let (ступень, держат, всего) = держащая_ступень(шаг, задачная, красные_раньше)?;
@@ -12302,7 +12315,6 @@ fn решение_лестницы(шаг: &Value, задачная: i64, кра
         "first": if ступень["ord"] == at["ord"] { at["first"].clone() } else { Value::Null },
         "holding": держат.iter().take(5).collect::<Vec<_>>(),
         "holdingCount": всего,
-        "stale": шаг["stale"],
         "why": format!(
             "ступень {} не пройдена, владелец `{}`: «{}». Задачи не запрашиваются, пока не пройдены все \
              ступени до {задачная}-й — сперва то, что держит эта",
@@ -12408,13 +12420,27 @@ mod лестница {
     }
 
     #[test]
-    fn сорвавшийся_пересчёт_и_непосчитанное_положение_держат() {
-        let чистое = json!({ "checkedAt": 1, "unanswerable": [], "openWork": [] });
-        assert!(решение_лестницы(&чистое, 9, &[], None).is_none());
-        let сорвался = решение_лестницы(&чистое, 9, &[], Some("relation x does not exist")).unwrap();
-        assert!(сорвался["why"].as_str().unwrap().contains("relation x does not exist"));
-        assert!(решение_лестницы(&json!({ "checkedAt": 1 }), 9, &[], None).is_some());
-        assert!(решение_лестницы(&json!({ "openWork": [] }), 9, &[], None).is_some());
+    fn устаревшее_и_непосчитанное_положение_держат() {
+        let чистое = json!({ "checkedAt": 1, "stale": false, "unanswerable": [], "openWork": [] });
+        assert!(решение_лестницы(&чистое, 9, &[], &json!(null)).is_none());
+        let устаревшее = json!({ "checkedAt": 1, "stale": true, "unanswerable": [], "openWork": [] });
+        let отказ =
+            решение_лестницы(&устаревшее, 9, &[], &json!({ "reason": "срыв пересчёта: relation x does not exist" }))
+                .unwrap();
+        assert!(отказ["why"].as_str().unwrap().contains("relation x does not exist"));
+        assert!(решение_лестницы(&json!({ "checkedAt": 1 }), 9, &[], &json!(null)).is_some());
+        assert!(решение_лестницы(&json!({ "openWork": [] }), 9, &[], &json!(null)).is_some());
+    }
+
+    #[test]
+    fn первая_единица_только_у_текущей_ступени() {
+        let шаг = |at: i64| {
+            json!({ "checkedAt": 1, "stale": false, "unanswerable": [],
+                    "at": { "ord": at, "first": { "name": "Q-1" } },
+                    "openWork": [{ "ord": 5, "state": "failed", "kind": "question", "touches": "corpus", "violations": 1 }] })
+        };
+        assert_eq!(решение_лестницы(&шаг(5), 9, &[], &json!(null)).unwrap()["first"]["name"], "Q-1");
+        assert!(решение_лестницы(&шаг(4), 9, &[], &json!(null)).unwrap()["first"].is_null());
     }
 }
 
