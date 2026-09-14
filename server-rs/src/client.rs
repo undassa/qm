@@ -746,11 +746,7 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
                 .filter_map(|p| p.split_once('='))
                 .map(|(a, b)| (a.trim(), b.trim()))
                 .collect();
-            let pairs = crate::repo_corpus::contract_vs_schema(&doc, &tables, &forced);
-            let facts: Vec<Value> = pairs
-                .iter()
-                .map(|p| json!({ "name": p.name, "detail": p.detail }))
-                .collect();
+            let facts = facts_of(&crate::repo_corpus::contract_vs_schema(&doc, &tables, &forced));
             let (out, _) = door.call("code-facts-push", &json!({ "kind": fact, "facts": facts }))?;
             done.push(json!({ "fact": fact, "files": files.len(), "found": facts.len(),
                               "was": out["was"], "now": out["now"] }));
@@ -816,10 +812,7 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
             // и считать их отдельно значило бы завести вторую правду о паре.
             pairs.extend(crate::repo_corpus::check_values_without_path(
                 &enums, &checks, &contract_enums, &forced, &checks_tables));
-            let facts: Vec<Value> = pairs
-                .iter()
-                .map(|p| json!({ "name": p.name, "detail": p.detail }))
-                .collect();
+            let facts = facts_of(&pairs);
             let (out, _) = door.call("code-facts-push", &json!({ "kind": fact, "facts": facts }))?;
             done.push(json!({ "fact": fact, "files": files.len(), "found": facts.len(),
                               "was": out["was"], "now": out["now"] }));
@@ -827,6 +820,11 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
         }
         let mut names: Vec<(String, String)> = Vec::new();
         let mut seen = std::collections::HashSet::new();
+        let declared: Vec<String> = if how == "secret-fields" {
+            files.iter().filter_map(|f| std::fs::read_to_string(f).ok()).flat_map(|t| declared_types(&t)).collect()
+        } else {
+            Vec::new()
+        };
         for f in &files {
             let short = f.strip_prefix(&format!("{root}/")).unwrap_or(f).to_owned();
             if how == "files" {
@@ -881,7 +879,7 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
                 continue;
             }
             if how == "secret-fields" {
-                for (decl, field, ty) in secret_fields(&text, re) {
+                for (decl, field, ty) in secret_fields(&text, re, &declared) {
                     // Ключ несёт путь: `Target.url` встречается в двух файлах
                     // разными типами, и одно исключение сняло бы оба разом.
                     let key = format!("{short}#{decl}.{field}");
@@ -927,9 +925,9 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
 ///
 /// Не образец, а обход: между `derive` и объявлением стоят другие атрибуты и
 /// комментарии, а поле надо смотреть внутри тела — regex такого не выражает.
-/// `field_re` — чем узнаётся секрето-подобное имя; подозрение снимает тип, не
-/// являющийся сырой строкой (`Secret<…>`, `StoredToken`, newtype), потому что он
-/// и есть ответ на него.
+/// `field_re` — чем узнаётся секрето-подобное имя; подозрение снимает только
+/// `Secret<…>` или тип, объявленный в самом корпусе (`StoredToken`, `PublicUrl`),
+/// потому что он и есть ответ на него. Всякий иной тип подозрителен.
 /// Строка подходит под образец. Ошибка в образце не молчит: она отвечает «нет»
 /// на каждую строку, и датчик подал бы пустоту как «ничего не найдено».
 fn suspect_line(re: &str, line: &str) -> bool {
@@ -945,7 +943,7 @@ fn bare_type(ty: &str) -> String {
     ty.split("//").next().unwrap_or("").trim().trim_end_matches(',').trim().to_owned()
 }
 
-fn raw_string(ty: &str) -> bool {
+fn answered(ty: &str, declared: &[String]) -> bool {
     let mut t = ty.trim();
     while let Some(inner) = ["Option<", "Box<", "Vec<"]
         .iter()
@@ -953,16 +951,27 @@ fn raw_string(ty: &str) -> bool {
     {
         t = inner.trim();
     }
-    if let Some(r) = t.strip_prefix('&') {
-        t = r.trim_start();
-        if t.starts_with('\'') {
-            t = t.split_once(' ').map(|(_, r)| r.trim()).unwrap_or("");
-        }
-    }
-    matches!(t, "String" | "str" | "Url" | "url::Url" | "Uri") || (t.starts_with("Cow<") && t.ends_with("str>"))
+    ty.contains("Secret<") || t.rsplit("::").next().is_some_and(|name| declared.iter().any(|d| d == name))
 }
 
-fn secret_fields(text: &str, field_re: &str) -> Vec<(String, String, String)> {
+fn declared_types(text: &str) -> Vec<String> {
+    regex::Regex::new(r"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?(?:struct|enum)\s+(\w+)")
+        .expect("образец объявления")
+        .captures_iter(text)
+        .map(|c| c[1].to_owned())
+        .collect()
+}
+
+fn facts_of(pairs: &[crate::repo_corpus::Pair]) -> Vec<Value> {
+    let marked = |p: &crate::repo_corpus::Pair| p.detail.starts_with("помечено ");
+    pairs
+        .iter()
+        .filter(|p| !marked(p) || !pairs.iter().any(|q| q.name == p.name && !marked(q)))
+        .map(|p| json!({ "name": p.name, "detail": p.detail }))
+        .collect()
+}
+
+fn secret_fields(text: &str, field_re: &str, declared: &[String]) -> Vec<(String, String, String)> {
     let Ok(suspect) = regex::Regex::new(if field_re.trim().is_empty() {
         r"(?i)\b(token|secret|password|passwd|api_?key|credential|private_?key)\b"
     } else {
@@ -1013,14 +1022,14 @@ fn secret_fields(text: &str, field_re: &str) -> Vec<(String, String, String)> {
                 for part in v[1].split(',') {
                     if let Some(f) = field.captures(part) {
                         let (fname, ftype) = (f[1].to_owned(), bare_type(&f[2]));
-                        if suspect.is_match(&fname) && raw_string(&ftype) {
+                        if suspect.is_match(&fname) && !answered(&ftype, declared) {
                             out.push((owner.clone(), fname, ftype));
                         }
                     }
                 }
             } else if let Some(f) = field.captures(lines[k]) {
                 let (fname, ftype) = (f[1].to_owned(), bare_type(&f[2]));
-                if suspect.is_match(&fname) && raw_string(&ftype) {
+                if suspect.is_match(&fname) && !answered(&ftype, declared) {
                     out.push((owner.clone(), fname, ftype));
                 }
             }
@@ -1481,7 +1490,8 @@ pub fn unrelated() -> u8 { 1 }
 
 #[cfg(test)]
 mod секреты {
-    use super::secret_fields;
+    use super::{declared_types, facts_of, secret_fields};
+    use crate::repo_corpus::Pair;
 
     const RS: &str = r#"
 #[derive(Debug)]
@@ -1491,15 +1501,73 @@ pub struct Target {
 }
 
 #[derive(Debug)]
+pub struct PublicUrl(String);
+
+#[derive(Debug)]
 pub struct Issued {
-    pub token: StoredToken,
+    pub token: Option<crate::StoredToken>,
     pub token_hash: Secret<String>,
+}
+
+#[derive(Debug)]
+pub struct StoredToken {
+    pub token_hash: Secret<String>,
+}
+
+#[derive(Debug)]
+pub struct Keys {
+    pub signing_key: Vec<u8>,
+    pub private_key: [u8; 32],
+    pub token: Uuid,
+    pub api_key: Arc<str>,
+    pub password: std::string::String,
+    pub secret: HashMap<String, String>,
+    pub webhook_url: reqwest::Url,
+    pub credential: serde_json::Value,
 }
 "#;
 
+    const NAMES: &str = r"(?i)(^|_)(password|token|secret|url|credential)($|_)|(^|_)(api|private|secret|signing)_key($|_)";
+
     #[test]
-    fn подозрительна_только_сырая_строка() {
-        let found = secret_fields(RS, r"(?i)(^|_)(url|token)($|_)");
-        assert_eq!(found, vec![("Target".to_owned(), "url".to_owned(), "Option<String>".to_owned())]);
+    fn подозрительно_всё_кроме_secret_и_типа_корпуса() {
+        let found: Vec<String> = secret_fields(RS, NAMES, &declared_types(RS))
+            .into_iter()
+            .map(|(decl, field, ty)| format!("{decl}.{field}: {ty}"))
+            .collect();
+        assert_eq!(found, vec![
+            "Target.url: Option<String>",
+            "Keys.signing_key: Vec<u8>",
+            "Keys.private_key: [u8; 32]",
+            "Keys.token: Uuid",
+            "Keys.api_key: Arc<str>",
+            "Keys.password: std::string::String",
+            "Keys.secret: HashMap<String, String>",
+            "Keys.webhook_url: reqwest::Url",
+            "Keys.credential: serde_json::Value",
+        ]);
+    }
+
+    #[test]
+    fn тип_не_из_корпуса_подозрения_не_снимает() {
+        let found = secret_fields(RS, NAMES, &[]);
+        assert!(found.iter().any(|(d, f, _)| d == "Issued" && f == "token"), "{found:?}");
+        assert!(found.iter().any(|(d, f, _)| d == "Target" && f == "public_url"), "{found:?}");
+    }
+
+    #[test]
+    fn помеченное_не_вытесняет_находку_того_же_имени() {
+        let p = |name: &str, detail: &str| Pair { name: name.into(), detail: detail.into() };
+        let facts = facts_of(&[
+            p("Target", "перечисление без множества CHECK (a.rs), значений 2"),
+            p("Target", "помечено x-derived: computed"),
+            p("Operator", "помечено x-stored-in: monitors.condition"),
+        ]);
+        let got: Vec<(&str, &str)> =
+            facts.iter().map(|f| (f["name"].as_str().unwrap_or(""), f["detail"].as_str().unwrap_or(""))).collect();
+        assert_eq!(got, vec![
+            ("Target", "перечисление без множества CHECK (a.rs), значений 2"),
+            ("Operator", "помечено x-stored-in: monitors.condition"),
+        ]);
     }
 }
