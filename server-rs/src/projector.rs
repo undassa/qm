@@ -699,6 +699,36 @@ CREATE TABLE IF NOT EXISTS task_worktree (
 -- записанное без звука. Дверь, чей итог живёт до следующего прогона, — это
 -- дверь, которой нет.
 ALTER TABLE project_decision_links ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'projected';
+
+-- С КАКОГО ДНЯ ПУНКТ СУДИТ. Ноль — «судит всё», и это умолчание: почти всякое
+-- правило меряет состояние, а состояние возраста не имеет — раздела в документе
+-- либо нет, либо он есть, и когда правило завелось, к делу не относится.
+--
+-- Иначе у правил, меряющих ПОРЯДОК. «План записан до закрытия» судит не
+-- состояние, а последовательность двух событий, и событие, случившееся раньше
+-- самого правила, оно судить не может: правила тогда не было. У `tot-ade` так
+-- набралось 78 находок, из которых ни одна правила не нарушала — все 78 задач
+-- закрыты прежде, чем харнес узнал слово «план». Закрыть их набору нечем:
+-- дописать план задним числом — подделка порядка, ради которого правило и
+-- заведено; переоткрыть 78 задач — сказать, что ни одна не доведена, при 84
+-- закрывающих трейлерах в истории; 78 побегов — отмена правила чужими руками.
+--
+-- Граница применения — свойство ПРИБОРА, а не набора: держать её решением в
+-- каждом наборе значило бы писать один довод столько раз, сколько наборов.
+-- Поэтому она стоит у пункта и объявляется вместе с ним.
+ALTER TABLE gate_item ADD COLUMN IF NOT EXISTS since bigint NOT NULL DEFAULT 0;
+
+-- КОГДА ФАКТ СЛУЧИЛСЯ — ЭТО НЕ «КОГДА ХАРНЕС ЕГО УВИДЕЛ».
+--
+-- `seen_at` — про наблюдение, и раньше принятия харнеса его не бывает по
+-- определению: набор, проработавший год и подключённый вчера, показывает всю
+-- свою историю вчерашним днём. Судить по такой отметке ПОРЯДОК нельзя — ни одно
+-- правило порядка не отличит сделанного до себя от сделанного после.
+--
+-- Время закрытия знает коммит, а коммиты знает тот, у кого репозиторий. Он же
+-- их и подаёт. Ноль — «не сказано», и правило тогда падает обратно на `seen_at`:
+-- подающий старой сборки не должен ломаться молча.
+ALTER TABLE task_state ADD COLUMN IF NOT EXISTS closed_at bigint NOT NULL DEFAULT 0;
 ALTER TABLE project_feature_stories ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'projected';
 ALTER TABLE project_story_requirements ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'projected';
 -- И ещё две того же рода: у `project_screen_references` есть дверь
@@ -3687,7 +3717,7 @@ pub async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, tokio_po
     // вопрос «можно ли идти дальше», и ответ не должен зависеть от того, кто как
     // завёл проверки у себя.
     let rows = client
-        .query("SELECT phase, item, kind, query, why, owner, id, subject_query, subject_why
+        .query("SELECT phase, item, kind, query, why, owner, id, subject_query, subject_why, since
                   FROM gate_item ORDER BY phase, id", &[])
         .await?;
     let waived: std::collections::HashSet<(String, String)> = client
@@ -3894,7 +3924,8 @@ async fn measure_item(
                 // пункта готовности и ступени лестницы. Свой здесь мерил бы не
                 // то, что обещано пунктом, и разошёлся бы молча.
                 sql => {
-                    let v = execute_method_upto(client, project, "query", sql.unwrap_or(""), 200).await;
+                    let since: i64 = r.try_get("since").unwrap_or(0);
+                    let v = execute_method_upto(client, project, "query", sql.unwrap_or(""), 200, since).await;
                     // Объявленные исключения ВЫЧИТАЮТСЯ — и остаются видны.
                     //
                     // Молча вычесть нельзя: исключение, которого не видно, — это
@@ -4428,24 +4459,43 @@ pub async fn preflight_queue(pool: &Pool, project: &str) -> Result<Value, tokio_
 pub async fn push_task_state(
     pool: &Pool,
     project: &str,
-    states: &[(String, String, String)],
+    states: &[(String, String, String, i64)],
     seen_at: i64,
 ) -> Result<Value, tokio_postgres::Error> {
     let mut client = pool.get().await.expect("пул отдал соединение");
     let tx = client.transaction().await?;
     // Подача полная, а не добавочная: задача, исчезнувшая из подачи, потеряла
     // трейлер, и держать её прежнее состояние значило бы помнить отменённое.
-    tx.execute("DELETE FROM task_state WHERE project_id = $1", &[&project]).await?;
+    // Уходят поэтому ТОЛЬКО отсутствующие в подаче, а не все подряд.
+    //
+    // «КОГДА УВИДЕЛИ» — ЭТО ПРО ФАКТ, А НЕ ПРО ПОДАЧУ.
+    //
+    // Снос-и-вставка переписывали `seen_at` текущим временем каждой подаче, а
+    // подают на каждом прогоне. Отметка значила «когда подали в последний раз»,
+    // то есть всегда «только что», и правило `plan-before-commit` сравнивало
+    // время плана с нею: любой план оказывался записан «до закрытия». Плечо
+    // порядка — то самое, ради которого правило и заведено, — не работало
+    // вовсе; красным его держало одно лишь «плана нет вовсе».
+    //
+    // Отметка двигается теперь при СМЕНЕ состояния. Это всё ещё не время
+    // коммита — его знает только тот, у кого репозиторий, — но это правда о
+    // факте, а не о разговоре.
+    let ids: Vec<String> = states.iter().map(|(t, _, _, _)| t.clone()).collect();
+    tx.execute("DELETE FROM task_state WHERE project_id = $1 AND task_id <> ALL($2)",
+               &[&project, &ids]).await?;
     let mut written = 0;
-    for (task, state, commit) in states {
+    for (task, state, commit, closed_at) in states {
         written += tx
             .execute(
-                "INSERT INTO task_state (project_id, task_id, state, closing_commit, seen_at)
-                 VALUES ($1, $2, $3, $4, $5)
+                "INSERT INTO task_state (project_id, task_id, state, closing_commit, seen_at,
+                                         closed_at)
+                 VALUES ($1, $2, $3, $4, $5, $6)
                  ON CONFLICT (project_id, task_id) DO UPDATE
                    SET state = EXCLUDED.state, closing_commit = EXCLUDED.closing_commit,
-                       seen_at = EXCLUDED.seen_at",
-                &[&project, task, state, commit, &seen_at],
+                       closed_at = EXCLUDED.closed_at,
+                       seen_at = CASE WHEN task_state.state IS DISTINCT FROM EXCLUDED.state
+                                      THEN EXCLUDED.seen_at ELSE task_state.seen_at END",
+                &[&project, task, state, commit, &seen_at, closed_at],
             )
             .await?;
     }
@@ -5894,8 +5944,13 @@ async fn answer_of(
     tx: &deadpool_postgres::Transaction<'_>,
     sql: &str,
     project: &str,
+    since: i64,
 ) -> Result<Vec<String>, String> {
-    match tx.query(sql, &[&project]).await {
+    match if sql.contains("$2") {
+        tx.query(sql, &[&project, &since]).await
+    } else {
+        tx.query(sql, &[&project]).await
+    } {
         Ok(rows) => {
             let mut out: Vec<String> =
                 rows.iter().map(|r| r.try_get::<_, String>(0).unwrap_or_default()).collect();
@@ -9930,7 +9985,7 @@ pub async fn step_selftest(
         }
         let tx = client.transaction().await?;
         force_gates(&tx, project, under).await?;
-        let saw = match answer_of(&tx, &method, project).await {
+        let saw = match answer_of(&tx, &method, project, 0).await {
             Err(e) => Err(format!("запрос ступени не исполнился: {e}")),
             Ok(before) => match tx.execute(probe.as_str(), &[&project]).await {
                 Err(e) => Err(format!("проба не исполнилась: {}", db_says(&e))),
@@ -9941,7 +9996,7 @@ pub async fn step_selftest(
                 Ok(0) => Err(format!(
                     "проба ничего не подсадила; запрос пункта до пробы вернул {} строк",
                     before.len())),
-                Ok(_) => match answer_of(&tx, &method, project).await {
+                Ok(_) => match answer_of(&tx, &method, project, 0).await {
                     Ok(after) => Ok((before, after)),
                     Err(e) => Err(format!("запрос ступени не исполнился после подсадки: {e}")),
                 },
@@ -10169,7 +10224,7 @@ pub async fn gate_selftest(pool: &Pool, project: &str, under: &str) -> Result<Va
     // сегодня отличают одно от другого.
     let items = client
         .query(
-            "SELECT phase, id, query, probe FROM gate_item
+            "SELECT phase, id, query, probe, since FROM gate_item
               WHERE kind = 'query' ORDER BY phase, item",
             &[],
         )
@@ -10186,6 +10241,10 @@ pub async fn gate_selftest(pool: &Pool, project: &str, under: &str) -> Result<Va
         let (phase, item): (String, String) = (r.get(0), r.get(1));
         let query: Option<String> = r.get(2);
         let probe: String = r.get(3);
+        // Проба судится границей САМОГО ПУНКТА: подсаженное нарушение случается
+        // сейчас, то есть позже границы, — и правило обязано его увидеть. Дать
+        // сюда ноль значило бы проверять не то правило, что работает.
+        let since: i64 = r.try_get("since").unwrap_or(0);
         let sql = query.unwrap_or_default();
         if probe.trim().is_empty() {
             undeclared.push(json!({ "phase": phase, "item": item,
@@ -10203,7 +10262,7 @@ pub async fn gate_selftest(pool: &Pool, project: &str, under: &str) -> Result<Va
         // четырнадцати уже красных пунктах это доказывало ровно ничего: они
         // вернули бы строки и с пустой пробой. Самотест отвечал «35 из 35
         // живы», а проверено было двадцать одно.
-        let saw = match answer_of(&tx, &sql, project).await {
+        let saw = match answer_of(&tx, &sql, project, since).await {
             Err(e) => Err(format!("запрос пункта не исполнился: {e}")),
             Ok(before) => match tx.execute(probe.as_str(), &[&project]).await {
                 Err(e) => Err(format!("проба не исполнилась: {}", db_says(&e))),
@@ -10214,7 +10273,7 @@ pub async fn gate_selftest(pool: &Pool, project: &str, under: &str) -> Result<Va
                 Ok(0) => Err(format!(
                     "проба ничего не подсадила; запрос пункта до пробы вернул {} строк",
                     before.len())),
-                Ok(_) => match answer_of(&tx, &sql, project).await {
+                Ok(_) => match answer_of(&tx, &sql, project, since).await {
                     Ok(after) => Ok((before, after)),
                     Err(e) => Err(format!("запрос пункта не исполнился после подсадки: {e}")),
                 },
@@ -10758,6 +10817,9 @@ pub async fn set_gate_item(
     // Над чем пункт меряет. Пусто в ответе — «неизвестно», а не «пройдено».
     subject: Option<&str>,
     subject_why: Option<&str>,
+    // С какого мгновения пункт судит. `None` — не трогать объявленное; ноль —
+    // судить всё, и это умолчание нового пункта.
+    since: Option<i64>,
     drop_it: bool,
 ) -> Result<Value, tokio_postgres::Error> {
     let mut client = pool.get().await.expect("пул отдал соединение");
@@ -10933,16 +10995,18 @@ pub async fn set_gate_item(
     let n = client
         .execute(
             "INSERT INTO gate_item (phase, id, item, kind, query, owner, probe, probe_ok,
-                                    subject_query, subject_why)
-             VALUES ($1, $2, $7, $3, $4, $5, $6, $8, coalesce($9, ''), coalesce($10, ''))
+                                    subject_query, subject_why, since)
+             VALUES ($1, $2, $7, $3, $4, $5, $6, $8, coalesce($9, ''), coalesce($10, ''),
+                     coalesce($11::bigint, 0))
              ON CONFLICT (phase, id) WHERE id <> ''
                DO UPDATE SET item = EXCLUDED.item, kind = EXCLUDED.kind, query = EXCLUDED.query,
                              owner = EXCLUDED.owner, probe = EXCLUDED.probe,
                              probe_ok = EXCLUDED.probe_ok,
                              subject_query = coalesce($9, gate_item.subject_query),
-                             subject_why = coalesce($10, gate_item.subject_why)",
+                             subject_why = coalesce($10, gate_item.subject_why),
+                             since = coalesce($11::bigint, gate_item.since)",
             &[&phase, &id, &kind, &query, &owner, &probe, &title, &None::<bool>,
-              &subject, &subject_why],
+              &subject, &subject_why, &since],
         )
         .await?;
     if !why.is_empty() {
@@ -11063,7 +11127,7 @@ pub async fn exception_changes_answer(
 ) -> Result<Option<String>, tokio_postgres::Error> {
     let mut client = pool.get().await.expect("пул отдал соединение");
     let Some(row) = client
-        .query_opt("SELECT query FROM gate_item WHERE id = $1 AND kind = 'query'", &[&rule])
+        .query_opt("SELECT query, since FROM gate_item WHERE id = $1 AND kind = 'query'", &[&rule])
         .await?
     else {
         return Ok(None);
@@ -11089,7 +11153,8 @@ pub async fn exception_changes_answer(
         return Ok(None);
     }
     let tx = client.transaction().await?;
-    let before = answer_of(&tx, &sql, project).await;
+    let since: i64 = row.get(1);
+    let before = answer_of(&tx, &sql, project, since).await;
     tx.execute(
         "INSERT INTO rule_exception (project_id, rule, entity_kind, entity_id, reason, decided_by)
          VALUES ($1,$2,'',$3,'проба ключа','проба')
@@ -11097,7 +11162,7 @@ pub async fn exception_changes_answer(
         &[&project, &rule, &entity],
     )
     .await?;
-    let after = answer_of(&tx, &sql, project).await;
+    let after = answer_of(&tx, &sql, project, since).await;
     tx.rollback().await?;
     let (Ok(before), Ok(after)) = (before, after) else { return Ok(None) };
     if before.len() != after.len() {
@@ -11296,7 +11361,7 @@ pub async fn execute_method(
     method_kind: &str,
     method: &str,
 ) -> Verdict {
-    execute_method_upto(client, project, method_kind, method, 5).await
+    execute_method_upto(client, project, method_kind, method, 5, 0).await
 }
 
 /// То же, но со своим числом примеров.
@@ -11311,9 +11376,18 @@ pub async fn execute_method_upto(
     method_kind: &str,
     method: &str,
     limit: usize,
+    since: i64,
 ) -> Verdict {
     match method_kind {
-        "query" if !method.trim().is_empty() => match client.query(method, &[&project]).await {
+        // `$2` ПОДСТАВЛЯЕТСЯ ТОЛЬКО ТЕМ, КТО ЕГО СПРАШИВАЕТ. Отдать лишний довод
+        // запросу, который его не поминает, — отказ базы: «bind message supplies
+        // 2 parameters, but prepared statement requires 1». Граница нужна
+        // считанным правилам, и знать о ней остальным незачем.
+        "query" if !method.trim().is_empty() => match if method.contains("$2") {
+            client.query(method, &[&project, &since]).await
+        } else {
+            client.query(method, &[&project]).await
+        } {
             Ok(found) => Verdict {
                 state: if found.is_empty() { "passed" } else { "failed" },
                 violations: found.len(),
@@ -11939,7 +12013,7 @@ pub async fn process_state(
         let verdict = if skipped || empty {
             None
         } else {
-            Some(execute_method_upto(&client, project, &method_kind, &method, 200).await)
+            Some(execute_method_upto(&client, project, &method_kind, &method, 200, 0).await)
         };
         out.push(json!({
             "ord": ord,

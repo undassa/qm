@@ -469,7 +469,12 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
 
         if how == "task-trailers" {
             let log = std::process::Command::new("git")
-                .args(["-C", &root, "log", "--all", "--pretty=%H%x00%B%x01"])
+                // ВРЕМЯ КОММИТА ПОДАЁТСЯ ВМЕСТЕ С ТРЕЙЛЕРОМ. Без него сервер
+                // знает лишь «когда увидел», а этим порядок не судится: набор,
+                // проработавший год и подключённый вчера, показал бы всю историю
+                // вчерашним днём, и правило «план записан до закрытия» не
+                // отличило бы сделанного до себя от сделанного после.
+                .args(["-C", &root, "log", "--all", "--pretty=%H%x00%ct%x00%B%x01"])
                 .output()
                 .ok()
                 .and_then(|o| String::from_utf8(o.stdout).ok())
@@ -480,8 +485,9 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
             let mut seen: std::collections::HashSet<String> = Default::default();
             let mut states: Vec<Value> = Vec::new();
             for entry in log.split('\u{1}') {
-                let mut parts = entry.splitn(2, '\u{0}');
+                let mut parts = entry.splitn(3, '\u{0}');
                 let commit = parts.next().unwrap_or("").trim().to_owned();
+                let at: i64 = parts.next().unwrap_or("").trim().parse::<i64>().unwrap_or(0) * 1000;
                 let body = parts.next().unwrap_or("");
                 for c in rex.captures_iter(body) {
                     let id = c.get(1).map(|m| m.as_str().trim().to_owned()).unwrap_or_default();
@@ -490,7 +496,7 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
                     if id.is_empty() || !seen.insert(id.clone()) {
                         continue;
                     }
-                    states.push(json!({ "id": id, "state": state, "commit": commit }));
+                    states.push(json!({ "id": id, "state": state, "commit": commit, "at": at }));
                 }
             }
             if states.is_empty() {

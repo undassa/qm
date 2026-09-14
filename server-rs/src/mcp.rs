@@ -159,9 +159,9 @@ impl Mcp {
             "inputSchema": { "type": "object", "properties": { "kind": s("вид"), "id": s("имя"), "anchor": s("якорь"), "body": s("новое тело раздела"), "expectedRevision": json!({"type":"integer"}) }, "required": ["kind", "anchor", "body"] } }));
         tools.push(json!({ "name": "rm", "description": "удалить сущность",
             "inputSchema": { "type": "object", "properties": { "deferProjection": json!({"type":"boolean","description":"не пересобирать проекции сейчас; позвать `reproject` после серии правок"}), "kind": s("вид"), "id": s("имя") }, "required": ["kind"] } }));
-        tools.push(json!({ "name": "task-state-push", "description": "принять состояния задач, выведенные харнесом из закрывающих трейлеров; подача полная",
+        tools.push(json!({ "name": "task-state-push", "description": "принять состояния задач, выведенные харнесом из закрывающих трейлеров; подача полная. `at` — время коммита в мс: без него харнес знает лишь «когда увидел», а этим порядок не судится",
             "inputSchema": { "type": "object", "properties": {
-                "states": { "type": "array", "description": "[{id, state, commit}]",
+                "states": { "type": "array", "description": "[{id, state, commit, at}]",
                             "items": { "type": "object", "properties": {
                               "id": s("имя задачи"), "state": s("not_started · claimed · closed"), "commit": s("закрывающий коммит") },
                               "required": ["id", "state"] } } }, "required": ["states"] } }));
@@ -217,6 +217,7 @@ impl Mcp {
                 "run": s("команда, которой видна единица работы ступени; `{имя}` — первое слово находки"),
                 "subject": s("запрос ПРЕДМЕТА ступени: пусто в ответе — «нечем мерить», а не «пройдено»"),
                 "subjectWhy": s("чем объяснить пустой предмет"),
+                "since": s("с какого мгновения (мс) пункт судит: факт раньше него им не судится. Нужно ПРАВИЛАМ ПОРЯДКА — «план записан до закрытия» не может судить закрытие, случившееся прежде самого правила. Запрос читает границу как `$2`; пусто — судит всё"),
                 "drop": json!({"type":"boolean"}) },
                 "required": ["ord", "methodKind"] } }));
         tools.push(json!({ "name": "document-add", "description": "завести новый документ объявленного вида; правит существующий — `put`, и заводить он отказывается",
@@ -900,7 +901,7 @@ impl Mcp {
                     .duration_since(std::time::SystemTime::UNIX_EPOCH)
                     .map(|d| d.as_millis() as i64)
                     .unwrap_or(0);
-                let states: Vec<(String, String, String)> = Some(rows(&args, "states"))
+                let states: Vec<(String, String, String, i64)> = Some(rows(&args, "states"))
                     .map(|list| {
                         list.iter()
                             .filter_map(|it| {
@@ -908,6 +909,10 @@ impl Mcp {
                                     it.get("id")?.as_str()?.to_owned(),
                                     it.get("state")?.as_str()?.to_owned(),
                                     it.get("commit").and_then(|c| c.as_str()).unwrap_or("").to_owned(),
+                                    // Время коммита. Нет его — ноль: подающий
+                                    // старой сборки не ломается, а правило
+                                    // порядка падает обратно на «когда увидели».
+                                    it.get("at").and_then(|a| a.as_i64()).unwrap_or(0),
                                 ))
                             })
                             .collect()
@@ -2512,6 +2517,7 @@ impl Mcp {
                                                       probe, why,
                                                       args.get("subject").and_then(|v| v.as_str()),
                                                       args.get("subjectWhy").and_then(|v| v.as_str()),
+                                                      num(args, "since"),
                                                       args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
@@ -2572,6 +2578,17 @@ impl Mcp {
                 if tool == "what-if" {
                     return refusal(Miss::Refused(
                         "примерка примерки — это копия копии: ответ тот же, цена вдвое".into()));
+                }
+                // ПРИМЕРЯЕТСЯ НАБОР, А НЕ ПРИБОР.
+                //
+                // Копия копирует то, у чего есть имя набора. Пункт гейта, фаза,
+                // ступень лестницы имени набора не имеют — они общие, и правка
+                // их на копии ушла бы в ЖИВОЕ, а снятие копии её не отменило бы:
+                // снимать нечего, строка лежит в общей таблице. Тихая правка
+                // прибора под видом примерки хуже, чем её отсутствие.
+                if Self::SHARED_WRITES.contains(&tool.as_str()) {
+                    return refusal(Miss::Refused(format!(
+                        "дверь «{tool}» правит ОБЩЕЕ — то, что принадлежит харнесу, а не набору.                          Копия копирует только набор, и эта правка ушла бы в живое, а снятие                          копии её не вернуло бы. Примерять можно правки набора")));
                 }
                 let inner = args.get("args").cloned().unwrap_or_else(|| json!({}));
                 match crate::projector::what_if(
