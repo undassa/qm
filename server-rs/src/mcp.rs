@@ -43,6 +43,7 @@ fn refusal(m: Miss) -> Value {
         Miss::Unprojected(k) => {
             format!("вид {k} в базу не спроецирован: ответ неизвестен, а не пуст — спрашивать нечего, а не ничего нет")
         }
+        Miss::Refused(почему) => почему,
         Miss::Db(e) => format!("база не ответила: {e:#}"),
     };
     json!({ "content": [{ "type": "text", "text": text }], "isError": true })
@@ -530,6 +531,11 @@ impl Mcp {
         tools.push(json!({ "name": "gate-selftest", "description": "самотест гейтов: каждый запросный пункт роняется подсаженным нарушением в откатываемой транзакции; `under` прогоняет его при всех зелёных либо всех красных гейтах — проба, живая лишь в одном из двух, зависит от состояния, которого не форсирует",
             "inputSchema": { "type": "object", "properties": {
                 "under": s("green · red — прогнать при всех зелёных либо всех красных гейтах; пусто — как есть") } } }));
+        tools.push(json!({ "name": "what-if", "description": "примерка: правка кладётся в копию набора, гейт меряется по ней, копия снимается. Отвечает, ЧТО покраснеет и ЧТО погаснет — до того, как править по-настоящему. Идёт десятки секунд",
+            "inputSchema": { "type": "object", "properties": {
+                "tool": s("имя двери, которую примеряем"),
+                "args": json!({"type":"object","description":"доводы этой двери, как если бы звали её саму"}) },
+                "required": ["tool"] } }));
         tools.push(json!({ "name": "order", "description": "порядок выполнения задач: волны как топологические слои внутри этапа — вывод сервера, файл производен",
             "inputSchema": { "type": "object", "properties": {} } }));
         tools.push(json!({ "name": "summary", "description": "перечень сущностей вида с колонками-числами: сколько проверок у требования, вариантов у решения, требований у истории",
@@ -769,7 +775,7 @@ impl Mcp {
             "method-set", "gate-item-set", "question-holders", "preflight-push", "worktree-push",
             "sensor-specs", "scheme-terms", "scheme-roles", "frozen-trees", "addresses-declared", "tree-declared", "donors", "skills-push", "skills", "agents", "code-facts-push", "code-facts", "summary", "links-of", "retired-terms", "order", "gate-measure", "gate-item-waive", "gate-selftest", "links-rewrite", "links-retarget", "reparse", "screen-area-set", "skill-set", "skills-paths", "version-freeze", "version-delta", "generated-check", "principal-allow", "principals", "author-set", "authors", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "version-close", "phase-set", "exception-set", "gate-selftest", "next-step", "process-state", "statuses", "task-status", "status-anomaly", "pipeline", "board", "waves", "phases", "coverage", "blocks", "history", "at-revision", "process-history", "progress",
             "kinds", "kinds-due", "readiness-gaps", "declared-unwritten", "blame-set", "doors", "derived-copy-set", "field-column-alias", "column-server-filled", "holders", "counts-sync", "kind-add", "kind-required", "kind-projection", "kind-reopens", "kind-proves", "kind-id-set", "kind-domain", "tree", "document-coverage", "sections", "section", "backlinks", "search", "put",
-            "put-section", "rm", "document-add", "reproject", "sweep", "gate", "next-task", "blockers", "events", "task-plan-push",
+            "put-section", "rm", "document-add", "reproject", "sweep", "gate", "next-task", "what-if", "blockers", "events", "task-plan-push",
             "norm-versions", "measurements", "plan", "readiness", "requirements-of",
             "tasks-of", "preflight-queue", "claims", "exceptions",
             "task-state-push", "state-disagreements",
@@ -879,7 +885,7 @@ impl Mcp {
                     .and_then(|v| v.as_str())
                     .unwrap_or_default();
                 if q.trim().is_empty() {
-                    return refusal(Miss::Db(
+                    return refusal(Miss::Refused(
                         "поиск без запроса вернул бы весь набор: назовите, что ищете (`query` или `q`)".into(),
                     ));
                 }
@@ -1265,7 +1271,7 @@ impl Mcp {
                 let task = args.get("task").and_then(|v| v.as_str()).unwrap_or("");
                 let body = args.get("body").and_then(|v| v.as_str()).unwrap_or("");
                 if task.is_empty() {
-                    return refusal(Miss::Db("план без задачи не записывается".into()));
+                    return refusal(Miss::Refused("план без задачи не записывается".into()));
                 }
                 match crate::projector::push_task_plan(&self.pool, p, task, body, &self.author).await {
                     Ok(v) => ok(v),
@@ -1938,7 +1944,7 @@ impl Mcp {
             "phase-set" => {
                 let phase = args.get("phase").and_then(|v| v.as_str()).unwrap_or("");
                 if phase.is_empty() {
-                    return refusal(Miss::Db("фаза без имени не объявляется".into()));
+                    return refusal(Miss::Refused("фаза без имени не объявляется".into()));
                 }
                 match crate::projector::set_phase(&self.pool, phase,
                         num(args, "ord").map(|n| n as i32),
@@ -1987,7 +1993,7 @@ impl Mcp {
                 let ord = num(args, "ord").unwrap_or(-1) as i32;
                 let question = args.get("question").and_then(|v| v.as_str()).unwrap_or("");
                 if question.trim().is_empty() {
-                    return refusal(Miss::Db("ступень без условия не переименовывается".into()));
+                    return refusal(Miss::Refused("ступень без условия не переименовывается".into()));
                 }
                 match crate::projector::set_step_question(&self.pool, set_name, process, ord, question, args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
                     Ok(v) => ok(v),
@@ -1998,14 +2004,14 @@ impl Mcp {
                 let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
                 let path = g("path");
                 if path.trim().is_empty() {
-                    return refusal(Miss::Db("заморозка без каталога не объявляется".into()));
+                    return refusal(Miss::Refused("заморозка без каталога не объявляется".into()));
                 }
                 let drop = args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false);
                 // Заморозка без хэша — не заморозка. Дверь приняла пустой хэш
                 // однажды (имя поля перепутали), и гейт позеленел: сверять было
                 // не с чем, а «не с чем» прочиталось как «сошлось».
                 if !drop && g("hash").trim().is_empty() {
-                    return refusal(Miss::Db(
+                    return refusal(Miss::Refused(
                         "заморозка без хэша ничего не держит: назовите хэш дерева либо снимите заморозку `drop=true`"
                             .into()));
                 }
@@ -2030,7 +2036,7 @@ impl Mcp {
                 let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
                 let (role, value) = (g("role"), g("value"));
                 if role.trim().is_empty() || value.trim().is_empty() {
-                    return refusal(Miss::Db("слово без роли или роль без слова не объявляются".into()));
+                    return refusal(Miss::Refused("слово без роли или роль без слова не объявляются".into()));
                 }
                 let ord = num(args, "ord").unwrap_or(0) as i32;
                 let drop = args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false);
@@ -2045,11 +2051,11 @@ impl Mcp {
                 // движков, молча выключало половину читателей.
                 if !drop && role.starts_with("id.") {
                     if client.query_one("SELECT 'проба' ~ $1", &[&value]).await.is_err() {
-                        return refusal(Miss::Db(format!(
+                        return refusal(Miss::Refused(format!(
                             "образец «{value}» не разбирается Postgres: по нему сверяются живые                              имена, и роль молча перестала бы считать")));
                     }
                     if let Err(e) = regex::Regex::new(&value) {
-                        return refusal(Miss::Db(format!(
+                        return refusal(Miss::Refused(format!(
                             "образец «{value}» не разбирается Rust: по нему строят проекции.                              {e}. Помните про расхождение движков: `\\b` в Postgres — не граница                              слова, а `\\y`")));
                     }
                 }
@@ -2110,7 +2116,7 @@ impl Mcp {
                     )
                     .await;
                 let Ok(tables) = tables else {
-                    return refusal(Miss::Db("перечень таблиц не читается".into()));
+                    return refusal(Miss::Refused("перечень таблиц не читается".into()));
                 };
                 let mut found: Vec<Value> = Vec::new();
                 let mut gone = 0i64;
@@ -2169,7 +2175,7 @@ impl Mcp {
                 let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
                 let (surface, kind, name) = (g("surface"), g("entityKind"), g("entityName"));
                 if surface.trim().is_empty() || kind.trim().is_empty() {
-                    return refusal(Miss::Db("источник без поверхности или без вида не объявляется".into()));
+                    return refusal(Miss::Refused("источник без поверхности или без вида не объявляется".into()));
                 }
                 let drop = args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false);
                 let client = self.pool.get().await.expect("пул отдал соединение");
@@ -2202,7 +2208,7 @@ impl Mcp {
                 let closes = args.get("closes").and_then(|v| v.as_str()).unwrap_or("");
                 let drop = args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false);
                 if rule.is_empty() || id.is_empty() {
-                    return refusal(Miss::Db("исключение без правила или без сущности не объявляется".into()));
+                    return refusal(Miss::Refused("исключение без правила или без сущности не объявляется".into()));
                 }
 
                 // ПРАВИЛО ОБЯЗАНО ЧИТАТЬ ИСКЛЮЧЕНИЯ. Дверь отвечала «written: 1»
@@ -2257,7 +2263,7 @@ impl Mcp {
                                     )
                                 })
                             });
-                        return refusal(Miss::Db(под_именем.unwrap_or_else(|| format!(
+                        return refusal(Miss::Refused(под_именем.unwrap_or_else(|| format!(
                             "правило «{rule}» исключений не читает: ни один пункт гейта не соединяет \
                              свой запрос с `rule_exception` по этому имени. Записанное здесь исчезло бы \
                              без следа. Сперва научите пункт читать исключения — потом объявляйте."
@@ -2265,7 +2271,7 @@ impl Mcp {
                     }
                 }
                 if reason.trim().is_empty() && !drop {
-                    return refusal(Miss::Db("исключение без причины — это дыра с разрешением, а не решение".into()));
+                    return refusal(Miss::Refused("исключение без причины — это дыра с разрешением, а не решение".into()));
                 }
                 // КЛЮЧ ПРОВЕРЯЕТСЯ ОТВЕТОМ ПРАВИЛА, а не формой.
                 //
@@ -2282,7 +2288,7 @@ impl Mcp {
                 // судит пробу, и он не зависит от того, из чего ключ склеен.
                 if !drop {
                     match crate::projector::exception_changes_answer(&self.pool, p, rule, id).await {
-                        Ok(Some(что)) => return refusal(Miss::Db(что)),
+                        Ok(Some(что)) => return refusal(Miss::Refused(что)),
                         Ok(None) => {}
                         Err(e) => return refusal(Miss::Db(crate::projector::db_says(&e))),
                     }
@@ -2347,7 +2353,7 @@ impl Mcp {
                 let who = args.get("principal").and_then(|v| v.as_str()).unwrap_or("");
                 let note = args.get("note").and_then(|v| v.as_str());
                 let drop = args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false);
-                if who.is_empty() { return refusal(Miss::Db("человек не назван".into())); }
+                if who.is_empty() { return refusal(Miss::Refused("человек не назван".into())); }
                 match crate::projector::allow_principal(&self.pool, who, note, drop, &self.author).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(Miss::Db(e.to_string())),
@@ -2366,7 +2372,7 @@ impl Mcp {
             },
             "version-freeze" => {
                 let v = args.get("version").and_then(|x| x.as_str()).unwrap_or("");
-                if v.is_empty() { return refusal(Miss::Db("выпуск не назван".into())); }
+                if v.is_empty() { return refusal(Miss::Refused("выпуск не назван".into())); }
                 match crate::projector::freeze_version(&self.pool, p, v, &self.author).await {
                     Ok(x) => ok(x),
                     Err(e) => refusal(Miss::Db(e.to_string())),
@@ -2374,7 +2380,7 @@ impl Mcp {
             }
             "version-delta" => {
                 let v = args.get("version").and_then(|x| x.as_str()).unwrap_or("");
-                if v.is_empty() { return refusal(Miss::Db("выпуск не назван".into())); }
+                if v.is_empty() { return refusal(Miss::Refused("выпуск не назван".into())); }
                 match crate::projector::version_delta(&self.pool, p, v).await {
                     Ok(x) => ok(x),
                     Err(e) => refusal(Miss::Db(e.to_string())),
@@ -2385,7 +2391,7 @@ impl Mcp {
                 let body = args.get("body").and_then(|v| v.as_str()).unwrap_or("");
                 let set = args.get("set").and_then(|v| v.as_str()).unwrap_or("godzy");
                 if name.is_empty() || body.is_empty() {
-                    return refusal(Miss::Db("субагент без имени или без тела не записывается".into()));
+                    return refusal(Miss::Refused("субагент без имени или без тела не записывается".into()));
                 }
                 match crate::projector::set_agent(&self.pool, set, name,
                         args.get("description").and_then(|v| v.as_str()), body,
@@ -2401,7 +2407,7 @@ impl Mcp {
                 let set = args.get("set").and_then(|v| v.as_str()).unwrap_or("godzy");
                 let description = args.get("description").and_then(|v| v.as_str());
                 if name.is_empty() || body.is_empty() {
-                    return refusal(Miss::Db("скилл без имени или без тела не записывается".into()));
+                    return refusal(Miss::Refused("скилл без имени или без тела не записывается".into()));
                 }
                 // Умение и субагент законно носят одно имя: `godzy-preflight` —
                 // и процедура, которой следует сессия, и работник, которого
@@ -2427,7 +2433,7 @@ impl Mcp {
                 let screen = args.get("screen").and_then(|v| v.as_str()).unwrap_or("");
                 let area = args.get("area").and_then(|v| v.as_str()).unwrap_or("");
                 if screen.is_empty() {
-                    return refusal(Miss::Db("область ставится экрану; экран не назван".into()));
+                    return refusal(Miss::Refused("область ставится экрану; экран не назван".into()));
                 }
                 match crate::projector::set_screen_area(&self.pool, p, screen, area, args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
                     Ok(v) => ok(v),
@@ -2499,7 +2505,7 @@ impl Mcp {
                 let owner = args.get("owner").and_then(|v| v.as_str());
                 let probe = args.get("probe").and_then(|v| v.as_str());
                 if phase.is_empty() || id.is_empty() {
-                    return refusal(Miss::Db(
+                    return refusal(Miss::Refused(
                         "пункт гейта без фазы или без имени не заводится: `id` адресует пункт, `item` его объясняет".into()));
                 }
                 match crate::projector::set_gate_item(&self.pool, p, phase, id, item, gk, query, owner,
@@ -2556,6 +2562,25 @@ impl Mcp {
                 Ok(v) => ok(v),
                 Err(e) => refusal(Miss::Db(e.to_string())),
             },
+            "what-if" => {
+                let tool = args.get("tool").and_then(|v| v.as_str()).unwrap_or("").trim().to_owned();
+                if tool.is_empty() {
+                    return refusal(Miss::Refused("примерять нечего: не названа дверь".into()));
+                }
+                // Примерка внутри примерки — копия копии: десятки секунд на
+                // каждом уровне и ни одного нового ответа.
+                if tool == "what-if" {
+                    return refusal(Miss::Refused(
+                        "примерка примерки — это копия копии: ответ тот же, цена вдвое".into()));
+                }
+                let inner = args.get("args").cloned().unwrap_or_else(|| json!({}));
+                match crate::projector::what_if(
+                    &self.pool, &self.kinds, p, &self.author, &tool, &inner).await
+                {
+                    Ok(v) => ok(v),
+                    Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
+                }
+            }
             "next-task" => match crate::projector::next_task(&self.pool, p).await {
                 Ok(v) => ok(v),
                 Err(e) => refusal(Miss::Db(e.to_string())),
@@ -3018,7 +3043,7 @@ impl Mcp {
                 &self.pool, &self.project, kind, id.unwrap_or(kind), revision, &self.author, &event,
             ).await {
                 // Летопись, промолчавшая об ошибке, — та же потеря следа.
-                return refusal(Miss::Db(format!("правка принята, но след не записан: {e}")));
+                return refusal(Miss::Refused(format!("правка принята, но след не записан: {e}")));
             }
             // Отложенная пересборка — для правки МНОГИХ документов подряд: она идёт
             // по всему набору, и делать её после каждой из восьмидесяти записей

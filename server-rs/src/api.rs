@@ -116,6 +116,7 @@ impl From<Miss> for Failure {
             Miss::NoKind(k) => Failure::NoKind(k),
             Miss::NoEntity(k, id) => Failure::NoEntity(k, id),
             Miss::Unprojected(k) => Failure::Unprojected(k),
+            Miss::Refused(почему) => Failure::Upstream(почему),
             Miss::Db(e) => Failure::Upstream(e),
         }
     }

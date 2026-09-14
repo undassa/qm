@@ -130,6 +130,43 @@ async fn main() {
         return;
     }
 
+    // Подкоманда `call`: любая дверь, позванная одним прогоном. Затем же, зачем
+    // `rebuild` и `reproject`, — прогнать её отдельно от сети и посмотреть, что
+    // она даёт, не поднимая сервер и не трогая работающий.
+    //
+    // Сборщик сюда не доезжает: подкоманды возвращаются до `watch::spawn`, и
+    // второй пересчёт наперегонки с боевым не заводится.
+    if std::env::args().nth(1).as_deref() == Some("call") {
+        let project = std::env::var("MH_PROJECT").unwrap_or_default();
+        let Some(name) = std::env::args().nth(2) else {
+            eprintln!("mh-server call: не названа дверь");
+            std::process::exit(2);
+        };
+        let args = match std::env::args().nth(3) {
+            None => serde_json::json!({}),
+            Some(текст) => match serde_json::from_str(&текст) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("mh-server call: доводы не разбираются как JSON: {e}");
+                    std::process::exit(2);
+                }
+            },
+        };
+        let out = mcp::Mcp {
+            pool: app.pool.clone(),
+            kinds: app.kinds.clone(),
+            project,
+            author: "cli".into(),
+        }
+        .call(&name, &args)
+        .await;
+        println!("{}", out["content"][0]["text"].as_str().unwrap_or(""));
+        if out["isError"] == serde_json::json!(true) {
+            std::process::exit(1);
+        }
+        return;
+    }
+
     // Подкоманда `rebuild`: собственные проекции сервера, без записи документа.
     // Нужна затем же, зачем `parse-check`, — прогнать сборку отдельно от правки
     // и посмотреть, что она даёт.

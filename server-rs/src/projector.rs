@@ -147,14 +147,24 @@ CREATE VIEW gate_state AS
 --
 -- Гейт, о котором замеров нет, держит по той же причине: `coalesce` называет
 -- его `open`, а не пропускает молча.
+--
+-- НАБОР ЗДЕСЬ — НЕ СТРОКА В `projects`. Вид стоял `FROM projects`, и примерка,
+-- копирующая набор под именем, которого среди проектов нет, получала ноль фаз:
+-- все семьдесят восемь закрытых задач читались как «вид задачи не отображён ни
+-- на одну фазу», и примерка на ПУСТОЙ правке показывала семьдесят семь находок,
+-- которых нет. Набор — это то, о чём есть замеры; строка в `projects` говорит
+-- лишь, что набор показывают человеку и тянет сборщик.
 CREATE VIEW phase_open AS
-  SELECT pr.id AS project_id, ph.id AS phase, ph.ord, ph.gate, ph.task_kind,
+  SELECT н.project_id, ph.id AS phase, ph.ord, ph.gate, ph.task_kind,
          NOT EXISTS (SELECT 1 FROM phase p2
                       WHERE p2.ord < ph.ord
                         AND coalesce((SELECT s.computed FROM gate_state s
-                                       WHERE s.project_id = pr.id AND s.gate = p2.gate),
+                                       WHERE s.project_id = н.project_id AND s.gate = p2.gate),
                                      'open') <> 'passed') AS open
-    FROM projects pr CROSS JOIN phase ph;
+    FROM (SELECT id AS project_id FROM projects
+           UNION
+          SELECT DISTINCT project_id FROM project_gates WHERE project_id <> '') н
+    CROSS JOIN phase ph;
 
 -- Задача и её фаза. Отображение объявлено записью — `phase.task_kind`, дверь
 -- `phase-set`, — а не прозой плана.
@@ -1926,7 +1936,31 @@ BEGIN
   IF откуда = куда THEN
     RAISE EXCEPTION 'копировать набор в себя же нечем: имена совпали (%)', откуда;
   END IF;
+  -- ПОРЯДОК ВСТАВКИ — ПО ВНЕШНИМ КЛЮЧАМ, А НЕ ПО АЛФАВИТУ.
+  --
+  -- `project_document_blocks` ссылается на `project_documents`, а по имени идёт
+  -- раньше: обход в алфавитном порядке клал ребёнка прежде родителя и падал на
+  -- ключе, не скопировав ничего. Глубина считается от таблиц, ни на кого не
+  -- ссылающихся; `уровень < 10` — не глубина схемы (она три), а обрыв на случай
+  -- кольца: кольцо в ключах свалило бы примерку бесконечным обходом.
   FOR t IN
+    WITH RECURSIVE ссылка AS (
+      SELECT DISTINCT c.conrelid AS дитя, c.confrelid AS предок
+        FROM pg_constraint c
+       WHERE c.contype = 'f' AND c.conrelid <> c.confrelid
+         AND c.connamespace = 'public'::regnamespace
+    ), глубина AS (
+      SELECT k.oid AS таблица, 0 AS уровень
+        FROM pg_class k JOIN pg_namespace n ON n.oid = k.relnamespace
+       WHERE k.relkind = 'r' AND n.nspname = 'public'
+      UNION ALL
+      SELECT s.дитя, г.уровень + 1
+        FROM глубина г JOIN ссылка s ON s.предок = г.таблица
+       WHERE г.уровень < 10
+    ), порядок AS (
+      SELECT (таблица::regclass)::text AS имя, max(уровень) AS уровень
+        FROM глубина GROUP BY 1
+    )
     SELECT c.table_name AS имя,
            string_agg(quote_ident(c.column_name), ', ' ORDER BY c.ordinal_position) AS колонки,
            string_agg(CASE WHEN c.column_name = 'project_id' THEN quote_literal(куда)
@@ -1935,10 +1969,12 @@ BEGIN
       JOIN information_schema.tables tb
         ON tb.table_schema = c.table_schema AND tb.table_name = c.table_name
        AND tb.table_type = 'BASE TABLE'
+      LEFT JOIN порядок п ON п.имя = c.table_name
      WHERE c.table_schema = 'public'
        AND coalesce(c.column_default, '') NOT LIKE 'nextval%'
-     GROUP BY c.table_name
+     GROUP BY c.table_name, п.уровень
     HAVING bool_or(c.column_name = 'project_id')
+     ORDER BY coalesce(п.уровень, 0), c.table_name
   LOOP
     EXECUTE format('INSERT INTO %I (%s) SELECT %s FROM %I WHERE project_id = $1',
                    t.имя, t.колонки, t.отбор, t.имя)
@@ -12798,4 +12834,187 @@ pub async fn blocks(
         })
         .collect();
     Ok(json!({ "count": out.len(), "blocks": out }))
+}
+
+/// Примерка: набор копируется, правка кладётся в копию, гейт меряется по ней.
+///
+/// Харнес силён в «правильно ли сейчас» и нем в «будет ли правильно, если я
+/// сделаю так». Агент правит вслепую и цену узнаёт после — отсюда и реестр
+/// вопросов, работающий переполнением: спросить дешевле, чем проверить.
+///
+/// Сравнивается не с «сейчас», а с самой копией ДО правки: замеры приезжают
+/// вместе с ней, и обе стороны сравнения посчитаны одним кругом одного кода.
+/// Свежесть при этом не выдумывается — несвежее «до» названо словом.
+pub async fn what_if(
+    pool: &Pool,
+    kinds: &std::sync::Arc<crate::kinds::Kinds>,
+    project: &str,
+    author: &str,
+    tool: &str,
+    args: &Value,
+) -> Result<Value, tokio_postgres::Error> {
+    let копия = format!("примерка·{project}·{}", now_ms());
+    let сделано = примерить(pool, kinds, project, &копия, author, tool, args).await;
+    // КОПИЯ СНИМАЕТСЯ ВСЕГДА, и число снятого называется: молчаливая уборка,
+    // которая не отработала, оставляет набор-призрак в каждой таблице сразу.
+    let убрано = забыть(pool, &копия).await;
+    let mut ответ = сделано?;
+    match убрано {
+        Ok(n) => ответ["снято строк копии"] = json!(n),
+        Err(e) => {
+            tracing::warn!("примерка не убралась за собой: копия {копия}, {}", db_says(&e));
+            ответ["копия осталась"] = json!(копия);
+            ответ["почему осталась"] = json!(db_says(&e));
+        }
+    }
+    Ok(ответ)
+}
+
+async fn забыть(pool: &Pool, копия: &str) -> Result<i64, tokio_postgres::Error> {
+    let client = pool.get().await.expect("пул отдал соединение");
+    Ok(client.query_one("SELECT project_forget($1)", &[&копия]).await?.get(0))
+}
+
+async fn примерить(
+    pool: &Pool,
+    kinds: &std::sync::Arc<crate::kinds::Kinds>,
+    project: &str,
+    копия: &str,
+    author: &str,
+    tool: &str,
+    args: &Value,
+) -> Result<Value, tokio_postgres::Error> {
+    let начало = std::time::Instant::now();
+    let строк: i64 = {
+        let client = pool.get().await.expect("пул отдал соединение");
+        client.query_one("SELECT project_copy($1, $2)", &[&project, &копия]).await?.get(0)
+    };
+    // ОТМЕТКА «НАДО ПЕРЕСЧИТАТЬ» КОПИИ НЕ НАСЛЕДУЕТСЯ.
+    //
+    // Она копируется вместе с набором, и сборщик — увидев её — берётся считать
+    // копию наперегонки с примеркой, ради которой копия и заведена. Хуже того,
+    // дописывает он её ПОСЛЕ снятия: остаётся набор-призрак, которого нет среди
+    // проектов и который уже никто не уберёт. Так и вышло дважды, пока сборщик
+    // не научили брать только настоящие наборы. Учить его было правильно; не
+    // оставлять ему повода — дешевле, и одно другому не мешает.
+    {
+        let client = pool.get().await.expect("пул отдал соединение");
+        client.execute("DELETE FROM gate_dirty WHERE project_id = $1", &[&копия]).await?;
+    }
+    let до = снимок_гейта(pool, копия).await?;
+
+    // Дверь зовётся по копии ТЕМ ЖЕ кодом: у примерки нет своей ветки, которая
+    // могла бы разойтись с настоящей. Имя набора — единственное, что меняется.
+    // Будущее кладётся в короб: `call` зовёт примерку, примерка зовёт `call`, и
+    // без короба у состояния этой цепочки нет конечного размера.
+    let дверь = crate::mcp::Mcp {
+        pool: pool.clone(),
+        kinds: kinds.clone(),
+        project: копия.to_owned(),
+        author: author.to_owned(),
+    };
+    let ответ_двери = Box::pin(дверь.call(tool, args)).await;
+    let отказ = ответ_двери.get("isError").and_then(Value::as_bool).unwrap_or(false);
+    // Дверь отвечает подробно, и подробность её — о копии: счёт проекций копии
+    // никому не нужен, а читать примерку мешает. Берётся слово исхода, а при
+    // отказе — весь довод, потому что довод и есть ответ.
+    let полностью = ответ_двери["content"][0]["text"].as_str().unwrap_or("").to_owned();
+    let сказано = serde_json::from_str::<Value>(&полностью)
+        .ok()
+        .and_then(|v| v["status"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| полностью.clone());
+    if отказ {
+        return Ok(json!({
+            "примерено": false, "дверь": tool, "отказ": полностью,
+            "почему": "дверь отказала на копии — на подлиннике отказала бы так же, \
+                       и мерить нечего",
+        }));
+    }
+
+    crate::reproject::reproject(pool, копия).await?;
+    rebuild_before(pool, копия).await?;
+    rebuild(pool, копия).await?;
+    // Порядок тот же, что у сборщика: проекции, гейты, лестница, фазы.
+    measure_gates(pool, копия).await?;
+    measure_process(pool, копия, author, author).await?;
+    measure_phases(pool, копия).await?;
+    let после = снимок_гейта(pool, копия).await?;
+
+    let mut стало_красным = Vec::new();
+    let mut погасло = Vec::new();
+    let mut сдвинулось = Vec::new();
+    let mut не_с_чем_сравнить = Vec::new();
+    for ((фаза, пункт), (было, было_найдено, _)) in &до {
+        let Some((стало, стало_найдено, чем)) = после.get(&(фаза.clone(), пункт.clone())) else {
+            continue;
+        };
+        let имя = format!("{фаза} · {пункт}");
+        // НЕСВЕЖЕЕ «ДО» НЕ СРАВНИВАЕТСЯ, А НАЗЫВАЕТСЯ. Пункт, у которого до
+        // правки не было ответа, после неё покажется покрасневшим от неё — хотя
+        // краснел он и без всякой правки. Одной оговорки внизу мало: находка
+        // уже прочитана к тому месту, где она опровергается.
+        if было == "unknown" || было == "stale" {
+            не_с_чем_сравнить.push(json!({ "пункт": имя, "до правки": было,
+                                           "после": стало, "находок после": стало_найдено }));
+            continue;
+        }
+        match (было.as_str(), стало.as_str()) {
+            (_, "failed") if было != "failed" => {
+                стало_красным.push(json!({ "пункт": имя, "находок": стало_найдено, "чем": чем }))
+            }
+            ("failed", "passed") => погасло.push(json!({ "пункт": имя })),
+            ("failed", "failed") if было_найдено != стало_найдено => сдвинулось.push(json!({
+                "пункт": имя, "было": было_найдено, "стало": стало_найдено })),
+            _ => {}
+        }
+    }
+    // НОВЫЙ ПУНКТ — ТОЖЕ ИСХОД. Правка, заводящая сущность нового вида, приносит
+    // с ней и пункты, которых у набора не было: без этого они прошли бы молча.
+    for ((фаза, пункт), (стало, найдено, чем)) in &после {
+        if стало == "failed" && !до.contains_key(&(фаза.clone(), пункт.clone())) {
+            стало_красным.push(json!({ "пункт": format!("{фаза} · {пункт}"),
+                                       "находок": найдено, "чем": чем, "пункт новый": true }));
+        }
+    }
+
+    Ok(json!({
+        "примерено": true,
+        "дверь": tool,
+        "сказала": сказано,
+        "стало красным": стало_красным,
+        "погасло": погасло,
+        "сдвинулось": сдвинулось,
+        "цена": {
+            "строк скопировано": строк,
+            "мс": начало.elapsed().as_millis() as i64,
+        },
+        "не с чем сравнить": не_с_чем_сравнить,
+    }))
+}
+
+async fn снимок_гейта(
+    pool: &Pool,
+    project: &str,
+) -> Result<std::collections::HashMap<(String, String), (String, String, String)>, tokio_postgres::Error>
+{
+    let client = pool.get().await.expect("пул отдал соединение");
+    let rows = client
+        .query(
+            // Имена находок приезжают вместе со счётом: «покраснел пункт, находок
+            // три» не говорит, ЧТО чинить, а примерка затем и заводится, чтобы
+            // сказать это до правки. Берутся первые три — перечень целиком
+            // бывает в сотни строк и хоронит ответ.
+            "SELECT phase, item, coalesce(result->>'computed', 'unknown'),
+                    coalesce(result->>'violations', ''),
+                    coalesce((SELECT string_agg(д, ' | ')
+                                FROM (SELECT jsonb_array_elements_text(result->'detail') AS д
+                                       LIMIT 3) x), '')
+               FROM project_gates WHERE project_id = $1",
+            &[&project],
+        )
+        .await?;
+    Ok(rows
+        .iter()
+        .map(|r| ((r.get(0), r.get(1)), (r.get(2), r.get(3), r.get(4))))
+        .collect())
 }

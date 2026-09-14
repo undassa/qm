@@ -76,8 +76,15 @@ async fn round(pool: &Pool) -> Result<(), tokio_postgres::Error> {
     let client = pool.get().await.expect("пул отдал соединение");
     let due = client
         .query(
-            "SELECT project_id, dirty_at, reason FROM gate_dirty
-              WHERE ran_at IS NULL OR dirty_at > ran_at",
+            // ТОЛЬКО НАСТОЯЩИЕ НАБОРЫ. Отметка ставится по имени набора, а имя
+            // бывает и не набором: примерка копирует набор под своим именем, и
+            // вместе с ним — эту отметку. Сборщик подхватил бы копию и пересобрал
+            // её ВТОРЫМ кругом, наперегонки с той примеркой, ради которой она и
+            // заведена. То же и с остатками оборвавшегося прогона: работать по
+            // ним значит тратить время на набор, которого нет.
+            "SELECT d.project_id, d.dirty_at, d.reason FROM gate_dirty d
+              WHERE (d.ran_at IS NULL OR d.dirty_at > d.ran_at)
+                AND EXISTS (SELECT 1 FROM projects p WHERE p.id = d.project_id)",
             &[],
         )
         .await?;
