@@ -786,6 +786,22 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
                 .filter_map(|p| p.split_once('='))
                 .map(|(a, b)| (a.trim(), b.trim()))
                 .collect();
+            let contract_enums_early = files
+                .iter()
+                .filter(|f| f.ends_with(".yaml") || f.ends_with(".yml"))
+                .filter_map(|f| std::fs::read_to_string(f).ok())
+                .map(|t| crate::repo_corpus::contract_enums(&crate::yaml::parse(&t)))
+                .fold(Vec::new(), |mut a, b| { a.extend(b); a });
+            let pairs = crate::repo_corpus::pair(&enums, &checks, &contract_enums_early, &forced);
+            // Тем же проходом — значения без пути: они опираются на ту же пару,
+            // и считать их отдельно значило бы завести вторую правду о паре.
+            let checks_tables: Vec<crate::repo_corpus::Table> = crate::repo_corpus::schema_of(
+                &files
+                    .iter()
+                    .filter(|f| f.ends_with(".sql"))
+                    .filter_map(|f| std::fs::read_to_string(f).ok())
+                    .collect::<Vec<String>>(),
+            );
             let contract_enums = files
                 .iter()
                 .filter(|f| f.ends_with(".yaml") || f.ends_with(".yml"))
@@ -795,15 +811,7 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
                     a.extend(b);
                     a
                 });
-            let checks_tables: Vec<crate::repo_corpus::Table> = crate::repo_corpus::schema_of(
-                &files
-                    .iter()
-                    .filter(|f| f.ends_with(".sql"))
-                    .filter_map(|f| std::fs::read_to_string(f).ok())
-                    .collect::<Vec<String>>(),
-            );
-            let mut pairs =
-                crate::repo_corpus::pair(&enums, &checks, &contract_enums, &forced, &checks_tables);
+            let mut pairs = pairs;
             // Полнота разбора считается тем же проходом: корпус, разобранный
             // наполовину, даёт зелёное всем правилам разом.
             for f in files.iter().filter(|f| f.ends_with(".yaml") || f.ends_with(".yml")) {
@@ -812,10 +820,8 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
                     pairs.extend(crate::repo_corpus::corpus_reach(&text, &doc, &enums, &checks_tables));
                 }
             }
-            // Тем же проходом — значения без пути: они опираются на ту же пару,
-            // и считать их отдельно значило бы завести вторую правду о паре.
             pairs.extend(crate::repo_corpus::check_values_without_path(
-                &enums, &checks, &contract_enums, &forced, &checks_tables));
+                &enums, &checks, &contract_enums, &forced));
             let facts: Vec<Value> = pairs
                 .iter()
                 .map(|p| json!({ "name": p.name, "detail": p.detail }))
@@ -881,12 +887,12 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
                 continue;
             }
             if how == "secret-fields" {
-                for (decl, field, ty) in secret_fields(&text, re) {
+                for (decl, field) in secret_fields(&text, re) {
                     // Ключ несёт путь: `Target.url` встречается в двух файлах
                     // разными типами, и одно исключение сняло бы оба разом.
                     let key = format!("{short}#{decl}.{field}");
                     if seen.insert(key.clone()) {
-                        names.push((key, format!("голым под derive(Debug), тип {ty}")));
+                        names.push((key, format!("голым под derive(Debug), тип не Secret<>")));
                     }
                 }
                 continue;
@@ -927,9 +933,8 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
 ///
 /// Не образец, а обход: между `derive` и объявлением стоят другие атрибуты и
 /// комментарии, а поле надо смотреть внутри тела — regex такого не выражает.
-/// `field_re` — чем узнаётся секрето-подобное имя; подозрение снимает тип, не
-/// являющийся сырой строкой (`Secret<…>`, `StoredToken`, newtype), потому что он
-/// и есть ответ на него.
+/// `field_re` — чем узнаётся секрето-подобное имя; обёртка `Secret<…>` снимает
+/// подозрение, потому что она и есть ответ на него.
 /// Строка подходит под образец. Ошибка в образце не молчит: она отвечает «нет»
 /// на каждую строку, и датчик подал бы пустоту как «ничего не найдено».
 fn suspect_line(re: &str, line: &str) -> bool {
@@ -941,28 +946,7 @@ fn suspect_line(re: &str, line: &str) -> bool {
     entry.as_ref().map(|r| r.is_match(line)).unwrap_or(false)
 }
 
-fn bare_type(ty: &str) -> String {
-    ty.split("//").next().unwrap_or("").trim().trim_end_matches(',').trim().to_owned()
-}
-
-fn raw_string(ty: &str) -> bool {
-    let mut t = ty.trim();
-    while let Some(inner) = ["Option<", "Box<", "Vec<"]
-        .iter()
-        .find_map(|w| t.strip_prefix(w)?.strip_suffix('>'))
-    {
-        t = inner.trim();
-    }
-    if let Some(r) = t.strip_prefix('&') {
-        t = r.trim_start();
-        if t.starts_with('\'') {
-            t = t.split_once(' ').map(|(_, r)| r.trim()).unwrap_or("");
-        }
-    }
-    matches!(t, "String" | "str" | "Url" | "url::Url" | "Uri") || (t.starts_with("Cow<") && t.ends_with("str>"))
-}
-
-fn secret_fields(text: &str, field_re: &str) -> Vec<(String, String, String)> {
+fn secret_fields(text: &str, field_re: &str) -> Vec<(String, String)> {
     let Ok(suspect) = regex::Regex::new(if field_re.trim().is_empty() {
         r"(?i)\b(token|secret|password|passwd|api_?key|credential|private_?key)\b"
     } else {
@@ -1012,16 +996,16 @@ fn secret_fields(text: &str, field_re: &str) -> Vec<(String, String, String)> {
             if let Some(v) = variant.captures(lines[k]) {
                 for part in v[1].split(',') {
                     if let Some(f) = field.captures(part) {
-                        let (fname, ftype) = (f[1].to_owned(), bare_type(&f[2]));
-                        if suspect.is_match(&fname) && raw_string(&ftype) {
-                            out.push((owner.clone(), fname, ftype));
+                        let (fname, ftype) = (f[1].to_owned(), f[2].to_owned());
+                        if suspect.is_match(&fname) && !ftype.contains("Secret<") {
+                            out.push((owner.clone(), fname));
                         }
                     }
                 }
             } else if let Some(f) = field.captures(lines[k]) {
-                let (fname, ftype) = (f[1].to_owned(), bare_type(&f[2]));
-                if suspect.is_match(&fname) && raw_string(&ftype) {
-                    out.push((owner.clone(), fname, ftype));
+                let (fname, ftype) = (f[1].to_owned(), f[2].to_owned());
+                if suspect.is_match(&fname) && !ftype.contains("Secret<") {
+                    out.push((owner.clone(), fname));
                 }
             }
             k += 1;
@@ -1476,30 +1460,5 @@ pub fn unrelated() -> u8 { 1 }
         // названное докблоком, считалось не названным нигде.
         let v = holder_verdict(Some(С_ПРОВЕРКОЙ), "FR-ESC-06");
         assert!(v.is_none(), "докблок снова не читается: {v:?}");
-    }
-}
-
-#[cfg(test)]
-mod секреты {
-    use super::secret_fields;
-
-    const RS: &str = r#"
-#[derive(Debug)]
-pub struct Target {
-    pub url: Option<String>, // адрес вебхука
-    pub public_url: PublicUrl,
-}
-
-#[derive(Debug)]
-pub struct Issued {
-    pub token: StoredToken,
-    pub token_hash: Secret<String>,
-}
-"#;
-
-    #[test]
-    fn подозрительна_только_сырая_строка() {
-        let found = secret_fields(RS, r"(?i)(^|_)(url|token)($|_)");
-        assert_eq!(found, vec![("Target".to_owned(), "url".to_owned(), "Option<String>".to_owned())]);
     }
 }
