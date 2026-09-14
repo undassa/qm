@@ -3104,12 +3104,16 @@ pub async fn rebuild(pool: &Pool, project: &str) -> Result<Value, tokio_postgres
     )
     .await?;
     // Переделанное снимается: закрыта заново, коммитом позже замеченного долга.
+    // Вместе с ним уходит и долг задачи, которой в плане больше нет: переделывать
+    // нечего, а запись жила бы вечно — плана она не касается и ничем не гасится.
     tx.execute(
         "DELETE FROM task_redo r
           WHERE r.project_id = $1
-            AND EXISTS (SELECT 1 FROM task_state ts
-                         WHERE ts.project_id = r.project_id AND ts.task_id = r.task_id
-                           AND ts.state = 'closed' AND ts.closed_at > r.noticed_at)",
+            AND (EXISTS (SELECT 1 FROM task_state ts
+                          WHERE ts.project_id = r.project_id AND ts.task_id = r.task_id
+                            AND ts.state = 'closed' AND ts.closed_at > r.noticed_at)
+                 OR NOT EXISTS (SELECT 1 FROM project_plan_tasks t
+                                 WHERE t.project_id = r.project_id AND t.id = r.task_id))",
         &[&project],
     )
     .await?;
@@ -3633,7 +3637,22 @@ pub async fn next_task(pool: &Pool, project: &str) -> Result<Value, tokio_postgr
             "instead": шаг_вместо(pool, project).await?,
         }));
     }
-    Ok(json!({
+    // ДОЛГ ВИДЕН СРАЗУ, А НЕ В КОНЦЕ ОЧЕРЕДИ.
+    //
+    // Предъявлять переделки только когда незакрытых задач не осталось значит
+    // молчать о них ровно столько, сколько идёт работа: у `myack` это 99
+    // переделок за 122 задачами. Агент прошёл бы весь черёд и лишь потом узнал,
+    // что девяносто девять шагов надо повторить. Очередь они при этом не
+    // перехватывают — задача выдаётся та же; долг едет рядом числом и именами.
+    let долг = client
+        .query(
+            "SELECT r.task_id FROM task_redo r
+               JOIN task_phase tp ON tp.project_id = r.project_id AND tp.task_id = r.task_id
+              WHERE r.project_id = $1 AND tp.open IS TRUE ORDER BY r.task_id",
+            &[&project],
+        )
+        .await?;
+    let mut ответ = json!({
         "task": {
             "id": id,
             "milestone": r.get::<_, String>(1),
@@ -3645,7 +3664,17 @@ pub async fn next_task(pool: &Pool, project: &str) -> Result<Value, tokio_postgr
             "requirementText": r.get::<_, String>(9),
             "checks": r.get::<_, String>(10),
         }
-    }))
+    });
+    if !долг.is_empty() {
+        ответ["redo"] = json!({
+            "count": долг.len(),
+            "tasks": долг.iter().take(20).map(|r| r.get::<_, String>(0)).collect::<Vec<_>>(),
+            "why": "эти задачи закрыты не в свой черёд: их фаза тогда не была открыта, и то, на \
+                    что работа опиралась, ещё не стояло. Фаза открыта сейчас — переделать их \
+                    можно. Долг гасится НОВЫМ закрывающим коммитом, а не словом",
+        });
+    }
+    Ok(ответ)
 }
 
 /// Почему задача не берётся: перечень того, чего она ждёт.
