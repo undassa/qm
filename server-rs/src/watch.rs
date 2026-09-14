@@ -139,14 +139,17 @@ async fn round(pool: &Pool) -> Result<(), tokio_postgres::Error> {
         let spent = began.elapsed().as_millis() as i32;
         let retry_at = measured.is_err().then(|| crate::projector::now_ms() + RETRY_MS);
         let client = pool.get().await.expect("пул отдал соединение");
-        client
+        if let Err(e) = client
             .execute(
                 "UPDATE gate_dirty SET ran_at = $2, ran_ms = $3,
                         dirty_at = CASE WHEN $4::bigint IS NOT NULL AND dirty_at <= $2 THEN $4 ELSE dirty_at END
                   WHERE project_id = $1",
                 &[&project, &taken, &spent, &retry_at],
             )
-            .await?;
+            .await
+        {
+            tracing::warn!("отметка пересчёта набора {project} не записана: {e}");
+        }
         drop(client);
         match measured {
             Ok(out) => tracing::info!(

@@ -12262,9 +12262,19 @@ async fn лестница_держит(
         })));
     };
     let шаг = position(client, project, "godzy").await?;
-    if шаг["checkedAt"].is_null() {
+    if шаг["checkedAt"].is_null() || !шаг["openWork"].is_array() {
         return Ok(Some(json!({
-            "why": "положение лестницы ни разу не считали: держит ли она задачи, сказать нечем, и это не «можно всё»",
+            "why": "положение лестницы этим кодом ни разу не считали: держит ли она задачи, сказать нечем, и это не «можно всё»",
+        })));
+    }
+    let срывается = client
+        .query_opt("SELECT dirty_at > $2 FROM gate_dirty WHERE project_id = $1", &[&project, &now_ms()])
+        .await?
+        .is_some_and(|r| r.get::<_, bool>(0));
+    if срывается {
+        return Ok(Some(json!({
+            "why": "пересчёт набора срывается и ждёт повтора: положение лестницы устарело, и держит ли она задачи, сказать нечем",
+            "stale": true,
         })));
     }
     let красные_раньше: Vec<String> = client
@@ -12293,8 +12303,8 @@ async fn лестница_держит(
         "holdingCount": всего,
         "stale": шаг["stale"],
         "why": format!(
-            "лестница на ступени {}, владелец `{}`: «{}». Задачи не запрашиваются, пока лестница не \
-             дойдёт до {задачная}-й — сперва то, что держит ступень",
+            "ступень {} не пройдена, владелец `{}`: «{}». Задачи не запрашиваются, пока не пройдены все \
+             ступени до {задачная}-й — сперва то, что держит эта",
             ступень["ord"], ступень["owner"].as_str().unwrap_or(""), ступень["question"].as_str().unwrap_or("")),
     })))
 }
@@ -12334,19 +12344,31 @@ mod лестница {
     use serde_json::json;
 
     #[test]
-    fn свой_гейт_не_держит_а_следующая_красная_держит() {
-        let шаг = json!({ "unanswerable": [], "openWork": [
-            { "ord": 6, "state": "failed", "kind": "gate", "touches": "corpus", "violations": 1,
-              "detail": ["G4 · все задачи кода закрыты"] },
-            { "ord": 7, "state": "failed", "kind": "sensor", "touches": "repository", "violations": 1,
-              "detail": ["migration-table — молчит"] },
-            { "ord": 11, "state": "failed", "kind": "gate", "touches": "repository", "violations": 3 },
-        ]});
+    fn проваленная_корпусная_и_неотвечаемые_не_те_не_освобождают_красную() {
+        let шаг = json!({
+            "corpusPhaseOpen": true,
+            "unanswerable": [{ "ord": 7, "touches": "repository" }, { "ord": 12, "touches": "corpus" }],
+            "openWork": [
+                { "ord": 6, "state": "failed", "kind": "gate", "touches": "corpus", "violations": 1,
+                  "detail": ["G4 · все задачи кода закрыты"] },
+                { "ord": 8, "state": "failed", "kind": "milestone", "touches": "repository", "violations": 1,
+                  "detail": ["M3 — задач нет"] },
+            ],
+        });
         let (ступень, держат, всего) = держащая_ступень(&шаг, 9, &[]).unwrap();
-        assert_eq!(
-            (ступень["ord"].as_i64(), держат, всего),
-            (Some(7), vec!["migration-table — молчит".to_owned()], 1)
-        );
+        assert_eq!((ступень["ord"].as_i64(), держат, всего), (Some(8), vec!["M3 — задач нет".to_owned()], 1));
+    }
+
+    #[test]
+    fn ступени_от_задачной_не_держат() {
+        let шаг = json!({
+            "unanswerable": [],
+            "openWork": [
+                { "ord": 9, "state": "failed", "kind": "task", "touches": "repository", "violations": 3 },
+                { "ord": 11, "state": "failed", "kind": "gate", "touches": "repository", "violations": 2 },
+            ],
+        });
+        assert!(держащая_ступень(&шаг, 9, &["corpus · x".to_owned()]).is_none());
     }
 
     #[test]
@@ -12360,15 +12382,15 @@ mod лестница {
     }
 
     #[test]
-    fn репозиторная_после_неотвечаемой_корпусной_и_поздняя_не_держат() {
+    fn репозиторная_после_неотвечаемой_корпусной_не_держит() {
         let шаг = json!({
+            "corpusPhaseOpen": true,
             "unanswerable": [{ "ord": 4, "touches": "corpus" }],
             "openWork": [
                 { "ord": 8, "state": "failed", "kind": "milestone", "touches": "repository", "violations": 1 },
-                { "ord": 11, "state": "failed", "kind": "gate", "touches": "repository", "violations": 3 },
             ],
         });
-        assert!(держащая_ступень(&шаг, 9, &["corpus · x".to_owned()]).is_none());
+        assert!(держащая_ступень(&шаг, 9, &[]).is_none());
     }
 }
 
