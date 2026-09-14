@@ -3837,6 +3837,22 @@ pub async fn waive_gate_item(
     if known == 0 {
         return Ok(json!({ "status": "not_found", "why": format!("пункта «{item}» у гейта {phase} нет") }));
     }
+    let holds_while_empty = holds_while_empty.trim();
+    if holds_while_empty.is_empty() {
+        return Ok(json!({ "status": "no_condition",
+                          "why": "неприменимость — это установленное отсутствие сущностей, а не решение: назовите \
+                                  род фактов `holdsWhileEmpty`, который мерит датчик. Пока род пуст и датчик свеж, \
+                                  пункт пройден; появятся сущности — пункт мерится, и красное только чинится" }));
+    }
+    let present: i64 = client
+        .query_one("SELECT count(*) FROM code_fact WHERE project_id = $1 AND kind = $2", &[&project, &holds_while_empty])
+        .await?
+        .get(0);
+    if present > 0 {
+        return Ok(json!({ "status": "entities_present", "facts": present,
+                          "why": format!("сущностей рода «{holds_while_empty}» в проекте {present}: пункт к ним \
+                                          применим, и красное здесь только чинится") }));
+    }
     client.execute(
         "INSERT INTO gate_item_waiver (project_id, phase, id, item, why, declared_at, declared_by,
                                        holds_while_empty)
@@ -3872,18 +3888,23 @@ pub async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, tokio_po
         .query("SELECT phase, item, kind, query, why, owner, id, subject_query, subject_why, since
                   FROM gate_item ORDER BY phase, id", &[])
         .await?;
-    let waived: std::collections::HashSet<(String, String)> = client
-        .query("SELECT phase, id FROM gate_item_waiver WHERE project_id = $1", &[&project])
-        .await?
-        .iter()
-        .map(|r| (r.get::<_, String>(0), r.get::<_, String>(1)))
-        .collect();
+    // Отмена действует, только пока отсутствие сущностей УСТАНОВЛЕНО: датчик
+    // названного рода свеж и не нашёл ни одной. Появились сущности или датчик
+    // протух — пункт мерится как обычно, и красное только чинится.
     let why_waived: std::collections::HashMap<(String, String), String> = client
-        .query("SELECT phase, id, why FROM gate_item_waiver WHERE project_id = $1", &[&project])
+        .query(
+            "SELECT w.phase, w.id, w.why FROM gate_item_waiver w
+              WHERE w.project_id = $1 AND w.holds_while_empty <> ''
+                AND fact_fresh(w.project_id, w.holds_while_empty)
+                AND NOT EXISTS (SELECT 1 FROM code_fact f
+                                 WHERE f.project_id = w.project_id AND f.kind = w.holds_while_empty)",
+            &[&project],
+        )
         .await?
         .iter()
         .map(|r| ((r.get::<_, String>(0), r.get::<_, String>(1)), r.get::<_, String>(2)))
         .collect();
+    let waived: std::collections::HashSet<(String, String)> = why_waived.keys().cloned().collect();
     let now = now_ms();
     let mut measured = 0usize;
     let mut failed = 0usize;
