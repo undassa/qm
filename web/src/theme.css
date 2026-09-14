@@ -5004,3 +5004,11 @@ tbody:first-of-type .co-grp th { padding-top: 8px; }
   .wk-rev { grid-area: rev; text-align: left; }
   .wk-tl li { grid-template-columns: 44px minmax(0, 1fr) 54px; }
 }
+
+.mockup-view { margin: 0 0 18px; }
+.mockup-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 10px; }
+.mockup-bar button { font: inherit; padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: inherit; cursor: pointer; }
+.mockup-bar button.on { background: var(--ground); font-weight: 600; }
+.mockup-bar a { margin-left: auto; }
+.mockup-frame { display: block; width: 100%; height: 78vh; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+.mockup-frame.phone { width: 390px; max-width: 100%; margin: 0 auto; }

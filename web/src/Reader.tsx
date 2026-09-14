@@ -459,6 +459,8 @@ export function Reader({
               ) : body.get("")?.length ? (
                 // Документ без заголовков: делить нечего, показывается целиком.
                 <Blocks blocks={body.get("")!} />
+              ) : (entity as { format?: string }).format === "html" && kind?.kind === "mockup" ? (
+                <Mockup projectId={projectId} name={разбор(показан.current)[1]} lang={lang} />
               ) : entity.entity ? (
                 // Внутренняя сущность — строка предметной таблицы: текста у неё нет,
                 // и подставлять его неоткуда. Зато есть место, где она записана, и
@@ -550,6 +552,37 @@ export function Reader({
  * Пустые поля названы, но не показаны значениями: «поля нет» и «поле пустое» —
  * разное, и молчание про второе читается как первое.
  */
+/**
+ * Макет — живой страницей. Сервер отдаёт его в непрозрачном происхождении, а
+ * окно ещё и песочница: код прототипа исполняется, но до интерфейса, сервера и
+ * данных не дотягивается.
+ */
+function Mockup({ projectId, name, lang }: { projectId: string; name: string; lang: Lang }): React.JSX.Element {
+  const [phone, setPhone] = useState(false);
+  const src = `/api/projects/${encodeURIComponent(projectId)}/mockup/${name.split("/").map(encodeURIComponent).join("/")}`;
+  return (
+    <div className="mockup-view">
+      <div className="mockup-bar">
+        <button type="button" className={phone ? "" : "on"} onClick={() => setPhone(false)}>
+          {say(lang, "rr.mockScreen")}
+        </button>
+        <button type="button" className={phone ? "on" : ""} onClick={() => setPhone(true)}>
+          {say(lang, "rr.mockPhone")}
+        </button>
+        <a href={src} target="_blank" rel="noopener noreferrer">{say(lang, "rr.mockOpen")}</a>
+      </div>
+      <iframe
+        key={src}
+        className={`mockup-frame${phone ? " phone" : ""}`}
+        title={name}
+        src={src}
+        sandbox="allow-scripts allow-popups"
+        referrerPolicy="no-referrer"
+      />
+    </div>
+  );
+}
+
 function Row({ row, lang }: { row: Record<string, unknown>; lang: Lang }): React.JSX.Element {
   const where = String(row["entity_kind"] ?? "");
   const whereName = String(row["entity_name"] ?? "");

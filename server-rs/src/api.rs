@@ -8,7 +8,7 @@ use std::{sync::Arc, time::SystemTime};
 
 use axum::{
     extract::{Path, Query, Request, State},
-    http::StatusCode,
+    http::{header, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::get,
@@ -396,6 +396,45 @@ async fn read_entity(
     Ok(Json(if q.brief.as_deref() == Some("true") { entities::without_body(v) } else { v }))
 }
 
+/// Макет — живой страницей, но в чужом происхождении.
+///
+/// Прототип — исполняемый код, а всякий запрос из нашего окна уже вошёл. Заголовок
+/// `sandbox` делает страницу непрозрачным происхождением и во встроенном окне, и в
+/// отдельной вкладке: код прототипа работает, но до сервера и чужих данных не
+/// дотягивается. Сеть закрыта — собранному прототипу хватает `data:` и `blob:`, в
+/// которые он распаковывает себя сам. Исключение одно: картинки иконок с `unpkg.com`.
+/// Картинка ответа не читает и ничего не уносит, а данных у прототипа нет.
+const MOCKUP_CSP: &str = "sandbox allow-scripts allow-popups; default-src 'none'; \
+    script-src 'unsafe-inline' 'unsafe-eval' blob: data:; style-src 'unsafe-inline' blob: data:; \
+    img-src blob: data: https://unpkg.com; font-src blob: data:; connect-src blob: data:; media-src blob: data:; \
+    worker-src blob:; frame-src blob: data:; base-uri 'none'; form-action 'none'; \
+    frame-ancestors 'self'";
+
+async fn mockup(
+    State(app): State<App>,
+    Path((project, name)): Path<(String, String)>,
+) -> Result<Response, Failure> {
+    let content_type = match name.rsplit('.').next() {
+        Some("html") => "text/html; charset=utf-8",
+        Some("js") => "text/javascript; charset=utf-8",
+        _ => return Err(Failure::NoEntity("mockup".into(), name)),
+    };
+    let Some(document) = documents::read(&app.pool, &project, "mockup", &name).await? else {
+        return Err(Failure::NoEntity("mockup".into(), name));
+    };
+    Ok((
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CONTENT_SECURITY_POLICY, MOCKUP_CSP),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (header::REFERRER_POLICY, "no-referrer"),
+            (header::CACHE_CONTROL, "private, no-cache"),
+        ],
+        document.content,
+    )
+        .into_response())
+}
+
 async fn entity_sections(
     State(app): State<App>,
     Path(project): Path<String>,
@@ -593,6 +632,7 @@ pub fn routes(app: App) -> Router {
         .route("/api/projects/:project/entity/section", get(entity_section))
         .route("/api/projects/:project/entity/section", axum::routing::patch(put_entity_section))
         .route("/api/projects/:project/entity/backlinks", get(entity_backlinks))
+        .route("/api/projects/:project/mockup/*name", get(mockup))
         .layer(middleware::from_fn_with_state(app.clone(), require_identity))
         .layer(tower_http::catch_panic::CatchPanicLayer::custom(panic_response))
         .with_state(app)
