@@ -404,7 +404,7 @@ async fn read_entity(
 /// дотягивается. Сеть закрыта — собранному прототипу хватает `data:` и `blob:`, в
 /// которые он распаковывает себя сам. Исключение одно: картинки иконок с `unpkg.com`.
 /// Картинка ответа не читает и ничего не уносит, а данных у прототипа нет.
-const MOCKUP_CSP: &str = "sandbox allow-scripts allow-popups; default-src 'none'; \
+const MOCKUP_CSP: &str = "sandbox allow-scripts; default-src 'none'; \
     script-src 'unsafe-inline' 'unsafe-eval' blob: data:; style-src 'unsafe-inline' blob: data:; \
     img-src blob: data: https://unpkg.com; font-src blob: data:; connect-src blob: data:; media-src blob: data:; \
     worker-src blob:; frame-src blob: data:; base-uri 'none'; form-action 'none'; \

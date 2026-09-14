@@ -576,7 +576,7 @@ function Mockup({ projectId, name, lang }: { projectId: string; name: string; la
         className={`mockup-frame${phone ? " phone" : ""}`}
         title={name}
         src={src}
-        sandbox="allow-scripts allow-popups"
+        sandbox="allow-scripts"
         referrerPolicy="no-referrer"
       />
     </div>
