@@ -650,7 +650,6 @@ CREATE TABLE IF NOT EXISTS project_task_tree_leaf (
   exempt boolean NOT NULL DEFAULT false,
   PRIMARY KEY (project_id, task_id, ord));
 
-DROP TABLE IF EXISTS rule_exception;
 
 -- Вердикт предполёта знает ревизию, на которой получен: «предполёт устарел» —
 -- сравнение ревизий, а не память.
@@ -1834,7 +1833,6 @@ CREATE TABLE IF NOT EXISTS reproject_state (
   ok boolean NOT NULL,
   why text NOT NULL DEFAULT '');
 
-DROP TABLE IF EXISTS rule_ceiling;
 ALTER TABLE project_feature_requirements ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'declared';
 ALTER TABLE project_milestone_requirements ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'declared';
 ALTER TABLE project_screen_requirements ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'declared';
@@ -2552,7 +2550,6 @@ CREATE TABLE IF NOT EXISTS project_goal (
   origin text NOT NULL DEFAULT 'declared',
   PRIMARY KEY (project_id, id));
 
-DROP TABLE IF EXISTS gate_item_waiver;
 
 -- Словарь схемы: РОЛЬ, которую знает код, и ЗНАЧЕНИЕ, которым её зовёт набор.
 --
@@ -3808,25 +3805,27 @@ pub async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, tokio_po
         // непустым, пока отсутствие не установлено: датчик не свеж, сборка не
         // прогонялась. Есть сущности — пункт мерится, и красное только чинится.
         let subject: String = r.get(7);
-        let empty = if subject.trim().is_empty() {
-            false
+        let subject_rows = if subject.trim().is_empty() {
+            Ok(1)
         } else {
-            match client.query(subject.as_str(), &[&project]).await {
-                Ok(rows) => rows.is_empty(),
-                // Запрос предмета, который не исполнился, — не «предмет пуст».
-                Err(_) => false,
-            }
+            client.query(subject.as_str(), &[&project]).await.map(|rows| rows.len())
         };
-        let entry = if empty {
-            let w: String = r.get(8);
-            json!({ "item": item, "kind": kind, "computed": "passed",
-                    "violations": 0, "detail": [],
-                    "why": if w.trim().is_empty() {
-                        "сущностей пункта в проекте нет: проверять нечего".to_owned()
-                    } else { w },
-                    "means": r.get::<_, String>(4) })
-        } else {
-            measure_item(&client, project, &item, &kind, query.as_deref(), r).await?
+        let entry = match subject_rows {
+            Ok(0) => {
+                let w: String = r.get(8);
+                json!({ "item": item, "kind": kind, "computed": "passed",
+                        "violations": 0, "detail": [],
+                        "why": if w.trim().is_empty() {
+                            "сущностей пункта в проекте нет: проверять нечего".to_owned()
+                        } else { w },
+                        "means": r.get::<_, String>(4) })
+            }
+            Ok(_) => measure_item(&client, project, &item, &kind, query.as_deref(), r).await?,
+            // Запрос предмета, который не исполнился, — не «предмет пуст» и не
+            // повод мерить: транзакция после ошибки прервана до точки возврата.
+            Err(e) => json!({ "item": item, "kind": kind, "computed": "unknown",
+                              "why": format!("запрос предмета не исполнился: {}", db_says(&e)),
+                              "means": r.get::<_, String>(4) }),
         };
         // Откат ВСЕГДА: замер обязан только читать, и терять ему нечего. Заодно
         // он отменяет то, что объявленный запрос успел написать: дверь проверяет

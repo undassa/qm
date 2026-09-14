@@ -572,7 +572,7 @@ impl Mcp {
                 "drop": json!({"type":"boolean","description":"снять пункт вместе с его замерами"}) }, "required": ["phase", "id", "itemKind"] } }));
         tools.push(json!({ "name": "requirements-of", "description": "требования задачи; объявленное отсутствие доезжает фразой, а не пустотой",
             "inputSchema": { "type": "object", "properties": { "id": s("имя задачи") }, "required": ["id"] } }));
-        tools.push(json!({ "name": "tasks-of", "description": "задачи истории через требования; исключение называется исключением",
+        tools.push(json!({ "name": "tasks-of", "description": "задачи истории через требования",
             "inputSchema": { "type": "object", "properties": { "id": s("имя истории") }, "required": ["id"] } }));
         tools.push(json!({ "name": "preflight-queue", "description": "задачи, которым предполёт не делали либо делали до правки",
             "inputSchema": { "type": "object", "properties": {} } }));
