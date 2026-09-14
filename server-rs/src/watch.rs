@@ -20,7 +20,7 @@ use deadpool_postgres::Pool;
 /// пересчётом; пара `reproject`+`rebuild` занимает около секунды, так что чаще
 /// смотреть незачем, а реже — заметно человеку.
 const TICK: std::time::Duration = std::time::Duration::from_secs(2);
-const RETRY: std::time::Duration = std::time::Duration::from_secs(60);
+const RETRY_MS: i64 = 60_000;
 
 /// Отметить, что набор изменился и гейты пора мерить заново.
 ///
@@ -45,10 +45,7 @@ pub async fn touch_all(pool: &Pool, reason: &str) {
 
 pub async fn touch(pool: &Pool, project: &str, reason: &str) {
     let Ok(client) = pool.get().await else { return };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
+    let now = crate::projector::now_ms();
     // Ошибка здесь молчалива намеренно: пометка — не часть правки. Уронить
     // записанный документ из-за неудавшейся отметки значило бы обменять
     // сохранённое на своевременность пересчёта.
@@ -87,8 +84,9 @@ async fn round(pool: &Pool) -> Result<(), tokio_postgres::Error> {
             // ним значит тратить время на набор, которого нет.
             "SELECT d.project_id, d.dirty_at, d.reason FROM gate_dirty d
               WHERE (d.ran_at IS NULL OR d.dirty_at > d.ran_at)
+                AND d.dirty_at <= $1
                 AND EXISTS (SELECT 1 FROM projects p WHERE p.id = d.project_id)",
-            &[],
+            &[&crate::projector::now_ms()],
         )
         .await?;
     drop(client);
@@ -139,11 +137,14 @@ async fn round(pool: &Pool) -> Result<(), tokio_postgres::Error> {
         }
         .await;
         let spent = began.elapsed().as_millis() as i32;
+        let retry_at = measured.is_err().then(|| crate::projector::now_ms() + RETRY_MS);
         let client = pool.get().await.expect("пул отдал соединение");
         client
             .execute(
-                "UPDATE gate_dirty SET ran_at = $2, ran_ms = $3 WHERE project_id = $1",
-                &[&project, &taken, &spent],
+                "UPDATE gate_dirty SET ran_at = $2, ran_ms = $3,
+                        dirty_at = CASE WHEN $4::bigint IS NOT NULL AND dirty_at <= $2 THEN $4 ELSE dirty_at END
+                  WHERE project_id = $1",
+                &[&project, &taken, &spent, &retry_at],
             )
             .await?;
         drop(client);
@@ -152,14 +153,7 @@ async fn round(pool: &Pool) -> Result<(), tokio_postgres::Error> {
                 "гейты пересчитаны: проект {project}, повод «{reason}», пунктов {}, провалено {}, {spent} мс",
                 out["measured"], out["failed"]
             ),
-            Err(e) => {
-                tracing::warn!("пересчёт набора {project} не прошёл, повтор через {RETRY:?}: {e}");
-                let pool = pool.clone();
-                tokio::spawn(async move {
-                    tokio::time::sleep(RETRY).await;
-                    touch(&pool, &project, "повтор после срыва").await;
-                });
-            }
+            Err(e) => tracing::warn!("пересчёт набора {project} не прошёл, повтор через {} с: {e}", RETRY_MS / 1000),
         }
     }
     Ok(())

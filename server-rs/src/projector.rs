@@ -11627,7 +11627,6 @@ async fn compute_next_step(
     let mut unanswerable = Vec::new();
     let mut at: Option<Value> = None;
     let mut corpus_open = false;
-    let mut corpus_unanswered = false;
     // ВСЯ ОТКРЫТАЯ РАБОТА, а не только самая ранняя ступень. Лестница строго
     // упорядочена, а работа — нет: у `tot-ade` одна неотвечаемая ступень
     // («карты проекта нет») закрывала собой предполёт, у которого три задачи
@@ -11701,7 +11700,6 @@ async fn compute_next_step(
                                           "owner": owner, "touches": touches }));
                 if touches == "corpus" {
                     corpus_open = true;
-                    corpus_unanswered = true;
                 }
                 continue;
             }
@@ -11718,23 +11716,22 @@ async fn compute_next_step(
         } else {
             json!(work_run.replace("{имя}", &here_name))
         };
-        let held = touches == "repository" && corpus_unanswered;
         open_work.push(json!({
             "ord": ord,
             "question": question,
             "state": verdict.state,
             "violations": verdict.violations,
+            "detail": verdict.detail,
             "owner": owner,
             "touches": touches,
             "run": here_run,
             "kind": unit,
-            "held": held,
         }));
 
         if at.is_none() {
             // Репозиторная ступень при открытой фазе набора не выдаётся, и
             // причина называется: иначе отказ читается как «нечего делать».
-            if held {
+            if touches == "repository" && corpus_open {
                 at = Some(json!({
                     "ord": ord, "question": question, "state": "held",
                     "ownerKind": owner_kind, "owner": owner, "touches": touches, "kind": unit,
@@ -12303,21 +12300,30 @@ async fn лестница_держит(
 }
 
 fn держащая_ступень(шаг: &Value, задачная: i64, красные_раньше: &[String]) -> Option<(Value, Vec<String>, i64)> {
+    let корпус_без_ответа_раньше = |ord: i64| {
+        шаг["unanswerable"].as_array().is_some_and(|u| {
+            u.iter().any(|s| s["touches"] == "corpus" && s["ord"].as_i64().is_some_and(|o| o < ord))
+        })
+    };
     шаг["openWork"]
         .as_array()?
         .iter()
-        .filter(|s| s["state"] == "failed" && s["held"] != true && s["ord"].as_i64().is_some_and(|o| o < задачная))
-        .find_map(|s| {
+        .filter_map(|s| Some((s["ord"].as_i64()?, s)))
+        .filter(|&(ord, s)| {
+            ord < задачная
+                && s["state"] == "failed"
+                && !(s["touches"] == "repository" && корпус_без_ответа_раньше(ord))
+        })
+        .find_map(|(_, s)| {
             if s["kind"] == "gate" {
                 (!красные_раньше.is_empty())
                     .then(|| (s.clone(), красные_раньше.to_vec(), красные_раньше.len() as i64))
             } else {
-                let имена = if s["ord"] == шаг["at"]["ord"] {
-                    serde_json::from_value(шаг["at"]["detail"].clone()).unwrap_or_default()
-                } else {
-                    Vec::new()
-                };
-                Some((s.clone(), имена, s["violations"].as_i64().unwrap_or(1)))
+                Some((
+                    s.clone(),
+                    serde_json::from_value(s["detail"].clone()).unwrap_or_default(),
+                    s["violations"].as_i64().unwrap_or(1),
+                ))
             }
         })
 }
@@ -12329,19 +12335,24 @@ mod лестница {
 
     #[test]
     fn свой_гейт_не_держит_а_следующая_красная_держит() {
-        let шаг = json!({ "at": { "ord": 6 }, "openWork": [
-            { "ord": 6, "state": "failed", "kind": "gate", "violations": 1 },
-            { "ord": 7, "state": "failed", "kind": "sensor", "violations": 2 },
-            { "ord": 11, "state": "failed", "kind": "gate", "violations": 3 },
+        let шаг = json!({ "unanswerable": [], "openWork": [
+            { "ord": 6, "state": "failed", "kind": "gate", "touches": "corpus", "violations": 1,
+              "detail": ["G4 · все задачи кода закрыты"] },
+            { "ord": 7, "state": "failed", "kind": "sensor", "touches": "repository", "violations": 1,
+              "detail": ["migration-table — молчит"] },
+            { "ord": 11, "state": "failed", "kind": "gate", "touches": "repository", "violations": 3 },
         ]});
-        let (ступень, _, всего) = держащая_ступень(&шаг, 9, &[]).unwrap();
-        assert_eq!((ступень["ord"].as_i64(), всего), (Some(7), 2));
+        let (ступень, держат, всего) = держащая_ступень(&шаг, 9, &[]).unwrap();
+        assert_eq!(
+            (ступень["ord"].as_i64(), держат, всего),
+            (Some(7), vec!["migration-table — молчит".to_owned()], 1)
+        );
     }
 
     #[test]
     fn корпус_держит_гейтовую_ступень() {
-        let шаг = json!({ "at": { "ord": 6 }, "openWork": [
-            { "ord": 6, "state": "failed", "kind": "gate", "violations": 4 },
+        let шаг = json!({ "unanswerable": [], "openWork": [
+            { "ord": 6, "state": "failed", "kind": "gate", "touches": "corpus", "violations": 4 },
         ]});
         let красные = vec!["corpus · x".to_owned()];
         let (ступень, держат, всего) = держащая_ступень(&шаг, 9, &красные).unwrap();
@@ -12349,11 +12360,14 @@ mod лестница {
     }
 
     #[test]
-    fn придержанная_и_поздняя_не_держат() {
-        let шаг = json!({ "at": { "ord": 8 }, "openWork": [
-            { "ord": 8, "state": "failed", "kind": "milestone", "held": true, "violations": 1 },
-            { "ord": 11, "state": "failed", "kind": "gate", "violations": 3 },
-        ]});
+    fn репозиторная_после_неотвечаемой_корпусной_и_поздняя_не_держат() {
+        let шаг = json!({
+            "unanswerable": [{ "ord": 4, "touches": "corpus" }],
+            "openWork": [
+                { "ord": 8, "state": "failed", "kind": "milestone", "touches": "repository", "violations": 1 },
+                { "ord": 11, "state": "failed", "kind": "gate", "touches": "repository", "violations": 3 },
+            ],
+        });
         assert!(держащая_ступень(&шаг, 9, &["corpus · x".to_owned()]).is_none());
     }
 }
