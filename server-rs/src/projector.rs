@@ -106,10 +106,8 @@ DROP VIEW IF EXISTS gate_state;
 --
 -- Слово в слово то же правило, что у ручки `gate`: красен хоть один пункт —
 -- `failed`; есть непосчитанный или протухший — `open`; иначе `passed`. Пересказ
--- расходился уже дважды. `phase_open` читал колонку `state`, куда `waived`
--- уложен как `unknown`, — и ОТМЕНЁННЫЙ пункт держал бы все последующие фазы,
--- пока `gate` о том же гейте отвечал «пройден». А `stage` и `redGate`
--- спрашивали `result->>'computed' <> 'passed'` и ловили бы то же самое.
+-- расходился уже дважды: барьер фаз и ручка `gate` отвечали о том же гейте
+-- по-разному.
 --
 -- Гейт БЕЗ ЕДИНОЙ СТРОКИ замера сюда не попадает вовсе, и читатель обязан
 -- считать его непройденным: «не мерили» — это не «пройден». Пустота, принятая
@@ -1810,7 +1808,6 @@ ALTER TABLE gate_item ADD COLUMN IF NOT EXISTS subject_query text NOT NULL DEFAU
 ALTER TABLE gate_item ADD COLUMN IF NOT EXISTS subject_why text NOT NULL DEFAULT '';
 ALTER TABLE project_gates ADD COLUMN IF NOT EXISTS probe_ok boolean;
 ALTER TABLE project_gates ADD COLUMN IF NOT EXISTS id text NOT NULL DEFAULT '';
-ALTER TABLE gate_item_waiver ADD COLUMN IF NOT EXISTS id text NOT NULL DEFAULT '';
 CREATE UNIQUE INDEX IF NOT EXISTS gate_item_by_id ON gate_item (phase, id) WHERE id <> '';
 CREATE UNIQUE INDEX IF NOT EXISTS project_gates_by_id ON project_gates (project_id, phase, id);
 -- ЧИСТКИ СИРОТ ПРИ СТАРТЕ ЗДЕСЬ БОЛЬШЕ НЕТ, и это не упущение.
@@ -2478,12 +2475,6 @@ ALTER TABLE project_document_plan_counts ADD COLUMN IF NOT EXISTS planned_kind t
 ALTER TABLE project_document_plan_counts ADD COLUMN IF NOT EXISTS planned_name text NOT NULL DEFAULT '';
 ALTER TABLE claim_subject ADD COLUMN IF NOT EXISTS entity_kind text NOT NULL DEFAULT '';
 ALTER TABLE claim_subject ADD COLUMN IF NOT EXISTS entity_name text NOT NULL DEFAULT '';
--- На чём держится отмена пункта: род факта, который обязан оставаться ПУСТЫМ.
--- Отмена «у проекта нет sqlx» верна, пока датчик sqlx ничего не подаёт; появился
--- хоть один факт — довод отмены исчез. Без этой колонки отмена живёт прозой и
--- тухнет молча: у myack пункт про крейты был отменён доводом «крейтов нет», а
--- их было четырнадцать.
-ALTER TABLE gate_item_waiver ADD COLUMN IF NOT EXISTS holds_while_empty text NOT NULL DEFAULT '';
 
 -- Донорский код: чужая реализация, замороженная на запись.
 --
@@ -2582,14 +2573,7 @@ CREATE TABLE IF NOT EXISTS project_goal (
   origin text NOT NULL DEFAULT 'declared',
   PRIMARY KEY (project_id, id));
 
-CREATE TABLE IF NOT EXISTS gate_item_waiver (
-  project_id text NOT NULL,
-  phase text NOT NULL,
-  item text NOT NULL,
-  why text NOT NULL,
-  declared_at bigint NOT NULL,
-  declared_by text NOT NULL DEFAULT '',
-  PRIMARY KEY (project_id, phase, item));
+DROP TABLE IF EXISTS gate_item_waiver;
 
 -- Словарь схемы: РОЛЬ, которую знает код, и ЗНАЧЕНИЕ, которым её зовёт набор.
 --
@@ -3815,56 +3799,6 @@ pub async fn task_blockers(pool: &Pool, project: &str, task: &str) -> Result<Val
 /// колонке `state` лежало заявление, написанное когда-то руками. Рядом они
 /// читались как два мнения, и «расхождением» звалось то, что было просто
 /// непересчитанной записью.
-/// Объявить пункт гейта неприменимым к проекту — с причиной.
-pub async fn waive_gate_item(
-    pool: &Pool, project: &str, phase: &str, item: &str, why: &str, actor: &str, drop: bool,
-    holds_while_empty: &str,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
-    if drop {
-        let n = client.execute(
-            "DELETE FROM gate_item_waiver WHERE project_id = $1 AND phase = $2 AND id = $3",
-            &[&project, &phase, &item]).await?;
-        return Ok(json!({ "status": if n > 0 { "dropped" } else { "not_found" } }));
-    }
-    if why.trim().is_empty() {
-        return Ok(json!({ "status": "no_reason",
-                          "why": "неприменимость без причины не объявляется: это решение, а не умолчание" }));
-    }
-    let known: i64 = client
-        .query_one("SELECT count(*) FROM gate_item WHERE phase = $1 AND id = $2", &[&phase, &item])
-        .await?.get(0);
-    if known == 0 {
-        return Ok(json!({ "status": "not_found", "why": format!("пункта «{item}» у гейта {phase} нет") }));
-    }
-    let holds_while_empty = holds_while_empty.trim();
-    if holds_while_empty.is_empty() {
-        return Ok(json!({ "status": "no_condition",
-                          "why": "неприменимость — это установленное отсутствие сущностей, а не решение: назовите \
-                                  род фактов `holdsWhileEmpty`, который мерит датчик. Пока род пуст и датчик свеж, \
-                                  пункт пройден; появятся сущности — пункт мерится, и красное только чинится" }));
-    }
-    let present: i64 = client
-        .query_one("SELECT count(*) FROM code_fact WHERE project_id = $1 AND kind = $2", &[&project, &holds_while_empty])
-        .await?
-        .get(0);
-    if present > 0 {
-        return Ok(json!({ "status": "entities_present", "facts": present,
-                          "why": format!("сущностей рода «{holds_while_empty}» в проекте {present}: пункт к ним \
-                                          применим, и красное здесь только чинится") }));
-    }
-    client.execute(
-        "INSERT INTO gate_item_waiver (project_id, phase, id, item, why, declared_at, declared_by,
-                                       holds_while_empty)
-         VALUES ($1,$2,$3,$3,$4,$5,$6,$7)
-         ON CONFLICT (project_id, phase, item) DO UPDATE SET why = EXCLUDED.why, id = EXCLUDED.id,
-           declared_at = EXCLUDED.declared_at, declared_by = EXCLUDED.declared_by,
-           holds_while_empty = EXCLUDED.holds_while_empty",
-        &[&project, &phase, &item, &why, &now_ms(), &actor, &holds_while_empty]).await?;
-    Ok(json!({ "status": "waived", "phase": phase, "item": item, "why": why,
-               "holdsWhileEmpty": holds_while_empty }))
-}
-
 pub async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
     let mut conn = pool.get().await.expect("пул отдал соединение");
     // ВЕСЬ КРУГ — ОДНОЙ ТРАНЗАКЦИЕЙ, и это не про скорость.
@@ -3888,23 +3822,6 @@ pub async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, tokio_po
         .query("SELECT phase, item, kind, query, why, owner, id, subject_query, subject_why, since
                   FROM gate_item ORDER BY phase, id", &[])
         .await?;
-    // Отмена действует, только пока отсутствие сущностей УСТАНОВЛЕНО: датчик
-    // названного рода свеж и не нашёл ни одной. Появились сущности или датчик
-    // протух — пункт мерится как обычно, и красное только чинится.
-    let why_waived: std::collections::HashMap<(String, String), String> = client
-        .query(
-            "SELECT w.phase, w.id, w.why FROM gate_item_waiver w
-              WHERE w.project_id = $1 AND w.holds_while_empty <> ''
-                AND fact_fresh(w.project_id, w.holds_while_empty)
-                AND NOT EXISTS (SELECT 1 FROM code_fact f
-                                 WHERE f.project_id = w.project_id AND f.kind = w.holds_while_empty)",
-            &[&project],
-        )
-        .await?
-        .iter()
-        .map(|r| ((r.get::<_, String>(0), r.get::<_, String>(1)), r.get::<_, String>(2)))
-        .collect();
-    let waived: std::collections::HashSet<(String, String)> = why_waived.keys().cloned().collect();
     let now = now_ms();
     let mut measured = 0usize;
     let mut failed = 0usize;
@@ -3935,35 +3852,30 @@ pub async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, tokio_po
         // Точка возврата снимается ВСЕГДА, а не по ошибке: замер обязан только
         // читать, и откат ему нечего терять. Запись замера идёт уже после неё.
         client.batch_execute("SAVEPOINT замер").await?;
-        let entry = if waived.contains(&(phase.clone(), id.clone())) {
-            json!({ "item": item, "kind": kind, "computed": "waived",
-                    "why": why_waived.get(&(phase.clone(), id.clone())).cloned().unwrap_or_default(),
+        // ПРЕДМЕТ СПРАШИВАЕТСЯ ПЕРВЫМ. Пустой предмет — установленное отсутствие
+        // сущностей пункта, и пункт пройден. Поэтому предмет обязан быть
+        // непустым, пока отсутствие не установлено: датчик не свеж, сборка не
+        // прогонялась. Есть сущности — пункт мерится, и красное только чинится.
+        let subject: String = r.get(7);
+        let empty = if subject.trim().is_empty() {
+            false
+        } else {
+            match client.query(subject.as_str(), &[&project]).await {
+                Ok(rows) => rows.is_empty(),
+                // Запрос предмета, который не исполнился, — не «предмет пуст».
+                Err(_) => false,
+            }
+        };
+        let entry = if empty {
+            let w: String = r.get(8);
+            json!({ "item": item, "kind": kind, "computed": "passed",
+                    "violations": 0, "detail": [],
+                    "why": if w.trim().is_empty() {
+                        "сущностей пункта в проекте нет: проверять нечего".to_owned()
+                    } else { w },
                     "means": r.get::<_, String>(4) })
         } else {
-            // ПРЕДМЕТ СПРАШИВАЕТСЯ ПЕРВЫМ. Пункт, у которого мерить стало нечего,
-            // отвечал зелёным и пропадал из перечня непройденных — счёт при этом
-            // улучшался. Пусто в предмете — «неизвестно» со своим словом.
-            let subject: String = r.get(7);
-            let empty = if subject.trim().is_empty() {
-                false
-            } else {
-                match client.query(subject.as_str(), &[&project]).await {
-                    Ok(rows) => rows.is_empty(),
-                    // Запрос предмета, который не исполнился, — не «предмет пуст».
-                    Err(_) => false,
-                }
-            };
-            if empty {
-                let w: String = r.get(8);
-                json!({ "item": item, "kind": kind, "computed": "unknown",
-                        "violations": 0, "detail": [],
-                        "why": if w.trim().is_empty() {
-                            "предмет пункта пуст: мерить нечего, и это не «пройдено»".to_owned()
-                        } else { w },
-                        "means": r.get::<_, String>(4) })
-            } else {
-                measure_item(&client, project, &item, &kind, query.as_deref(), r).await?
-            }
+            measure_item(&client, project, &item, &kind, query.as_deref(), r).await?
         };
         // Откат ВСЕГДА: замер обязан только читать, и терять ему нечего. Заодно
         // он отменяет то, что объявленный запрос успел написать: дверь проверяет
@@ -3974,7 +3886,7 @@ pub async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, tokio_po
         // таблицы. Полное слово («не подписан», «подпись устарела») лежит в
         // `result`: сузить его до `unknown` в колонке можно, потерять — нельзя.
         let flat = match computed {
-            "passed" | "waived" => "passed",
+            "passed" => "passed",
             "failed" => "failed",
             _ => "unknown",
         };
@@ -4277,7 +4189,7 @@ pub async fn gate(pool: &Pool, project: &str, phase: Option<&str>) -> Result<Val
             m.insert(
                 "verdict".into(),
                 json!(match m.get("computed").and_then(|v| v.as_str()).unwrap_or("") {
-                    "passed" | "waived" => "green",
+                    "passed" => "green",
                     "failed" => "red",
                     _ => "unknown",
                 }),
@@ -4340,10 +4252,8 @@ pub async fn gate(pool: &Pool, project: &str, phase: Option<&str>) -> Result<Val
     // добавить к тому, что уже померено.
     //
     // ВЫВОДИТСЯ ОНО ВИДОМ `gate_state`, а не пересчётом здесь. Пересчёт был
-    // вторым описанием одного правила, и разошлось оно дважды: барьер фаз читал
-    // колонку `state`, куда `waived` уложен как `unknown`, и держал фазы за
-    // отменённый пункт, пока эта ручка о том же гейте отвечала «пройден».
-    // Двух описаний больше нет — есть одно, и обе стороны читают его.
+    // вторым описанием одного правила, и разошлось оно дважды. Двух описаний
+    // больше нет — есть одно, и обе стороны читают его.
     let verdicts: std::collections::HashMap<String, (String, i64, i64)> = client
         .query(
             "SELECT gate, computed, failed, open FROM gate_state WHERE project_id = $1",

@@ -92,10 +92,9 @@ const TONE: Record<string, string> = {
   passed: "ok",
   failed: "bad",
   unknown: "dim",
-  waived: "ok",
 };
 
-const held = (computed: string) => computed === "passed" || computed === "waived";
+const held = (computed: string) => computed === "passed";
 
 /** Считает пункты гейта по состояниям — это и есть содержимое полоски фазы. */
 function tally(g?: Gate): { passed: number; failed: number; other: number; total: number; violations: number } {

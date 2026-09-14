@@ -523,10 +523,6 @@ impl Mcp {
                 "required": ["kind", "from", "to"] } }));
         tools.push(json!({ "name": "links-retarget", "description": "переписать цель ссылок в `вид:имя` по уже разобранной связи; ярлык не трогается; сухой режим по умолчанию",
             "inputSchema": { "type": "object", "properties": { "apply": json!({"type":"boolean"}) } } }));
-        tools.push(json!({ "name": "gate-item-waive", "description": "объявить пункт гейта неприменимым к этому проекту — с обязательной причиной",
-            "inputSchema": { "type": "object", "properties": { "id": s("имя пункта, латиницей через дефис"), "phase": s("гейт"), "item": s("пункт"), "holdsWhileEmpty": s("род факта, который обязан оставаться пустым, пока отмена верна"),
-                "why": s("почему неприменим"), "drop": json!({"type":"boolean"}) },
-                "required": ["phase", "item"] } }));
         tools.push(json!({ "name": "gate-measure", "description": "перемерить все пункты СЕЙЧАС и дождаться итога; зовите, когда нужно измеренное сейчас — сам пересчёт идёт фоном, и узнать, что он кончился, вызывающему нечем",
             "inputSchema": { "type": "object", "properties": {} } }));
         tools.push(json!({ "name": "gate-selftest", "description": "самотест гейтов: каждый запросный пункт роняется подсаженным нарушением в откатываемой транзакции; `under` прогоняет его при всех зелёных либо всех красных гейтах — проба, живая лишь в одном из двух, зависит от состояния, которого не форсирует",
@@ -730,8 +726,8 @@ impl Mcp {
     // вовсе: он работает в транзакции, которую всегда откатывает, и не пишет
     // ни строки. Пока он числился пишущим, каждый его прогон — а их в проверке
     // шесть — заказывал полный пересчёт всем проектам ни за чем.
-    const SHARED_WRITES: [&'static str; 9] = [
-        "gate-item-set", "gate-item-waive", "phase-set", "step-add", "step-remove",
+    const SHARED_WRITES: [&'static str; 8] = [
+        "gate-item-set", "phase-set", "step-add", "step-remove",
         "step-method-set", "step-question-set", "step-probe-set", "gate-selftest",
     ];
 
@@ -780,7 +776,7 @@ impl Mcp {
         // вызов и отдавал строку таблицы вместо вычисления.
         const RESERVED: &[&str] = &[
             "method-set", "gate-item-set", "question-holders", "preflight-push", "worktree-push",
-            "sensor-specs", "scheme-terms", "scheme-roles", "frozen-trees", "addresses-declared", "tree-declared", "donors", "skills-push", "skills", "agents", "code-facts-push", "code-facts", "summary", "links-of", "retired-terms", "order", "gate-measure", "gate-item-waive", "gate-selftest", "links-rewrite", "links-retarget", "reparse", "screen-area-set", "skill-set", "skills-paths", "version-freeze", "version-delta", "generated-check", "principal-allow", "principals", "author-set", "authors", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "version-close", "phase-set", "exception-set", "gate-selftest", "next-step", "process-state", "statuses", "task-status", "status-anomaly", "pipeline", "board", "waves", "phases", "coverage", "blocks", "history", "at-revision", "process-history", "progress",
+            "sensor-specs", "scheme-terms", "scheme-roles", "frozen-trees", "addresses-declared", "tree-declared", "donors", "skills-push", "skills", "agents", "code-facts-push", "code-facts", "summary", "links-of", "retired-terms", "order", "gate-measure", "gate-selftest", "links-rewrite", "links-retarget", "reparse", "screen-area-set", "skill-set", "skills-paths", "version-freeze", "version-delta", "generated-check", "principal-allow", "principals", "author-set", "authors", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "version-close", "phase-set", "exception-set", "gate-selftest", "next-step", "process-state", "statuses", "task-status", "status-anomaly", "pipeline", "board", "waves", "phases", "coverage", "blocks", "history", "at-revision", "process-history", "progress",
             "kinds", "kinds-due", "readiness-gaps", "declared-unwritten", "blame-set", "doors", "derived-copy-set", "field-column-alias", "column-server-filled", "holders", "counts-sync", "kind-add", "kind-required", "kind-projection", "kind-reopens", "kind-proves", "kind-id-set", "kind-domain", "tree", "document-coverage", "sections", "section", "backlinks", "search", "put",
             "put-section", "rm", "document-add", "reproject", "sweep", "gate", "next-task", "what-if", "blockers", "events", "task-plan-push",
             "norm-versions", "measurements", "plan", "readiness", "requirements-of",
@@ -2219,6 +2215,11 @@ impl Mcp {
                 // Задача, которая побег отменит. Пусто — побег бессрочный.
                 let closes = args.get("closes").and_then(|v| v.as_str()).unwrap_or("");
                 let drop = args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false);
+                if !drop {
+                    return refusal(Miss::Refused(
+                        "исключение не объявляется: сущность, которая есть и не проходит проверку, только чинится; \
+                         если сущность правилу не принадлежит — чинится правило, а не список исключений".into()));
+                }
                 if rule.is_empty() || id.is_empty() {
                     return refusal(Miss::Refused("исключение без правила или без сущности не объявляется".into()));
                 }
@@ -2456,19 +2457,6 @@ impl Mcp {
                 Ok(v) => ok(v),
                 Err(e) => refusal(Miss::Db(e.to_string())),
             },
-            "gate-item-waive" => {
-                let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
-                let drop = args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false);
-                // Отмена адресуется ИМЕНЕМ пункта. Прежде — заголовком, и стоило
-                // переписать формулировку, как отмена оставалась висеть в пустоте.
-                let who = if g("id").is_empty() { g("item") } else { g("id") };
-                match crate::projector::waive_gate_item(&self.pool, p, &g("phase"), &who,
-                                                         &g("why"), &self.author, drop,
-                                                         &g("holdsWhileEmpty")).await {
-                    Ok(v) => ok(v),
-                    Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
-                }
-            }
             "gate-measure" => match crate::projector::measure_gates(&self.pool, p).await {
                 Ok(v) => ok(v),
                 Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
@@ -2498,8 +2486,12 @@ impl Mcp {
                     .or_else(|| args.get("ceiling").and_then(|v| v.as_str()).and_then(|t| t.parse().ok()))
                     .unwrap_or(0) as i32;
                 let why = args.get("why").and_then(|v| v.as_str()).unwrap_or("");
-                match crate::projector::set_ceiling(&self.pool, p, rule, ceiling, why,
-                        args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
+                let drop = args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false);
+                if !drop {
+                    return refusal(Miss::Refused(
+                        "потолок долга не объявляется: сущность, которая есть и не проходит проверку, только чинится".into()));
+                }
+                match crate::projector::set_ceiling(&self.pool, p, rule, ceiling, why, drop).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
                 }
