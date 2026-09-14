@@ -45,18 +45,27 @@ pub async fn touch_all(pool: &Pool, reason: &str) {
 }
 
 pub async fn touch(pool: &Pool, project: &str, reason: &str) {
-    let Ok(client) = pool.get().await else { return };
+    let client = match pool.get().await {
+        Ok(client) => client,
+        Err(e) => {
+            tracing::warn!("отметка «пересчитать» набора {project} потеряна, пул не отдал соединение: {e}");
+            return;
+        }
+    };
     let now = crate::projector::now_ms();
-    // Ошибка здесь молчалива намеренно: пометка — не часть правки. Уронить
+    // Ошибка здесь не роняет правку намеренно: пометка — не часть правки. Уронить
     // записанный документ из-за неудавшейся отметки значило бы обменять
     // сохранённое на своевременность пересчёта.
-    let _ = client
+    if let Err(e) = client
         .execute(
             "INSERT INTO gate_dirty(project_id, dirty_at, reason) VALUES ($1,$2,$3)
              ON CONFLICT (project_id) DO UPDATE SET dirty_at = $2, reason = $3",
             &[&project, &now, &reason],
         )
-        .await;
+        .await
+    {
+        tracing::warn!("отметка «пересчитать» набора {project} потеряна: {e}");
+    }
 }
 
 /// Работник: смотрит отметку и, если набор менялся, пересчитывает.

@@ -18,6 +18,7 @@ pub fn pool(url: &str, size: usize) -> Result<Pool, String> {
     Pool::builder(manager)
         .max_size(size)
         .wait_timeout(Some(std::time::Duration::from_secs(30)))
+        .create_timeout(Some(std::time::Duration::from_secs(10)))
         .runtime(deadpool_postgres::Runtime::Tokio1)
         .build()
         .map_err(|e| format!("пул не собрался: {e}"))

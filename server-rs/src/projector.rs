@@ -5638,12 +5638,13 @@ pub async fn authors(pool: &Pool, project: &str) -> Result<Value, tokio_postgres
 ///
 /// Один вызов на запрос, и он же ведёт след: отдельный «журнал входов» рядом с
 /// проверкой разошёлся бы с ней в первый же отказ.
-pub async fn edge_admits(pool: &Pool, principal: &str) -> bool {
-    let Ok(client) = pool.get().await else { return false };
-    let declared: i64 = match client.query_one("SELECT count(*) FROM edge_principal", &[]).await {
-        Ok(r) => r.get(0),
-        Err(_) => return false,
-    };
+pub async fn edge_admits(pool: &Pool, principal: &str) -> Result<bool, String> {
+    let client = pool.get().await.map_err(|e| format!("пул не отдал соединение: {e}"))?;
+    let declared: i64 = client
+        .query_one("SELECT count(*) FROM edge_principal", &[])
+        .await
+        .map_err(|e| db_says(&e))?
+        .get(0);
     let allowed = if declared == 0 {
         true
     } else {
@@ -5653,8 +5654,9 @@ pub async fn edge_admits(pool: &Pool, principal: &str) -> bool {
                 &[&principal],
             )
             .await
-            .map(|r| r.get::<_, i64>(0) > 0)
-            .unwrap_or(false)
+            .map_err(|e| db_says(&e))?
+            .get::<_, i64>(0)
+            > 0
     };
     let now = now_ms();
     let (ok, no): (i64, i64) = if allowed { (1, 0) } else { (0, 1) };
@@ -5667,7 +5669,7 @@ pub async fn edge_admits(pool: &Pool, principal: &str) -> bool {
             &[&principal, &now, &ok, &no],
         )
         .await;
-    allowed
+    Ok(allowed)
 }
 
 /// Объявить, что этому человеку можно войти. Пустая пометка снимает объявление.

@@ -179,12 +179,15 @@ async fn require_identity(State(app): State<App>, request: Request, next: Next) 
             // подставляет какое настроено. Допущенные объявлены в базе, и вход
             // записывается — как допущенный, так и отказанный.
             if !shown.is_empty() && shown == edge.secret && !principal.is_empty() {
-                if crate::projector::edge_admits(&app.pool, &principal).await {
-                    let mut request = request;
-                    request.extensions_mut().insert(Author(principal));
-                    return next.run(request).await;
+                match crate::projector::edge_admits(&app.pool, &principal).await {
+                    Ok(true) => {
+                        let mut request = request;
+                        request.extensions_mut().insert(Author(principal));
+                        return next.run(request).await;
+                    }
+                    Ok(false) => return Failure::Unauthorized.into_response(),
+                    Err(e) => return Failure::Upstream(format!("вход не проверен: {e}")).into_response(),
                 }
-                return Failure::Unauthorized.into_response();
             }
         }
         return Failure::Unauthorized.into_response();
@@ -591,6 +594,7 @@ pub fn routes(app: App) -> Router {
         .route("/api/projects/:project/entity/section", axum::routing::patch(put_entity_section))
         .route("/api/projects/:project/entity/backlinks", get(entity_backlinks))
         .layer(middleware::from_fn_with_state(app.clone(), require_identity))
+        .layer(tower_http::catch_panic::CatchPanicLayer::new())
         .with_state(app)
 }
 
