@@ -20,6 +20,7 @@ use deadpool_postgres::Pool;
 /// пересчётом; пара `reproject`+`rebuild` занимает около секунды, так что чаще
 /// смотреть незачем, а реже — заметно человеку.
 const TICK: std::time::Duration = std::time::Duration::from_secs(2);
+const RETRY: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Отметить, что набор изменился и гейты пора мерить заново.
 ///
@@ -137,13 +138,6 @@ async fn round(pool: &Pool) -> Result<(), tokio_postgres::Error> {
             Ok(out)
         }
         .await;
-        let out = match measured {
-            Ok(out) => out,
-            Err(e) => {
-                tracing::warn!("пересчёт набора {project} не прошёл: {e}");
-                continue;
-            }
-        };
         let spent = began.elapsed().as_millis() as i32;
         let client = pool.get().await.expect("пул отдал соединение");
         client
@@ -152,10 +146,21 @@ async fn round(pool: &Pool) -> Result<(), tokio_postgres::Error> {
                 &[&project, &taken, &spent],
             )
             .await?;
-        tracing::info!(
-            "гейты пересчитаны: проект {project}, повод «{reason}», пунктов {}, провалено {}, {spent} мс",
-            out["measured"], out["failed"]
-        );
+        drop(client);
+        match measured {
+            Ok(out) => tracing::info!(
+                "гейты пересчитаны: проект {project}, повод «{reason}», пунктов {}, провалено {}, {spent} мс",
+                out["measured"], out["failed"]
+            ),
+            Err(e) => {
+                tracing::warn!("пересчёт набора {project} не прошёл, повтор через {RETRY:?}: {e}");
+                let pool = pool.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(RETRY).await;
+                    touch(&pool, &project, "повтор после срыва").await;
+                });
+            }
+        }
     }
     Ok(())
 }

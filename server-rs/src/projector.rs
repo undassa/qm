@@ -11627,6 +11627,7 @@ async fn compute_next_step(
     let mut unanswerable = Vec::new();
     let mut at: Option<Value> = None;
     let mut corpus_open = false;
+    let mut corpus_unanswered = false;
     // ВСЯ ОТКРЫТАЯ РАБОТА, а не только самая ранняя ступень. Лестница строго
     // упорядочена, а работа — нет: у `tot-ade` одна неотвечаемая ступень
     // («карты проекта нет») закрывала собой предполёт, у которого три задачи
@@ -11700,6 +11701,7 @@ async fn compute_next_step(
                                           "owner": owner, "touches": touches }));
                 if touches == "corpus" {
                     corpus_open = true;
+                    corpus_unanswered = true;
                 }
                 continue;
             }
@@ -11716,6 +11718,7 @@ async fn compute_next_step(
         } else {
             json!(work_run.replace("{имя}", &here_name))
         };
+        let held = touches == "repository" && corpus_unanswered;
         open_work.push(json!({
             "ord": ord,
             "question": question,
@@ -11725,13 +11728,13 @@ async fn compute_next_step(
             "touches": touches,
             "run": here_run,
             "kind": unit,
-            "held": touches == "repository" && corpus_open,
+            "held": held,
         }));
 
         if at.is_none() {
             // Репозиторная ступень при открытой фазе набора не выдаётся, и
             // причина называется: иначе отказ читается как «нечего делать».
-            if touches == "repository" && corpus_open {
+            if held {
                 at = Some(json!({
                     "ord": ord, "question": question, "state": "held",
                     "ownerKind": owner_kind, "owner": owner, "touches": touches, "kind": unit,
