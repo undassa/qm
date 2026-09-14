@@ -137,14 +137,14 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
     }
 
     // Задача ↔ операция: поле «Операции контракта».
-    let said = if let Some(term) = terms.one("field.task-contract-ops") { client
+    let said = if !terms.all("field.task-contract-ops").is_empty() { client
         .query(
             "SELECT t.id, f.value FROM project_plan_tasks t
                JOIN project_document_fields f
                  ON f.project_id = t.project_id AND f.entity_kind = t.entity_kind
-                    AND f.entity_name = t.entity_name AND f.name = $2
+                    AND f.entity_name = t.entity_name AND f.name = ANY($2)
               WHERE t.project_id = $1",
-            &[&project, &term],
+            &[&project, &terms.all("field.task-contract-ops")],
         )
         .await? } else { Vec::new() };
     let op_re = Lazy::new(|| {
@@ -160,18 +160,25 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
     }
 
     // Задача ↔ проверка: доказательство обычной задачи и перечень красной.
-    let proof = if let Some(term) = terms.one("section.proof") { client
+    // СЛОВ У РОЛИ БЫВАЕТ НЕСКОЛЬКО, и здесь их спрашивают все.
+    //
+    // `terms.one` отдаёт слово только когда оно единственное: набор, где обычная
+    // и красная задача зовут раздел доказательства по-разному, объявить оба не
+    // мог — второе объявление делало роль двусмысленной, и связь «задача ↔
+    // проверка» переставала выводиться вовсе. Соседний `id.check` читается через
+    // `all` ровно поэтому, и это верная форма для обоих.
+    let proof = if !terms.all("section.proof").is_empty() { client
         .query(
             "SELECT t.id, c.value FROM project_plan_tasks t
                JOIN project_document_sections s
                  ON s.project_id = t.project_id AND s.entity_kind = t.entity_kind
-                    AND s.entity_name = t.entity_name AND s.title = $2
+                    AND s.entity_name = t.entity_name AND s.title = ANY($2)
                JOIN project_document_cells c
                  ON c.project_id = t.project_id AND c.entity_kind = t.entity_kind
                     AND c.entity_name = t.entity_name AND c.col = 0
                     AND c.block_ord BETWEEN s.first_block AND s.last_block
               WHERE t.project_id = $1 AND t.kind = 'dev'",
-            &[&project, &term],
+            &[&project, &terms.all("section.proof")],
         )
         .await? } else { Vec::new() };
     let mut task_check: Vec<(String, String, &str)> = Vec::new();
@@ -182,14 +189,14 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
             task_check.push((task.clone(), m, "доказательство"));
         }
     }
-    let red = if let Some(term) = terms.one("field.red-checks") { client
+    let red = if !terms.all("field.red-checks").is_empty() { client
         .query(
             "SELECT t.id, f.value FROM project_plan_tasks t
                JOIN project_document_fields f
                  ON f.project_id = t.project_id AND f.entity_kind = t.entity_kind
-                    AND f.entity_name = t.entity_name AND f.name = $2
+                    AND f.entity_name = t.entity_name AND f.name = ANY($2)
               WHERE t.project_id = $1 AND t.kind = 'red'",
-            &[&project, &term],
+            &[&project, &terms.all("field.red-checks")],
         )
         .await? } else { Vec::new() };
     for r in &red {
@@ -202,22 +209,40 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
 
     // Родитель красной задачи: имя из поля «Родительская задача», сведённое к
     // существующей задаче. Не первые два знака имени — их разбирают глазами.
-    let parents = if let Some(term) = terms.one("field.red-parent") { client
+    // РОЛЬ С ДВУМЯ СЛОВАМИ — ЗДЕСЬ ПРАВИЛО, А НЕ ИСКЛЮЧЕНИЕ. У `field.red-parent`
+    // на `myack` объявлены и «Пара», и «Родительская задача»; `one` про такую
+    // роль честно отвечает `None`, и весь этот путь молчал. Колонка
+    // `parent_task_id` при этом выглядела заполненной — значения остались от
+    // времени, когда слово было одно, и ни одна правка их больше не трогала.
+    // Первая же новая красная задача получила бы пустого родителя, а `red_task`
+    // (`WHERE parent_task_id <> ''`) выронил бы её молча.
+    let parents = if !terms.all("field.red-parent").is_empty() { client
         .query(
             "SELECT t.id, f.value FROM project_plan_tasks t
                JOIN project_document_fields f
                  ON f.project_id = t.project_id AND f.entity_kind = t.entity_kind
-                    AND f.entity_name = t.entity_name AND f.name = $2
+                    AND f.entity_name = t.entity_name AND f.name = ANY($2)
               WHERE t.project_id = $1 AND t.kind = 'red'",
-            &[&project, &term],
+            &[&project, &terms.all("field.red-parent")],
         )
         .await? } else { Vec::new() };
-    let task_id = Lazy::new(|| Regex::new(r"M[0-9]+-T[0-9]+[a-z]?").expect("образец задачи"));
+    // ОБРАЗЕЦ — ИЗ РАСКЛАДКИ, а не зашитый. Зашитый знал только `M`, и у
+    // `tot-ade` восемьдесят две задачи из ста шестидесяти четырёх, названные на
+    // `V`, для этого обхода не существовали: у красной задачи не находился
+    // родитель, и `red_task` роняла её молча.
+    //
+    // Образец вида — якорный (`^…$`), он для сверки имени целиком; здесь имя
+    // ищут внутри строки, поэтому якоря снимаются, а границы слова ставятся.
+    let образцы_задачи = crate::scheme::id_pattern(&client, project, "task").await?;
+    let task_id: Vec<Regex> = образцы_задачи
+        .iter()
+        .filter_map(|p| Regex::new(&format!(r"\b(?:{})\b", p.trim_start_matches('^').trim_end_matches('$'))).ok())
+        .collect();
     let mut parent_of: Vec<(String, String)> = Vec::new();
     for r in &parents {
         let task: String = r.get(0);
         let value: String = r.get(1);
-        if let Some(m) = task_id.find(&value) {
+        if let Some(m) = task_id.iter().find_map(|r| r.find(&value)) {
             parent_of.push((task, m.as_str().to_owned()));
         }
     }

@@ -93,33 +93,65 @@ pub async fn create(
     let tx = client.transaction().await?;
     let content_hash = hash_document(content);
     let bytes32 = bytes as i32;
+    // ЛЕТОПИСЬ ПРОДОЛЖАЕТСЯ, А НЕ НАЧИНАЕТСЯ ЗАНОВО.
+    //
+    // Снятие документа летопись не трогает — и не должно: `history` и
+    // `at-revision` читают её, а снятая запись, у которой стёрли прошлое,
+    // перестаёт быть историей. Но заведение писало ревизию 1 всегда, а у
+    // летописи есть ключ `(проект, вид, имя, ревизия)`. Значит имя, однажды
+    // снятое, завести обратно было НЕЛЬЗЯ НИКОГДА: вставка падала «база не
+    // ответила», и содержимое, если его не сохранили на диск заранее, пропадало.
+    // Так в tot-ade сгорело 295 имён — весь след переименований, которые вели
+    // обходом «завести новое → снять старое».
+    //
+    // Номер берётся следующим за прожитым этим именем. Единица у нового имени,
+    // шестая — у имени, прожившего пять правок до снятия, и это правда о нём.
+    // Номер считается ВНУТРИ той же команды, что занимает имя, а не до неё.
+    // Отдельный `SELECT` замка не берёт — строки документа в этот миг ещё нет,
+    // брать нечего, — и между ним и вставкой успевала пройти чужая жизнь имени:
+    // завести, править, снять. Тогда номер оказывался уже занятым, вставка в
+    // летопись падала на уникальности, и содержимое пропадало ровно так, как
+    // эта правка и взялась чинить.
+    //
     // `ON CONFLICT DO NOTHING` вместо проверки-и-вставки: двое заводящих
     // одновременно прочли бы «нет такого» оба, и второй затёр бы первого.
-    let put = tx
-        .execute(
+    let занято = tx
+        .query_opt(
             "INSERT INTO project_documents
                 (project_id, entity_kind, entity_name, content, content_hash, bytes,
                  revision, updated_at, updated_by, author)
-             VALUES ($1,$2,$3,$4,$5,$6,1,$7,$8,$8)
-             ON CONFLICT (project_id, entity_kind, entity_name) DO NOTHING",
+             VALUES ($1,$2,$3,$4,$5,$6,
+                     (SELECT coalesce(max(revision), 0) + 1 FROM project_document_revisions
+                       WHERE project_id = $1 AND entity_kind = $2 AND entity_name = $3),
+                     $7,$8,$8)
+             ON CONFLICT (project_id, entity_kind, entity_name) DO NOTHING
+             RETURNING revision",
             &[&project, &kind, &name, &content, &content_hash, &bytes32, &now_ms, &author],
         )
         .await?;
-    if put == 0 {
+    let Some(строка) = занято else {
         return Ok(json!({ "status": "exists",
                           "why": "документ с таким видом и именем уже есть: заводить нечего" }));
-    }
+    };
+    let revision: i64 = строка.get(0);
     tx.execute(
         "INSERT INTO project_document_revisions
             (project_id, entity_kind, entity_name, content, content_hash, bytes, revision, written_at, written_by)
-         VALUES ($1,$2,$3,$4,$5,$6,1,$7,$8)",
-        &[&project, &kind, &name, &content, &content_hash, &bytes32, &now_ms, &author],
+         VALUES ($1,$2,$3,$4,$5,$6,$9,$7,$8)",
+        &[&project, &kind, &name, &content, &content_hash, &bytes32, &now_ms, &author, &revision],
     )
     .await?;
     write_structure(&tx, project, kind, name, content).await?;
     tx.commit().await?;
     crate::watch::touch(pool, project, "заведён документ").await;
-    Ok(json!({ "status": "created", "kind": kind, "name": name, "revision": 1, "bytes": bytes }))
+    let mut ответ = json!({ "status": "created", "kind": kind, "name": name,
+                            "revision": revision, "bytes": bytes });
+    // Слово говорится только когда есть что сказать: всегда пустое `why` веб
+    // читает как отказ без довода.
+    if revision > 1 {
+        ответ["why"] = json!("имя уже жило: номер продолжает его летопись, а не начинает заново");
+    }
+    Ok(ответ)
 }
 
 /// Записать сущность целиком.

@@ -1889,6 +1889,87 @@ ALTER TABLE project_screens ADD COLUMN IF NOT EXISTS spec text NOT NULL DEFAULT 
 -- и сервер, у которого функция уже есть в прежней форме, не поднялся бы вовсе
 -- — со словом «db error», как это и случилось при первой правке.
 DROP FUNCTION IF EXISTS rename_in_columns(text, text, text);
+-- ПРИМЕРКА: набор копируется целиком, правка кладётся в копию, гейт меряется по
+-- ней, копия снимается.
+--
+-- Харнес силён в «правильно ли сейчас» и нем в «будет ли правильно, если я
+-- сделаю так». Двери, умеющей примерить, у него двенадцать из ста шестидесяти
+-- одной, и агент правит вслепую: цену узнаёт после. Отсюда и реестр вопросов,
+-- работающий переполнением, — спросить дешевле, чем проверить.
+--
+-- Одной транзакцией это не делается: пересборка берёт пул сама и открывает свои
+-- транзакции, снаружи их не объять. Зато копия набора — делается, и весь
+-- существующий код работает по ней без единой правки: он и так принимает имя
+-- проекта доводом.
+--
+-- Имя копии не значится среди проектов: сборщик её не видит, а чистка сирот
+-- подберёт, если прогон оборвётся на полпути. Самоисцеление тут не украшение —
+-- примерка идёт десятки секунд.
+--
+-- Колонки с `nextval` не копируются: их значения принадлежат своей
+-- последовательности, и перенос столкнул бы копию с подлинником на первичном
+-- ключе.
+CREATE OR REPLACE FUNCTION project_copy(откуда text, куда text) RETURNS bigint AS $$
+DECLARE t record; n bigint := 0; m bigint;
+BEGIN
+  -- ПУСТОЕ ИМЯ ПРОЕКТА — НЕ ПРОЕКТ, А ОБЩИЙ СЛОЙ СЛОВАРЯ.
+  --
+  -- `scheme_term` с `project_id = ''` — это словарь, общий на все наборы, и
+  -- `scheme($1)` читает его как основание. Он уже погиб однажды: `orphans-purge`
+  -- снёс 118 его строк, потому что `''` не значится среди проектов, и вернуть
+  -- их удалось лишь из ночного дампа. Здесь тот же обход по всем таблицам с
+  -- `project_id`, только адресный — и без этой проверки одна опечатка в доводе
+  -- повторила бы ту потерю.
+  IF coalesce(откуда, '') = '' OR coalesce(куда, '') = '' THEN
+    RAISE EXCEPTION 'имя набора пусто: `''''` — это общий слой словаря, а не набор';
+  END IF;
+  IF откуда = куда THEN
+    RAISE EXCEPTION 'копировать набор в себя же нечем: имена совпали (%)', откуда;
+  END IF;
+  FOR t IN
+    SELECT c.table_name AS имя,
+           string_agg(quote_ident(c.column_name), ', ' ORDER BY c.ordinal_position) AS колонки,
+           string_agg(CASE WHEN c.column_name = 'project_id' THEN quote_literal(куда)
+                           ELSE quote_ident(c.column_name) END, ', ' ORDER BY c.ordinal_position) AS отбор
+      FROM information_schema.columns c
+      JOIN information_schema.tables tb
+        ON tb.table_schema = c.table_schema AND tb.table_name = c.table_name
+       AND tb.table_type = 'BASE TABLE'
+     WHERE c.table_schema = 'public'
+       AND coalesce(c.column_default, '') NOT LIKE 'nextval%'
+     GROUP BY c.table_name
+    HAVING bool_or(c.column_name = 'project_id')
+  LOOP
+    EXECUTE format('INSERT INTO %I (%s) SELECT %s FROM %I WHERE project_id = $1',
+                   t.имя, t.колонки, t.отбор, t.имя)
+      USING откуда;
+    GET DIAGNOSTICS m = ROW_COUNT; n := n + m;
+  END LOOP;
+  RETURN n;
+END $$ LANGUAGE plpgsql;
+
+-- Снять набор целиком. Не `orphans-purge`: тот берёт ВСЕХ, кого нет среди
+-- проектов, и снёс бы чужую примерку, идущую рядом.
+CREATE OR REPLACE FUNCTION project_forget(чей text) RETURNS bigint AS $$
+DECLARE t record; n bigint := 0; m bigint;
+BEGIN
+  IF coalesce(чей, '') = '' THEN
+    RAISE EXCEPTION 'имя набора пусто: `''''` — это общий слой словаря, а не набор';
+  END IF;
+  FOR t IN
+    SELECT tb.table_name AS имя
+      FROM information_schema.tables tb
+      JOIN information_schema.columns c
+        ON c.table_schema = tb.table_schema AND c.table_name = tb.table_name
+       AND c.column_name = 'project_id'
+     WHERE tb.table_schema = 'public' AND tb.table_type = 'BASE TABLE'
+  LOOP
+    EXECUTE format('DELETE FROM %I WHERE project_id = $1', t.имя) USING чей;
+    GET DIAGNOSTICS m = ROW_COUNT; n := n + m;
+  END LOOP;
+  RETURN n;
+END $$ LANGUAGE plpgsql;
+
 -- Снимается трёхдоводная: у неё не было слова о склейке, и склейку она делала
 -- всегда — молча и удалением.
 DROP FUNCTION IF EXISTS rename_in_columns(text, text, text);
@@ -8740,6 +8821,21 @@ pub async fn readiness_gaps(pool: &Pool, project: &str) -> Result<Value, tokio_p
 ///
 /// Ответ достаётся из САМОГО запроса, а не из второй записи о нём: вторая
 /// разошлась бы с первой при первой же правке правила.
+/// Имя, ПОД КОТОРЫМ правило читает исключения, — из его же запроса.
+///
+/// Имя пункта и имя правила в `rule_exception` совпадают не всегда: пункт
+/// зовётся `retired-term-in-corpus`, а исключения ищет по `retired-term`. Дверь
+/// на такое отвечала «правило исключений не читает» — и это неправда: читает,
+/// под другим именем. Отказ, называющий не ту причину, отправляет искать то,
+/// чего нет; здесь он назовёт верное имя.
+pub fn exception_rule(query: &str) -> Option<String> {
+    let at = query.find("e.rule = ")?;
+    let rest = &query[at + "e.rule = ".len()..];
+    let rest = rest.trim_start().strip_prefix('\'')?;
+    let end = rest.find('\'')?;
+    Some(rest[..end].to_owned())
+}
+
 pub fn exception_key(query: &str) -> Option<String> {
     let at = query.find("e.entity_id")?;
     let rest = &query[at + "e.entity_id".len()..];
@@ -10937,6 +11033,25 @@ pub async fn exception_changes_answer(
         return Ok(None);
     };
     let Some(sql) = row.get::<_, Option<String>>(0) else { return Ok(None) };
+    // УЖЕ ЗАПИСАННОЕ ИСКЛЮЧЕНИЕ ДОКАЗЫВАТЬ НЕ НАДО — ОНО УЖЕ РАБОТАЕТ.
+    //
+    // Проба сажает нарушение и смотрит, изменился ли ответ правила. Но если
+    // исключение по этому ключу уже лежит, правило эту находку УЖЕ не отдаёт:
+    // проба ничего не меняет, ответ тот же, и дверь отказывает словами «ключ не
+    // совпал ни с одной находкой» — прямой неправдой. Своя же запись двери —
+    // `DO UPDATE SET reason, decided_by, closes`: она затем и upsert, чтобы
+    // довод можно было дописать, а задачу-закрывателя привязать позже.
+    let уже: bool = client
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM rule_exception
+                             WHERE project_id = $1 AND rule = $2 AND entity_id = $3)",
+            &[&project, &rule, &entity],
+        )
+        .await?
+        .get(0);
+    if уже {
+        return Ok(None);
+    }
     let tx = client.transaction().await?;
     let before = answer_of(&tx, &sql, project).await;
     tx.execute(
@@ -10966,6 +11081,157 @@ pub async fn exception_changes_answer(
          и записанное исключение было бы мёртвым. Ключ этого правила — `{ключ}`. Находки сейчас: {}",
         примеры.join(" | ")
     )))
+}
+
+/// Роли словаря: что спрашивают проекции, что объявлено и что молчит.
+///
+/// Молчащая роль не «нашла ноль» — она ВЫКЛЮЧАЕТ правило, и снаружи это
+/// неотличимо от зелёного. Узнать, чего не хватает, можно было только чтением
+/// исходника; один набор объявил так семь ролей за день, каждую — после того,
+/// как нашёл её в коде.
+pub async fn scheme_roles(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
+    let client = pool.get().await.expect("пул отдал соединение");
+    let rows = client
+        .query("SELECT role, value, coalesce(nullif(project_id,''),'') AS чей
+                  FROM scheme_term ORDER BY role, ord, value", &[])
+        .await?;
+    let mut своё: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    let mut общее: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    for r in &rows {
+        let (role, value, чей): (String, String, String) = (r.get(0), r.get(1), r.get(2));
+        if чей == project {
+            своё.entry(role).or_default().push(value);
+        } else if чей.is_empty() {
+            общее.entry(role).or_default().push(value);
+        }
+    }
+    // РОЛИ, КОТОРЫЕ СПРАШИВАЕТ SQL ПУНКТОВ, — из самих запросов, а не списком.
+    //
+    // Половина спрашивающих — не Rust: четырнадцать пунктов гейта читают словарь
+    // через `scheme($1) WHERE role = '…'`, и статического перечня для них быть
+    // не должно — пункты заводят дверью. Роль `term.foreign-home` стоила
+    // шестнадцати находок, `register.questions` — «в реестре строк 0»,
+    // `word.manifest-key` — зависимости, которой нет; о каждой узнавали чтением
+    // SQL.
+    //
+    // Отсюда же берётся и «чего стоит»: пункт, который её спрашивает, назван
+    // поимённо — точнее любого описания, которое можно придумать заранее.
+    let из_правил = client
+        .query(
+            // Роль спрашивают двумя формами — `role = 'x'` и `role IN ('x','y')`, —
+            // и вторая несёт их несколько. Брать только первую значило бы снова
+            // потерять роль: так `term.foreign-home` не попала в реестр, а её
+            // молчание стоило шестнадцати находок.
+            "SELECT m[1] AS роль,
+                    string_agg(DISTINCT phase || ' · ' || id, ', ') AS пункты
+               FROM gate_item g
+               CROSS JOIN LATERAL regexp_matches(g.query, '''([a-z]+\\.[a-z.-]+)''', 'g') m
+              WHERE g.kind = 'query' AND g.query LIKE '%scheme(%'
+                AND g.query ~ ('role\\s*(=|IN)')
+              GROUP BY 1 ORDER BY 1",
+            &[],
+        )
+        .await?;
+    let mut спрошено: Vec<(String, String, String)> = crate::scheme::ROLES
+        .iter()
+        .map(|(r, как, чем)| ((*r).to_owned(), (*как).to_owned(), (*чем).to_owned()))
+        .collect();
+    for r in &из_правил {
+        let (роль, пункты): (String, String) = (r.get(0), r.get(1));
+        if !спрошено.iter().any(|(имя, _, _)| *имя == роль) {
+            спрошено.push((роль, "all".to_owned(), format!("её спрашивает пункт гейта: {пункты}")));
+        }
+    }
+    спрошено.sort();
+
+    // ОБРАЗЕЦ, НЕ ПОЙМАВШИЙ НИ ОДНОГО ЖИВОГО ИМЕНИ, — находка, а не настройка.
+    //
+    // Умолчание `id.requirement` было `FR-[A-Z]+-[0-9]+` против живых `FR-122` и
+    // `NFR-07`: совпало с нулём имён и промолчало, а раздел держателей
+    // инварианта не работал трое суток. Дверь `kind-id-set` этот приём знает —
+    // «сверяется на живых именах»; здесь он тот же, только для роли.
+    let mut не_ловят: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    for (роль, _, _) in &спрошено {
+        let Some(вид) = роль.strip_prefix("id.") else { continue };
+        let образцы: Vec<String> = своё
+            .get(роль.as_str())
+            .or_else(|| общее.get(роль.as_str()))
+            .cloned()
+            .unwrap_or_default();
+        if образцы.is_empty() {
+            continue;
+        }
+        let (mut подошло, mut всего) = (0i64, 0i64);
+        for table in своих_таблиц(&client, вид).await? {
+            let есть: bool = client
+                .query_one(
+                    "SELECT EXISTS (SELECT 1 FROM information_schema.columns
+                                     WHERE table_schema='public' AND table_name=$1 AND column_name='id')",
+                    &[&table],
+                )
+                .await?
+                .get(0);
+            if !есть {
+                continue;
+            }
+            let r = client
+                .query_one(
+                    &format!(
+                        "SELECT count(*) FILTER (WHERE id ~ ANY($2)), count(*)
+                           FROM {table} WHERE project_id = $1"
+                    ),
+                    &[&project, &образцы],
+                )
+                .await?;
+            подошло += r.get::<_, i64>(0);
+            всего += r.get::<_, i64>(1);
+        }
+        // Ноль живых имён — не находка: ловить нечего, и это другое.
+        if всего > 0 && подошло == 0 {
+            не_ловят.insert(роль.clone(), всего);
+        }
+    }
+
+    let mut молчат = 0usize;
+    let mut двусмысленны = 0usize;
+    let mut слепы = 0usize;
+    let out: Vec<Value> = спрошено
+        .iter()
+        .map(|(role, как_спрашивают, чем_платит)| {
+            let role = role.as_str();
+            let как_спрашивают = как_спрашивают.as_str();
+            let s = своё.get(role);
+            let o = общее.get(role);
+            let слова = s.or(o);
+            let сколько = слова.map(|v| v.len()).unwrap_or(0);
+            // Ноль слов — беда всегда. Два слова — беда ТОЛЬКО у роли, которую
+            // спрашивают одним: `one` про такую честно отвечает `None`, и
+            // правило выключается. Роль-список двумя значениями не ломается, и
+            // звать это двусмысленностью значит поднимать тревогу на здоровом.
+            let состояние = match (сколько, как_спрашивают) {
+                (0, _) => { молчат += 1; "молчит" }
+                (n, "one") if n > 1 => { двусмысленны += 1; "двусмысленна" }
+                _ if не_ловят.contains_key(role) => { слепы += 1; "не ловит имён" }
+                _ => "считает",
+            };
+            json!({
+                "role": role, "state": состояние, "asked": как_спрашивают,
+                "liveNames": не_ловят.get(role).map(|n| json!(n)).unwrap_or(Value::Null),
+                "words": слова.cloned().unwrap_or_default(),
+                "from": if s.is_some() { "набор" } else if o.is_some() { "общее" } else { "нигде" },
+                "costs": чем_платит,
+            })
+        })
+        .collect();
+    Ok(json!({
+        "roles": out,
+        "asked": out.len(),
+        "silent": молчат,
+        "ambiguous": двусмысленны,
+        "catchesNothing": слепы,
+        "why": "молчащая роль ВЫКЛЮЧАЕТ правило, а не обнуляет его находки: снаружи это \
+                неотличимо от зелёного. Объявляется дверью `scheme-term-set`",
+    }))
 }
 
 pub fn violator(detail: &str) -> String {

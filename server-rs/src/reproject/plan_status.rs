@@ -13,12 +13,25 @@ use std::collections::HashSet;
 const KIND: &str = "board";
 const NAME: &str = "status";
 const HEADER: [&str; 3] = ["Задача", "Состояние", "Коммиты"];
-static TASK_ID: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^\s*`?([MV]\d+-T[0-9a-z]+)`?\s*$").expect("образец задачи"));
+
 /// В ячейке коммита бывает несколько хешей и прочерк.
 static COMMIT: Lazy<Regex> = Lazy::new(|| Regex::new(r"\b([0-9a-f]{7,40})\b").expect("образец коммита"));
 
 pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres::Error> {
+    // ОБРАЗЕЦ ЗАДАЧИ — ИЗ РАСКЛАДКИ, а не свой. Здесь стоял `[MV]\d+-T…`, а
+    // раскладка говорит `[MmVv]\d+-[Tt][\w-]+`: набор со строчными именами эта
+    // копия не увидела бы, и доска состояний молча не собралась бы.
+    let образцы = {
+        let client = pool.get().await.expect("пул отдал соединение");
+        crate::scheme::id_pattern(&client, project, "task").await?
+    };
+    let task_id: Vec<Regex> = образцы
+        .iter()
+        .filter_map(|p| {
+            let ядро = p.trim_start_matches('^').trim_end_matches('$');
+            Regex::new(&format!(r"^\s*`?({ядро})`?\s*$")).ok()
+        })
+        .collect();
     let blocks = cells(pool, project, KIND, NAME, false).await?;
     let heads = headings(pool, project, KIND, NAME).await?;
     let mut out: Vec<(String, String, &str, String)> = Vec::new();
@@ -35,7 +48,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
             if *ord == 0 {
                 continue;
             }
-            let Some(m) = TASK_ID.captures(at(row, 0)) else { continue };
+            let Some(m) = task_id.iter().find_map(|r| r.captures(at(row, 0))) else { continue };
             let id = m[1].to_owned();
             if !seen.insert(id.clone()) {
                 continue;

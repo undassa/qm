@@ -212,7 +212,12 @@ pub async fn project(
 
     let mut client = pool.get().await.expect("пул отдал соединение");
     let tx = client.transaction().await?;
-    tx.execute("DELETE FROM project_feature_stories WHERE project_id = $1", &[&project]).await?;
+    // Объявленное дверью `feature-story-add` переживает пересборку — но не саму
+    // фичу. Фича выводится целиком и при исчезновении из документов уходит; её
+    // объявленная связь оставалась висеть и считалась в `feature-matches-stories`
+    // как живая. Прежний снос целиком её подбирал, `origin` — уже нет.
+    tx.execute("DELETE FROM project_feature_stories WHERE project_id = $1 AND origin = 'projected'",
+               &[&project]).await?;
     tx.execute("DELETE FROM project_features WHERE project_id = $1", &[&project]).await?;
     for (id, title, kind, name, stories) in &features {
         tx.execute(
@@ -242,6 +247,17 @@ pub async fn project(
         )
         .await?;
     }
+    // СВЯЗЬ, ПЕРЕЖИВШАЯ СВОЮ ФИЧУ, — не запись, а мусор. Снимается ПОСЛЕ того,
+    // как фичи вставлены заново: до вставки их нет вовсе, и то же условие
+    // снесло бы объявленное целиком.
+    tx.execute(
+        "DELETE FROM project_feature_stories fs
+          WHERE fs.project_id = $1
+            AND NOT EXISTS (SELECT 1 FROM project_features f
+                             WHERE f.project_id = fs.project_id AND f.id = fs.feature_id)",
+        &[&project],
+    )
+    .await?;
     tx.execute("DELETE FROM project_runs_log WHERE project_id = $1", &[&project]).await?;
     for (id, title, kind, name, version, milestone, is_milestone, left_open, sections, is_version) in &runs {
         tx.execute(

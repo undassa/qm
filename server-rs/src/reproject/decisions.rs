@@ -331,7 +331,10 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize)
 
     let mut client = pool.get().await.expect("пул отдал соединение");
     let tx = client.transaction().await?;
-    tx.execute("DELETE FROM project_decision_links WHERE project_id = $1", &[&project]).await?;
+    // Своё — стирается, объявленное — нет: дверь `decision-link-add` пишет
+    // `origin='declared'`, и снос целиком стирал её запись каждой пересборкой.
+    tx.execute("DELETE FROM project_decision_links WHERE project_id = $1 AND origin = 'projected'",
+               &[&project]).await?;
     tx.execute("DELETE FROM project_decision_alternatives WHERE project_id = $1 AND origin = 'projected'", &[&project]).await?;
     // Альтернативы адресуются решением и порядком, и объявленные тем же решением
     // сталкиваются так же. Уходят они ЦЕЛИКОМ по своему решению: половина
@@ -379,6 +382,25 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize)
         )
         .await?;
     }
+    // СВЯЗЬ, ПЕРЕЖИВШАЯ СВОЁ РЕШЕНИЕ, — не запись, а ложная зелень.
+    //
+    // Дверь `decision-link-add` существования решения не проверяет, а
+    // `decision-add drop` снимает только строку решения. Прежний снос целиком
+    // такую связь подбирал; снос «только своего» оставил бы её навсегда — и
+    // `closed-question-names-closer` держал бы вопрос ЗЕЛЁНЫМ через
+    // `NOT EXISTS (… kind = 'closes' AND target = q.id)`: вопрос закрыт без
+    // ответа и назвал закрывателя, которого нет.
+    //
+    // Снимается ПОСЛЕ вставки решений — до неё их нет вовсе, и то же условие
+    // снесло бы объявленное целиком. Тот же приём, что у фич в `runs`.
+    tx.execute(
+        "DELETE FROM project_decision_links l
+          WHERE l.project_id = $1
+            AND NOT EXISTS (SELECT 1 FROM project_decisions d
+                             WHERE d.project_id = l.project_id AND d.id = l.decision_id)",
+        &[&project],
+    )
+    .await?;
     tx.commit().await?;
     Ok((decisions.len(), links.len(), alternatives.len()))
 }

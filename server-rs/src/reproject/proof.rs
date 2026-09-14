@@ -79,7 +79,10 @@ fn declares_over(kind: &str, existing: Option<&String>, home: &str) -> bool {
     }
 }
 
-pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize), tokio_postgres::Error> {
+pub async fn project(
+    pool: &Pool,
+    project: &str,
+) -> Result<(usize, usize, usize, u64), tokio_postgres::Error> {
     let client = pool.get().await.expect("пул отдал соединение");
     // Порядок строк решает, какое из двух объявлений одного имени взято первым,
     // и потому назван: вид, имя, блок, строка, колонка. Прежде первым шёл путь;
@@ -441,6 +444,64 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize)
     )
     .await?;
 
+    // ИСТОЧНИК ПРОВЕРКИ — ДОКУМЕНТ, КОТОРЫЙ ЕЁ ОБЪЯВЛЯЕТ, а не тот, кто упомянул
+    // первым.
+    //
+    // Три пути кладут сюда проверки, и все три — с `DO NOTHING`. Значит
+    // источником записывался первый успевший, а путь из требования берёт
+    // источник у ТРЕБОВАНИЯ. У `tot-ade` все пятьдесят шесть проверок живут в
+    // `acceptance`, а числились написанными в `srs` — потому что их оттуда
+    // назвали.
+    //
+    // Круг при этом замыкался: вид `named_id_role` зовёт вхождение
+    // «объявляющим», когда документ совпал с ЗАПИСАННЫМ источником, — а
+    // записанный источник и был неверен. Правило
+    // `entity-written-in-its-source` честно говорило «документа, где она
+    // написана, нет», и поправить это было нечем: двери снятия у проверок нет,
+    // а чистка сносит выведенное и вставляет то же самое.
+    //
+    // Объявление опознаётся РАЗДЕЛОМ, названным именем: «TC-AGENT-01 · От
+    // находки до дельты». Не любым упоминанием имени в заголовке — «TC-AGENT-01
+    // считает переходы» это проза о ней, а не её заведение; разделяет их
+    // разделитель после имени.
+    //
+    // ДВУСМЫСЛЕННОЕ РАЗБИРАЕТСЯ ОБЪЯВЛЕННЫМ, а не догадкой. Разделов, названных
+    // именем проверки, бывает два: реестр, который её заводит, и задача, которая
+    // о ней говорит. Отличает их не длина и не порядок, а раскладка: `single`
+    // сказано у вида. Одиночка (`acceptance`, `srs`, `test-cases`) — корпусный
+    // дом вида; документ задачи принадлежит своей задаче, и проверка ему не
+    // принадлежит.
+    //
+    // Одиночек два или ни одного — не трогаем: тогда выбрать вправду нечем, и
+    // красное правило честнее тихой догадки.
+    let дом = tx
+        .execute(
+            "UPDATE project_checks c
+                SET entity_kind = d.kind, entity_name = d.name
+               FROM (SELECT c2.id,
+                            min(s.entity_kind) AS kind, min(s.entity_name) AS name,
+                            count(DISTINCT s.entity_kind || E'\t' || s.entity_name) AS сколько
+                       FROM project_checks c2
+                       JOIN project_document_sections s
+                         ON s.project_id = c2.project_id
+                        -- Имя приходит из текста документа, и в выражение его не
+                        -- подставляют: точка в имени совпала бы с чем угодно, а
+                        -- незакрытая скобка уронила бы `UPDATE` — и с ним весь
+                        -- круг пересборки этого набора, каждый раз.
+                        AND (s.title = c2.id
+                             OR (left(s.title, length(c2.id)) = c2.id
+                                 AND substr(s.title, length(c2.id) + 1) ~ '^\\s*[·—:-]'))
+                       JOIN kind_layout k
+                         ON k.name = s.entity_kind AND k.spec->>'single' = 'true'
+                      WHERE c2.project_id = $1
+                      GROUP BY c2.id) d
+              WHERE c.project_id = $1 AND c.id = d.id AND d.сколько = 1
+                AND (c.entity_kind, c.entity_name) IS DISTINCT FROM (d.kind, d.name)",
+            &[&project],
+        )
+        .await?;
+
+
     // ...И ПРОВЕРКИ, ПРИШЕДШИЕ ДРУГИМ ПУТЁМ. У `myack` доказательства не в
     // прозе `measured_by`, а в ячейках таблиц, и таблица доказательств
     // оставалась пустой — правило честно отвечало «судить нечем» при 363
@@ -533,5 +594,8 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize)
     )
     .await?;
     tx.commit().await?;
-    Ok((requirements.len(), checks.len(), needs.len()))
+    // ПЕРЕПИСАННЫЙ ИСТОЧНИК НАЗЫВАЕТСЯ ЧИСЛОМ. Проход молча правит, где написана
+    // проверка; посчитать и выбросить значило бы прятать правку от того, кто её
+    // потом ищет.
+    Ok((requirements.len(), checks.len(), needs.len(), дом))
 }

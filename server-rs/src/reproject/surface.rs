@@ -212,16 +212,27 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize,
         Vec::new()
     };
     let tx = client.transaction().await?;
-    // Связи пересобираются целиком — они выводятся всегда. У сущностей стирается
-    // только выведенное: объявленная прямо история не выводится ниоткуда, и
-    // пересборка, стирающая её, стирала бы запись, а не свой прошлый вывод.
-    for table in ["project_screen_references", "project_story_requirements"] {
-        tx.execute(&format!("DELETE FROM {table} WHERE project_id = $1"), &[&project]).await?;
-    }
+    // «Связи выводятся всегда» — было правдой, пока связь нельзя было объявить.
+    // Дверь `story-requirement-add` появилась, и снос целиком стал стирать её
+    // запись каждой пересборкой: дверь отвечала «записано», а до следующего
+    // прогона запись не доживала.
+    tx.execute("DELETE FROM project_screen_references WHERE project_id = $1 AND origin = 'projected'",
+               &[&project]).await?;
+    tx.execute("DELETE FROM project_story_requirements WHERE project_id = $1 AND origin = 'projected'",
+               &[&project]).await?;
     for table in ["project_stories", "project_screens"] {
         tx.execute(&format!("DELETE FROM {table} WHERE project_id = $1 AND origin = 'projected'"),
                    &[&project]).await?;
     }
+    // ДОКУМЕНТ ПОЛНЕЕ ОБЪЯВЛЕНИЯ, и побеждает он. Стирается только выведенное, а
+    // вставка шла без `ON CONFLICT`: история, объявленная дверью `story-add` и
+    // заодно описанная документом, роняла ВСЮ пересборку о первичный ключ —
+    // проекции оставались недособранными, а гейт продолжал считать по ним.
+    // `decisions.rs` этот случай разбирает тем же снятием по именам; здесь его
+    // не было.
+    let story_ids: Vec<String> = stories.iter().map(|s| s.0.clone()).collect();
+    tx.execute("DELETE FROM project_stories WHERE project_id = $1 AND id = ANY($2)",
+               &[&project, &story_ids]).await?;
     for (id, title, kind, name, area, persona, phase, feature) in &stories {
         tx.execute(
             "INSERT INTO project_stories(project_id, id, title, entity_kind, entity_name, area,
@@ -231,7 +242,24 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize,
         )
         .await?;
     }
+    let screen_ids: Vec<String> = screens.iter().map(|s| s.0.clone()).collect();
+    tx.execute("DELETE FROM project_screens WHERE project_id = $1 AND id = ANY($2)",
+               &[&project, &screen_ids]).await?;
+    for (id, title, kind, name, area) in &screens {
+        tx.execute(
+            "INSERT INTO project_screens(project_id, id, title, entity_kind, entity_name, area)
+             VALUES ($1,$2,$3,$4,$5,$6)",
+            &[&project, id, title, kind, name, area],
+        )
+        .await?;
+    }
     // Отложенность экрана объявлена в нём самом: «**Вне первой версии**».
+    //
+    // ПОСЛЕ ВСТАВКИ, а не до неё. Правка стояла выше сноса и вставки тех же
+    // строк: флаг ложился на строки, которые тут же сносились, а вставка клала
+    // умолчание. Колонка была пуста у ВСЕХ экранов всегда, и правило
+    // `screen-has-story-or-task`, читающее `out_of_version = ''`, находило
+    // экран, документ которого прямо говорит «Вне первой версии».
     tx.execute(
         "UPDATE project_screens s SET out_of_version = CASE
             WHEN d.content ~ 'Вне первой версии' OR d.content ~ 'Вне v[0-9]' THEN 'объявлен отложенным'
@@ -242,14 +270,6 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize,
         &[&project],
     )
     .await?;
-    for (id, title, kind, name, area) in &screens {
-        tx.execute(
-            "INSERT INTO project_screens(project_id, id, title, entity_kind, entity_name, area)
-             VALUES ($1,$2,$3,$4,$5,$6)",
-            &[&project, id, title, kind, name, area],
-        )
-        .await?;
-    }
     // Тело экрана — из секции его же документа, названной его именем. Без
     // текста экран выпадал из каскада «связь обновилась — вопрос переоткрыт»,
     // хотя описание есть у всех 69.

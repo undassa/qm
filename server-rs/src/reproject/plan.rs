@@ -295,9 +295,19 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize,
     }
     // Листья дерева задач: разбор блока живёт в своём модуле, а сюда приходит
     // готовым перечнем.
+    //
+    // ЧИТАЕТСЯ ТОЙ ЖЕ ТРАНЗАКЦИЕЙ, А НЕ ВТОРЫМ СОЕДИНЕНИЕМ. Здесь стоял
+    // `pool.get()` при живом внешнем соединении с открытой транзакцией — и это
+    // единственное такое место во всей пересборке. В пуле восемь слотов, а
+    // `deadpool` собран без срока ожидания: восемь пересборок разом — а дверь
+    // `put` без `deferProjection` зовёт пересборку на КАЖДУЮ запись — заняли бы
+    // все восемь внешними соединениями и встали бы навсегда, ожидая девятого.
+    // Не «медленно», а молча и насмерть.
+    //
+    // На ответ это не влияет: `project_plan_tasks` эта транзакция трогает
+    // ниже, так что читается ровно то же зафиксированное состояние.
     let tree_leaves: Vec<(String, i32, String, String, bool, bool, String)> = {
-        let client = pool.get().await.expect("пул отдал соединение");
-        let rows = client
+        let rows = tx
             .query(
                 "SELECT t.id, d.content FROM project_plan_tasks t
                    JOIN project_documents d ON d.project_id = t.project_id
@@ -366,8 +376,25 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize,
             &[&project, id, version, ord, title, kind, name],
         ).await?;
     }
+    // СНОСИТСЯ ТОЛЬКО СВОЁ. Красные задачи кладёт `rebuild` из `red_task`, а этот
+    // проход сносил их заодно: их нет в его перечне, значит под «лишние» они
+    // подходили.
+    //
+    // Цена измерена, а не предположена: опрос в 400 замеров во время одного
+    // `reproject` увидел ноль красных задач в 382 из них. Восемьдесят три задачи
+    // пропадали на всё время между двумя проходами, и всякий, кто в это окно
+    // мерил гейт, считал по плану без трека проверок. Так четырежды за сессию
+    // «ломался» пункт `check-track-has-tasks` — он честно отвечал «трек пуст»,
+    // потому что трек и вправду был пуст. А подкоманда `mh-server reproject
+    // --half`, которая пересборку не зовёт, оставляла проект без красных задач
+    // насовсем.
+    //
+    // Снос красных стоит теперь ВПЛОТНУЮ к их вставке, в той же транзакции
+    // `rebuild`: и окна нет, и призраков нет. Условие на вид здесь — не особый
+    // случай, а граница прохода: он владеет задачами из документов вида `task`.
     tx.execute("DELETE FROM project_plan_tasks
-                 WHERE project_id = $1 AND origin = 'projected' AND id <> ALL($2)",
+                 WHERE project_id = $1 AND origin = 'projected' AND id <> ALL($2)
+                   AND entity_kind <> 'red-task'",
                &[&project, &task_ids]).await?;
     for (id, milestone, ord, title, ekind, ename, size, kind, state, commit) in &tasks {
         tx.execute(

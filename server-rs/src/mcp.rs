@@ -459,6 +459,8 @@ impl Mcp {
             "inputSchema": { "type": "object", "properties": { "drop": json!({"type":"boolean","description":"снять объявленное этой же дверью"}), "process": s("процесс, по умолчанию godzy"),
                 "ord": json!({"type":"integer"}), "question": s("условие словами") },
                 "required": ["ord", "question"] } }));
+        tools.push(json!({ "name": "scheme-roles", "description": "роли словаря: что спрашивают проекции, что объявлено набором либо общим слоем, что молчит — и какое правило молчанием выключено",
+            "inputSchema": { "type": "object", "properties": {} } }));
         tools.push(json!({ "name": "scheme-term-set", "description": "объявить слово схемы этого набора; роль, объявленная набором, замещает общий список целиком",
             "inputSchema": { "type": "object", "properties": { "role": s("роль, латиницей"),
                 "value": s("слово набора"), "ord": s("порядок, если слов несколько"),
@@ -765,7 +767,7 @@ impl Mcp {
         // вызов и отдавал строку таблицы вместо вычисления.
         const RESERVED: &[&str] = &[
             "method-set", "gate-item-set", "question-holders", "preflight-push", "worktree-push",
-            "sensor-specs", "scheme-terms", "frozen-trees", "addresses-declared", "tree-declared", "donors", "skills-push", "skills", "agents", "code-facts-push", "code-facts", "summary", "links-of", "retired-terms", "order", "gate-measure", "gate-item-waive", "gate-selftest", "links-rewrite", "links-retarget", "reparse", "screen-area-set", "skill-set", "skills-paths", "version-freeze", "version-delta", "generated-check", "principal-allow", "principals", "author-set", "authors", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "version-close", "phase-set", "exception-set", "gate-selftest", "next-step", "process-state", "statuses", "task-status", "status-anomaly", "pipeline", "board", "waves", "phases", "coverage", "blocks", "history", "at-revision", "process-history", "progress",
+            "sensor-specs", "scheme-terms", "scheme-roles", "frozen-trees", "addresses-declared", "tree-declared", "donors", "skills-push", "skills", "agents", "code-facts-push", "code-facts", "summary", "links-of", "retired-terms", "order", "gate-measure", "gate-item-waive", "gate-selftest", "links-rewrite", "links-retarget", "reparse", "screen-area-set", "skill-set", "skills-paths", "version-freeze", "version-delta", "generated-check", "principal-allow", "principals", "author-set", "authors", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "version-close", "phase-set", "exception-set", "gate-selftest", "next-step", "process-state", "statuses", "task-status", "status-anomaly", "pipeline", "board", "waves", "phases", "coverage", "blocks", "history", "at-revision", "process-history", "progress",
             "kinds", "kinds-due", "readiness-gaps", "declared-unwritten", "blame-set", "doors", "derived-copy-set", "field-column-alias", "column-server-filled", "holders", "counts-sync", "kind-add", "kind-required", "kind-projection", "kind-reopens", "kind-proves", "kind-id-set", "kind-domain", "tree", "document-coverage", "sections", "section", "backlinks", "search", "put",
             "put-section", "rm", "document-add", "reproject", "sweep", "gate", "next-task", "blockers", "events", "task-plan-push",
             "norm-versions", "measurements", "plan", "readiness", "requirements-of",
@@ -1270,6 +1272,10 @@ impl Mcp {
                     Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
                 }
             }
+            "scheme-roles" => match crate::projector::scheme_roles(&self.pool, p).await {
+                Ok(v) => ok(v),
+                Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
+            },
             "next-step" => {
                 let process = args.get("process").and_then(|v| v.as_str()).unwrap_or("godzy");
                 match crate::projector::next_step(&self.pool, p, process).await {
@@ -2029,6 +2035,24 @@ impl Mcp {
                 let ord = num(args, "ord").unwrap_or(0) as i32;
                 let drop = args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false);
                 let client = self.pool.get().await.expect("пул отдал соединение");
+                // ОБРАЗЕЦ ИМЕНИ ЧИТАЮТ ДВА РАЗНЫХ ДВИЖКА, И ОБА ДОЛЖНЫ ЕГО ПОНЯТЬ.
+                //
+                // Роли `id.*` — это выражения. По ним `scheme-roles` сверяет
+                // живые имена запросом `id ~ ANY($2)`, а проекции на Rust строят
+                // `Regex`. Дверь не проверяла ничего: незакрытая скобка в слове
+                // роняла `scheme-roles` отказом базы — ту самую дверь, которой
+                // ищут сломанные слова, — а выражение, понятное лишь одному из
+                // движков, молча выключало половину читателей.
+                if !drop && role.starts_with("id.") {
+                    if client.query_one("SELECT 'проба' ~ $1", &[&value]).await.is_err() {
+                        return refusal(Miss::Db(format!(
+                            "образец «{value}» не разбирается Postgres: по нему сверяются живые                              имена, и роль молча перестала бы считать")));
+                    }
+                    if let Err(e) = regex::Regex::new(&value) {
+                        return refusal(Miss::Db(format!(
+                            "образец «{value}» не разбирается Rust: по нему строят проекции.                              {e}. Помните про расхождение движков: `\\b` в Postgres — не граница                              слова, а `\\y`")));
+                    }
+                }
                 // СЛОЙ НАЗЫВАЕТСЯ. По умолчанию слово принадлежит ЭТОМУ набору:
                 // дверь зовётся из репозитория и отвечает про проект, и писать
                 // из неё в общее значило бы менять чужой разбор молча — так и
@@ -2098,8 +2122,22 @@ impl Mcp {
                     let count = client
                         .query_one(
                             &format!(
+                                // ПУСТОЙ `project_id` — НЕ СИРОТА, А ОБЩИЙ СЛОЙ.
+                                //
+                                // Словарь схемы устроен в два слоя: своё у набора
+                                // и общее на всех, и общее хранится с пустым
+                                // именем проекта. Пустое имя среди проектов не
+                                // значится — и чистка, взяв «всех, кого нет
+                                // среди проектов», сносила ОБЩИЙ СЛОВАРЬ ЦЕЛИКОМ.
+                                // Проверено ценой: один вызов с подтверждением
+                                // снёс его, и у соседнего набора разом потухли
+                                // правила, которым не стало на чём считать —
+                                // выглядело это находками в наборе.
+                                //
+                                // Восстановить нечем: летописи вызовов дверей
+                                // база не ведёт.
                                 "SELECT count(*) FROM \"{name}\"
-                                  WHERE project_id NOT IN (SELECT id FROM projects)"
+                                  WHERE project_id <> '' AND project_id NOT IN (SELECT id FROM projects)"
                             ),
                             &[],
                         )
@@ -2115,7 +2153,7 @@ impl Mcp {
                             .execute(
                                 &format!(
                                     "DELETE FROM \"{name}\"
-                                      WHERE project_id NOT IN (SELECT id FROM projects)"
+                                      WHERE project_id <> '' AND project_id NOT IN (SELECT id FROM projects)"
                                 ),
                                 &[],
                             )
@@ -2191,15 +2229,63 @@ impl Mcp {
                         .map(|r| r.first().map(|x| x.get::<_, i64>(0)).unwrap_or(0))
                         .unwrap_or(0);
                     if reads == 0 {
-                        return refusal(Miss::Db(format!(
+                        // НЕ ЧИТАЕТ — ИЛИ ЧИТАЕТ ПОД ДРУГИМ ИМЕНЕМ, и это разное.
+                        // Пункт `retired-term-in-corpus` ищет исключения по имени
+                        // `retired-term`; отказ говорил «не читает», отправляя
+                        // искать то, чего нет. Верное имя лежит в самом запросе —
+                        // спросим его, раз уж отказываем.
+                        let под_именем = self
+                            .pool
+                            .get()
+                            .await
+                            .expect("пул отдал соединение")
+                            .query_opt(
+                                "SELECT query FROM gate_item WHERE id = $1 AND kind = 'query'",
+                                &[&rule],
+                            )
+                            .await
+                            .ok()
+                            .flatten()
+                            .and_then(|r| r.get::<_, Option<String>>(0))
+                            .and_then(|q| {
+                                crate::projector::exception_rule(&q).map(|имя| {
+                                    let ключ = crate::projector::exception_key(&q)
+                                        .unwrap_or_else(|| "не объявлен".to_owned());
+                                    format!(
+                                        "пункт «{rule}» читает исключения под именем «{имя}», \
+                                         ключ — `{ключ}`. Зовите дверь с `rule={имя}`"
+                                    )
+                                })
+                            });
+                        return refusal(Miss::Db(под_именем.unwrap_or_else(|| format!(
                             "правило «{rule}» исключений не читает: ни один пункт гейта не соединяет \
                              свой запрос с `rule_exception` по этому имени. Записанное здесь исчезло бы \
                              без следа. Сперва научите пункт читать исключения — потом объявляйте."
-                        )));
+                        ))));
                     }
                 }
                 if reason.trim().is_empty() && !drop {
                     return refusal(Miss::Db("исключение без причины — это дыра с разрешением, а не решение".into()));
+                }
+                // КЛЮЧ ПРОВЕРЯЕТСЯ ОТВЕТОМ ПРАВИЛА, а не формой.
+                //
+                // Ключи у правил разные и разными быть обязаны: `f.name`, `r.id`,
+                // `l.kind || ':' || l.id`, `tc.task_id || ':' || tc.check_id`.
+                // Плохо не это, а то, что узнать ключ можно было только чтением
+                // SQL: `closed-rests-on-current` печатает находку как
+                // «milestone M0 — …», а ждёт `milestone:M0`, и дверь на «M0»
+                // молча отвечала `declared`. Побег ложился мимо, пункт оставался
+                // красным, и почему — не говорил никто.
+                //
+                // Форму ключа здесь не разбираем вовсе: исключение обязано
+                // ИЗМЕНИТЬ ответ правила. Это тот же приём, которым самотест
+                // судит пробу, и он не зависит от того, из чего ключ склеен.
+                if !drop {
+                    match crate::projector::exception_changes_answer(&self.pool, p, rule, id).await {
+                        Ok(Some(что)) => return refusal(Miss::Db(что)),
+                        Ok(None) => {}
+                        Err(e) => return refusal(Miss::Db(crate::projector::db_says(&e))),
+                    }
                 }
                 let client = self.pool.get().await.expect("пул отдал соединение");
                 let done = if drop {

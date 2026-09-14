@@ -82,10 +82,13 @@ pub async fn reproject(pool: &Pool, project: &str) -> Result<Value, tokio_postgr
     let (n, ns) = needs::project(pool, project).await?;
     done.insert("project_needs".into(), json!(n));
     done.insert("project_need_stories".into(), json!(ns));
-    let (req, chk, rn) = proof::project(pool, project).await?;
+    let (req, chk, rn, дом) = proof::project(pool, project).await?;
     done.insert("project_requirements".into(), json!(req));
     done.insert("project_checks".into(), json!(chk));
     done.insert("project_requirement_needs".into(), json!(rn));
+    if дом > 0 {
+        done.insert("проверок переписан источник".into(), json!(дом));
+    }
     done.insert("project_questions".into(), json!(questions::project(pool, project).await?));
     let (d, dl, da) = decisions::project(pool, project).await?;
     done.insert("project_decisions".into(), json!(d));
