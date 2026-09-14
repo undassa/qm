@@ -137,6 +137,13 @@ async fn round(pool: &Pool) -> Result<(), tokio_postgres::Error> {
             Ok(out)
         }
         .await;
+        let out = match measured {
+            Ok(out) => out,
+            Err(e) => {
+                tracing::warn!("пересчёт набора {project} не прошёл: {e}");
+                continue;
+            }
+        };
         let spent = began.elapsed().as_millis() as i32;
         let client = pool.get().await.expect("пул отдал соединение");
         client
@@ -145,13 +152,10 @@ async fn round(pool: &Pool) -> Result<(), tokio_postgres::Error> {
                 &[&project, &taken, &spent],
             )
             .await?;
-        match measured {
-            Ok(out) => tracing::info!(
-                "гейты пересчитаны: проект {project}, повод «{reason}», пунктов {}, провалено {}, {spent} мс",
-                out["measured"], out["failed"]
-            ),
-            Err(e) => tracing::warn!("пересчёт набора {project} не прошёл: {e}"),
-        }
+        tracing::info!(
+            "гейты пересчитаны: проект {project}, повод «{reason}», пунктов {}, провалено {}, {spent} мс",
+            out["measured"], out["failed"]
+        );
     }
     Ok(())
 }

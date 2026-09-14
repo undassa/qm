@@ -3486,7 +3486,8 @@ pub async fn next_task(pool: &Pool, project: &str) -> Result<Value, tokio_postgr
                                 FROM project_checks c
                                 JOIN task_requirement r
                                   ON r.project_id = c.project_id AND r.requirement_id = c.requirement_id
-                               WHERE c.project_id = $1 AND r.task_id = o.id), '') AS checks
+                               WHERE c.project_id = $1 AND r.task_id = o.id), '') AS checks,
+                    tp.phase_ord
                FROM open o
                LEFT JOIN task_phase tp ON tp.project_id = $1 AND tp.task_id = o.id
               WHERE o.id NOT IN (SELECT task_id FROM blocked_by_task)
@@ -3506,7 +3507,7 @@ pub async fn next_task(pool: &Pool, project: &str) -> Result<Value, tokio_postgr
         // числится закрытой и в перечень незакрытых не попадает никогда.
         let долг = client
             .query(
-                "SELECT r.task_id, r.phase, r.gate, t.title
+                "SELECT r.task_id, r.phase, r.gate, t.title, tp.phase_ord
                    FROM task_redo r
                    JOIN task_phase tp ON tp.project_id = r.project_id AND tp.task_id = r.task_id
                    LEFT JOIN project_plan_tasks t
@@ -3517,8 +3518,7 @@ pub async fn next_task(pool: &Pool, project: &str) -> Result<Value, tokio_postgr
             )
             .await?;
         if let Some(первая) = долг.first() {
-            let свой: String = первая.get(2);
-            if let Some(держит) = лестница_держит(&client, project, &свой).await? {
+            if let Some(держит) = лестница_держит(&client, project, первая.get(4)).await? {
                 return Ok(json!({ "task": null, "candidate": первая.get::<_, String>(0), "redo": true,
                                   "why": держит["why"], "ladder": держит }));
             }
@@ -3545,6 +3545,7 @@ pub async fn next_task(pool: &Pool, project: &str) -> Result<Value, tokio_postgr
     let id: String = r.get(0);
     let phase: Option<String> = r.get(5);
     let gate: Option<String> = r.get(6);
+    let phase_ord: Option<i32> = r.get(11);
 
     // БАРЬЕР ФАЗ. Прежде здесь стоял барьер красной фазы: «есть незакрытые
     // красные — задачи не выдаём». Он мерил не то. На `myack` все 82 красные
@@ -3650,7 +3651,7 @@ pub async fn next_task(pool: &Pool, project: &str) -> Result<Value, tokio_postgr
             "instead": шаг_вместо(&client, project).await?,
         }));
     }
-    if let Some(держит) = лестница_держит(&client, project, gate.as_deref().unwrap_or("")).await? {
+    if let Some(держит) = лестница_держит(&client, project, phase_ord).await? {
         return Ok(json!({ "task": null, "candidate": id, "why": держит["why"], "ladder": держит }));
     }
     // ДОЛГ ВИДЕН СРАЗУ, А НЕ В КОНЦЕ ОЧЕРЕДИ.
@@ -11724,6 +11725,7 @@ async fn compute_next_step(
             "touches": touches,
             "run": here_run,
             "kind": unit,
+            "held": touches == "repository" && corpus_open,
         }));
 
         if at.is_none() {
@@ -12243,7 +12245,7 @@ async fn шаг_вместо(
 async fn лестница_держит(
     client: &impl deadpool_postgres::GenericClient,
     project: &str,
-    свой_гейт: &str,
+    своя_фаза: Option<i32>,
 ) -> Result<Option<Value>, tokio_postgres::Error> {
     let задачная: Option<i32> = client
         .query_one(
@@ -12265,48 +12267,92 @@ async fn лестница_держит(
             "why": "положение лестницы ни разу не считали: держит ли она задачи, сказать нечем, и это не «можно всё»",
         })));
     }
-    let at = &шаг["at"];
-    let ord = at["ord"].as_i64().unwrap_or(i64::MAX);
-    if at.is_null() || ord >= i64::from(задачная) {
-        return Ok(None);
-    }
-    let (чужие, всего): (Vec<String>, i64) = if at["kind"] == "gate" {
-        let rows = client
-            .query(
-                "SELECT g.phase || ' · ' || g.item FROM project_gates g
-                  WHERE g.project_id = $1 AND g.state = 'failed'
-                    AND g.phase NOT IN (SELECT ph.gate FROM phase ph
-                                         WHERE ph.ord >= (SELECT min(p2.ord) FROM phase p2
-                                                           WHERE $2 <> '' AND p2.gate = $2))
-                  ORDER BY g.phase, g.item",
-                &[&project, &свой_гейт],
-            )
-            .await?;
-        let все: Vec<String> = rows.iter().map(|r| r.get(0)).collect();
-        let n = все.len() as i64;
-        (все, n)
-    } else {
-        (
-            serde_json::from_value(at["detail"].clone()).unwrap_or_default(),
-            at["violations"].as_i64().unwrap_or(1),
+    let красные_раньше: Vec<String> = client
+        .query(
+            "SELECT g.phase || ' · ' || g.item FROM project_gates g
+              WHERE g.project_id = $1 AND g.state = 'failed'
+                AND g.phase NOT IN (SELECT ph.gate FROM phase ph WHERE ph.ord >= $2)
+              ORDER BY g.phase, g.item",
+            &[&project, &своя_фаза.unwrap_or(i32::MAX)],
         )
-    };
-    if всего == 0 {
+        .await?
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    let Some((ступень, держат, всего)) = держащая_ступень(&шаг, i64::from(задачная), &красные_раньше) else {
         return Ok(None);
-    }
+    };
+    let at = &шаг["at"];
     Ok(Some(json!({
-        "ord": ord,
-        "owner": at["owner"],
-        "question": at["question"],
-        "first": at["first"],
-        "holding": чужие.iter().take(5).collect::<Vec<_>>(),
+        "ord": ступень["ord"],
+        "owner": ступень["owner"],
+        "question": ступень["question"],
+        "run": ступень["run"],
+        "first": if ступень["ord"] == at["ord"] { at["first"].clone() } else { Value::Null },
+        "holding": держат.iter().take(5).collect::<Vec<_>>(),
         "holdingCount": всего,
         "stale": шаг["stale"],
         "why": format!(
-            "лестница на ступени {ord}, владелец `{}`: «{}». Задачи не запрашиваются, пока лестница не \
+            "лестница на ступени {}, владелец `{}`: «{}». Задачи не запрашиваются, пока лестница не \
              дойдёт до {задачная}-й — сперва то, что держит ступень",
-            at["owner"].as_str().unwrap_or(""), at["question"].as_str().unwrap_or("")),
+            ступень["ord"], ступень["owner"].as_str().unwrap_or(""), ступень["question"].as_str().unwrap_or("")),
     })))
+}
+
+fn держащая_ступень(шаг: &Value, задачная: i64, красные_раньше: &[String]) -> Option<(Value, Vec<String>, i64)> {
+    шаг["openWork"]
+        .as_array()?
+        .iter()
+        .filter(|s| s["state"] == "failed" && s["held"] != true && s["ord"].as_i64().is_some_and(|o| o < задачная))
+        .find_map(|s| {
+            if s["kind"] == "gate" {
+                (!красные_раньше.is_empty())
+                    .then(|| (s.clone(), красные_раньше.to_vec(), красные_раньше.len() as i64))
+            } else {
+                let имена = if s["ord"] == шаг["at"]["ord"] {
+                    serde_json::from_value(шаг["at"]["detail"].clone()).unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                Some((s.clone(), имена, s["violations"].as_i64().unwrap_or(1)))
+            }
+        })
+}
+
+#[cfg(test)]
+mod лестница {
+    use super::держащая_ступень;
+    use serde_json::json;
+
+    #[test]
+    fn свой_гейт_не_держит_а_следующая_красная_держит() {
+        let шаг = json!({ "at": { "ord": 6 }, "openWork": [
+            { "ord": 6, "state": "failed", "kind": "gate", "violations": 1 },
+            { "ord": 7, "state": "failed", "kind": "sensor", "violations": 2 },
+            { "ord": 11, "state": "failed", "kind": "gate", "violations": 3 },
+        ]});
+        let (ступень, _, всего) = держащая_ступень(&шаг, 9, &[]).unwrap();
+        assert_eq!((ступень["ord"].as_i64(), всего), (Some(7), 2));
+    }
+
+    #[test]
+    fn корпус_держит_гейтовую_ступень() {
+        let шаг = json!({ "at": { "ord": 6 }, "openWork": [
+            { "ord": 6, "state": "failed", "kind": "gate", "violations": 4 },
+        ]});
+        let красные = vec!["corpus · x".to_owned()];
+        let (ступень, держат, всего) = держащая_ступень(&шаг, 9, &красные).unwrap();
+        assert_eq!((ступень["ord"].as_i64(), держат, всего), (Some(6), красные, 1));
+    }
+
+    #[test]
+    fn придержанная_и_поздняя_не_держат() {
+        let шаг = json!({ "at": { "ord": 8 }, "openWork": [
+            { "ord": 8, "state": "failed", "kind": "milestone", "held": true, "violations": 1 },
+            { "ord": 11, "state": "failed", "kind": "gate", "violations": 3 },
+        ]});
+        assert!(держащая_ступень(&шаг, 9, &["corpus · x".to_owned()]).is_none());
+    }
 }
 
 pub async fn next_step(pool: &Pool, project: &str, process: &str) -> Result<Value, tokio_postgres::Error> {
