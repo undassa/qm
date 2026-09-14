@@ -92,15 +92,17 @@ const TONE: Record<string, string> = {
   passed: "ok",
   failed: "bad",
   unknown: "dim",
-  waived: "dim",
+  waived: "ok",
 };
+
+const held = (computed: string) => computed === "passed" || computed === "waived";
 
 /** Считает пункты гейта по состояниям — это и есть содержимое полоски фазы. */
 function tally(g?: Gate): { passed: number; failed: number; other: number; total: number; violations: number } {
   const items = g?.items ?? [];
   let passed = 0, failed = 0, other = 0, violations = 0;
   for (const i of items) {
-    if (i.computed === "passed") passed++;
+    if (held(i.computed)) passed++;
     else if (i.computed === "failed") { failed++; violations += i.violations ?? 0; }
     else other++;
   }
@@ -159,7 +161,7 @@ export function Readiness({
   const all: (Item & { gate: string })[] = gates.flatMap((g) =>
     g.items.map((i) => ({ ...i, gate: g.gate })),
   );
-  const passed = all.filter((i) => i.computed === "passed").length;
+  const passed = all.filter((i) => held(i.computed)).length;
   const violations = all.reduce((n, i) => n + (i.violations ?? 0), 0);
 
   // Полоса доверия. Правило, которое ни разу не уронили, зелёным быть не может:
@@ -172,16 +174,16 @@ export function Readiness({
 
   const shownItems = all
     .filter((i) => (phaseOnly ? gateOfPhase.get(i.gate)?.phase === phaseOnly || (phaseOnly === "corpus" && !gateOfPhase.has(i.gate)) : true))
-    .filter((i) => (showPassed ? true : i.computed !== "passed"))
+    .filter((i) => (showPassed ? true : !held(i.computed)))
     .sort(
       (a, b) =>
-        (a.computed === "failed" ? 0 : a.computed === "passed" ? 2 : 1) -
-          (b.computed === "failed" ? 0 : b.computed === "passed" ? 2 : 1) ||
+        (a.computed === "failed" ? 0 : held(a.computed) ? 2 : 1) -
+          (b.computed === "failed" ? 0 : held(b.computed) ? 2 : 1) ||
         (b.violations ?? 0) - (a.violations ?? 0) ||
         a.item.localeCompare(b.item),
     );
   const hiddenPassed = all.filter(
-    (i) => i.computed === "passed" &&
+    (i) => held(i.computed) &&
       (phaseOnly ? gateOfPhase.get(i.gate)?.phase === phaseOnly || (phaseOnly === "corpus" && !gateOfPhase.has(i.gate)) : true),
   ).length;
 

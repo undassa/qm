@@ -3953,7 +3953,7 @@ pub async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, tokio_po
         // таблицы. Полное слово («не подписан», «подпись устарела») лежит в
         // `result`: сузить его до `unknown` в колонке можно, потерять — нельзя.
         let flat = match computed {
-            "passed" => "passed",
+            "passed" | "waived" => "passed",
             "failed" => "failed",
             _ => "unknown",
         };
@@ -4256,7 +4256,7 @@ pub async fn gate(pool: &Pool, project: &str, phase: Option<&str>) -> Result<Val
             m.insert(
                 "verdict".into(),
                 json!(match m.get("computed").and_then(|v| v.as_str()).unwrap_or("") {
-                    "passed" => "green",
+                    "passed" | "waived" => "green",
                     "failed" => "red",
                     _ => "unknown",
                 }),
