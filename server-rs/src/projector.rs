@@ -12264,16 +12264,6 @@ async fn лестница_держит(
         })));
     };
     let шаг = position(client, project, "godzy").await?;
-    let пересчёт = if шаг["stale"] == true {
-        client
-            .query_opt("SELECT reason, dirty_at, ran_ms FROM gate_dirty WHERE project_id = $1", &[&project])
-            .await?
-            .map_or(Value::Null, |r| {
-                json!({ "reason": r.get::<_, String>(0), "dirtyAt": r.get::<_, i64>(1), "lastMs": r.get::<_, Option<i32>>(2) })
-            })
-    } else {
-        Value::Null
-    };
     let красные_раньше: Vec<String> = client
         .query(
             "SELECT g.phase || ' · ' || g.item FROM project_gates g
@@ -12286,23 +12276,13 @@ async fn лестница_держит(
         .iter()
         .map(|r| r.get(0))
         .collect();
-    Ok(решение_лестницы(&шаг, i64::from(задачная), &красные_раньше, &пересчёт))
+    Ok(решение_лестницы(&шаг, i64::from(задачная), &красные_раньше))
 }
 
-fn решение_лестницы(шаг: &Value, задачная: i64, красные_раньше: &[String], пересчёт: &Value) -> Option<Value> {
+fn решение_лестницы(шаг: &Value, задачная: i64, красные_раньше: &[String]) -> Option<Value> {
     if шаг["checkedAt"].is_null() || !шаг["openWork"].is_array() {
         return Some(json!({
             "why": "положение лестницы этим кодом ни разу не считали: держит ли она задачи, сказать нечем, и это не «можно всё»",
-        }));
-    }
-    if шаг["stale"] == true {
-        return Some(json!({
-            "why": format!(
-                "положение лестницы старше последней правки (повод пересчёта: «{}»): решать по прошлому нельзя — \
-                 спросите снова, когда пересчёт закончится",
-                пересчёт["reason"].as_str().unwrap_or("")),
-            "stale": true,
-            "recount": пересчёт,
         }));
     }
     let (ступень, держат, всего) = держащая_ступень(шаг, задачная, красные_раньше)?;
@@ -12315,6 +12295,7 @@ fn решение_лестницы(шаг: &Value, задачная: i64, кра
         "first": if ступень["ord"] == at["ord"] { at["first"].clone() } else { Value::Null },
         "holding": держат.iter().take(5).collect::<Vec<_>>(),
         "holdingCount": всего,
+        "stale": шаг["stale"],
         "why": format!(
             "ступень {} не пройдена, владелец `{}`: «{}». Задачи не запрашиваются, пока не пройдены все \
              ступени до {задачная}-й — сперва то, что держит эта",
@@ -12420,16 +12401,11 @@ mod лестница {
     }
 
     #[test]
-    fn устаревшее_и_непосчитанное_положение_держат() {
-        let чистое = json!({ "checkedAt": 1, "stale": false, "unanswerable": [], "openWork": [] });
-        assert!(решение_лестницы(&чистое, 9, &[], &json!(null)).is_none());
+    fn непосчитанное_положение_держит_а_устаревшее_решает_по_последнему() {
         let устаревшее = json!({ "checkedAt": 1, "stale": true, "unanswerable": [], "openWork": [] });
-        let отказ =
-            решение_лестницы(&устаревшее, 9, &[], &json!({ "reason": "срыв пересчёта: relation x does not exist" }))
-                .unwrap();
-        assert!(отказ["why"].as_str().unwrap().contains("relation x does not exist"));
-        assert!(решение_лестницы(&json!({ "checkedAt": 1 }), 9, &[], &json!(null)).is_some());
-        assert!(решение_лестницы(&json!({ "openWork": [] }), 9, &[], &json!(null)).is_some());
+        assert!(решение_лестницы(&устаревшее, 9, &[]).is_none());
+        assert!(решение_лестницы(&json!({ "checkedAt": 1 }), 9, &[]).is_some());
+        assert!(решение_лестницы(&json!({ "openWork": [] }), 9, &[]).is_some());
     }
 
     #[test]
@@ -12437,10 +12413,15 @@ mod лестница {
         let шаг = |at: i64| {
             json!({ "checkedAt": 1, "stale": false, "unanswerable": [],
                     "at": { "ord": at, "first": { "name": "Q-1" } },
-                    "openWork": [{ "ord": 5, "state": "failed", "kind": "question", "touches": "corpus", "violations": 1 }] })
+                    "openWork": [{ "ord": 5, "state": "failed", "kind": "question", "touches": "corpus", "violations": 1,
+                                   "detail": ["Q-1 — открыт"] }] })
         };
-        assert_eq!(решение_лестницы(&шаг(5), 9, &[], &json!(null)).unwrap()["first"]["name"], "Q-1");
-        assert!(решение_лестницы(&шаг(4), 9, &[], &json!(null)).unwrap()["first"].is_null());
+        let держит = решение_лестницы(&шаг(5), 9, &[]).unwrap();
+        assert_eq!(
+            (держит["first"]["name"].as_str(), держит["holding"][0].as_str()),
+            (Some("Q-1"), Some("Q-1 — открыт"))
+        );
+        assert!(решение_лестницы(&шаг(4), 9, &[]).unwrap()["first"].is_null());
     }
 }
 
@@ -12461,7 +12442,7 @@ async fn position(
     let row = client
         .query_opt(
             "SELECT p.result, p.checked_at,
-                    coalesce((SELECT d.dirty_at > coalesce(p.checked_at, 0) FROM gate_dirty d
+                    coalesce((SELECT d.dirty_at > coalesce(d.ran_at, 0) FROM gate_dirty d
                                WHERE d.project_id = p.project_id), false)
                FROM process_position p WHERE p.project_id = $1 AND p.process = $2",
             &[&project, &process],
@@ -13077,8 +13058,7 @@ pub async fn phases(pool: &Pool, project: &str) -> Result<Value, tokio_postgres:
     }
     let stale: bool = client
         .query_one(
-            "SELECT coalesce((SELECT d.dirty_at > coalesce((SELECT min(checked_at) FROM phase_state
-                                WHERE project_id = $1), 0)
+            "SELECT coalesce((SELECT d.dirty_at > coalesce(d.ran_at, 0)
                                 FROM gate_dirty d WHERE d.project_id = $1), false)",
             &[&project],
         )
