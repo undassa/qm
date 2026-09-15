@@ -945,7 +945,7 @@ fn bare_type(ty: &str) -> String {
     ty.split("//").next().unwrap_or("").trim().trim_end_matches(',').trim().to_owned()
 }
 
-fn answered(ty: &str, declared: &[String]) -> bool {
+fn answered(ty: &str, declared: &[String], imported: &[String]) -> bool {
     let mut t = ty.trim();
     while let Some(inner) = ["Option<", "Box<", "Vec<"]
         .iter()
@@ -954,7 +954,7 @@ fn answered(ty: &str, declared: &[String]) -> bool {
         t = inner.trim();
     }
     let local = match t.split_once("::") {
-        None => Some(t),
+        None => Some(t).filter(|name| !imported.iter().any(|i| i == name)),
         Some(("crate" | "self" | "super", _)) => t.rsplit("::").next(),
         Some(_) => None,
     };
@@ -966,6 +966,26 @@ fn declared_types(text: &str) -> Vec<String> {
         .expect("образец объявления")
         .captures_iter(text)
         .map(|c| c[1].to_owned())
+        .collect()
+}
+
+fn imported_types(text: &str) -> Vec<String> {
+    regex::Regex::new(r"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?use\s+([^;]+);")
+        .expect("образец use")
+        .captures_iter(text)
+        .filter(|c| !matches!(c[1].trim().trim_start_matches("::").split("::").next(), Some("crate" | "self" | "super")))
+        .flat_map(|c| {
+            c[1].replace(['{', '}'], ",")
+                .split(',')
+                .filter_map(|piece| {
+                    let name = match piece.split_once(" as ") {
+                        Some((_, alias)) => alias.trim(),
+                        None => piece.rsplit("::").next().unwrap_or("").trim(),
+                    };
+                    (!name.is_empty() && name != "self" && name != "*").then(|| name.to_owned())
+                })
+                .collect::<Vec<String>>()
+        })
         .collect()
 }
 
@@ -992,6 +1012,7 @@ fn secret_fields(text: &str, field_re: &str, declared: &[String]) -> Vec<(String
     let field = regex::Regex::new(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(\w+)\s*:\s*(.+?),?\s*$")
         .expect("образец поля");
     let variant = regex::Regex::new(r"^\s*\w+\s*\{(.+)\}\s*,?\s*$").expect("образец ветки");
+    let imported = imported_types(text);
     let lines: Vec<&str> = text.split('\n').collect();
     let mut out = Vec::new();
     let mut i = 0;
@@ -1029,14 +1050,14 @@ fn secret_fields(text: &str, field_re: &str, declared: &[String]) -> Vec<(String
                 for part in v[1].split(',') {
                     if let Some(f) = field.captures(part) {
                         let (fname, ftype) = (f[1].to_owned(), bare_type(&f[2]));
-                        if suspect.is_match(&fname) && !answered(&ftype, declared) {
+                        if suspect.is_match(&fname) && !answered(&ftype, declared, &imported) {
                             out.push((owner.clone(), fname, ftype));
                         }
                     }
                 }
             } else if let Some(f) = field.captures(lines[k]) {
                 let (fname, ftype) = (f[1].to_owned(), bare_type(&f[2]));
-                if suspect.is_match(&fname) && !answered(&ftype, declared) {
+                if suspect.is_match(&fname) && !answered(&ftype, declared, &imported) {
                     out.push((owner.clone(), fname, ftype));
                 }
             }
@@ -1560,6 +1581,12 @@ pub struct Keys {
         let rs = "#[derive(Debug)]\npub struct Url(pub String);\n\n#[derive(Debug)]\npub struct Hook {\n    pub webhook_url: reqwest::Url,\n    pub callback_url: Option<Url>,\n    pub public_url: crate::Url,\n}\n";
         let found: Vec<String> = secret_fields(rs, NAMES, &declared_types(rs)).into_iter().map(|(_, f, _)| f).collect();
         assert_eq!(found, vec!["webhook_url"]);
+        let declared = vec!["Url".to_owned(), "Link".to_owned(), "PublicUrl".to_owned()];
+        for rs in ["use reqwest::Url;\n\n#[derive(Debug)]\npub struct Hook {\n    pub webhook_url: Url,\n    pub public_url: PublicUrl,\n}\n",
+                   "use reqwest::{Client, Url as Link};\n\n#[derive(Debug)]\npub struct Hook {\n    pub webhook_url: Link,\n    pub public_url: crate::PublicUrl,\n}\n"] {
+            let found: Vec<String> = secret_fields(rs, NAMES, &declared).into_iter().map(|(_, f, _)| f).collect();
+            assert_eq!(found, vec!["webhook_url"], "{rs}");
+        }
     }
 
     #[test]

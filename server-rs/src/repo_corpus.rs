@@ -63,9 +63,9 @@ fn up_only(text: &str) -> String {
     text.lines()
         .filter(|line| {
             if let Some(said) = line.trim_start().strip_prefix("--") {
-                match said.trim().to_ascii_lowercase().as_str() {
-                    "+goose down" | "migrate:down" => up = false,
-                    "+goose up" | "migrate:up" => up = true,
+                match said.to_ascii_lowercase().split_whitespace().collect::<Vec<&str>>().as_slice() {
+                    ["+goose", "down", ..] | ["migrate:down", ..] => up = false,
+                    ["+goose", "up", ..] | ["migrate:up", ..] => up = true,
                     _ => {}
                 }
             }
@@ -76,7 +76,7 @@ fn up_only(text: &str) -> String {
 }
 
 pub fn migration_up(name: &str) -> bool {
-    name.ends_with(".sql") && !name.ends_with(".down.sql")
+    name.ends_with(".sql") && !name.ends_with(".down.sql") && name.rsplit('/').next() != Some("down.sql")
 }
 
 fn uncommented(text: &str) -> String {
@@ -894,7 +894,8 @@ mod правки {
 
     #[test]
     fn раздел_down_не_читается() {
-        for (up, down) in [("-- +goose Up", "-- +goose Down"), ("-- migrate:up", "-- migrate:down")] {
+        for (up, down) in [("-- +goose Up", "-- +goose Down"), ("-- migrate:up", "-- migrate:down"),
+                           ("--+goose up", "-- +goose    Down"), ("-- migrate:up", "-- migrate:down transaction:false")] {
             let text = format!("{up}\nCREATE TABLE api_tokens (id text PRIMARY KEY, owner_id text NOT NULL CHECK (owner_id IN ('a')));\n{down}\nDROP TABLE api_tokens;\nCREATE TABLE api_tokens (id text PRIMARY KEY, owner_id text CHECK (owner_id IN ('b')));\n");
             let t = schema_of(&[text.clone()]);
             assert!(t.iter().any(|x| x.name == "api_tokens" && x.cols.iter().any(|c| c.name == "owner_id" && c.not_null)), "{down}");
@@ -904,6 +905,7 @@ mod правки {
         assert!(schema_of(&["CREATE TABLE api_tokens (id text PRIMARY KEY);".into(), "DROP TABLE api_tokens;".into()]).is_empty(),
                 "снятая миграцией таблица осталась");
         assert!(super::migration_up("0001_x.up.sql") && super::migration_up("0001_x.sql") && !super::migration_up("0001_x.down.sql"));
+        assert!(!super::migration_up("migrations/2024_x/down.sql") && super::migration_up("migrations/2024_x/up.sql"));
     }
 
     #[test]
@@ -1317,7 +1319,7 @@ pub fn contract_vs_schema(
                     .filter(|w| {
                         w[1].strip_prefix('{')
                             .and_then(|b| b.strip_suffix('}'))
-                            .is_some_and(|b| !t.cols.iter().any(|c| c.name == b))
+                            .is_some_and(|b| !t.cols.iter().any(|c| c.name == b && !c.primary_key))
                     })
                     .map(|w| w[0])
                     .collect::<Vec<&str>>()
@@ -1334,7 +1336,7 @@ pub fn contract_vs_schema(
                 parents.contains(&r)
                     && t.cols
                         .iter()
-                        .filter(|x| x.not_null && !SYSTEM.contains(&x.name.as_str()) && x.references.as_deref() == Some(r))
+                        .filter(|x| x.not_null && x.references.as_deref() == Some(r))
                         .count()
                         == 1
             });
@@ -2222,6 +2224,24 @@ CREATE TABLE billing_profiles (
         let p = contract_vs_schema(&doc, &schema_of(&[sql.into()]), &[]);
         assert!(пояснение(&p, "billing_profiles.payer_account_id · обязательна").is_some(), "скобка родителя названа своей колонкой");
         assert!(пояснение(&p, "billing_profiles.service_id · обязательна").is_some(), "таблицы ключа нет в пути");
+        let camel = serde_json::to_string(&doc).expect("контракт").replace("{account_id}", "{accountId}");
+        let p = contract_vs_schema(&serde_json::from_str(&camel).expect("контракт"), &schema_of(&[sql.into()]), &[]);
+        assert!(пояснение(&p, "billing_profiles.payer_account_id · обязательна").is_some(), "второй ключ к родителю при скобке не колонкой");
+        let runs = "
+CREATE TABLE monitors (id text PRIMARY KEY, name text NOT NULL);
+CREATE TABLE monitor_runs (id text PRIMARY KEY, monitor_id text NOT NULL REFERENCES monitors(id), note text);
+";
+        let doc = json!({
+            "paths": { "/monitors/{id}/runs": {
+                "post": { "requestBody": ссылка("MonitorRunInput"), "responses": { "201": ссылка("MonitorRun") } }
+            } },
+            "components": { "schemas": {
+                "MonitorRun": { "properties": { "note": { "type": "string" } } },
+                "MonitorRunInput": { "properties": { "note": { "type": "string" } } }
+            } }
+        });
+        let p = contract_vs_schema(&doc, &schema_of(&[runs.into()]), &[]);
+        assert_eq!(пояснение(&p, "monitor_runs.monitor_id · обязательна"), None, "скобка {{id}} — первичный ключ, а не колонка-ключ");
     }
 
     #[test]
