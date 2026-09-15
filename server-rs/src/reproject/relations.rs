@@ -49,11 +49,14 @@ fn checks_in(line: &str, res: &[Regex], caveats: &[String]) -> Vec<String> {
     out
 }
 
+pub const FACT_KINDS: [&str; 7] =
+    ["code-file", "crate-manifest", "repo-file", "requirement-op", "test-fn", "tree-file", "written-tc"];
+
 pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres::Error> {
-    let mut guard = pool.get().await.expect("пул отдал соединение");
-    let lock = guard.transaction().await?;
-    lock.execute("SELECT pg_advisory_xact_lock(hashtext('relations:' || $1))", &[&project]).await?;
-    let client = pool.get().await.expect("пул отдал соединение");
+    let mut connection = pool.get().await.expect("пул отдал соединение");
+    let tx = connection.transaction().await?;
+    tx.execute("SELECT pg_advisory_xact_lock(hashtext('relations:' || $1))", &[&project]).await?;
+    let client = &tx;
     // Слова схемы — из словаря, не из кода. Роль без слова НЕ подставляет
     // пустое: пустое совпало бы со всем подряд. Такая связь просто не
     // считается, и её отсутствие видно перечнем ниже.
@@ -236,7 +239,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
     //
     // Образец вида — якорный (`^…$`), он для сверки имени целиком; здесь имя
     // ищут внутри строки, поэтому якоря снимаются, а границы слова ставятся.
-    let образцы_задачи = crate::scheme::id_pattern(&client, project, "task").await?;
+    let образцы_задачи = crate::scheme::id_pattern(client, project, "task").await?;
     let task_id: Vec<Regex> = образцы_задачи
         .iter()
         .filter_map(|p| Regex::new(&format!(r"\b(?:{})\b", p.trim_start_matches('^').trim_end_matches('$'))).ok())
@@ -349,8 +352,6 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
     }
 
 
-    let mut client = pool.get().await.expect("пул отдал соединение");
-    let tx = client.transaction().await?;
     for (table, _) in [
         ("project_requirement_op", ()),
         ("project_task_operation", ()),

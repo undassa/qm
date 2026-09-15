@@ -1330,11 +1330,9 @@ impl Mcp {
                         "text": "подача без перечня: пустой перечень — это «ничего не нашёл», а отсутствие перечня — «не подали»" }],
                         "isError": true });
                 }
-                const RELATIONS_READ: [&str; 7] =
-                    ["code-file", "crate-manifest", "repo-file", "requirement-op", "test-fn", "tree-file", "written-tc"];
                 match crate::projector::push_code_facts(&self.pool, p, &fact_kind, &list, &self.author).await {
                     Ok(mut v) => {
-                        if RELATIONS_READ.contains(&fact_kind.as_str()) {
+                        if crate::reproject::relations::FACT_KINDS.contains(&fact_kind.as_str()) {
                             match crate::reproject::relations::project(&self.pool, p).await {
                                 Ok(n) => v["relations"] = json!(n),
                                 Err(e) => v["relationsError"] = json!(crate::projector::db_says(&e)),
