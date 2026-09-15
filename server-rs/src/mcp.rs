@@ -650,10 +650,6 @@ impl Mcp {
                 "why": s("почему — обязательно") }, "required": ["kind", "why"] } }));
         tools.push(json!({ "name": "holders", "description": "объявленные держатели инварианта: требование и путь",
             "inputSchema": { "type": "object", "properties": {} } }));
-        tools.push(json!({ "name": "column-server-filled", "description": "колонку заполняет сервер, и названо чем: правила входа её больше не спрашивают",
-            "inputSchema": { "type": "object", "properties": { "table": s("таблица"), "column": s("колонка"),
-                "by": s("чем именно сервер её заполняет — обязательно"), "why": s("довод"),
-                "drop": json!({"type":"boolean"}) }, "required": ["table", "column", "by"] } }));
         tools.push(json!({ "name": "derived-copy-set", "description": "вот источник, вот копия, вот чем сверять: одна дверь для чисел и для тел",
             "inputSchema": { "type": "object", "properties": { "name": s("величина или предмет копии"),
                 "source": s("источник — `вид:имя`"), "copy": s("копия — `вид:имя`"),
@@ -662,12 +658,6 @@ impl Mcp {
                 "sourcePattern": s("образец у ИСТОЧНИКА, если он говорит другими словами; пусто — тот же"),
                 "why": s("почему это копия — обязательно"), "drop": json!({"type":"boolean"}) },
                 "required": ["name", "source", "copy", "compare", "pattern", "why"] } }));
-        tools.push(json!({ "name": "field-column-alias", "description": "поле контракта и колонка схемы — одно под разными именами; читается всеми правилами имён разом",
-            "inputSchema": { "type": "object", "properties": { "schema": s("схема контракта, например Absence"),
-                "field": s("поле схемы, например from"), "table": s("таблица, например absences"),
-                "column": s("колонка, например starts_at"), "why": s("почему имена разные — обязательно"),
-                "drop": json!({"type":"boolean"}) },
-                "required": ["schema", "field", "table", "column", "why"] } }));
         tools.push(json!({ "name": "doors", "description": "какой вопрос какой дверью закрывается: поиск по дверям словами вопроса",
             "inputSchema": { "type": "object", "properties": { "q": s("вопрос словами: «кто ссылается на требование», «что сейчас держит»"),
                 "limit": json!({"type":"integer","description":"сколько дверей назвать, по умолчанию 8"}) } } }));
@@ -699,7 +689,7 @@ impl Mcp {
         "put", "put-section", "rm", "document-add", "reparse", "reproject", "sweep",
         "task-state-push", "code-facts-push", "skills-push", "preflight-push", "worktree-push",
         "task-plan-push",
-        "blame-set", "derived-copy-set", "field-column-alias", "column-server-filled", "counts-sync", "kind-add", "kind-required", "kind-projection", "frozen-tree-set", "scheme-term-set", "orphans-purge", "surface-source-add", "sensor-spec-add", "agent-set", "donor-add", "guard-add", "gate-item-set", "method-set", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "version-close", "phase-set", "gate-selftest",
+        "blame-set", "derived-copy-set", "counts-sync", "kind-add", "kind-required", "kind-projection", "frozen-tree-set", "scheme-term-set", "orphans-purge", "surface-source-add", "sensor-spec-add", "agent-set", "donor-add", "guard-add", "gate-item-set", "method-set", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "version-close", "phase-set", "gate-selftest",
         "author-set", "screen-area-set", "skill-set", "version-freeze",
         "links-rewrite", "links-retarget", "entity-rename",
     ];
@@ -763,7 +753,7 @@ impl Mcp {
         const RESERVED: &[&str] = &[
             "method-set", "gate-item-set", "question-holders", "preflight-push", "worktree-push",
             "sensor-specs", "scheme-terms", "scheme-roles", "frozen-trees", "addresses-declared", "tree-declared", "donors", "skills-push", "skills", "agents", "code-facts-push", "code-facts", "summary", "links-of", "retired-terms", "order", "gate-measure", "gate-selftest", "links-rewrite", "links-retarget", "reparse", "screen-area-set", "skill-set", "skills-paths", "version-freeze", "version-delta", "generated-check", "principal-allow", "principals", "author-set", "authors", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "version-close", "phase-set", "gate-selftest", "next-step", "process-state", "statuses", "task-status", "status-anomaly", "pipeline", "board", "waves", "phases", "coverage", "blocks", "history", "at-revision", "process-history", "progress",
-            "kinds", "kinds-due", "readiness-gaps", "declared-unwritten", "blame-set", "doors", "derived-copy-set", "field-column-alias", "column-server-filled", "holders", "counts-sync", "kind-add", "kind-required", "kind-projection", "kind-reopens", "kind-proves", "kind-id-set", "kind-domain", "tree", "document-coverage", "sections", "section", "backlinks", "search", "put",
+            "kinds", "kinds-due", "readiness-gaps", "declared-unwritten", "blame-set", "doors", "derived-copy-set", "holders", "counts-sync", "kind-add", "kind-required", "kind-projection", "kind-reopens", "kind-proves", "kind-id-set", "kind-domain", "tree", "document-coverage", "sections", "section", "backlinks", "search", "put",
             "put-section", "rm", "document-add", "reproject", "sweep", "gate", "next-task", "what-if", "blockers", "events", "task-plan-push",
             "norm-versions", "measurements", "plan", "readiness", "requirements-of",
             "tasks-of", "preflight-queue", "claims",
@@ -1130,28 +1120,10 @@ impl Mcp {
                 Ok(v) => ok(v),
                 Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
             },
-            "column-server-filled" => {
-                let g = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("");
-                match crate::projector::set_server_filled(&self.pool, p, g("table"), g("column"),
-                        g("by"), g("why"), &self.author,
-                        args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
-                    Ok(v) => ok(v),
-                    Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
-                }
-            }
             "derived-copy-set" => {
                 let g = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("");
                 match crate::projector::set_derived_copy(&self.pool, p, g("name"), g("source"),
                         g("copy"), g("compare"), g("pattern"), g("sourcePattern"), g("why"), &self.author,
-                        args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
-                    Ok(v) => ok(v),
-                    Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
-                }
-            }
-            "field-column-alias" => {
-                let g = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("");
-                match crate::projector::set_field_alias(&self.pool, p, g("schema"), g("field"),
-                        g("table"), g("column"), g("why"), &self.author,
                         args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),

@@ -1181,49 +1181,6 @@ CREATE TABLE IF NOT EXISTS finding_blame (
 -- разные беды и чинятся разным — завести кормильца либо вернуть умолкшего, — а
 -- пункт называл первую в обоих случаях. Слово, называющее не тот случай, шлёт
 -- читателя не туда.
--- ПЕРЕИМЕНОВАННАЯ ПАРА «ПОЛЕ ↔ КОЛОНКА» — ОДНА ЗАПИСЬ, а не побег на каждое
--- правило. `absences.starts_at` в контракте зовётся `Absence.from`, и причина не
--- косметическая: `from` — зарезервированное слово SQL, колонкой его не назвать.
---
--- Одна пара стоила ШЕСТИ побегов в трёх правилах, и все шесть говорили одно и то
--- же. Хуже: заведение операции `POST /absences` подорожало на два побега, ничего
--- не изменив по существу, — `mandatory-input` начал спрашивать таблицу ровно в
--- тот момент, когда у неё появился писатель.
---
--- Причина пишется ОДИН раз и в одном месте: размазанная по шести, она разойдётся
--- на первой же правке.
--- КОЛОНКА, КОТОРУЮ ЗАПОЛНЯЕТ СЕРВЕР. У ПОЛЯ контракта есть чем сказать «я
--- вычисляюсь» — пометка с правилом вывода. У КОЛОНКИ такого способа не было:
--- список системных имён закрыт пятью (`id`, `account_id`, `created_at`,
--- `updated_at`, `rev`), и колонка, которую сервер выдаёт в момент выдачи, в него
--- не входит.
---
--- `POST /sessions` завёл писателя таблице и тут же дал шесть находок: `user_id`
--- из сошедшихся учётных данных, `jti` от подписывателя маркера, `device` из
--- заголовка, `ip` из соединения, `expires_at` по правилу аккаунта. Обязательное
--- поле с таким именем в схеме запроса означало бы, что входящий сам называет, за
--- кого он вошёл, чем и насколько.
---
--- `by` обязателен: «заполняет сервер» без указания ЧЕМ — обещание, а не запись.
-CREATE TABLE IF NOT EXISTS column_server_filled (
-  project_id text NOT NULL,
-  table_name text NOT NULL,
-  column_name text NOT NULL,
-  by_what text NOT NULL,
-  why text NOT NULL DEFAULT '',
-  decided_by text NOT NULL DEFAULT '',
-  PRIMARY KEY (project_id, table_name, column_name));
-
-CREATE TABLE IF NOT EXISTS field_column_alias (
-  project_id text NOT NULL,
-  schema_name text NOT NULL,
-  field text NOT NULL,
-  table_name text NOT NULL,
-  column_name text NOT NULL,
-  why text NOT NULL DEFAULT '',
-  decided_by text NOT NULL DEFAULT '',
-  PRIMARY KEY (project_id, schema_name, field));
-
 CREATE OR REPLACE FUNCTION fact_gap(p text, f text) RETURNS text AS $г$
   SELECT CASE WHEN EXISTS (SELECT 1 FROM fact_push WHERE project_id = p AND fact = f)
               THEN 'подавал и ПРОТУХ'
@@ -1277,13 +1234,8 @@ ALTER TABLE harness_process_step ADD COLUMN IF NOT EXISTS subject_why text NOT N
 ALTER TABLE project_document_plan ADD COLUMN IF NOT EXISTS planned_kind text NOT NULL DEFAULT '';
 ALTER TABLE project_document_plan ADD COLUMN IF NOT EXISTS planned_name text NOT NULL DEFAULT '';
 
--- Почему у решения нет отвергнутых вариантов — СЛОВОМ, а не догадкой.
---
--- Отвергнутый вариант бывает не всегда: часть записей сделана до того, как
--- скелет решения стал требованием, и дописать им варианты значило бы выдумать
--- нерассмотренное. Набор это и говорит — пометкой `godzy-decision:` в самом
--- документе. Пункт гейта её не читал и требовал вариантов у всех подряд.
-ALTER TABLE project_decisions ADD COLUMN IF NOT EXISTS waiver text NOT NULL DEFAULT '';
+ALTER TABLE project_decisions DROP COLUMN IF EXISTS waiver;
+DROP TABLE IF EXISTS column_server_filled, field_column_alias, rule_exception, rule_ceiling, gate_item_waiver;
 
 -- Чем умению разрешено пользоваться — КОЛОНКОЙ, а не строкой в шапке файла.
 --
@@ -6856,8 +6808,8 @@ pub async fn declare_decision(
     client
         .execute(
             "INSERT INTO project_decisions (project_id, id, number, title, entity_kind, entity_name,
-                        status, status_text, date, deciders, context, decision, consequences, waiver, origin)
-             VALUES ($1,$2,$3,$4,'decision',$2,$5,$6,$7,$8,$9,$10,$11,'','declared')
+                        status, status_text, date, deciders, context, decision, consequences, origin)
+             VALUES ($1,$2,$3,$4,'decision',$2,$5,$6,$7,$8,$9,$10,$11,'declared')
              ON CONFLICT (project_id, id) DO UPDATE SET number = EXCLUDED.number,
                title = EXCLUDED.title, status = EXCLUDED.status, status_text = EXCLUDED.status_text,
                date = EXCLUDED.date, deciders = EXCLUDED.deciders, context = EXCLUDED.context,
@@ -8581,35 +8533,6 @@ pub async fn holders(pool: &Pool, project: &str) -> Result<Value, tokio_postgres
         "requirement": r.get::<_, String>(0), "path": r.get::<_, String>(1) })).collect::<Vec<_>>() }))
 }
 
-pub async fn set_server_filled(
-    pool: &Pool, project: &str, table: &str, column: &str, by: &str, why: &str,
-    decided_by: &str, drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
-    if drop_it {
-        let gone = client
-            .execute("DELETE FROM column_server_filled WHERE project_id = $1 AND table_name = $2 AND column_name = $3",
-                     &[&project, &table, &column]).await?;
-        return Ok(json!({ "status": if gone > 0 { "dropped" } else { "not_found" } }));
-    }
-    if table.trim().is_empty() || column.trim().is_empty() {
-        return Ok(json!({ "status": "nameless", "why": "колонка называется таблицей и именем" }));
-    }
-    if by.trim().is_empty() {
-        return Ok(json!({ "status": "no_source", "why":
-            "не сказано, ЧЕМ сервер её заполняет. «Заполняет сервер» без этого — обещание, \
-             а не запись: проверить его нечем, и снять потом будет не за что." }));
-    }
-    client.execute(
-        "INSERT INTO column_server_filled (project_id, table_name, column_name, by_what, why, decided_by)
-         VALUES ($1,$2,$3,$4,$5,$6)
-         ON CONFLICT (project_id, table_name, column_name) DO UPDATE SET by_what = EXCLUDED.by_what,
-           why = EXCLUDED.why, decided_by = EXCLUDED.decided_by",
-        &[&project, &table, &column, &by, &why, &decided_by]).await?;
-    Ok(json!({ "status": "declared", "column": format!("{table}.{column}"), "by": by,
-               "means": "правила входа больше не спрашивают эту колонку: вход у неё есть, просто не телом запроса" }))
-}
-
 /// Объявить производную копию: вот источник, вот копия, вот чем сверять.
 ///
 /// Причина обязательна: копия без довода неотличима от случайного совпадения, и
@@ -8666,37 +8589,6 @@ pub async fn set_derived_copy(
                "pair": format!("{sk}:{sn} → {ck}:{cn}"), "compare": compare,
                "means": "равенство держит теперь машина, а не рука" }))
 }
-
-pub async fn set_field_alias(
-    pool: &Pool, project: &str, schema: &str, field: &str, table: &str, column: &str,
-    why: &str, decided_by: &str, drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
-    if drop_it {
-        let gone = client
-            .execute("DELETE FROM field_column_alias WHERE project_id = $1 AND schema_name = $2 AND field = $3",
-                     &[&project, &schema, &field]).await?;
-        return Ok(json!({ "status": if gone > 0 { "dropped" } else { "not_found" } }));
-    }
-    if [schema, field, table, column].iter().any(|v| v.trim().is_empty()) {
-        return Ok(json!({ "status": "incomplete",
-            "why": "пара называется целиком: схема, поле, таблица, колонка" }));
-    }
-    if why.trim().is_empty() {
-        return Ok(json!({ "status": "no_why",
-            "why": "не сказано, ПОЧЕМУ имена разные. Пара без причины неотличима от опечатки, \
-                    и снять её потом будет нечем." }));
-    }
-    client.execute(
-        "INSERT INTO field_column_alias (project_id, schema_name, field, table_name, column_name, why, decided_by)
-         VALUES ($1,$2,$3,$4,$5,$6,$7)
-         ON CONFLICT (project_id, schema_name, field) DO UPDATE SET table_name = EXCLUDED.table_name,
-           column_name = EXCLUDED.column_name, why = EXCLUDED.why, decided_by = EXCLUDED.decided_by",
-        &[&project, &schema, &field, &table, &column, &why, &decided_by]).await?;
-    Ok(json!({ "status": "declared", "pair": format!("{schema}.{field} ↔ {table}.{column}"),
-               "means": "пара читается ВСЕМИ правилами имён разом: побега на каждое больше не нужно" }))
-}
-
 
 pub async fn declared_unwritten(
     pool: &Pool,

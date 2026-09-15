@@ -202,22 +202,6 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize)
     let empty_fields = HashMap::new();
     let empty_titles: Vec<String> = Vec::new();
     let empty_bodies = HashMap::new();
-    // Пометка «почему вариантов нет» стоит комментарием у самой записи, до
-    // первого раздела, и потому её не видно ни в полях, ни в телах разделов.
-    // Берётся прямо из содержимого — один запрос на все решения.
-    let waivers: std::collections::HashMap<String, String> = {
-        let client = pool.get().await.expect("пул отдал соединение");
-        client
-            .query(
-                "SELECT entity_name, coalesce(substring(content from 'godzy-decision:\\s*([a-z-]+)'), '')
-                   FROM project_documents WHERE project_id = $1 AND entity_kind = 'decision'",
-                &[&project],
-            )
-            .await?
-            .iter()
-            .map(|r| (r.get::<_, String>(0), r.get::<_, String>(1)))
-            .collect()
-    };
     // Статус и решающие, объявленные СТРОКОЙ В ШАПКЕ документа — «Статус:
     // принято · 2026-08-06», «Решают: владелец продукта». Полем это не
     // считалось: полем звалась только строка таблицы или пункт списка, и все
@@ -239,7 +223,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize)
             .collect()
     };
     let no_head = (String::new(), String::new());
-    let mut decisions: Vec<(String, i32, String, String, String, &str, String, String, String, String, String, String, String)> =
+    let mut decisions: Vec<(String, i32, String, String, String, &str, String, String, String, String, String, String)> =
         Vec::new();
     let mut alternatives: Vec<(String, Alternative)> = Vec::new();
     let mut links: Vec<(String, &str, String)> = Vec::new();
@@ -292,7 +276,6 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize)
             body_of(list, body, &CONTEXT),
             body_of(list, body, &DECISION),
             body_of(list, body, &CONSEQUENCES),
-            waivers.get(path).cloned().unwrap_or_default(),
         ));
         for a in split_alternatives(&body_of(list, body, &ALTERNATIVES)) {
             alternatives.push((id.clone(), a));
@@ -356,13 +339,13 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize)
     let ids: Vec<String> = decisions.iter().map(|d| d.0.clone()).collect();
     tx.execute("DELETE FROM project_decisions WHERE project_id = $1 AND id = ANY($2)",
                &[&project, &ids]).await?;
-    for (id, number, title, kind, name, status, status_text, date, deciders, context, decision, consequences, waiver) in &decisions {
+    for (id, number, title, kind, name, status, status_text, date, deciders, context, decision, consequences) in &decisions {
         tx.execute(
             "INSERT INTO project_decisions(project_id, id, number, title, entity_kind, entity_name,
                                            status, status_text,
-                                           date, deciders, context, decision, consequences, waiver)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
-            &[&project, id, number, title, kind, name, status, status_text, date, deciders, context, decision, consequences, waiver],
+                                           date, deciders, context, decision, consequences)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
+            &[&project, id, number, title, kind, name, status, status_text, date, deciders, context, decision, consequences],
         )
         .await?;
     }
