@@ -27,15 +27,22 @@ fn status_of(text: &str) -> &'static str {
         .split(|c: char| c.is_whitespace() || c == ',')
         .next()
         .unwrap_or("")
+        .trim_matches(|c: char| c == '*' || c == '_')
         .to_lowercase();
     if head.starts_with("отменен") || head.starts_with("отменён") || head.starts_with("superseded") {
         "superseded"
     } else if head.starts_with("принят") || head.starts_with("accepted") {
         "accepted"
+    } else if head.starts_with("предложен") || head.starts_with("proposed") {
+        "proposed"
+    } else if head.starts_with("отклонен") || head.starts_with("отклонён") || head.starts_with("rejected") {
+        "rejected"
     } else {
         "template"
     }
 }
+static NUMBERED_TITLE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^ADR-\d{3,4}\s*[·:—–-]\s*").expect("образец номера в заголовке"));
 static DATE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(\d{4}-\d{2}-\d{2})").expect("образец даты"));
 static ADR_REFERENCE: Lazy<Regex> = Lazy::new(|| Regex::new(r"ADR-(\d{3,4})").expect("образец ссылки на решение"));
 static REQUIREMENT_REFERENCE: Lazy<Regex> =
@@ -267,7 +274,9 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize)
         decisions.push((
             id.clone(),
             m[1].parse().unwrap_or(0),
-            super::title_without_name(&list.first().cloned().unwrap_or_else(|| path.clone()), &id),
+            NUMBERED_TITLE
+                .replace(&super::title_without_name(&list.first().cloned().unwrap_or_else(|| path.clone()), &id), "")
+                .into_owned(),
             e.0.clone(),
             e.1.clone(),
             status_of(&status_text),

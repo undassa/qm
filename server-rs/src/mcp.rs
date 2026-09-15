@@ -210,7 +210,7 @@ impl Mcp {
         tools.push(json!({ "name": "links-of", "description": "чем доказано и с чем связано: связи сущности по видам: проверки, истории, задачи, решения — то, что показывает панель раздела",
             "inputSchema": { "type": "object", "properties": { "kind": s("requirement · story · decision"), "id": s("имя") }, "required": ["kind", "id"] } }));
         tools.push(json!({ "name": "entity-confirm", "description": "перечитал переоткрытую запись — закрытие в силе: с доводом и автором; правка опоры снова её переоткроет",
-            "inputSchema": { "type": "object", "properties": { "kind": s("вид записи: task, red-task, milestone, question, requirement"),
+            "inputSchema": { "type": "object", "properties": { "kind": s("вид записи: task, milestone, question, requirement"),
                 "id": s("имя записи"), "why": s("что перечитано и почему закрытие в силе — обязательно") },
                 "required": ["kind", "id", "why"] } }));
         tools.push(json!({ "name": "term-retire", "description": "объявить снятый термин набора: слово, которым больше не называют, и чем оно снято",

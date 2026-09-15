@@ -2173,6 +2173,7 @@ CREATE TABLE IF NOT EXISTS entity_stamp (
     PRIMARY KEY (project_id, kind, id)
 );
 ALTER TABLE entity_stamp ADD COLUMN IF NOT EXISTS body_version integer NOT NULL DEFAULT 1;
+ALTER TABLE entity_stamp ADD COLUMN IF NOT EXISTS confirmed_at bigint NOT NULL DEFAULT 0;
 CREATE TABLE IF NOT EXISTS entity_confirm (
     project_id text   NOT NULL,
     kind       text   NOT NULL,
@@ -2273,28 +2274,28 @@ SELECT n.project_id, n.entity_kind, n.entity_name, n.said_id, n.caveated,
 -- `origin` исключён: он про то, ОТКУДА запись, а не что в ней.
 CREATE OR REPLACE VIEW entity_row AS
        SELECT project_id, 'requirement' AS kind, id, entity_kind, entity_name, section_ord,
-              (to_jsonb(r.*) - 'project_id' - 'origin' - 'entity_kind' - 'entity_name' - 'section_ord' - 'satisfied' - 'out_of_version' - 'crosscutting')::text AS body FROM project_requirements r
+              (to_jsonb(r.*) - 'project_id' - 'origin' - 'entity_kind' - 'entity_name' - 'section_ord')::text AS body, r.origin FROM project_requirements r
  UNION ALL SELECT project_id, 'check', id, entity_kind, entity_name, section_ord,
-              (to_jsonb(c.*) - 'project_id' - 'origin' - 'entity_kind' - 'entity_name' - 'section_ord')::text FROM project_checks c
+              (to_jsonb(c.*) - 'project_id' - 'origin' - 'entity_kind' - 'entity_name' - 'section_ord')::text, c.origin FROM project_checks c
  UNION ALL SELECT project_id, 'need', id, entity_kind, entity_name, section_ord,
-              (to_jsonb(n.*) - 'project_id' - 'entity_kind' - 'entity_name' - 'section_ord')::text FROM project_needs n
+              (to_jsonb(n.*) - 'project_id' - 'entity_kind' - 'entity_name' - 'section_ord')::text, 'projected'::text FROM project_needs n
  UNION ALL SELECT project_id, 'decision', id, entity_kind, entity_name, NULL::integer,
-              (to_jsonb(d.*) - 'project_id' - 'origin' - 'entity_kind' - 'entity_name')::text FROM project_decisions d
+              (to_jsonb(d.*) - 'project_id' - 'origin' - 'entity_kind' - 'entity_name')::text, d.origin FROM project_decisions d
  UNION ALL SELECT project_id, 'screen', id, entity_kind, entity_name, NULL::integer,
-              (to_jsonb(s.*) - 'project_id' - 'origin' - 'entity_kind' - 'entity_name' - 'out_of_version')::text FROM project_screens s
+              (to_jsonb(s.*) - 'project_id' - 'origin' - 'entity_kind' - 'entity_name' - 'out_of_version')::text, s.origin FROM project_screens s
  UNION ALL SELECT project_id, 'story', id, entity_kind, entity_name, NULL::integer,
-              (to_jsonb(t.*) - 'project_id' - 'origin' - 'entity_kind' - 'entity_name')::text FROM project_stories t
+              (to_jsonb(t.*) - 'project_id' - 'origin' - 'entity_kind' - 'entity_name')::text, t.origin FROM project_stories t
  UNION ALL SELECT project_id, 'task', id, entity_kind, entity_name, NULL::integer,
-              (to_jsonb(p.*) - 'project_id' - 'origin' - 'entity_kind' - 'entity_name' - 'ord' - 'number' - 'preflight' - 'preflight_at' - 'preflight_revision' - 'preflight_findings' - 'preflight_fresh')::text FROM project_plan_tasks p
+              (to_jsonb(p.*) - 'project_id' - 'origin' - 'entity_kind' - 'entity_name' - 'ord' - 'number' - 'preflight' - 'preflight_at' - 'preflight_revision' - 'preflight_findings' - 'preflight_fresh')::text, p.origin FROM project_plan_tasks p
  UNION ALL SELECT project_id, 'milestone', id, entity_kind, entity_name, NULL::integer,
-              (to_jsonb(m.*) - 'project_id' - 'origin' - 'entity_kind' - 'entity_name' - 'ord')::text FROM project_plan_milestones m
+              (to_jsonb(m.*) - 'project_id' - 'origin' - 'entity_kind' - 'entity_name' - 'ord')::text, m.origin FROM project_plan_milestones m
  UNION ALL SELECT project_id, 'question', id, entity_kind, entity_name, NULL::integer,
-              (to_jsonb(q.*) - 'project_id' - 'origin' - 'created_at' - 'updated_at' - 'entity_kind' - 'entity_name')::text
+              (to_jsonb(q.*) - 'project_id' - 'origin' - 'created_at' - 'updated_at' - 'entity_kind' - 'entity_name')::text, q.origin
          FROM project_questions q
  -- Рассуждение — тоже запись: у него есть тело, адрес и дата правки, и оно
  -- переоткрывается, когда меняется то, что оно объясняет.
  UNION ALL SELECT project_id, 'rationale', id, entity_kind, entity_name, section_ord,
-              (to_jsonb(a.*) - 'project_id' - 'origin' - 'entity_kind' - 'entity_name' - 'section_ord')::text FROM project_rationale a;
+              (to_jsonb(a.*) - 'project_id' - 'origin' - 'entity_kind' - 'entity_name' - 'section_ord')::text, a.origin FROM project_rationale a;
 
 -- НАПРАВЛЕННАЯ СВЯЗЬ: КТО НА КОМ СТОИТ. Раньше каскад шёл по совместному
 -- упоминанию — «названо в той же секции», — и это оказалось не зависимостью, а
@@ -2313,14 +2314,18 @@ CREATE OR REPLACE VIEW entity_link AS
          FROM project_check_requirements
  UNION ALL SELECT project_id, 'milestone', milestone_id, 'requirement', requirement_id
          FROM project_milestone_requirements
- UNION ALL SELECT project_id, 'milestone', milestone_id, kind, target
-         FROM project_milestone_links
+ UNION ALL SELECT l.project_id, 'milestone', l.milestone_id, l.kind, coalesce(dm.id, l.target)
+         FROM project_milestone_links l
+         LEFT JOIN project_decisions dm ON dm.project_id = l.project_id AND l.kind = 'decision'
+               AND dm.number = substring(l.target from '^ADR-0*([0-9]+)$')::int
  UNION ALL SELECT project_id, 'story', story_id, 'requirement', requirement_id
          FROM project_story_requirements
  UNION ALL SELECT project_id, 'requirement', requirement_id, 'need', need_id
          FROM project_requirement_needs
- UNION ALL SELECT project_id, 'requirement', requirement_id, kind, target
-         FROM project_requirement_sources
+ UNION ALL SELECT rs.project_id, 'requirement', rs.requirement_id, rs.kind, coalesce(dr.id, rs.target)
+         FROM project_requirement_sources rs
+         LEFT JOIN project_decisions dr ON dr.project_id = rs.project_id AND rs.kind = 'decision'
+               AND dr.number = substring(rs.target from '^ADR-0*([0-9]+)$')::int
  -- Этап стоит на своих задачах, красная задача — на родительской. Оба ребра
  -- лежали колонками `milestone_id` и `parent_task_id` и в связи не попадали,
  -- отчего цепочка обрывалась на первом же шаге: правка требования доходила до
@@ -2357,7 +2362,7 @@ WITH RECURSIVE прямо AS (
            ON l.project_id = st.project_id AND l.from_kind = st.kind AND l.from_id = st.id
          JOIN entity_stamp s2
            ON s2.project_id = l.project_id AND s2.kind = l.to_kind AND s2.id = l.to_id
-        WHERE s2.updated_at > st.updated_at
+        WHERE s2.updated_at > greatest(st.updated_at, st.confirmed_at)
 ),
 цепь AS (
        SELECT * FROM прямо
@@ -2372,7 +2377,7 @@ WITH RECURSIVE прямо AS (
          JOIN kind_layout k ON k.name = l.from_kind AND (k.spec->>'reopens')::boolean IS TRUE
          JOIN entity_stamp sf
            ON sf.project_id = l.project_id AND sf.kind = l.from_kind AND sf.id = l.from_id
-        WHERE ц.depth < 6 AND ц.cause_at > sf.updated_at
+        WHERE ц.depth < 6 AND ц.cause_at > greatest(sf.updated_at, sf.confirmed_at)
 )
 SELECT e.project_id, e.kind, e.id, st.updated_at, st.created_at,
        ц.cause AS stale_link, ц.cause_at AS link_changed, ц.depth,
@@ -12551,6 +12556,11 @@ pub async fn confirm_entity(
     }
     let mut client = pool.get().await.expect("пул отдал соединение");
     let tx = client.transaction().await?;
+    tx.query(
+        "SELECT 1 FROM entity_stamp WHERE project_id = $1 AND kind = $2 AND id = $3 FOR UPDATE",
+        &[&project, &kind, &id],
+    )
+    .await?;
     let causes: Vec<String> = tx
         .query(
             "SELECT DISTINCT stale_link FROM entity_live
@@ -12567,7 +12577,7 @@ pub async fn confirm_entity(
     }
     let at = now_ms();
     tx.execute(
-        "UPDATE entity_stamp SET updated_at = $4 WHERE project_id = $1 AND kind = $2 AND id = $3",
+        "UPDATE entity_stamp SET confirmed_at = $4 WHERE project_id = $1 AND kind = $2 AND id = $3",
         &[&project, &kind, &id, &at],
     )
     .await?;

@@ -564,58 +564,82 @@ pub async fn project(
     )
     .await?;
 
-    // ОТМЕТКА ИЗМЕНЕНИЯ. Отпечаток записи сверяется с прошлым: совпал — дата
-    // держится, разошёлся — ставится новая.
-    //
-    // ПЕРВАЯ отметка — ОДНА НА ВСЕХ, а не из документа-источника. Это ловилось
-    // замером четырежды, и три раза я ошибался:
-    //     «сейчас»                  → 213 переоткрытых вопросов
-    //     текущая дата документа    → 210
-    //     первая ревизия документа  →  12, но 271 требование из 306
-    // Последнее и показало ошибку: у разных документов разная первая ревизия,
-    // и требование из `srs` выходило старше проверки из `test-cases`. Разница
-    // была разницей ДОКУМЕНТОВ, а не правок записей — а то, что обновился
-    // `srs`, о самой записи не говорит ничего.
-    //
-    // Одна дата на всех значит «правок мы не видели ни одной». Это правда о
-    // наборе, приехавшем переносом, и с неё каскад начинает считать честно.
-    tx.execute(
-        "UPDATE entity_stamp st
-            SET text_hash = md5(e.body), body_version = 2,
-                updated_at = CASE
-                  WHEN e.kind IN ('requirement', 'check', 'need', 'decision', 'screen', 'story', 'rationale')
-                   AND NOT EXISTS (SELECT 1 FROM entity_confirm c
-                                    WHERE c.project_id = st.project_id AND c.kind = st.kind
-                                      AND c.id = st.id AND c.at = st.updated_at)
-                  THEN coalesce((SELECT max(r.written_at) FROM project_document_revisions r
-                                  WHERE r.project_id = st.project_id AND r.entity_kind = e.entity_kind
-                                    AND r.entity_name = e.entity_name AND r.written_at <= st.updated_at),
-                                st.updated_at)
-                  ELSE st.updated_at END
-           FROM entity_row e
-          WHERE st.project_id = $1 AND st.body_version < 2
-            AND e.project_id = st.project_id AND e.kind = st.kind AND e.id = st.id",
-        &[&project],
-    )
-    .await?;
-    tx.execute(
-        "INSERT INTO entity_stamp (project_id, kind, id, text_hash, created_at, updated_at, body_version)
-         SELECT e.project_id, e.kind, e.id, md5(e.body), нач.когда, нач.когда, 2
-           FROM entity_row e
-           CROSS JOIN (SELECT coalesce(min(written_at), $2) AS когда
-                         FROM project_document_revisions WHERE project_id = $1) нач
-          WHERE e.project_id = $1
-         ON CONFLICT (project_id, kind, id) DO UPDATE
-            SET updated_at = CASE WHEN entity_stamp.text_hash <> EXCLUDED.text_hash
-                                  THEN $2 ELSE entity_stamp.updated_at END,
-                text_hash  = EXCLUDED.text_hash,
-                body_version = 2",
-        &[&project, &crate::projector::now_ms()],
-    )
-    .await?;
     tx.commit().await?;
     // ПЕРЕПИСАННЫЙ ИСТОЧНИК НАЗЫВАЕТСЯ ЧИСЛОМ. Проход молча правит, где написана
     // проверка; посчитать и выбросить значило бы прятать правку от того, кто её
     // потом ищет.
     Ok((requirements.len(), checks.len(), needs.len(), дом))
 }
+
+/// ОТМЕТКА ИЗМЕНЕНИЯ. Отпечаток записи сверяется с прошлым: совпал — дата
+/// держится, разошёлся — ставится новая.
+///
+/// ПЕРВАЯ отметка — ОДНА НА ВСЕХ, а не из документа-источника. Это ловилось
+/// замером четырежды, и три раза я ошибался:
+///     «сейчас»                  → 213 переоткрытых вопросов
+///     текущая дата документа    → 210
+///     первая ревизия документа  →  12, но 271 требование из 306
+/// Последнее и показало ошибку: у разных документов разная первая ревизия,
+/// и требование из `srs` выходило старше проверки из `test-cases`. Разница
+/// была разницей ДОКУМЕНТОВ, а не правок записей — а то, что обновился
+/// `srs`, о самой записи не говорит ничего.
+///
+/// Одна дата на всех значит «правок мы не видели ни одной». Это правда о
+/// наборе, приехавшем переносом, и с неё каскад начинает считать честно.
+pub async fn stamp(pool: &Pool, project: &str) -> Result<u64, tokio_postgres::Error> {
+    let mut client = pool.get().await.expect("пул отдал соединение");
+    let tx = client.transaction().await?;
+    let now = crate::projector::now_ms();
+    tx.execute(STAMP_MIGRATION, &[&project, &now]).await?;
+    tx.execute("UPDATE entity_stamp SET body_version = 2 WHERE project_id = $1 AND body_version < 2", &[&project])
+        .await?;
+    let changed = tx.execute(STAMP_CHANGED, &[&project, &now]).await?;
+    tx.execute(STAMP_FRESH, &[&project, &now]).await?;
+    tx.commit().await?;
+    Ok(changed)
+}
+
+const STAMP_MIGRATION: &str = "WITH old AS (SELECT 'requirement' AS kind, id, (to_jsonb(r.*) - 'project_id' - 'origin')::text AS body FROM project_requirements r WHERE project_id = $1
+ UNION ALL SELECT 'check', id, (to_jsonb(c.*) - 'project_id' - 'origin')::text FROM project_checks c WHERE project_id = $1
+ UNION ALL SELECT 'need', id, (to_jsonb(n.*) - 'project_id')::text FROM project_needs n WHERE project_id = $1
+ UNION ALL SELECT 'decision', id, (to_jsonb(d.*) - 'project_id' - 'origin')::text FROM project_decisions d WHERE project_id = $1
+ UNION ALL SELECT 'screen', id, (to_jsonb(s.*) - 'project_id' - 'origin')::text FROM project_screens s WHERE project_id = $1
+ UNION ALL SELECT 'story', id, (to_jsonb(t.*) - 'project_id' - 'origin')::text FROM project_stories t WHERE project_id = $1
+ UNION ALL SELECT 'task', id, (to_jsonb(p.*) - 'project_id' - 'origin')::text FROM project_plan_tasks p WHERE project_id = $1
+ UNION ALL SELECT 'milestone', id, (to_jsonb(m.*) - 'project_id' - 'origin')::text FROM project_plan_milestones m WHERE project_id = $1
+ UNION ALL SELECT 'question', id, (to_jsonb(q.*) - 'project_id' - 'origin' - 'created_at' - 'updated_at')::text FROM project_questions q WHERE project_id = $1
+ UNION ALL SELECT 'rationale', id, (to_jsonb(a.*) - 'project_id' - 'origin')::text FROM project_rationale a WHERE project_id = $1)
+UPDATE entity_stamp st
+   SET text_hash = md5(e.body), body_version = 2,
+       updated_at = CASE
+         WHEN o.body IS NULL OR st.text_hash <> md5(o.body) THEN CASE WHEN e.origin <> 'declared' AND e.kind IN ('requirement', 'check', 'need', 'decision', 'screen', 'story', 'rationale')
+                THEN coalesce((SELECT max(r.written_at) FROM project_document_revisions r
+                  WHERE r.project_id = e.project_id AND r.entity_kind = e.entity_kind
+                    AND r.entity_name = e.entity_name AND r.written_at <= $2), $2)
+                ELSE $2 END
+         WHEN e.origin <> 'declared' AND e.kind IN ('requirement', 'check', 'need', 'decision', 'screen', 'story', 'rationale')
+           THEN coalesce((SELECT max(r.written_at) FROM project_document_revisions r
+                  WHERE r.project_id = e.project_id AND r.entity_kind = e.entity_kind
+                    AND r.entity_name = e.entity_name AND r.written_at <= st.updated_at), st.updated_at)
+         ELSE st.updated_at END
+  FROM entity_row e LEFT JOIN old o ON o.kind = e.kind AND o.id = e.id
+ WHERE st.project_id = $1 AND st.body_version < 2
+   AND e.project_id = st.project_id AND e.kind = st.kind AND e.id = st.id";
+
+const STAMP_CHANGED: &str = "UPDATE entity_stamp st
+   SET text_hash = md5(e.body), updated_at = CASE WHEN e.origin <> 'declared' AND e.kind IN ('requirement', 'check', 'need', 'decision', 'screen', 'story', 'rationale')
+                THEN coalesce((SELECT max(r.written_at) FROM project_document_revisions r
+                  WHERE r.project_id = e.project_id AND r.entity_kind = e.entity_kind
+                    AND r.entity_name = e.entity_name AND r.written_at <= $2), $2)
+                ELSE $2 END
+  FROM entity_row e
+ WHERE st.project_id = $1 AND e.project_id = st.project_id AND e.kind = st.kind AND e.id = st.id
+   AND st.text_hash <> md5(e.body)";
+
+const STAMP_FRESH: &str = "INSERT INTO entity_stamp (project_id, kind, id, text_hash, created_at, updated_at, body_version)
+SELECT e.project_id, e.kind, e.id, md5(e.body), нач.когда, нач.когда, 2
+  FROM entity_row e
+ CROSS JOIN (SELECT coalesce(min(written_at), $2) AS когда
+               FROM project_document_revisions WHERE project_id = $1) нач
+ WHERE e.project_id = $1
+ON CONFLICT (project_id, kind, id) DO NOTHING";

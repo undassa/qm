@@ -109,5 +109,6 @@ pub async fn reproject(pool: &Pool, project: &str) -> Result<Value, tokio_postgr
     let (dp, dc) = document_plan::project(pool, project).await?;
     done.insert("project_document_plan".into(), json!(dp));
     done.insert("project_document_plan_counts".into(), json!(dc));
+    done.insert("entity_stamp_changed".into(), json!(proof::stamp(pool, project).await?));
     Ok(Value::Object(done))
 }
