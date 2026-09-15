@@ -405,7 +405,10 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
         let how = spec["how"].as_str().unwrap_or("extract");
         let retired;
         let (how, re) = if how == "retired-terms" {
-            let (terms, _) = door.call("retired-terms", &json!({}))?;
+            let (terms, refused) = door.call("retired-terms", &json!({}))?;
+            if refused {
+                return Err(format!("{fact}: сервер не отдал снятые термины, подавать пустоту нельзя: {terms}"));
+            }
             let words: Vec<String> = terms["rows"]
                 .as_array()
                 .unwrap_or(&empty)
@@ -414,7 +417,7 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
                 .filter(|t| !t.trim().is_empty())
                 .map(regex::escape)
                 .collect();
-            retired = if words.is_empty() { String::new() } else { format!(r"\b({})\b", words.join("|")) };
+            retired = if words.is_empty() { String::new() } else { format!(r"(?:^|\W)({})(?:\W|$)", words.join("|")) };
             ("lines", retired.as_str())
         } else {
             (how, re)
@@ -970,8 +973,7 @@ fn answered(ty: &str, declared: &[String], imported: &[String]) -> bool {
         t = inner.trim();
     }
     let scalar = ty.trim().strip_prefix("Option<").and_then(|x| x.strip_suffix('>')).unwrap_or(ty.trim()).trim();
-    if matches!(scalar, "bool" | "char" | "u8" | "u16" | "u32" | "u64" | "u128" | "usize"
-                 | "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "f32" | "f64") {
+    if scalar == "bool" {
         return true;
     }
     let local = match t.split_once("::") {
@@ -1618,10 +1620,10 @@ pub struct Keys {
     }
 
     #[test]
-    fn поле_примитивного_типа_секрета_не_несёт() {
+    fn поле_bool_секрета_не_несёт() {
         let rs = "#[derive(Debug)]\npub enum Platform {\n    Windows { restricted_token: bool },\n}\n\n#[derive(Debug)]\npub struct Keys {\n    pub token_ttl: u64,\n    pub token: String,\n}\n";
         let found: Vec<String> = secret_fields(rs, NAMES, &[]).into_iter().map(|(_, f, _)| f).collect();
-        assert_eq!(found, vec!["token"]);
+        assert_eq!(found, vec!["token_ttl", "token"]);
     }
 
     #[test]

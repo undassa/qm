@@ -50,6 +50,9 @@ fn checks_in(line: &str, res: &[Regex], caveats: &[String]) -> Vec<String> {
 }
 
 pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres::Error> {
+    let mut guard = pool.get().await.expect("пул отдал соединение");
+    let lock = guard.transaction().await?;
+    lock.execute("SELECT pg_advisory_xact_lock(hashtext('relations:' || $1))", &[&project]).await?;
     let client = pool.get().await.expect("пул отдал соединение");
     // Слова схемы — из словаря, не из кода. Роль без слова НЕ подставляет
     // пустое: пустое совпало бы со всем подряд. Такая связь просто не

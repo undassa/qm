@@ -388,6 +388,7 @@ CREATE TABLE IF NOT EXISTS term_retired (
   retired_by text NOT NULL DEFAULT '',
   declared_in text NOT NULL DEFAULT '',
   PRIMARY KEY (project_id, term));
+DELETE FROM term_retired WHERE retired_by = '' AND declared_in = 'docs-lint RETIRED + Article 12';
 
 -- Признак раздела «Состояния» у экрана. Карта проекта просит проверять ПО
 -- ОТСУТСТВИЮ ЗАГОЛОВКА, а не по перечню: перечень она сама объявляет неполным.
@@ -12514,21 +12515,14 @@ pub async fn history(
     let client = pool.get().await.expect("пул отдал соединение");
     let rows = client
         .query(
-            "SELECT revision, bytes, content_hash, written_at, written_by
+            "SELECT revision, bytes, content_hash, written_at, written_by, count(*) OVER ()
                FROM project_document_revisions
               WHERE project_id = $1 AND entity_kind = $2 AND entity_name = $3
               ORDER BY revision DESC LIMIT $4",
             &[&project, &kind, &name, &limit],
         )
         .await?;
-    let total: i64 = client
-        .query_one(
-            "SELECT count(*) FROM project_document_revisions
-              WHERE project_id = $1 AND entity_kind = $2 AND entity_name = $3",
-            &[&project, &kind, &name],
-        )
-        .await?
-        .get(0);
+    let total: i64 = rows.first().map(|r| r.get(5)).unwrap_or(0);
     Ok(json!({
         "count": rows.len(),
         "total": total,

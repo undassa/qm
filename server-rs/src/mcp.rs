@@ -745,24 +745,29 @@ impl Mcp {
         out
     }
 
+    fn args_refusal(&self, name: &str, args: &Value) -> Option<Value> {
+        let tool = self.tools().into_iter().find(|t| t["name"] == name)?;
+        let (given, known) = (args.as_object()?, tool["inputSchema"]["properties"].as_object()?);
+        let unknown: Vec<String> = given
+            .keys()
+            .filter(|k| !known.contains_key(*k) && !matches!(k.as_str(), "id" | "kind" | "brief"))
+            .map(|k| format!("«{k}»"))
+            .collect();
+        if unknown.is_empty() {
+            return None;
+        }
+        let mut names: Vec<&str> = known.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        Some(refusal(Miss::Refused(format!(
+            "дверь {name} не знает {}: неизвестный довод пропал бы молча. Знает: {}",
+            unknown.join(", "),
+            names.join(", ")
+        ))))
+    }
+
     async fn run(&self, name: &str, args: &Value) -> Value {
-        if let Some(tool) = self.tools().into_iter().find(|t| t["name"] == name) {
-            if let (Some(given), Some(known)) = (args.as_object(), tool["inputSchema"]["properties"].as_object()) {
-                let unknown: Vec<String> = given
-                    .keys()
-                    .filter(|k| !known.contains_key(*k) && !matches!(k.as_str(), "id" | "kind" | "brief"))
-                    .map(|k| format!("«{k}»"))
-                    .collect();
-                if !unknown.is_empty() {
-                    let mut names: Vec<&str> = known.keys().map(String::as_str).collect();
-                    names.sort_unstable();
-                    return refusal(Miss::Refused(format!(
-                        "дверь {name} не знает {}: неизвестный довод пропал бы молча. Знает: {}",
-                        unknown.join(", "),
-                        names.join(", ")
-                    )));
-                }
-            }
+        if let Some(refused) = self.args_refusal(name, args) {
+            return refused;
         }
         // Имя сущности бывает числом — у статьи конституции оно и есть номер.
         // По HTTP оно приходит из адреса и разбирается в число; строкой его
@@ -1325,14 +1330,18 @@ impl Mcp {
                         "text": "подача без перечня: пустой перечень — это «ничего не нашёл», а отсутствие перечня — «не подали»" }],
                         "isError": true });
                 }
+                const RELATIONS_READ: [&str; 7] =
+                    ["code-file", "crate-manifest", "repo-file", "requirement-op", "test-fn", "tree-file", "written-tc"];
                 match crate::projector::push_code_facts(&self.pool, p, &fact_kind, &list, &self.author).await {
-                    Ok(mut v) => match crate::reproject::relations::project(&self.pool, p).await {
-                        Ok(n) => {
-                            v["relations"] = json!(n);
-                            ok(v)
+                    Ok(mut v) => {
+                        if RELATIONS_READ.contains(&fact_kind.as_str()) {
+                            match crate::reproject::relations::project(&self.pool, p).await {
+                                Ok(n) => v["relations"] = json!(n),
+                                Err(e) => v["relationsError"] = json!(crate::projector::db_says(&e)),
+                            }
                         }
-                        Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
-                    },
+                        ok(v)
+                    }
                     Err(e) => refusal(Miss::Db(e.to_string())),
                 }
             }
@@ -2460,6 +2469,9 @@ impl Mcp {
                          копии её не вернуло бы. Примеряются: {}", Self::TRY_ON.join(" · "))));
                 }
                 let inner = args.get("args").cloned().unwrap_or_else(|| json!({}));
+                if let Some(refused) = self.args_refusal(&tool, &inner) {
+                    return refused;
+                }
                 match crate::projector::what_if(
                     &self.pool, &self.kinds, p, &self.author, &tool, &inner).await
                 {
