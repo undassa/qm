@@ -627,11 +627,7 @@ UPDATE entity_stamp st
    AND e.project_id = st.project_id AND e.kind = st.kind AND e.id = st.id";
 
 const STAMP_CHANGED: &str = "UPDATE entity_stamp st
-   SET text_hash = md5(e.body), updated_at = CASE WHEN e.origin <> 'declared' AND e.kind IN ('requirement', 'check', 'need', 'decision', 'screen', 'story', 'rationale')
-                THEN coalesce((SELECT max(r.written_at) FROM project_document_revisions r
-                  WHERE r.project_id = e.project_id AND r.entity_kind = e.entity_kind
-                    AND r.entity_name = e.entity_name AND r.written_at <= $2), $2)
-                ELSE $2 END
+   SET text_hash = md5(e.body), updated_at = $2
   FROM entity_row e
  WHERE st.project_id = $1 AND e.project_id = st.project_id AND e.kind = st.kind AND e.id = st.id
    AND st.text_hash <> md5(e.body)";
