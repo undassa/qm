@@ -63,9 +63,10 @@ fn up_only(text: &str) -> String {
     text.lines()
         .filter(|line| {
             if let Some(said) = line.trim_start().strip_prefix("--") {
+                let opts = |rest: &[&str]| rest.iter().all(|w| w.contains(':') || *w == "notransaction");
                 match said.to_ascii_lowercase().split_whitespace().collect::<Vec<&str>>().as_slice() {
-                    ["+goose", "down", ..] | ["migrate:down", ..] => up = false,
-                    ["+goose", "up", ..] | ["migrate:up", ..] => up = true,
+                    ["+goose" | "+migrate", "down", rest @ ..] | ["migrate:down", rest @ ..] if opts(rest) => up = false,
+                    ["+goose" | "+migrate", "up", rest @ ..] | ["migrate:up", rest @ ..] if opts(rest) => up = true,
                     _ => {}
                 }
             }
@@ -895,12 +896,17 @@ mod правки {
     #[test]
     fn раздел_down_не_читается() {
         for (up, down) in [("-- +goose Up", "-- +goose Down"), ("-- migrate:up", "-- migrate:down"),
-                           ("--+goose up", "-- +goose    Down"), ("-- migrate:up", "-- migrate:down transaction:false")] {
+                           ("--+goose up", "-- +goose    Down"), ("-- migrate:up", "-- migrate:down transaction:false"),
+                           ("-- +migrate Up", "-- +migrate Down notransaction")] {
             let text = format!("{up}\nCREATE TABLE api_tokens (id text PRIMARY KEY, owner_id text NOT NULL CHECK (owner_id IN ('a')));\n{down}\nDROP TABLE api_tokens;\nCREATE TABLE api_tokens (id text PRIMARY KEY, owner_id text CHECK (owner_id IN ('b')));\n");
             let t = schema_of(&[text.clone()]);
             assert!(t.iter().any(|x| x.name == "api_tokens" && x.cols.iter().any(|c| c.name == "owner_id" && c.not_null)), "{down}");
             let sets: Vec<Vec<String>> = super::checks_of(&text, "0001.sql").into_iter().map(|c| c.values).collect();
             assert_eq!(sets, vec![vec!["a".to_owned()]], "{down}");
+        }
+        for prose in ["-- migrate:down не пишем: откат только вперёд", "-- +goose Down не используется"] {
+            let t = schema_of(&[format!("{prose}\nCREATE TABLE api_tokens (id text PRIMARY KEY);")]);
+            assert_eq!(t.len(), 1, "{prose}");
         }
         assert!(schema_of(&["CREATE TABLE api_tokens (id text PRIMARY KEY);".into(), "DROP TABLE api_tokens;".into()]).is_empty(),
                 "снятая миграцией таблица осталась");
