@@ -10006,13 +10006,17 @@ pub async fn gate_selftest(pool: &Pool, project: &str, under: &str) -> Result<Va
     // сегодня отличают одно от другого.
     let items = client
         .query(
-            "SELECT phase, id, query, probe, since FROM gate_item
+            "SELECT phase, id, query, probe, since, subject_query FROM gate_item
               WHERE kind = 'query' ORDER BY phase, item",
             &[],
         )
         .await?;
 
     let (mut alive, mut broken, mut undeclared) = (Vec::new(), Vec::new(), Vec::new());
+    // Четвёртая корзина: предмет пуст и после подсадки. Пункт в этом наборе
+    // проходит по отсутствию сущностей, и уронить его здесь нечем — это не
+    // сломанная проба, а неприменимость пункта к набору.
+    let mut absent: Vec<Value> = Vec::new();
     // Третья корзина: правило, чей род факта не свеж, судить отказывается, и
     // уронить его подсадкой нельзя — реагировать нечему.
     let mut stale: Vec<Value> = Vec::new();
@@ -10027,6 +10031,7 @@ pub async fn gate_selftest(pool: &Pool, project: &str, under: &str) -> Result<Va
         // сейчас, то есть позже границы, — и правило обязано его увидеть. Дать
         // сюда ноль значило бы проверять не то правило, что работает.
         let since: i64 = r.try_get("since").unwrap_or(0);
+        let subject: String = r.get(5);
         let sql = query.unwrap_or_default();
         if probe.trim().is_empty() {
             undeclared.push(json!({ "phase": phase, "item": item,
@@ -10055,20 +10060,38 @@ pub async fn gate_selftest(pool: &Pool, project: &str, under: &str) -> Result<Va
                 Ok(0) => Err(format!(
                     "проба ничего не подсадила; запрос пункта до пробы вернул {} строк",
                     before.len())),
-                Ok(_) => match answer_of(&tx, &sql, project, since).await {
-                    Ok(after) => Ok((before, after)),
-                    Err(e) => Err(format!("запрос пункта не исполнился после подсадки: {e}")),
-                },
+                Ok(_) => {
+                    let empty_subject = !subject.trim().is_empty()
+                        && tx
+                            .query(subject.as_str(), &[&project])
+                            .await
+                            .map(|rows| rows.is_empty())
+                            .unwrap_or(false);
+                    if empty_subject {
+                        Ok(None)
+                    } else {
+                        match answer_of(&tx, &sql, project, since).await {
+                            Ok(after) => Ok(Some((before, after))),
+                            Err(e) => Err(format!("запрос пункта не исполнился после подсадки: {e}")),
+                        }
+                    }
+                }
             },
         };
         tx.rollback().await?;
         match saw {
-            Ok((was, became)) if became != was => {
+            Ok(None) => {
+                verdict.push((phase.clone(), item.clone(), None));
+                absent.push(json!({ "phase": phase, "item": item,
+                    "why": "предмет пуст и после подсадки: в этом наборе пункт проходит по отсутствию \
+                            сущностей, и уронить его здесь нечем" }));
+            }
+            Ok(Some((was, became))) if became != was => {
                 verdict.push((phase.clone(), item.clone(), Some(true)));
                 alive.push(json!({ "phase": phase, "item": item,
                     "was": was.len(), "became": became.len() }));
             }
-            Ok((was, _)) => {
+            Ok(Some((was, _))) => {
                 // ПРОТУХШИЙ ДАТЧИК — ТРЕТЬЕ, а не «сломан». Правило, чей род
                 // факта не свеж, честно отказывается судить: оно отвечает одной
                 // строкой об этом и на подсадку не реагирует — реагировать
@@ -10160,6 +10183,7 @@ pub async fn gate_selftest(pool: &Pool, project: &str, under: &str) -> Result<Va
         "alive": alive.len(), "aliveItems": alive,
         "broken": broken.len(), "brokenItems": broken,
         "stale": stale.len(), "staleItems": stale,
+        "absent": absent.len(), "absentItems": absent,
         "undeclared": undeclared.len(), "undeclaredItems": undeclared,
         "why": "пункт без пробы не «прошёл самотест», а «самотест не объявлен» — это разные ответы",
     }))
