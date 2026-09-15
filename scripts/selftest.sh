@@ -29,20 +29,20 @@ check () {
   printf '%s' "$out" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
-subject = d.get("queryItems", d.get("steps", 0))
+alive = d.get("alive", 0)
 broken = d.get("broken", 1)
 undeclared = d.get("undeclared", 0)
-print("%d %d %d" % (subject, broken, undeclared))
-for key in ("brokenItems", "brokenSteps", "undeclaredItems", "undeclaredSteps"):
+print("%d %d %d" % (alive, broken, undeclared))
+for key in ("brokenItems", "brokenSteps", "undeclaredItems", "undeclaredSteps", "staleItems", "staleSteps"):
     for row in d.get(key, []):
         print("   ", key, json.dumps(row, ensure_ascii=False), file=sys.stderr)
 ' > /tmp/mh-selftest.$$ 2>/tmp/mh-selftest.err.$$ || { printf '%s\n' "$out" >&2; bad=1; return; }
-  read -r subject broken undeclared < /tmp/mh-selftest.$$
+  read -r alive broken undeclared < /tmp/mh-selftest.$$
   rm -f /tmp/mh-selftest.$$
-  printf '%-14s under=%-9s предметов %-3s · сломанных %s · без пробы %s\n' \
-    "$door" "${under:-как-есть}" "$subject" "$broken" "$undeclared"
-  if [ "$subject" -eq 0 ]; then
-    echo "   предмета нет ни одного: мерить нечем, и это не «пройдено»" >&2
+  printf '%-14s under=%-9s живых %-3s · сломанных %s · без пробы %s\n' \
+    "$door" "${under:-как-есть}" "$alive" "$broken" "$undeclared"
+  if [ "$alive" -eq 0 ]; then
+    echo "   живой пробы нет ни одной: не проверено ничего, и это не «пройдено»" >&2
     bad=1
   fi
   if [ "$broken" != 0 ] || [ "$undeclared" != 0 ]; then

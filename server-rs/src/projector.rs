@@ -10013,10 +10013,6 @@ pub async fn gate_selftest(pool: &Pool, project: &str, under: &str) -> Result<Va
         .await?;
 
     let (mut alive, mut broken, mut undeclared) = (Vec::new(), Vec::new(), Vec::new());
-    // Четвёртая корзина: предмет пуст и после подсадки. Пункт в этом наборе
-    // проходит по отсутствию сущностей, и уронить его здесь нечем — это не
-    // сломанная проба, а неприменимость пункта к набору.
-    let mut absent: Vec<Value> = Vec::new();
     // Третья корзина: правило, чей род факта не свеж, судить отказывается, и
     // уронить его подсадкой нельзя — реагировать нечему.
     let mut stale: Vec<Value> = Vec::new();
@@ -10061,37 +10057,31 @@ pub async fn gate_selftest(pool: &Pool, project: &str, under: &str) -> Result<Va
                     "проба ничего не подсадила; запрос пункта до пробы вернул {} строк",
                     before.len())),
                 Ok(_) => {
-                    let empty_subject = !subject.trim().is_empty()
-                        && tx
-                            .query(subject.as_str(), &[&project])
-                            .await
-                            .map(|rows| rows.is_empty())
-                            .unwrap_or(false);
-                    if empty_subject {
-                        Ok(None)
+                    let subject_rows = if subject.trim().is_empty() {
+                        Ok(1)
                     } else {
-                        match answer_of(&tx, &sql, project, since).await {
-                            Ok(after) => Ok(Some((before, after))),
-                            Err(e) => Err(format!("запрос пункта не исполнился после подсадки: {e}")),
-                        }
+                        tx.query(subject.as_str(), &[&project]).await.map(|rows| rows.len())
+                    };
+                    match subject_rows {
+                        Err(e) => Err(format!("запрос предмета не исполнился после подсадки: {}", db_says(&e))),
+                        Ok(0) => Err("предмет пуст после подсадки: сущности под нарушением проба не завела, \
+                                      и гейт пройдёт пункт по отсутствию".to_owned()),
+                        Ok(_) => answer_of(&tx, &sql, project, since)
+                            .await
+                            .map(|after| (before, after))
+                            .map_err(|e| format!("запрос пункта не исполнился после подсадки: {e}")),
                     }
                 }
             },
         };
         tx.rollback().await?;
         match saw {
-            Ok(None) => {
-                verdict.push((phase.clone(), item.clone(), None));
-                absent.push(json!({ "phase": phase, "item": item,
-                    "why": "предмет пуст и после подсадки: в этом наборе пункт проходит по отсутствию \
-                            сущностей, и уронить его здесь нечем" }));
-            }
-            Ok(Some((was, became))) if became != was => {
+            Ok((was, became)) if became != was => {
                 verdict.push((phase.clone(), item.clone(), Some(true)));
                 alive.push(json!({ "phase": phase, "item": item,
                     "was": was.len(), "became": became.len() }));
             }
-            Ok(Some((was, _))) => {
+            Ok((was, _)) => {
                 // ПРОТУХШИЙ ДАТЧИК — ТРЕТЬЕ, а не «сломан». Правило, чей род
                 // факта не свеж, честно отказывается судить: оно отвечает одной
                 // строкой об этом и на подсадку не реагирует — реагировать
@@ -10158,10 +10148,6 @@ pub async fn gate_selftest(pool: &Pool, project: &str, under: &str) -> Result<Va
     let persist = under.is_empty();
     if persist {
         for (phase, id, ok) in &verdict {
-            client
-                .execute("UPDATE gate_item SET probe_ok = $3 WHERE phase = $1 AND id = $2",
-                         &[phase, id, ok])
-                .await?;
             // ЗАМЕР ПРИНАДЛЕЖИТ ПРОЕКТУ, и без его имени приговор растекался по
             // всем: `project_gates` ключуется тройкой, а писали сюда парой.
             // Самотест проекта A перекрашивал одноимённый пункт у B — пробой,
@@ -10183,7 +10169,6 @@ pub async fn gate_selftest(pool: &Pool, project: &str, under: &str) -> Result<Va
         "alive": alive.len(), "aliveItems": alive,
         "broken": broken.len(), "brokenItems": broken,
         "stale": stale.len(), "staleItems": stale,
-        "absent": absent.len(), "absentItems": absent,
         "undeclared": undeclared.len(), "undeclaredItems": undeclared,
         "why": "пункт без пробы не «прошёл самотест», а «самотест не объявлен» — это разные ответы",
     }))
