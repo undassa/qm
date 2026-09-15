@@ -724,7 +724,7 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
                 let Ok(text) = std::fs::read_to_string(f) else { continue };
                 if short.ends_with(".yaml") || short.ends_with(".yml") {
                     doc = crate::yaml::parse(&text);
-                } else if short.ends_with(".sql") {
+                } else if crate::repo_corpus::migration_up(&short) {
                     sql.push(text);
                 }
             }
@@ -764,7 +764,7 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
                 let Ok(text) = std::fs::read_to_string(f) else { continue };
                 if short.ends_with(".rs") {
                     enums.extend(crate::repo_corpus::enums_of(&text, &short));
-                } else if short.ends_with(".sql") {
+                } else if crate::repo_corpus::migration_up(&short) {
                     checks.extend(crate::repo_corpus::checks_of(&text, &short));
                 }
             }
@@ -794,7 +794,7 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
             let checks_tables: Vec<crate::repo_corpus::Table> = crate::repo_corpus::schema_of(
                 &files
                     .iter()
-                    .filter(|f| f.ends_with(".sql"))
+                    .filter(|f| crate::repo_corpus::migration_up(f))
                     .filter_map(|f| std::fs::read_to_string(f).ok())
                     .collect::<Vec<String>>(),
             );
@@ -927,7 +927,9 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
 /// комментарии, а поле надо смотреть внутри тела — regex такого не выражает.
 /// `field_re` — чем узнаётся секрето-подобное имя; подозрение снимает только
 /// `Secret<…>` или тип, объявленный в самом корпусе (`StoredToken`, `PublicUrl`),
-/// потому что он и есть ответ на него. Всякий иной тип подозрителен.
+/// потому что он и есть ответ на него. Тип корпуса узнаётся голым именем или
+/// путём через `crate::`/`self::`/`super::`: `reqwest::Url` — не `Url` корпуса.
+/// Всякий иной тип подозрителен.
 /// Строка подходит под образец. Ошибка в образце не молчит: она отвечает «нет»
 /// на каждую строку, и датчик подал бы пустоту как «ничего не найдено».
 fn suspect_line(re: &str, line: &str) -> bool {
@@ -951,7 +953,12 @@ fn answered(ty: &str, declared: &[String]) -> bool {
     {
         t = inner.trim();
     }
-    ty.contains("Secret<") || t.rsplit("::").next().is_some_and(|name| declared.iter().any(|d| d == name))
+    let local = match t.split_once("::") {
+        None => Some(t),
+        Some(("crate" | "self" | "super", _)) => t.rsplit("::").next(),
+        Some(_) => None,
+    };
+    ty.contains("Secret<") || local.is_some_and(|name| declared.iter().any(|d| d == name))
 }
 
 fn declared_types(text: &str) -> Vec<String> {
@@ -1546,6 +1553,13 @@ pub struct Keys {
             "Keys.webhook_url: reqwest::Url",
             "Keys.credential: serde_json::Value",
         ]);
+    }
+
+    #[test]
+    fn тип_корпуса_узнаётся_голым_именем_или_путём_крейта() {
+        let rs = "#[derive(Debug)]\npub struct Url(pub String);\n\n#[derive(Debug)]\npub struct Hook {\n    pub webhook_url: reqwest::Url,\n    pub callback_url: Option<Url>,\n    pub public_url: crate::Url,\n}\n";
+        let found: Vec<String> = secret_fields(rs, NAMES, &declared_types(rs)).into_iter().map(|(_, f, _)| f).collect();
+        assert_eq!(found, vec!["webhook_url"]);
     }
 
     #[test]
