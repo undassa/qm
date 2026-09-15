@@ -1748,11 +1748,7 @@ ALTER TABLE project_sensor_spec ADD COLUMN IF NOT EXISTS how text NOT NULL DEFAU
 -- пустым. Заголовок теперь просто текст, который можно переписать; адресует
 -- пункт `id`.
 ALTER TABLE gate_item ADD COLUMN IF NOT EXISTS id text NOT NULL DEFAULT '';
--- ИСПОЛНЯЕТСЯ ЛИ ПРОБА. `null` — не проверяли; `false` — проба есть, но она не
--- запрос, и пункт не роняли НИ РАЗУ. Зелёное у такого пункта не значит ничего,
--- и молчать об этом нельзя: гейт для того и написан, чтобы не было зелёного,
--- которое никто не проверял.
-ALTER TABLE gate_item ADD COLUMN IF NOT EXISTS probe_ok boolean;
+ALTER TABLE gate_item DROP COLUMN IF EXISTS probe_ok;
 -- НАД ЧЕМ ПУНКТ МЕРЯЕТ. Правило, у которого предмет ИСЧЕЗ, отчитывалось
 -- тишиной: строк нет — нарушений нет — пункт зелен и пропал из перечня
 -- непройденных. Счёт при этом улучшался, и гейт зеленел от того, что мерить
@@ -5942,6 +5938,23 @@ async fn answer_of(
     }
 }
 
+async fn subject_planted(
+    tx: &deadpool_postgres::Transaction<'_>,
+    subject: &str,
+    project: &str,
+) -> Result<(), String> {
+    if subject.trim().is_empty() {
+        return Ok(());
+    }
+    match tx.query(subject, &[&project]).await {
+        Err(e) => Err(format!("запрос предмета не исполнился после подсадки: {}", db_says(&e))),
+        Ok(rows) if rows.is_empty() => Err("предмет пуст после подсадки: сущности под нарушением проба \
+                                            не завела, и замер пройдёт по отсутствию"
+            .to_owned()),
+        Ok(_) => Ok(()),
+    }
+}
+
 /// Ошибка базы словами, а не «db error».
 ///
 /// `Display` у ошибки tokio-postgres печатает ровно «db error» и прячет причину
@@ -9727,7 +9740,7 @@ pub async fn step_selftest(
             // набор называет. Второй набор с одноимённым процессом отдал бы
             // сюда СВОИ ступени, прогнанные по чужому проекту, и номера в
             // отчёте задвоились бы.
-            "SELECT ord, question, method_kind, method, probe FROM harness_process_step
+            "SELECT ord, question, method_kind, method, probe, subject_query FROM harness_process_step
               WHERE set_name = $1 AND process = $2 ORDER BY ord",
             &[&set_name, &process],
         )
@@ -9740,6 +9753,7 @@ pub async fn step_selftest(
         let method_kind: String = r.get(2);
         let method: String = r.get(3);
         let probe: String = r.get(4);
+        let subject: String = r.get(5);
         if method_kind != "query" || method.trim().is_empty() {
             undeclared.push(json!({ "ord": ord, "question": question,
                                     "why": "способ не запрос: ронять нечего" }));
@@ -9763,9 +9777,12 @@ pub async fn step_selftest(
                 Ok(0) => Err(format!(
                     "проба ничего не подсадила; запрос пункта до пробы вернул {} строк",
                     before.len())),
-                Ok(_) => match answer_of(&tx, &method, project, 0).await {
-                    Ok(after) => Ok((before, after)),
-                    Err(e) => Err(format!("запрос ступени не исполнился после подсадки: {e}")),
+                Ok(_) => match subject_planted(&tx, &subject, project).await {
+                    Err(why) => Err(why),
+                    Ok(()) => match answer_of(&tx, &method, project, 0).await {
+                        Ok(after) => Ok((before, after)),
+                        Err(e) => Err(format!("запрос ступени не исполнился после подсадки: {e}")),
+                    },
                 },
             },
         };
@@ -10030,6 +10047,7 @@ pub async fn gate_selftest(pool: &Pool, project: &str, under: &str) -> Result<Va
         let subject: String = r.get(5);
         let sql = query.unwrap_or_default();
         if probe.trim().is_empty() {
+            verdict.push((phase.clone(), item.clone(), None));
             undeclared.push(json!({ "phase": phase, "item": item,
                                     "why": "проба не объявлена: чем ронять этот пункт — не сказано" }));
             continue;
@@ -10056,22 +10074,13 @@ pub async fn gate_selftest(pool: &Pool, project: &str, under: &str) -> Result<Va
                 Ok(0) => Err(format!(
                     "проба ничего не подсадила; запрос пункта до пробы вернул {} строк",
                     before.len())),
-                Ok(_) => {
-                    let subject_rows = if subject.trim().is_empty() {
-                        Ok(1)
-                    } else {
-                        tx.query(subject.as_str(), &[&project]).await.map(|rows| rows.len())
-                    };
-                    match subject_rows {
-                        Err(e) => Err(format!("запрос предмета не исполнился после подсадки: {}", db_says(&e))),
-                        Ok(0) => Err("предмет пуст после подсадки: сущности под нарушением проба не завела, \
-                                      и гейт пройдёт пункт по отсутствию".to_owned()),
-                        Ok(_) => answer_of(&tx, &sql, project, since)
-                            .await
-                            .map(|after| (before, after))
-                            .map_err(|e| format!("запрос пункта не исполнился после подсадки: {e}")),
-                    }
-                }
+                Ok(_) => match subject_planted(&tx, &subject, project).await {
+                    Err(why) => Err(why),
+                    Ok(()) => answer_of(&tx, &sql, project, since)
+                        .await
+                        .map(|after| (before, after))
+                        .map_err(|e| format!("запрос пункта не исполнился после подсадки: {e}")),
+                },
             },
         };
         tx.rollback().await?;
@@ -10685,13 +10694,13 @@ pub async fn set_gate_item(
     }
     let was = client
         .query(
-            "SELECT query, owner, probe, item FROM gate_item WHERE phase = $1 AND id = $2",
+            "SELECT query, owner, probe, item, subject_query FROM gate_item WHERE phase = $1 AND id = $2",
             &[&phase, &id],
         )
         .await?;
-    let had: (Option<String>, Option<String>, String, String) = match was.first() {
-        Some(r) => (r.get(0), r.get(1), r.get(2), r.get(3)),
-        None => (None, None, String::new(), String::new()),
+    let had: (Option<String>, Option<String>, String, String, String) = match was.first() {
+        Some(r) => (r.get(0), r.get(1), r.get(2), r.get(3), r.get(4)),
+        None => (None, None, String::new(), String::new(), String::new()),
     };
     // Проба проверяется ПОСЛЕ подстановки прежней, и отметка ставится той пробе,
     // которая в строке останется. Прежде отметка бралась только у переданной, и
@@ -10779,26 +10788,33 @@ pub async fn set_gate_item(
         return Ok(json!({ "status": "nameless",
                           "why": "пункт гейта без имени не заводится: имя адресует пункт, заголовок его объясняет" }));
     }
+    let judged_changed = query.is_some_and(|q| Some(q) != had.0.as_deref())
+        || probe.is_some_and(|p| p != had.2)
+        || subject.is_some_and(|q| q != had.4);
     let query = query.map(|q| q.to_owned()).or(had.0);
     let owner = owner.map(|o| o.to_owned()).or(had.1);
     let probe = probe_text;
     let n = client
         .execute(
-            "INSERT INTO gate_item (phase, id, item, kind, query, owner, probe, probe_ok,
+            "INSERT INTO gate_item (phase, id, item, kind, query, owner, probe,
                                     subject_query, subject_why, since)
-             VALUES ($1, $2, $7, $3, $4, $5, $6, $8, coalesce($9, ''), coalesce($10, ''),
-                     coalesce($11::bigint, 0))
+             VALUES ($1, $2, $7, $3, $4, $5, $6, coalesce($8, ''), coalesce($9, ''),
+                     coalesce($10::bigint, 0))
              ON CONFLICT (phase, id) WHERE id <> ''
                DO UPDATE SET item = EXCLUDED.item, kind = EXCLUDED.kind, query = EXCLUDED.query,
                              owner = EXCLUDED.owner, probe = EXCLUDED.probe,
-                             probe_ok = EXCLUDED.probe_ok,
-                             subject_query = coalesce($9, gate_item.subject_query),
-                             subject_why = coalesce($10, gate_item.subject_why),
-                             since = coalesce($11::bigint, gate_item.since)",
-            &[&phase, &id, &kind, &query, &owner, &probe, &title, &None::<bool>,
+                             subject_query = coalesce($8, gate_item.subject_query),
+                             subject_why = coalesce($9, gate_item.subject_why),
+                             since = coalesce($10::bigint, gate_item.since)",
+            &[&phase, &id, &kind, &query, &owner, &probe, &title,
               &subject, &subject_why, &since],
         )
         .await?;
+    if judged_changed {
+        client
+            .execute("UPDATE project_gates SET probe_ok = NULL WHERE phase = $1 AND id = $2", &[&phase, &id])
+            .await?;
+    }
     if !why.is_empty() {
         client
             .execute("UPDATE gate_item SET why = $3 WHERE phase = $1 AND id = $2",

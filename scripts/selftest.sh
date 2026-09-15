@@ -33,7 +33,7 @@ alive = d.get("alive", 0)
 broken = d.get("broken", 1)
 undeclared = d.get("undeclared", 0)
 print("%d %d %d" % (alive, broken, undeclared))
-for key in ("brokenItems", "brokenSteps", "undeclaredItems", "undeclaredSteps", "staleItems", "staleSteps"):
+for key in ("brokenItems", "brokenSteps", "undeclaredItems", "undeclaredSteps", "staleItems"):
     for row in d.get(key, []):
         print("   ", key, json.dumps(row, ensure_ascii=False), file=sys.stderr)
 ' > /tmp/mh-selftest.$$ 2>/tmp/mh-selftest.err.$$ || { printf '%s\n' "$out" >&2; bad=1; return; }
@@ -43,9 +43,8 @@ for key in ("brokenItems", "brokenSteps", "undeclaredItems", "undeclaredSteps", 
     "$door" "${under:-как-есть}" "$alive" "$broken" "$undeclared"
   if [ "$alive" -eq 0 ]; then
     echo "   живой пробы нет ни одной: не проверено ничего, и это не «пройдено»" >&2
-    bad=1
   fi
-  if [ "$broken" != 0 ] || [ "$undeclared" != 0 ]; then
+  if [ "$alive" -eq 0 ] || [ "$broken" != 0 ] || [ "$undeclared" != 0 ]; then
     cat /tmp/mh-selftest.err.$$ >&2
     bad=1
   fi
