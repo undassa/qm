@@ -403,6 +403,22 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
             continue;
         }
         let how = spec["how"].as_str().unwrap_or("extract");
+        let retired;
+        let (how, re) = if how == "retired-terms" {
+            let (terms, _) = door.call("retired-terms", &json!({}))?;
+            let words: Vec<String> = terms["rows"]
+                .as_array()
+                .unwrap_or(&empty)
+                .iter()
+                .filter_map(|r| r["term"].as_str())
+                .filter(|t| !t.trim().is_empty())
+                .map(regex::escape)
+                .collect();
+            retired = if words.is_empty() { String::new() } else { format!(r"\b({})\b", words.join("|")) };
+            ("lines", retired.as_str())
+        } else {
+            (how, re)
+        };
         // Строка, которую датчик не считает находкой, и места, где правило не
         // действует. Без первого правило ловит себя же в объяснении, без
         // второго — запрещает шкале называть размеры, а часам — форматировать
@@ -952,6 +968,11 @@ fn answered(ty: &str, declared: &[String], imported: &[String]) -> bool {
         .find_map(|w| t.strip_prefix(w)?.strip_suffix('>'))
     {
         t = inner.trim();
+    }
+    let scalar = ty.trim().strip_prefix("Option<").and_then(|x| x.strip_suffix('>')).unwrap_or(ty.trim()).trim();
+    if matches!(scalar, "bool" | "char" | "u8" | "u16" | "u32" | "u64" | "u128" | "usize"
+                 | "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "f32" | "f64") {
+        return true;
     }
     let local = match t.split_once("::") {
         None => Some(t).filter(|name| !imported.iter().any(|i| i == name)),
@@ -1594,6 +1615,13 @@ pub struct Keys {
         let found = secret_fields(RS, NAMES, &[]);
         assert!(found.iter().any(|(d, f, _)| d == "Issued" && f == "token"), "{found:?}");
         assert!(found.iter().any(|(d, f, _)| d == "Target" && f == "public_url"), "{found:?}");
+    }
+
+    #[test]
+    fn поле_примитивного_типа_секрета_не_несёт() {
+        let rs = "#[derive(Debug)]\npub enum Platform {\n    Windows { restricted_token: bool },\n}\n\n#[derive(Debug)]\npub struct Keys {\n    pub token_ttl: u64,\n    pub token: String,\n}\n";
+        let found: Vec<String> = secret_fields(rs, NAMES, &[]).into_iter().map(|(_, f, _)| f).collect();
+        assert_eq!(found, vec!["token"]);
     }
 
     #[test]

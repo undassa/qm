@@ -2171,6 +2171,17 @@ CREATE TABLE IF NOT EXISTS entity_stamp (
     updated_at bigint NOT NULL,
     PRIMARY KEY (project_id, kind, id)
 );
+ALTER TABLE entity_stamp ADD COLUMN IF NOT EXISTS body_version integer NOT NULL DEFAULT 1;
+CREATE TABLE IF NOT EXISTS entity_confirm (
+    project_id text   NOT NULL,
+    kind       text   NOT NULL,
+    id         text   NOT NULL,
+    at         bigint NOT NULL,
+    by_whom    text   NOT NULL DEFAULT '',
+    why        text   NOT NULL,
+    cause      text   NOT NULL DEFAULT '',
+    PRIMARY KEY (project_id, kind, id, at)
+);
 
 ALTER TABLE project_questions ADD COLUMN IF NOT EXISTS created_at bigint;
 ALTER TABLE project_questions ADD COLUMN IF NOT EXISTS updated_at bigint;
@@ -2261,28 +2272,28 @@ SELECT n.project_id, n.entity_kind, n.entity_name, n.said_id, n.caveated,
 -- `origin` исключён: он про то, ОТКУДА запись, а не что в ней.
 CREATE OR REPLACE VIEW entity_row AS
        SELECT project_id, 'requirement' AS kind, id, entity_kind, entity_name, section_ord,
-              (to_jsonb(r.*) - 'project_id' - 'origin')::text AS body FROM project_requirements r
+              (to_jsonb(r.*) - 'project_id' - 'origin' - 'entity_kind' - 'entity_name' - 'section_ord' - 'satisfied' - 'out_of_version' - 'crosscutting')::text AS body FROM project_requirements r
  UNION ALL SELECT project_id, 'check', id, entity_kind, entity_name, section_ord,
-              (to_jsonb(c.*) - 'project_id' - 'origin')::text FROM project_checks c
+              (to_jsonb(c.*) - 'project_id' - 'origin' - 'entity_kind' - 'entity_name' - 'section_ord')::text FROM project_checks c
  UNION ALL SELECT project_id, 'need', id, entity_kind, entity_name, section_ord,
-              (to_jsonb(n.*) - 'project_id')::text FROM project_needs n
+              (to_jsonb(n.*) - 'project_id' - 'entity_kind' - 'entity_name' - 'section_ord')::text FROM project_needs n
  UNION ALL SELECT project_id, 'decision', id, entity_kind, entity_name, NULL::integer,
-              (to_jsonb(d.*) - 'project_id' - 'origin')::text FROM project_decisions d
+              (to_jsonb(d.*) - 'project_id' - 'origin' - 'entity_kind' - 'entity_name')::text FROM project_decisions d
  UNION ALL SELECT project_id, 'screen', id, entity_kind, entity_name, NULL::integer,
-              (to_jsonb(s.*) - 'project_id' - 'origin')::text FROM project_screens s
+              (to_jsonb(s.*) - 'project_id' - 'origin' - 'entity_kind' - 'entity_name' - 'out_of_version')::text FROM project_screens s
  UNION ALL SELECT project_id, 'story', id, entity_kind, entity_name, NULL::integer,
-              (to_jsonb(t.*) - 'project_id' - 'origin')::text FROM project_stories t
+              (to_jsonb(t.*) - 'project_id' - 'origin' - 'entity_kind' - 'entity_name')::text FROM project_stories t
  UNION ALL SELECT project_id, 'task', id, entity_kind, entity_name, NULL::integer,
-              (to_jsonb(p.*) - 'project_id' - 'origin')::text FROM project_plan_tasks p
+              (to_jsonb(p.*) - 'project_id' - 'origin' - 'entity_kind' - 'entity_name' - 'ord' - 'number' - 'preflight' - 'preflight_at' - 'preflight_revision' - 'preflight_findings' - 'preflight_fresh')::text FROM project_plan_tasks p
  UNION ALL SELECT project_id, 'milestone', id, entity_kind, entity_name, NULL::integer,
-              (to_jsonb(m.*) - 'project_id' - 'origin')::text FROM project_plan_milestones m
+              (to_jsonb(m.*) - 'project_id' - 'origin' - 'entity_kind' - 'entity_name' - 'ord')::text FROM project_plan_milestones m
  UNION ALL SELECT project_id, 'question', id, entity_kind, entity_name, NULL::integer,
-              (to_jsonb(q.*) - 'project_id' - 'origin' - 'created_at' - 'updated_at')::text
+              (to_jsonb(q.*) - 'project_id' - 'origin' - 'created_at' - 'updated_at' - 'entity_kind' - 'entity_name')::text
          FROM project_questions q
  -- Рассуждение — тоже запись: у него есть тело, адрес и дата правки, и оно
  -- переоткрывается, когда меняется то, что оно объясняет.
  UNION ALL SELECT project_id, 'rationale', id, entity_kind, entity_name, section_ord,
-              (to_jsonb(a.*) - 'project_id' - 'origin')::text FROM project_rationale a;
+              (to_jsonb(a.*) - 'project_id' - 'origin' - 'entity_kind' - 'entity_name' - 'section_ord')::text FROM project_rationale a;
 
 -- НАПРАВЛЕННАЯ СВЯЗЬ: КТО НА КОМ СТОИТ. Раньше каскад шёл по совместному
 -- упоминанию — «названо в той же секции», — и это оказалось не зависимостью, а
@@ -2358,7 +2369,9 @@ WITH RECURSIVE прямо AS (
          JOIN entity_link l
            ON l.project_id = ц.project_id AND l.to_kind = ц.kind AND l.to_id = ц.id
          JOIN kind_layout k ON k.name = l.from_kind AND (k.spec->>'reopens')::boolean IS TRUE
-        WHERE ц.depth < 6
+         JOIN entity_stamp sf
+           ON sf.project_id = l.project_id AND sf.kind = l.from_kind AND sf.id = l.from_id
+        WHERE ц.depth < 6 AND ц.cause_at > sf.updated_at
 )
 SELECT e.project_id, e.kind, e.id, st.updated_at, st.created_at,
        ц.cause AS stale_link, ц.cause_at AS link_changed, ц.depth,
@@ -3202,20 +3215,10 @@ pub async fn rebuild(pool: &Pool, project: &str) -> Result<Value, tokio_postgres
         )
         .await?;
 
-    // ── Снятые термины ───────────────────────────────────────────────────────
-    // Источник — список, который сегодня носит правило `docs-lint`. Он назван
-    // здесь один раз, и правило может читать его отсюда вместо своей копии.
-    tx.execute("DELETE FROM term_retired WHERE project_id = $1", &[&project]).await?;
     let retired = tx
-        .execute(
-            "INSERT INTO term_retired (project_id, term, retired_by, declared_in)
-             SELECT $1, t.term, '', 'docs-lint RETIRED + Article 12'
-               FROM (VALUES ('Incident'), ('AlertState'), ('watchdog'), ('data_source'),
-                            ('SituationState.merged'), ('Alert')) AS t(term)
-             ON CONFLICT DO NOTHING",
-            &[&project],
-        )
-        .await?;
+        .query_one("SELECT count(*) FROM term_retired WHERE project_id = $1", &[&project])
+        .await?
+        .get::<_, i64>(0);
 
     // ── Есть ли у экрана раздел «Состояния» ──────────────────────────────────
     // Проверка ПО ОТСУТСТВИЮ ЗАГОЛОВКА: перечень из карты она сама объявляет
@@ -7215,7 +7218,7 @@ pub async fn declare_sensor_spec(
     }
     // Незнакомый род прежде молча становился `extract`: датчик объявляли одним,
     // он снимал другое и говорил «снято». Отказ называет допустимые роды.
-    const KINDS: [&str; 16] = ["extract", "files", "secret-fields", "declared-paths", "lines",
+    const KINDS: [&str; 17] = ["extract", "files", "secret-fields", "declared-paths", "lines", "retired-terms",
                               "domain-vs-check", "contract-vs-schema", "contract-ops", "contract-body", "declared-lines", "contract-marks", "contract-head", "frozen-tree",
                               "task-trailers", "holder-stub", "file-matches"];
     let how = if how.trim().is_empty() { "extract" } else { how };
@@ -12518,8 +12521,18 @@ pub async fn history(
             &[&project, &kind, &name, &limit],
         )
         .await?;
+    let total: i64 = client
+        .query_one(
+            "SELECT count(*) FROM project_document_revisions
+              WHERE project_id = $1 AND entity_kind = $2 AND entity_name = $3",
+            &[&project, &kind, &name],
+        )
+        .await?
+        .get(0);
     Ok(json!({
         "count": rows.len(),
+        "total": total,
+        "truncated": (rows.len() as i64) < total,
         "revisions": rows.iter().map(|r| json!({
             "revision": r.get::<_, i64>(0),
             "bytes": r.get::<_, i32>(1),
@@ -12528,6 +12541,84 @@ pub async fn history(
             "by": r.get::<_, String>(4),
         })).collect::<Vec<_>>(),
     }))
+}
+
+pub async fn confirm_entity(
+    pool: &Pool,
+    project: &str,
+    kind: &str,
+    id: &str,
+    why: &str,
+    by: &str,
+) -> Result<Value, tokio_postgres::Error> {
+    if why.trim().is_empty() {
+        return Ok(json!({ "status": "no_why",
+            "why": "подтверждение без довода — отметка, а не ревью: скажите, что перечитано и почему закрытие в силе" }));
+    }
+    let mut client = pool.get().await.expect("пул отдал соединение");
+    let tx = client.transaction().await?;
+    let causes: Vec<String> = tx
+        .query(
+            "SELECT DISTINCT stale_link FROM entity_live
+              WHERE project_id = $1 AND kind = $2 AND id = $3 AND live_state = 'reopened'",
+            &[&project, &kind, &id],
+        )
+        .await?
+        .iter()
+        .map(|r| r.get::<_, String>(0))
+        .collect();
+    if causes.is_empty() {
+        return Ok(json!({ "status": "not_reopened", "kind": kind, "id": id,
+            "why": "запись не переоткрыта: подтверждать нечего" }));
+    }
+    let at = now_ms();
+    tx.execute(
+        "UPDATE entity_stamp SET updated_at = $4 WHERE project_id = $1 AND kind = $2 AND id = $3",
+        &[&project, &kind, &id, &at],
+    )
+    .await?;
+    tx.execute(
+        "INSERT INTO entity_confirm (project_id, kind, id, at, by_whom, why, cause)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        &[&project, &kind, &id, &at, &by, &why, &causes.join(", ")],
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(json!({ "status": "confirmed", "kind": kind, "id": id, "causes": causes, "at": at }))
+}
+
+pub async fn declare_retired_term(
+    pool: &Pool,
+    project: &str,
+    term: &str,
+    retired_by: &str,
+    declared_in: &str,
+    drop_it: bool,
+) -> Result<Value, tokio_postgres::Error> {
+    let client = pool.get().await.expect("пул отдал соединение");
+    let term = term.trim();
+    if term.is_empty() {
+        return Ok(json!({ "status": "nameless", "why": "снимается слово, а оно не названо" }));
+    }
+    if drop_it {
+        let gone = client
+            .execute("DELETE FROM term_retired WHERE project_id = $1 AND term = $2", &[&project, &term])
+            .await?;
+        return Ok(json!({ "status": if gone > 0 { "dropped" } else { "not_found" }, "term": term }));
+    }
+    if retired_by.trim().is_empty() {
+        return Ok(json!({ "status": "no_source",
+            "why": "не сказано, чем слово снято: снятие без решения или статьи неотличимо от вкуса" }));
+    }
+    client
+        .execute(
+            "INSERT INTO term_retired (project_id, term, retired_by, declared_in) VALUES ($1, $2, $3, $4)
+             ON CONFLICT (project_id, term) DO UPDATE
+                SET retired_by = EXCLUDED.retired_by, declared_in = EXCLUDED.declared_in",
+            &[&project, &term, &retired_by, &declared_in],
+        )
+        .await?;
+    Ok(json!({ "status": "declared", "term": term, "retiredBy": retired_by }))
 }
 
 /// Текст сущности, каким он был на названной правке.

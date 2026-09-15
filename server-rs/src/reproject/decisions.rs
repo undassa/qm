@@ -11,9 +11,10 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
 
-/// Имя решения — его собственный идентификатор: `ADR-0157`.
+/// Имя решения — его собственный идентификатор: `ADR-0157` либо номер со словами,
+/// `0015-block-library-source-of-truth`.
 static DECISION_NAME: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^ADR-(\d{3,4})$").expect("образец решения"));
+    Lazy::new(|| Regex::new(r"^(?:ADR-)?(\d{3,4})(?:-[a-z0-9][a-z0-9-]*)?$").expect("образец решения"));
 
 /// Состояние решения объявляет ПОЛЕ «Статус», а не каталог, в котором лежал файл.
 ///
@@ -311,6 +312,16 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize)
         }
     }
     decisions.sort_by_key(|d| d.1);
+    let by_number: HashMap<i32, String> = decisions.iter().map(|d| (d.1, d.0.clone())).collect();
+    for l in links.iter_mut() {
+        if let Some(real) = DECISION_NAME
+            .captures(&l.2)
+            .and_then(|c| c[1].parse::<i32>().ok())
+            .and_then(|n| by_number.get(&n))
+        {
+            l.2 = real.clone();
+        }
+    }
 
     let mut client = pool.get().await.expect("пул отдал соединение");
     let tx = client.transaction().await?;

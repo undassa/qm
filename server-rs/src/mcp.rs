@@ -156,7 +156,7 @@ impl Mcp {
             "inputSchema": { "type": "object", "properties": { "deferProjection": json!({"type":"boolean","description":"не пересобирать проекции сейчас; позвать `reproject` после серии правок"}), "kind": s("вид"), "id": s("имя"), "content": s("текст целиком"), "expectedRevision": json!({"type":"integer"}),
                 "create": json!({"type":"boolean","description":"завести, если сущности ещё нет; без этого `put` только правит"}) }, "required": ["kind", "content"] } }));
         tools.push(json!({ "name": "put-section", "description": "заменить один раздел сущности; проекции пересобираются в этом же вызове",
-            "inputSchema": { "type": "object", "properties": { "kind": s("вид"), "id": s("имя"), "anchor": s("якорь"), "body": s("новое тело раздела"), "expectedRevision": json!({"type":"integer"}) }, "required": ["kind", "anchor", "body"] } }));
+            "inputSchema": { "type": "object", "properties": { "deferProjection": json!({"type":"boolean","description":"не пересобирать проекции сейчас; позвать `reproject` после серии правок"}), "kind": s("вид"), "id": s("имя"), "anchor": s("якорь"), "body": s("новое тело раздела"), "expectedRevision": json!({"type":"integer"}) }, "required": ["kind", "anchor", "body"] } }));
         tools.push(json!({ "name": "rm", "description": "удалить сущность",
             "inputSchema": { "type": "object", "properties": { "deferProjection": json!({"type":"boolean","description":"не пересобирать проекции сейчас; позвать `reproject` после серии правок"}), "kind": s("вид"), "id": s("имя") }, "required": ["kind"] } }));
         tools.push(json!({ "name": "task-state-push", "description": "принять состояния задач, выведенные харнесом из закрывающих трейлеров; подача полная. `at` — время коммита в мс: без него харнес знает лишь «когда увидел», а этим порядок не судится",
@@ -209,10 +209,19 @@ impl Mcp {
                 "method": s("запрос либо команда") }, "required": ["kind", "ord", "methodKind"] } }));
         tools.push(json!({ "name": "links-of", "description": "чем доказано и с чем связано: связи сущности по видам: проверки, истории, задачи, решения — то, что показывает панель раздела",
             "inputSchema": { "type": "object", "properties": { "kind": s("requirement · story · decision"), "id": s("имя") }, "required": ["kind", "id"] } }));
+        tools.push(json!({ "name": "entity-confirm", "description": "перечитал переоткрытую запись — закрытие в силе: с доводом и автором; правка опоры снова её переоткроет",
+            "inputSchema": { "type": "object", "properties": { "kind": s("вид записи: task, red-task, milestone, question, requirement"),
+                "id": s("имя записи"), "why": s("что перечитано и почему закрытие в силе — обязательно") },
+                "required": ["kind", "id", "why"] } }));
+        tools.push(json!({ "name": "term-retire", "description": "объявить снятый термин набора: слово, которым больше не называют, и чем оно снято",
+            "inputSchema": { "type": "object", "properties": { "term": s("снятое слово"),
+                "retiredBy": s("чем снято: решение или статья — обязательно"), "declaredIn": s("где снятие записано"),
+                "drop": json!({"type":"boolean","description":"вернуть слово: снять объявление"}) },
+                "required": ["term"] } }));
         tools.push(json!({ "name": "retired-terms", "description": "слова, снятые из словаря: встреченные в свежем тексте — находка",
             "inputSchema": { "type": "object", "properties": {} } }));
         tools.push(json!({ "name": "step-method-set", "description": "объявить способ проверки ступени лестницы; переживает пересборку и выкатку",
-            "inputSchema": { "type": "object", "properties": { "process": s("процесс, по умолчанию godzy"),
+            "inputSchema": { "type": "object", "properties": { "set": s("набор лестницы; по умолчанию godzy"), "process": s("процесс, по умолчанию godzy"),
                 "ord": json!({"type":"integer"}), "methodKind": s("query · command"), "method": s("запрос либо команда"),
                 "run": s("команда, которой видна единица работы ступени; `{имя}` — первое слово находки"),
                 "unit": s("вид единицы работы: document · link · version · question · gate · sensor · milestone · task. Ступень `task` — та, с которой лестница выдаёт задачи: до неё `next-task` отказывает"),
@@ -228,7 +237,7 @@ impl Mcp {
             "inputSchema": { "type": "object", "properties": { "set": s("набор, по умолчанию godzy"),
                 "body": json!({"type":"boolean"}) } } }));
         tools.push(json!({ "name": "step-remove", "description": "снять ступень лестницы и сдвинуть номера следом идущих; способ и проба уходят вместе с ней",
-            "inputSchema": { "type": "object", "properties": { "process": s("процесс, по умолчанию godzy"),
+            "inputSchema": { "type": "object", "properties": { "set": s("набор лестницы; по умолчанию godzy"), "process": s("процесс, по умолчанию godzy"),
                 "ord": json!({"type":"integer"}) }, "required": ["ord"] } }));
         tools.push(json!({ "name": "run-record-add", "description": "объявить запись прогона: задача, коммиты, даты, ревью, что появилось и что осталось открытым",
             "inputSchema": { "type": "object", "properties": { "drop": json!({"type":"boolean","description":"снять объявленное этой же дверью"}), "id": s("имя прогона"), "task": s("задача"),
@@ -329,7 +338,7 @@ impl Mcp {
                 "date": s("дата"), "deciders": s("кто решал"), "context": s("контекст"),
                 "decision": s("решение"), "consequences": s("последствия") }, "required": ["id", "title"] } }));
         tools.push(json!({ "name": "story-add", "description": "объявить историю прямо: имя, заголовок, область",
-            "inputSchema": { "type": "object", "properties": { "id": s("имя"), "title": s("заголовок"),
+            "inputSchema": { "type": "object", "properties": { "drop": json!({"type":"boolean","description":"снять объявленное этой же дверью"}), "id": s("имя"), "title": s("заголовок"),
                 "area": s("область") }, "required": ["id", "title"] } }));
         tools.push(json!({ "name": "screen-add", "description": "объявить экран прямо: имя, заголовок, область",
             "inputSchema": { "type": "object", "properties": { "drop": json!({"type":"boolean","description":"снять объявленное этой же дверью"}), "id": s("имя"), "title": s("заголовок"),
@@ -432,7 +441,7 @@ impl Mcp {
         tools.push(json!({ "name": "sensors", "description": "объявленные датчики и когда каждый подавал; отдельно — подающие, которых никто не объявлял",
             "inputSchema": { "type": "object", "properties": {} } }));
         tools.push(json!({ "name": "step-add", "description": "завести ступень лестницы на указанное место, раздвинув номера; способ и пробу объявляют отдельно",
-            "inputSchema": { "type": "object", "properties": { "process": s("процесс, по умолчанию godzy"),
+            "inputSchema": { "type": "object", "properties": { "set": s("набор лестницы; по умолчанию godzy"), "process": s("процесс, по умолчанию godzy"),
                 "ord": json!({"type":"integer"}), "question": s("условие словами"),
                 "ownerKind": s("skill · agent · none"), "owner": s("имя скилла или субагента"),
                 "touches": s("corpus · repository") }, "required": ["ord", "question", "touches"] } }));
@@ -446,11 +455,11 @@ impl Mcp {
                 "taskKind": s("вид задач фазы: red · dev; пусто — фаза задач не несёт") },
                 "required": ["phase"] } }));
         tools.push(json!({ "name": "step-when-set", "description": "объявить, когда ступень вообще в игре: запрос условия и причина пропуска",
-            "inputSchema": { "type": "object", "properties": { "drop": json!({"type":"boolean","description":"снять объявленное этой же дверью"}), "process": s("процесс, по умолчанию godzy"),
+            "inputSchema": { "type": "object", "properties": { "set": s("набор лестницы; по умолчанию godzy"), "drop": json!({"type":"boolean","description":"снять объявленное этой же дверью"}), "process": s("процесс, по умолчанию godzy"),
                 "ord": json!({"type":"integer"}), "whenQuery": s("запрос условия; пусто — всегда в игре"),
                 "whenWhy": s("причина пропуска словами") }, "required": ["ord"] } }));
         tools.push(json!({ "name": "step-probe-set", "description": "объявить пробу ступени: запрос, подсаживающий нарушение — им самотест её роняет",
-            "inputSchema": { "type": "object", "properties": { "drop": json!({"type":"boolean","description":"снять объявленное этой же дверью"}), "process": s("процесс, по умолчанию godzy"),
+            "inputSchema": { "type": "object", "properties": { "set": s("набор лестницы; по умолчанию godzy"), "drop": json!({"type":"boolean","description":"снять объявленное этой же дверью"}), "process": s("процесс, по умолчанию godzy"),
                 "ord": json!({"type":"integer"}), "probe": s("запрос подсадки") },
                 "required": ["ord", "probe"] } }));
         tools.push(json!({ "name": "step-selftest", "description": "самотест лестницы: каждая ступень роняется подсаженным нарушением в откатываемой транзакции; живой считается та, у которой число выросло — и выросло при всех зелёных гейтах и при всех красных, а не только в сегодняшнем состоянии",
@@ -458,7 +467,7 @@ impl Mcp {
                 "process": s("процесс, по умолчанию godzy"),
                 "under": s("green · red — прогнать при всех зелёных либо всех красных гейтах; пусто — как есть") } } }));
         tools.push(json!({ "name": "step-question-set", "description": "переименовать ступень лестницы: условие, которое должно быть верно, чтобы она считалась пройденной",
-            "inputSchema": { "type": "object", "properties": { "drop": json!({"type":"boolean","description":"снять объявленное этой же дверью"}), "process": s("процесс, по умолчанию godzy"),
+            "inputSchema": { "type": "object", "properties": { "set": s("набор лестницы; по умолчанию godzy"), "drop": json!({"type":"boolean","description":"снять объявленное этой же дверью"}), "process": s("процесс, по умолчанию godzy"),
                 "ord": json!({"type":"integer"}), "question": s("условие словами") },
                 "required": ["ord", "question"] } }));
         tools.push(json!({ "name": "scheme-roles", "description": "роли словаря: что спрашивают проекции, что объявлено набором либо общим слоем, что молчит — и какое правило молчанием выключено",
@@ -562,7 +571,7 @@ impl Mcp {
         tools.push(json!({ "name": "question-holders", "description": "вопрос и его задача-держатель: пора закрывать, закрыт рано, судить нечем",
             "inputSchema": { "type": "object", "properties": {} } }));
         tools.push(json!({ "name": "gate-item-set", "description": "объявить пункт гейта: запрос, команда или подпись",
-            "inputSchema": { "type": "object", "properties": { "id": s("устойчивое имя пункта, латиницей через дефис — им пункт адресуется"), "phase": s("гейт, например G5"), "item": s("заголовок пункта для человека; переписывается свободно, ссылок не рвёт"),
+            "inputSchema": { "type": "object", "properties": { "owner": s("владелец бывает только у подписного пункта: у запросного дверь откажет"), "id": s("устойчивое имя пункта, латиницей через дефис — им пункт адресуется"), "phase": s("гейт, например G5"), "item": s("заголовок пункта для человека; переписывается свободно, ссылок не рвёт"),
                 "itemKind": s("query · command"), "query": s("запрос для вида query"),
                                 "probe": s("запрос, подсаживающий нарушение — им самотест роняет пункт"),
                 "subject": s("запрос ПРЕДМЕТА пункта: пусто в ответе — «неизвестно», а не «пройдено»"),
@@ -691,7 +700,7 @@ impl Mcp {
         "task-plan-push",
         "blame-set", "derived-copy-set", "counts-sync", "kind-add", "kind-required", "kind-projection", "frozen-tree-set", "scheme-term-set", "orphans-purge", "surface-source-add", "sensor-spec-add", "agent-set", "donor-add", "guard-add", "gate-item-set", "method-set", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "version-close", "phase-set", "gate-selftest",
         "author-set", "screen-area-set", "skill-set", "version-freeze",
-        "links-rewrite", "links-retarget", "entity-rename",
+        "links-rewrite", "links-retarget", "entity-rename", "entity-confirm", "term-retire",
     ];
 
     /// Вызов инструмента — и отметка, если он писал.
@@ -737,6 +746,24 @@ impl Mcp {
     }
 
     async fn run(&self, name: &str, args: &Value) -> Value {
+        if let Some(tool) = self.tools().into_iter().find(|t| t["name"] == name) {
+            if let (Some(given), Some(known)) = (args.as_object(), tool["inputSchema"]["properties"].as_object()) {
+                let unknown: Vec<String> = given
+                    .keys()
+                    .filter(|k| !known.contains_key(*k) && !matches!(k.as_str(), "id" | "kind" | "brief"))
+                    .map(|k| format!("«{k}»"))
+                    .collect();
+                if !unknown.is_empty() {
+                    let mut names: Vec<&str> = known.keys().map(String::as_str).collect();
+                    names.sort_unstable();
+                    return refusal(Miss::Refused(format!(
+                        "дверь {name} не знает {}: неизвестный довод пропал бы молча. Знает: {}",
+                        unknown.join(", "),
+                        names.join(", ")
+                    )));
+                }
+            }
+        }
         // Имя сущности бывает числом — у статьи конституции оно и есть номер.
         // По HTTP оно приходит из адреса и разбирается в число; строкой его
         // здесь не увидели бы, и вид получил бы отказ «нужно имя» при поданном
@@ -752,7 +779,7 @@ impl Mcp {
         // вызов и отдавал строку таблицы вместо вычисления.
         const RESERVED: &[&str] = &[
             "method-set", "gate-item-set", "question-holders", "preflight-push", "worktree-push",
-            "sensor-specs", "scheme-terms", "scheme-roles", "frozen-trees", "addresses-declared", "tree-declared", "donors", "skills-push", "skills", "agents", "code-facts-push", "code-facts", "summary", "links-of", "retired-terms", "order", "gate-measure", "gate-selftest", "links-rewrite", "links-retarget", "reparse", "screen-area-set", "skill-set", "skills-paths", "version-freeze", "version-delta", "generated-check", "principal-allow", "principals", "author-set", "authors", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "version-close", "phase-set", "gate-selftest", "next-step", "process-state", "statuses", "task-status", "status-anomaly", "pipeline", "board", "waves", "phases", "coverage", "blocks", "history", "at-revision", "process-history", "progress",
+            "sensor-specs", "scheme-terms", "scheme-roles", "frozen-trees", "addresses-declared", "tree-declared", "donors", "skills-push", "skills", "agents", "code-facts-push", "code-facts", "summary", "links-of", "retired-terms", "term-retire", "entity-confirm", "order", "gate-measure", "gate-selftest", "links-rewrite", "links-retarget", "reparse", "screen-area-set", "skill-set", "skills-paths", "version-freeze", "version-delta", "generated-check", "principal-allow", "principals", "author-set", "authors", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "version-close", "phase-set", "gate-selftest", "next-step", "process-state", "statuses", "task-status", "status-anomaly", "pipeline", "board", "waves", "phases", "coverage", "blocks", "history", "at-revision", "process-history", "progress",
             "kinds", "kinds-due", "readiness-gaps", "declared-unwritten", "blame-set", "doors", "derived-copy-set", "holders", "counts-sync", "kind-add", "kind-required", "kind-projection", "kind-reopens", "kind-proves", "kind-id-set", "kind-domain", "tree", "document-coverage", "sections", "section", "backlinks", "search", "put",
             "put-section", "rm", "document-add", "reproject", "sweep", "gate", "next-task", "what-if", "blockers", "events", "task-plan-push",
             "norm-versions", "measurements", "plan", "readiness", "requirements-of",
@@ -1299,7 +1326,13 @@ impl Mcp {
                         "isError": true });
                 }
                 match crate::projector::push_code_facts(&self.pool, p, &fact_kind, &list, &self.author).await {
-                    Ok(v) => ok(v),
+                    Ok(mut v) => match crate::reproject::relations::project(&self.pool, p).await {
+                        Ok(n) => {
+                            v["relations"] = json!(n);
+                            ok(v)
+                        }
+                        Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
+                    },
                     Err(e) => refusal(Miss::Db(e.to_string())),
                 }
             }
@@ -1416,6 +1449,21 @@ impl Mcp {
                 Ok(v) => ok(v),
                 Err(e) => refusal(e),
             },
+            "entity-confirm" => {
+                let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
+                match crate::projector::confirm_entity(&self.pool, p, &g("kind"), &g("id"), &g("why"), &self.author).await {
+                    Ok(v) => ok(v),
+                    Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
+                }
+            }
+            "term-retire" => {
+                let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
+                match crate::projector::declare_retired_term(&self.pool, p, &g("term"), &g("retiredBy"), &g("declaredIn"),
+                        args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
+                    Ok(v) => ok(v),
+                    Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
+                }
+            }
             "retired-terms" => {
                 // Снятое слово в словаре не лежит — его оттуда убрали. Это
                 // отдельный факт, и спрашивается он отдельно: встреченное в

@@ -580,8 +580,27 @@ pub async fn project(
     // Одна дата на всех значит «правок мы не видели ни одной». Это правда о
     // наборе, приехавшем переносом, и с неё каскад начинает считать честно.
     tx.execute(
-        "INSERT INTO entity_stamp (project_id, kind, id, text_hash, created_at, updated_at)
-         SELECT e.project_id, e.kind, e.id, md5(e.body), нач.когда, нач.когда
+        "UPDATE entity_stamp st
+            SET text_hash = md5(e.body), body_version = 2,
+                updated_at = CASE
+                  WHEN e.kind IN ('requirement', 'check', 'need', 'decision', 'screen', 'story', 'rationale')
+                   AND NOT EXISTS (SELECT 1 FROM entity_confirm c
+                                    WHERE c.project_id = st.project_id AND c.kind = st.kind
+                                      AND c.id = st.id AND c.at = st.updated_at)
+                  THEN coalesce((SELECT max(r.written_at) FROM project_document_revisions r
+                                  WHERE r.project_id = st.project_id AND r.entity_kind = e.entity_kind
+                                    AND r.entity_name = e.entity_name AND r.written_at <= st.updated_at),
+                                st.updated_at)
+                  ELSE st.updated_at END
+           FROM entity_row e
+          WHERE st.project_id = $1 AND st.body_version < 2
+            AND e.project_id = st.project_id AND e.kind = st.kind AND e.id = st.id",
+        &[&project],
+    )
+    .await?;
+    tx.execute(
+        "INSERT INTO entity_stamp (project_id, kind, id, text_hash, created_at, updated_at, body_version)
+         SELECT e.project_id, e.kind, e.id, md5(e.body), нач.когда, нач.когда, 2
            FROM entity_row e
            CROSS JOIN (SELECT coalesce(min(written_at), $2) AS когда
                          FROM project_document_revisions WHERE project_id = $1) нач
@@ -589,7 +608,8 @@ pub async fn project(
          ON CONFLICT (project_id, kind, id) DO UPDATE
             SET updated_at = CASE WHEN entity_stamp.text_hash <> EXCLUDED.text_hash
                                   THEN $2 ELSE entity_stamp.updated_at END,
-                text_hash  = EXCLUDED.text_hash",
+                text_hash  = EXCLUDED.text_hash,
+                body_version = 2",
         &[&project, &crate::projector::now_ms()],
     )
     .await?;
