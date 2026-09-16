@@ -1807,6 +1807,10 @@ ALTER TABLE project_plan_tasks ADD COLUMN IF NOT EXISTS number integer NOT NULL 
 -- задача вправе класть туда код — она его и заведёт. Считается по ПРЕДКУ:
 -- объявлено `mobile`, значит и `mobile/src/offline` описан вперёд.
 ALTER TABLE project_task_tree_leaf ADD COLUMN IF NOT EXISTS forward_declared boolean NOT NULL DEFAULT false;
+-- Пометка записи и полный путь листа: «+» обещает, что файла ещё нет, «!» и
+-- «-» — что он есть. Сверить обещание с деревом без них нечем.
+ALTER TABLE project_task_tree_leaf ADD COLUMN IF NOT EXISTS op text NOT NULL DEFAULT '';
+ALTER TABLE project_task_tree_leaf ADD COLUMN IF NOT EXISTS path text NOT NULL DEFAULT '';
 -- Ключ фазы у строки процесса. Прежде фаза жила только прозой («Фаза 2 ·
 -- Проектирование»), и правило искало её подстрокой: переименовали заголовок —
 -- правило перестало находить и позеленело, ничего не сказав.

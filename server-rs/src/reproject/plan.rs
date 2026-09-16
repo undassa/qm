@@ -306,7 +306,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize,
     //
     // На ответ это не влияет: `project_plan_tasks` эта транзакция трогает
     // ниже, так что читается ровно то же зафиксированное состояние.
-    let tree_leaves: Vec<(String, i32, String, String, bool, bool, String)> = {
+    let tree_leaves: Vec<(String, i32, String, String, bool, bool, String, String, String)> = {
         let rows = tx
             .query(
                 "SELECT t.id, d.content FROM project_plan_tasks t
@@ -322,7 +322,8 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize,
             let content: String = r.get(1);
             for (i, l) in super::tree_leaf::leaves_of(&content, terms.one("section.tree").unwrap_or("")).into_iter().enumerate() {
                 let target = super::tree_leaf::target_dir(&l.dir, &l.leaf);
-                out.push((task.clone(), i as i32, l.dir, l.leaf, l.is_path, l.exempt, target));
+                let path = super::tree_leaf::full_path(&l.dir, &l.leaf);
+                out.push((task.clone(), i as i32, l.dir, l.leaf, l.is_path, l.exempt, target, l.op.to_string(), path));
             }
         }
         out
@@ -333,12 +334,12 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize,
     // тематическими заголовками, а не планом: новое требование не попадает
     // ни в один и молчит.
     tx.execute("DELETE FROM project_task_tree_leaf WHERE project_id = $1", &[&project]).await?;
-    for (task, ord, dir, leaf, is_path, exempt, target) in &tree_leaves {
+    for (task, ord, dir, leaf, is_path, exempt, target, op, path) in &tree_leaves {
         tx.execute(
             "INSERT INTO project_task_tree_leaf(project_id, task_id, ord, dir, leaf, is_path,
-                                                exempt, target_dir)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
-            &[&project, task, ord, dir, leaf, is_path, exempt, target],
+                                                exempt, target_dir, op, path)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+            &[&project, task, ord, dir, leaf, is_path, exempt, target, op, path],
         )
         .await?;
     }

@@ -37,6 +37,19 @@ pub fn leaf_of(raw_body: &str) -> Option<String> {
     Some(DECOR_TAIL.replace(head, "").into_owned())
 }
 
+/// Лист ПЛОСКОЙ записи — `+ crates/tot-page/src/lib.rs`, без рисунка дерева.
+///
+/// Один набор рисует дерево, второй пишет пути списком, и список разбор не
+/// видел вовсе: у tot-ade ни одного листа, а значит, ни одной проверки места.
+/// Строка без рисунка бывает и продолжением комментария («!  транзакцией…»),
+/// поэтому листом она становится, только если первое слово — путь с `/`.
+fn flat_leaf(raw_body: &str) -> Option<String> {
+    let entry = DECOR_HEAD.replace(raw_body, "");
+    let head = entry.split_whitespace().next().unwrap_or("");
+    let leaf = DECOR_TAIL.replace(head, "").into_owned();
+    (leaf.contains('/') && PATH_CHARS.is_match(&leaf)).then_some(leaf)
+}
+
 /// Похоже ли на путь. Пустой лист путём считается: это уже не наша находка.
 pub fn looks_like_path(leaf: &str) -> bool {
     leaf.is_empty() || (PATH_CHARS.is_match(leaf) && (leaf.ends_with('/') || TREE_EXT.is_match(leaf)))
@@ -47,6 +60,8 @@ pub struct Leaf {
     pub leaf: String,
     pub is_path: bool,
     pub exempt: bool,
+    /// `+` — файла нет, задача его создаёт; `!` — есть и правится; `-` — снимается.
+    pub op: char,
 }
 
 /// Разбирает блок задачи в перечень листьев.
@@ -82,12 +97,22 @@ pub fn leaves_of(content: &str, section: &str) -> Vec<Leaf> {
             }
             continue;
         }
-        if mark != '+' && mark != '!' {
+        if !matches!(mark, '+' | '!' | '-') {
             continue;
         }
-        let Some(leaf) = leaf_of(&raw_body) else { continue };
-        let is_path = looks_like_path(&leaf);
-        out.push(Leaf { dir: dir.clone(), leaf, is_path, exempt });
+        // Плоская строка листом становится, только если она путь, — сверять её
+        // с перечнем расширений незачем: `backend/Cargo.lock` путь и без него.
+        let (leaf, dir, is_path) = match leaf_of(&raw_body) {
+            Some(leaf) => {
+                let is_path = looks_like_path(&leaf);
+                (leaf, dir.clone(), is_path)
+            }
+            None => match flat_leaf(&raw_body) {
+                Some(leaf) => (leaf, String::new(), true),
+                None => continue,
+            },
+        };
+        out.push(Leaf { dir, leaf, is_path, exempt, op: mark });
     }
     out
 }
@@ -138,16 +163,20 @@ mod tests {
 /// Каталог, в который ляжет лист. Разбор пути — дело проекции: запрос гейта
 /// соединяет каталоги РАВЕНСТВОМ, а не считает подстроки на лету.
 pub fn target_dir(dir: &str, leaf: &str) -> String {
-    let full = if leaf.contains('/') && dir.is_empty() {
-        leaf.to_owned()
-    } else {
-        format!("{}{}", dir, leaf)
-    };
+    let full = full_path(dir, leaf);
     let dir = match full.rfind('/') {
         Some(i) => full[..i].to_owned(),
         None => return String::new(),
     };
     normalize(&dir)
+}
+
+/// Полный путь листа, приведённый: каталог записи и сам лист. Каталог
+/// оставляет косую черту в конце — по ней видно, что лист назван каталогом.
+pub fn full_path(dir: &str, leaf: &str) -> String {
+    let full = if leaf.contains('/') && dir.is_empty() { leaf.to_owned() } else { format!("{dir}{leaf}") };
+    let tail = if full.ends_with('/') { "/" } else { "" };
+    format!("{}{tail}", normalize(&full))
 }
 
 /// Приводит путь к нормальному виду: `a/b/../c` — это `a/c`. Без этого каталог
@@ -174,5 +203,26 @@ mod norm_tests {
         assert_eq!(super::normalize("a/b/../c"), "a/c");
         assert_eq!(super::normalize("backend/crates/myack-http/src/.."), "backend/crates/myack-http");
         assert_eq!(super::normalize("a/./b"), "a/b");
+    }
+}
+
+#[cfg(test)]
+mod flat_tests {
+    use super::leaves_of;
+
+    #[test]
+    fn flat_and_drawn_leaves_carry_op_and_path() {
+        let doc = "## Что меняется в дереве\n\n```diff\n+ crates/tot-page/src/lib.rs\n! backend/Cargo.lock\n! .github/workflows/ci.yml\n- crates/tot-ui/src/spike/file_view.rs\n!    транзакцией, что правка правил\n  backend/crates/app/src/\n! └── evaluator.rs   оператор\n+     └── seed/\n```\n";
+        let leaves = leaves_of(doc, "Что меняется в дереве");
+        assert!(leaves.iter().all(|l| l.is_path), "плоская строка со `/` — путь и без расширения из перечня");
+        let got: Vec<(char, String)> = leaves.iter().map(|l| (l.op, super::full_path(&l.dir, &l.leaf))).collect();
+        assert_eq!(got, vec![
+            ('+', "crates/tot-page/src/lib.rs".to_owned()),
+            ('!', "backend/Cargo.lock".to_owned()),
+            ('!', ".github/workflows/ci.yml".to_owned()),
+            ('-', "crates/tot-ui/src/spike/file_view.rs".to_owned()),
+            ('!', "backend/crates/app/src/evaluator.rs".to_owned()),
+            ('+', "backend/crates/app/src/seed/".to_owned()),
+        ]);
     }
 }
