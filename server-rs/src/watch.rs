@@ -213,10 +213,18 @@ pub(crate) async fn recount(pool: &Pool, project: &str) -> Result<serde_json::Va
     crate::reproject::reproject(pool, project).await?;
     crate::projector::rebuild_before(pool, project).await?;
     crate::projector::rebuild(pool, project).await?;
-    // Порядок обязателен и он такой: проекции, гейты, лестница, фазы.
-    // Ступени 4, 7 и 10 читают состояние пунктов гейта, фаза — состояние
-    // своего гейта. Посчитанные раньше, они прочли бы прошлый круг и
-    // разошлись бы с доской на один шаг — расхождение, невидимое глазом.
+    measure(pool, project).await
+}
+
+/// Гейты, лестница, фазы — одним замером и в этом порядке.
+///
+/// Ступени 4, 7 и 10 читают состояние пунктов гейта, фаза — состояние своего
+/// гейта. Посчитанные раньше, они прочли бы прошлый круг и разошлись бы с
+/// доской на один шаг — расхождение, невидимое глазом.
+///
+/// Дверь `gate-measure` и пересборка после записи мерили только гейты: лестница
+/// ждала этого работника, и `next-step`, спрошенный сразу, отвечал прежним.
+pub(crate) async fn measure(pool: &Pool, project: &str) -> Result<serde_json::Value, tokio_postgres::Error> {
     let out = crate::projector::measure_gates(pool, project).await?;
     crate::projector::measure_process(pool, project, "godzy", "godzy").await?;
     crate::projector::measure_phases(pool, project).await?;

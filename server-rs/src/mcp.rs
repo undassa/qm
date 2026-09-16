@@ -540,7 +540,7 @@ impl Mcp {
                 "required": ["kind", "from", "to"] } }));
         tools.push(json!({ "name": "links-retarget", "description": "переписать цель ссылок в `вид:имя` по уже разобранной связи; ярлык не трогается; сухой режим по умолчанию",
             "inputSchema": { "type": "object", "properties": { "apply": json!({"type":"boolean"}) } } }));
-        tools.push(json!({ "name": "gate-measure", "description": "перемерить все пункты СЕЙЧАС и дождаться итога; зовите, когда нужно измеренное сейчас — сам пересчёт идёт фоном, и узнать, что он кончился, вызывающему нечем",
+        tools.push(json!({ "name": "gate-measure", "description": "перемерить все пункты, лестницу и фазы СЕЙЧАС и дождаться итога; зовите, когда нужно измеренное сейчас — сам пересчёт идёт фоном, и узнать, что он кончился, вызывающему нечем",
             "inputSchema": { "type": "object", "properties": {} } }));
         tools.push(json!({ "name": "gate-selftest", "description": "самотест гейтов: каждый запросный пункт роняется подсаженным нарушением в откатываемой транзакции; `under` прогоняет его при всех зелёных либо всех красных гейтах — проба, живая лишь в одном из двух, зависит от состояния, которого не форсирует",
             "inputSchema": { "type": "object", "properties": {
@@ -2519,7 +2519,7 @@ impl Mcp {
                 Ok(v) => ok(v),
                 Err(e) => refusal(Miss::Db(e.to_string())),
             },
-            "gate-measure" => match crate::projector::measure_gates(&self.pool, p).await {
+            "gate-measure" => match crate::watch::measure(&self.pool, p).await {
                 Ok(v) => ok(v),
                 Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
             },
@@ -2789,7 +2789,7 @@ impl Mcp {
         // Целую сессию я списывал это на «замер до синхронизации» и объяснял
         // неверно — кэш был не отставанием, а тишиной.
         let t = std::time::Instant::now();
-        let gates = crate::projector::measure_gates(&self.pool, &self.project)
+        let gates = crate::watch::measure(&self.pool, &self.project)
             .await
             .map_err(say("замер гейтов"))?;
         let ms_gates = t.elapsed().as_millis() as u64;

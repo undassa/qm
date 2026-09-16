@@ -12372,8 +12372,11 @@ async fn position(
 ) -> Result<Value, tokio_postgres::Error> {
     let row = client
         .query_opt(
+            // Устарело то, что считали РАНЬШЕ последней правки, — кто бы ни
+            // считал. Сравнение с одним прогоном работника называло устаревшим
+            // положение, только что посчитанное дверью `gate-measure`.
             "SELECT p.result, p.checked_at,
-                    coalesce((SELECT d.dirty_at > coalesce(d.ran_at, 0) FROM gate_dirty d
+                    coalesce((SELECT d.dirty_at > greatest(coalesce(d.ran_at, 0), p.checked_at) FROM gate_dirty d
                                WHERE d.project_id = p.project_id), false)
                FROM process_position p WHERE p.project_id = $1 AND p.process = $2",
             &[&project, &process],
@@ -12989,7 +12992,8 @@ pub async fn phases(pool: &Pool, project: &str) -> Result<Value, tokio_postgres:
     }
     let stale: bool = client
         .query_one(
-            "SELECT coalesce((SELECT d.dirty_at > coalesce(d.ran_at, 0)
+            "SELECT coalesce((SELECT d.dirty_at > greatest(coalesce(d.ran_at, 0),
+                                       (SELECT min(f.checked_at) FROM phase_state f WHERE f.project_id = $1))
                                 FROM gate_dirty d WHERE d.project_id = $1), false)",
             &[&project],
         )
