@@ -12,7 +12,9 @@ import sys
 import time
 
 MH = os.path.expanduser("~/.local/bin/mh")
-ВЕДРО = "Read Grep Glob Bash(mh:*) Bash(git log:*) Bash(git diff:*) Bash(git status:*) Bash(ls:*) Bash(rg:*)"
+# Ключ --allowedTools забирает ВСЕ следующие слова, поэтому список идёт одним
+# словом через запятую, а сама просьба — стандартным вводом.
+ВЕДРО = "Read,Grep,Glob,Bash(mh:*),Bash(git log:*),Bash(git diff:*),Bash(git status:*),Bash(ls:*),Bash(rg:*)"
 ПОРА = 5
 
 
@@ -42,12 +44,13 @@ def спросить(набор: dict, session: str, prompt: str) -> tuple[str, 
     cmd = [
         "claude", "-p", "--output-format", "json",
         "--append-system-prompt", подсказка,
-        "--allowedTools", *ВЕДРО.split(" "),
+        "--allowedTools", ВЕДРО,
     ]
     if session:
         cmd += ["--resume", session]
     r = subprocess.run(
-        cmd + [prompt],
+        cmd,
+        input=prompt,
         cwd=набор["repo"],
         env={**os.environ, "MH_PROJECT": набор["project"]},
         capture_output=True,
