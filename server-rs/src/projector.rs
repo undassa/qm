@@ -2185,6 +2185,94 @@ CREATE TABLE IF NOT EXISTS entity_confirm (
     PRIMARY KEY (project_id, kind, id, at)
 );
 
+-- ОЧЕРЕДЬ РЕШЕНИЙ ВЛАДЕЛЬЦА. Заявка сессии на изменение харнеса и просьба
+-- подтвердить коммит лежат в одной очереди: человек открывает пульт с одним
+-- вопросом — «что от меня ждут», — и два места для ответа означали бы, что
+-- половина ожиданий не видна.
+CREATE TABLE IF NOT EXISTS owner_ask (
+  id          bigserial PRIMARY KEY,
+  project_id  text   NOT NULL DEFAULT '',
+  kind        text   NOT NULL,
+  title       text   NOT NULL,
+  body        text   NOT NULL DEFAULT '',
+  asked_by    text   NOT NULL DEFAULT '',
+  at          bigint NOT NULL,
+  run_id      text   NOT NULL DEFAULT '',
+  state       text   NOT NULL DEFAULT 'open',
+  why         text   NOT NULL DEFAULT '',
+  decided_by  text   NOT NULL DEFAULT '',
+  decided_at  bigint
+);
+CREATE INDEX IF NOT EXISTS owner_ask_open ON owner_ask (state, at DESC);
+
+-- Прогон задачи агентом: одна строка на попытку. Таблица досталась от прежнего
+-- харнеса, и объявлена она здесь, чтобы у неё был один хозяин.
+CREATE TABLE IF NOT EXISTS project_task_runs (
+  id           text NOT NULL PRIMARY KEY,
+  project_id   text NOT NULL,
+  task_id      text NOT NULL,
+  agent_id     text,
+  state        text NOT NULL DEFAULT 'running',
+  attempt      integer NOT NULL DEFAULT 1,
+  run_id       text NOT NULL DEFAULT '',
+  session_id   text NOT NULL DEFAULT '',
+  note         text NOT NULL DEFAULT '',
+  created_at   bigint NOT NULL,
+  updated_at   bigint,
+  finished_at  bigint
+);
+
+-- ЧТО ПРОГОН УСПЕЛ: шаги, вопросы, отказы. Без этого «идёт» на пульте
+-- неотличимо от «висит»: состояние говорит, что прогон жив, и молчит о том,
+-- дошёл ли он хоть до чего-нибудь.
+CREATE TABLE IF NOT EXISTS task_run_event (
+  id          bigserial PRIMARY KEY,
+  project_id  text   NOT NULL,
+  run_id      text   NOT NULL,
+  at          bigint NOT NULL,
+  kind        text   NOT NULL,
+  text        text   NOT NULL
+);
+CREATE INDEX IF NOT EXISTS task_run_event_by_run ON task_run_event (project_id, run_id, at DESC);
+
+-- Слово человека прогону и ответ прогона. Доставленное помечается, иначе
+-- агент читал бы одно и то же на каждом круге.
+CREATE TABLE IF NOT EXISTS task_run_message (
+  id           bigserial PRIMARY KEY,
+  project_id   text   NOT NULL,
+  run_id       text   NOT NULL,
+  at           bigint NOT NULL,
+  side         text   NOT NULL,
+  text         text   NOT NULL,
+  delivered_at bigint
+);
+CREATE INDEX IF NOT EXISTS task_run_message_by_run ON task_run_message (project_id, run_id, at);
+
+-- БЕСЕДА — не прогон. Прогон делает задачу и кончается; беседа думает вслух над
+-- набором: спросить по ходу, разобрать документ, проверить замысел. Общая
+-- таблица сделала бы «идёт» бессмысленным: у беседы нет ни задачи, ни попытки.
+CREATE TABLE IF NOT EXISTS chat_thread (
+  id          text   NOT NULL PRIMARY KEY,
+  project_id  text   NOT NULL,
+  title       text   NOT NULL DEFAULT '',
+  session_id  text   NOT NULL DEFAULT '',
+  state       text   NOT NULL DEFAULT 'open',
+  created_at  bigint NOT NULL,
+  updated_at  bigint NOT NULL
+);
+CREATE INDEX IF NOT EXISTS chat_thread_by_project ON chat_thread (project_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS chat_message (
+  id           bigserial PRIMARY KEY,
+  project_id   text   NOT NULL,
+  thread_id    text   NOT NULL,
+  at           bigint NOT NULL,
+  side         text   NOT NULL,
+  text         text   NOT NULL,
+  delivered_at bigint
+);
+CREATE INDEX IF NOT EXISTS chat_message_by_thread ON chat_message (project_id, thread_id, at);
+
 ALTER TABLE project_questions ADD COLUMN IF NOT EXISTS created_at bigint;
 ALTER TABLE project_questions ADD COLUMN IF NOT EXISTS updated_at bigint;
 
@@ -8483,6 +8571,340 @@ pub async fn console(pool: &Pool, project: &str) -> Result<Value, tokio_postgres
             "kind": r.get::<_, String>(0), "count": r.get::<_, i64>(1) })).collect::<Vec<_>>(),
         "means": "три полосы пульта: что идёт · что ждёт человека · что поехало",
     }))
+}
+
+/// Заявка в очередь владельца: изменение харнеса либо подтверждение коммита.
+pub async fn add_ask(
+    pool: &Pool, project: &str, kind: &str, title: &str, body: &str, run_id: &str, by: &str,
+) -> Result<Value, tokio_postgres::Error> {
+    if !["request", "approval"].contains(&kind) {
+        return Ok(json!({ "status": "kind_unknown", "kind": kind,
+            "why": "заявка бывает двух родов: request — изменение харнеса, approval — подтверждение коммита и пуша" }));
+    }
+    if title.trim().is_empty() {
+        return Ok(json!({ "status": "nameless",
+            "why": "заявка без строки о том, что нужно, читается как пустое место в очереди" }));
+    }
+    if kind == "approval" && run_id.trim().is_empty() {
+        return Ok(json!({ "status": "no_run",
+            "why": "подтверждение просит прогон: без его имени решение некуда вернуть" }));
+    }
+    let client = pool.get().await.expect("пул отдал соединение");
+    let row = client
+        .query_one(
+            "INSERT INTO owner_ask (project_id, kind, title, body, asked_by, at, run_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
+            &[&project, &kind, &title, &body, &by, &now_ms(), &run_id],
+        )
+        .await?;
+    Ok(json!({ "status": "asked", "id": row.get::<_, i64>(0), "kind": kind, "title": title }))
+}
+
+/// Очередь: что ждёт решения. Решённое отдаётся по просьбе — им проверяют, что
+/// ответ доехал.
+pub async fn list_asks(pool: &Pool, project: &str, state: &str, limit: i64) -> Result<Value, tokio_postgres::Error> {
+    let client = pool.get().await.expect("пул отдал соединение");
+    let rows = client
+        .query(
+            "SELECT id, project_id, kind, title, body, asked_by, at, run_id, state, why,
+                    decided_by, coalesce(decided_at, 0)
+               FROM owner_ask
+              WHERE ($1 = '' OR project_id = $1 OR project_id = '')
+                AND ($2 = '' OR state = $2)
+              ORDER BY at DESC LIMIT $3",
+            &[&project, &state, &limit],
+        )
+        .await?;
+    Ok(json!({ "count": rows.len(), "asks": rows.iter().map(|r| json!({
+        "id": r.get::<_, i64>(0), "project": r.get::<_, String>(1), "kind": r.get::<_, String>(2),
+        "title": r.get::<_, String>(3), "body": r.get::<_, String>(4), "askedBy": r.get::<_, String>(5),
+        "at": r.get::<_, i64>(6), "runId": r.get::<_, String>(7), "state": r.get::<_, String>(8),
+        "why": r.get::<_, String>(9), "decidedBy": r.get::<_, String>(10),
+        "decidedAt": r.get::<_, i64>(11) })).collect::<Vec<_>>() }))
+}
+
+/// Решение по заявке. Довод обязателен: очередь без доводов через неделю
+/// неотличима от списка «почему-то отклонено».
+pub async fn decide_ask(
+    pool: &Pool, id: i64, state: &str, why: &str, by: &str,
+) -> Result<Value, tokio_postgres::Error> {
+    const СОСТОЯНИЯ: [&str; 6] = ["taken", "owner", "declined", "done", "approved", "rejected"];
+    if !СОСТОЯНИЯ.contains(&state) {
+        return Ok(json!({ "status": "state_unknown", "state": state,
+            "why": format!("решение бывает такое: {}", СОСТОЯНИЯ.join(" · ")) }));
+    }
+    if why.trim().is_empty() {
+        return Ok(json!({ "status": "no_why", "why": "решение без довода не читается и не спорится" }));
+    }
+    let client = pool.get().await.expect("пул отдал соединение");
+    let n = client
+        .execute(
+            "UPDATE owner_ask SET state = $2, why = $3, decided_by = $4, decided_at = $5 WHERE id = $1",
+            &[&id, &state, &why, &by, &now_ms()],
+        )
+        .await?;
+    Ok(json!({ "status": if n > 0 { "decided" } else { "not_found" }, "id": id, "state": state }))
+}
+
+/// Завести прогон задачи: с него начинается всё, что о нём потом рассказывают.
+pub async fn start_run(
+    pool: &Pool, project: &str, task: &str, agent: &str, note: &str,
+) -> Result<Value, tokio_postgres::Error> {
+    if task.trim().is_empty() {
+        return Ok(json!({ "status": "no_task", "why": "прогон заводится под задачу: без неё он ни о чём" }));
+    }
+    let client = pool.get().await.expect("пул отдал соединение");
+    let attempt: i32 = client
+        .query_one(
+            "SELECT coalesce(max(attempt), 0) + 1 FROM project_task_runs WHERE project_id = $1 AND task_id = $2",
+            &[&project, &task],
+        )
+        .await?
+        .get(0);
+    let row = client
+        .query_one(
+            "INSERT INTO project_task_runs (id, project_id, task_id, agent_id, state, attempt, note, created_at, updated_at)
+             VALUES (gen_random_uuid()::text, $1, $2, nullif($3, ''), 'running', $4, $5, $6, $6) RETURNING id",
+            &[&project, &task, &agent, &attempt, &note, &now_ms()],
+        )
+        .await?;
+    Ok(json!({ "status": "running", "runId": row.get::<_, String>(0), "task": task, "attempt": attempt }))
+}
+
+/// Состояние прогона словом: идёт · ждёт · кончился · сорвался.
+pub async fn set_run_state(
+    pool: &Pool, project: &str, run: &str, state: &str, note: &str,
+) -> Result<Value, tokio_postgres::Error> {
+    const СОСТОЯНИЯ: [&str; 4] = ["running", "waiting", "finished", "failed"];
+    if !СОСТОЯНИЯ.contains(&state) {
+        return Ok(json!({ "status": "state_unknown", "state": state,
+            "why": format!("состояние прогона бывает такое: {}", СОСТОЯНИЯ.join(" · ")) }));
+    }
+    if state != "running" && note.trim().is_empty() {
+        return Ok(json!({ "status": "no_note",
+            "why": "остановка без причины не отличима от обрыва: скажите, на чём встали" }));
+    }
+    let client = pool.get().await.expect("пул отдал соединение");
+    let n = client
+        .execute(
+            "UPDATE project_task_runs
+                SET state = $3, note = $4, updated_at = $5,
+                    finished_at = CASE WHEN $3 IN ('finished', 'failed') THEN $5 ELSE finished_at END
+              WHERE project_id = $1 AND id = $2",
+            &[&project, &run, &state, &note, &now_ms()],
+        )
+        .await?;
+    Ok(json!({ "status": if n > 0 { "written" } else { "not_found" }, "runId": run, "state": state }))
+}
+
+/// Шаг прогона: что он сделал или на чём встал.
+pub async fn add_run_event(
+    pool: &Pool, project: &str, run: &str, kind: &str, text: &str,
+) -> Result<Value, tokio_postgres::Error> {
+    if run.trim().is_empty() || text.trim().is_empty() {
+        return Ok(json!({ "status": "incomplete", "why": "событие называет прогон и то, что случилось" }));
+    }
+    let client = pool.get().await.expect("пул отдал соединение");
+    client
+        .execute(
+            "INSERT INTO task_run_event (project_id, run_id, at, kind, text) VALUES ($1, $2, $3, $4, $5)",
+            &[&project, &run, &now_ms(), &kind, &text],
+        )
+        .await?;
+    client
+        .execute("UPDATE project_task_runs SET updated_at = $3 WHERE project_id = $1 AND id = $2",
+                 &[&project, &run, &now_ms()])
+        .await?;
+    Ok(json!({ "status": "written", "runId": run, "kind": kind }))
+}
+
+/// Слово человека прогону — и слово прогона в ответ.
+pub async fn say_to_run(
+    pool: &Pool, project: &str, run: &str, side: &str, text: &str,
+) -> Result<Value, tokio_postgres::Error> {
+    if !["owner", "agent"].contains(&side) {
+        return Ok(json!({ "status": "side_unknown", "side": side, "why": "говорит либо owner, либо agent" }));
+    }
+    if run.trim().is_empty() || text.trim().is_empty() {
+        return Ok(json!({ "status": "incomplete", "why": "сказанное принадлежит прогону и не бывает пустым" }));
+    }
+    let client = pool.get().await.expect("пул отдал соединение");
+    client
+        .execute(
+            "INSERT INTO task_run_message (project_id, run_id, at, side, text, delivered_at)
+             VALUES ($1, $2, $3, $4, $5, CASE WHEN $4 = 'agent' THEN $3 END)",
+            &[&project, &run, &now_ms(), &side, &text],
+        )
+        .await?;
+    Ok(json!({ "status": "said", "runId": run, "side": side }))
+}
+
+/// Что человек сказал прогону и он ещё не прочёл. Прочитанное помечается тем же
+/// вызовом: иначе агент отвечал бы на одно и то же каждый круг.
+pub async fn run_inbox(pool: &Pool, project: &str, run: &str) -> Result<Value, tokio_postgres::Error> {
+    let client = pool.get().await.expect("пул отдал соединение");
+    let rows = client
+        .query(
+            "UPDATE task_run_message SET delivered_at = $3
+              WHERE project_id = $1 AND run_id = $2 AND side = 'owner' AND delivered_at IS NULL
+              RETURNING at, text",
+            &[&project, &run, &now_ms()],
+        )
+        .await?;
+    Ok(json!({ "count": rows.len(), "said": rows.iter().map(|r| json!({
+        "at": r.get::<_, i64>(0), "text": r.get::<_, String>(1) })).collect::<Vec<_>>() }))
+}
+
+/// Завести беседу: место, где думают вслух над набором.
+pub async fn start_chat(pool: &Pool, project: &str, title: &str) -> Result<Value, tokio_postgres::Error> {
+    let client = pool.get().await.expect("пул отдал соединение");
+    let row = client
+        .query_one(
+            "INSERT INTO chat_thread (id, project_id, title, created_at, updated_at)
+             VALUES (gen_random_uuid()::text, $1, $2, $3, $3) RETURNING id",
+            &[&project, &title, &now_ms()],
+        )
+        .await?;
+    Ok(json!({ "status": "open", "thread": row.get::<_, String>(0), "title": title }))
+}
+
+/// Сказанное в беседе. Сторона названа: `owner` — человек, `agent` — тот, кто
+/// отвечает.
+pub async fn say_in_chat(
+    pool: &Pool, project: &str, thread: &str, side: &str, text: &str,
+) -> Result<Value, tokio_postgres::Error> {
+    if !["owner", "agent"].contains(&side) {
+        return Ok(json!({ "status": "side_unknown", "side": side, "why": "говорит либо owner, либо agent" }));
+    }
+    if thread.trim().is_empty() || text.trim().is_empty() {
+        return Ok(json!({ "status": "incomplete", "why": "сказанное принадлежит беседе и не бывает пустым" }));
+    }
+    let client = pool.get().await.expect("пул отдал соединение");
+    let n = client
+        .execute(
+            "INSERT INTO chat_message (project_id, thread_id, at, side, text, delivered_at)
+             SELECT $1, $2, $3, $4, $5, CASE WHEN $4 = 'agent' THEN $3 END
+              WHERE EXISTS (SELECT 1 FROM chat_thread t WHERE t.project_id = $1 AND t.id = $2)",
+            &[&project, &thread, &now_ms(), &side, &text],
+        )
+        .await?;
+    if n == 0 {
+        return Ok(json!({ "status": "no_thread", "thread": thread, "why": "беседы с таким именем у набора нет" }));
+    }
+    client
+        .execute("UPDATE chat_thread SET updated_at = $3 WHERE project_id = $1 AND id = $2",
+                 &[&project, &thread, &now_ms()])
+        .await?;
+    Ok(json!({ "status": "said", "thread": thread, "side": side }))
+}
+
+/// Что человек сказал беседе и она ещё не прочла; прочитанное помечается.
+/// Здесь же беседа называет сессию, которой отвечает: без неё каждый ответ
+/// начинался бы с чистого листа.
+pub async fn chat_inbox(
+    pool: &Pool, project: &str, thread: &str, session: &str,
+) -> Result<Value, tokio_postgres::Error> {
+    let client = pool.get().await.expect("пул отдал соединение");
+    if !session.trim().is_empty() {
+        client
+            .execute("UPDATE chat_thread SET session_id = $3, updated_at = $4 WHERE project_id = $1 AND id = $2",
+                     &[&project, &thread, &session, &now_ms()])
+            .await?;
+    }
+    let rows = client
+        .query(
+            "UPDATE chat_message SET delivered_at = $3
+              WHERE project_id = $1 AND thread_id = $2 AND side = 'owner' AND delivered_at IS NULL
+              RETURNING at, text",
+            &[&project, &thread, &now_ms()],
+        )
+        .await?;
+    let session_id: String = client
+        .query_one("SELECT coalesce(session_id, '') FROM chat_thread WHERE project_id = $1 AND id = $2",
+                   &[&project, &thread])
+        .await
+        .map(|r| r.get(0))
+        .unwrap_or_default();
+    Ok(json!({ "count": rows.len(), "sessionId": session_id, "said": rows.iter().map(|r| json!({
+        "at": r.get::<_, i64>(0), "text": r.get::<_, String>(1) })).collect::<Vec<_>>() }))
+}
+
+/// Беседы набора, а с именем беседы — её строки.
+pub async fn read_chat(
+    pool: &Pool, project: &str, thread: &str, limit: i64,
+) -> Result<Value, tokio_postgres::Error> {
+    let client = pool.get().await.expect("пул отдал соединение");
+    if thread.trim().is_empty() {
+        let rows = client
+            .query(
+                "SELECT t.id, t.title, t.state, t.updated_at,
+                        (SELECT count(*) FROM chat_message m WHERE m.project_id = t.project_id AND m.thread_id = t.id),
+                        (SELECT count(*) FROM chat_message m
+                          WHERE m.project_id = t.project_id AND m.thread_id = t.id
+                            AND m.side = 'owner' AND m.delivered_at IS NULL)
+                   FROM chat_thread t WHERE t.project_id = $1
+                  ORDER BY t.updated_at DESC LIMIT $2",
+                &[&project, &limit],
+            )
+            .await?;
+        return Ok(json!({ "count": rows.len(), "threads": rows.iter().map(|r| json!({
+            "thread": r.get::<_, String>(0), "title": r.get::<_, String>(1), "state": r.get::<_, String>(2),
+            "at": r.get::<_, i64>(3), "said": r.get::<_, i64>(4), "waiting": r.get::<_, i64>(5) })).collect::<Vec<_>>() }));
+    }
+    let rows = client
+        .query(
+            "SELECT at, side, text, delivered_at IS NOT NULL FROM chat_message
+              WHERE project_id = $1 AND thread_id = $2 ORDER BY at DESC LIMIT $3",
+            &[&project, &thread, &limit],
+        )
+        .await?;
+    Ok(json!({ "thread": thread, "count": rows.len(), "said": rows.iter().rev().map(|r| json!({
+        "at": r.get::<_, i64>(0), "side": r.get::<_, String>(1), "text": r.get::<_, String>(2),
+        "read": r.get::<_, bool>(3) })).collect::<Vec<_>>() }))
+}
+
+/// Прогоны с последними шагами: пульту нужен не список состояний, а рассказ.
+pub async fn list_runs(pool: &Pool, project: &str, limit: i64) -> Result<Value, tokio_postgres::Error> {
+    let client = pool.get().await.expect("пул отдал соединение");
+    let runs = client
+        .query(
+            "SELECT r.id, r.task_id, coalesce(t.title, ''), r.state, r.attempt, r.note,
+                    r.created_at, coalesce(r.updated_at, r.created_at)
+               FROM project_task_runs r
+               LEFT JOIN project_plan_tasks t ON t.project_id = r.project_id AND t.id = r.task_id
+              WHERE r.project_id = $1
+              ORDER BY coalesce(r.updated_at, r.created_at) DESC LIMIT $2",
+            &[&project, &limit],
+        )
+        .await?;
+    let mut out = Vec::new();
+    for r in &runs {
+        let id: String = r.get(0);
+        let events = client
+            .query(
+                "SELECT at, kind, text FROM task_run_event
+                  WHERE project_id = $1 AND run_id = $2 ORDER BY at DESC LIMIT 12",
+                &[&project, &id],
+            )
+            .await?;
+        let said = client
+            .query(
+                "SELECT at, side, text FROM task_run_message
+                  WHERE project_id = $1 AND run_id = $2 ORDER BY at DESC LIMIT 12",
+                &[&project, &id],
+            )
+            .await?;
+        out.push(json!({
+            "runId": id, "task": r.get::<_, String>(1), "title": r.get::<_, String>(2),
+            "state": r.get::<_, String>(3), "attempt": r.get::<_, i32>(4), "note": r.get::<_, String>(5),
+            "startedAt": r.get::<_, i64>(6), "at": r.get::<_, i64>(7),
+            "events": events.iter().map(|e| json!({
+                "at": e.get::<_, i64>(0), "kind": e.get::<_, String>(1), "text": e.get::<_, String>(2) })).collect::<Vec<_>>(),
+            "said": said.iter().map(|m| json!({
+                "at": m.get::<_, i64>(0), "side": m.get::<_, String>(1), "text": m.get::<_, String>(2) })).collect::<Vec<_>>(),
+        }));
+    }
+    Ok(json!({ "count": out.len(), "runs": out }))
 }
 
 /// Объявить, к какой области проекта принадлежит вид.

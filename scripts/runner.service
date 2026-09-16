@@ -1,0 +1,12 @@
+[Unit]
+Description=mh: воркер пульта — отвечает в беседах набора
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /opt/src/github.com/undassa/mh/scripts/runner.py
+WorkingDirectory=/opt/src/github.com/undassa/mh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

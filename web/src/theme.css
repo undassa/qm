@@ -5012,3 +5012,12 @@ tbody:first-of-type .co-grp th { padding-top: 8px; }
 .mockup-bar a { margin-left: auto; }
 .mockup-frame { display: block; width: 100%; height: 78vh; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
 .mockup-frame.phone { width: 390px; max-width: 100%; margin: 0 auto; }
+
+/* Беседа и тела заявок: строка человека и ответ набора различаются краем,
+   а не цветом пузыря — цвет ушёл бы в тему и в печать. */
+.pu-talk { display: grid; gap: 8px; }
+.pu-said { display: grid; gap: 10px; max-height: 46vh; overflow-y: auto; padding: 4px 2px; }
+.pu-line { display: grid; gap: 2px; margin: 0; padding-left: 10px; border-left: 2px solid var(--line, #d9d9d9); }
+.pu-line.owner { border-left-color: var(--key, #2f6f4f); }
+.pu-line .pu-text { white-space: pre-wrap; }
+.pu-body { white-space: pre-wrap; max-height: 30vh; overflow: auto; margin: 0 0 8px; font-size: 0.9em; }

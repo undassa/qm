@@ -625,6 +625,49 @@ impl Mcp {
                 "holds": json!({"type":"array","items":{"type":"string"},
                     "description":"для container: таблицы, где лежат его сущности — проверяются по entity_kind"}) },
                 "required": ["kind", "projection"] } }));
+        tools.push(json!({ "name": "request-add", "description": "заявка на изменение харнеса: что не так, доказательство, что держит; ждёт решения на пульте",
+            "inputSchema": { "type": "object", "properties": { "title": s("одна строка: что не так"),
+                "body": s("доказательство, что уже сделано в наборе, чего ждём от харнеса, что держит"),
+                "runId": s("прогон, из которого пришла заявка") }, "required": ["title"] } }));
+        tools.push(json!({ "name": "approval-ask", "description": "попросить подтверждение владельца на коммит и пуш кода проекта",
+            "inputSchema": { "type": "object", "properties": { "title": s("одна строка: что коммитим"),
+                "body": s("дифф или его выжимка и почему так"), "runId": s("прогон, который ждёт ответа") },
+                "required": ["title", "runId"] } }));
+        tools.push(json!({ "name": "asks", "description": "очередь решений владельца: заявки на харнес и просьбы подтвердить коммит",
+            "inputSchema": { "type": "object", "properties": {
+                "state": s("open · taken · owner · declined · done · approved · rejected; пусто — все"),
+                "limit": json!({"type":"integer","description":"сколько отдать, по умолчанию 40"}) } } }));
+        tools.push(json!({ "name": "ask-decide", "description": "решение по заявке из очереди: с доводом, он остаётся в ней",
+            "inputSchema": { "type": "object", "properties": { "ask": json!({"type":"integer","description":"номер заявки"}),
+                "state": s("taken · owner · declined · done · approved · rejected"),
+                "why": s("довод — обязательно") }, "required": ["ask", "state", "why"] } }));
+        tools.push(json!({ "name": "run-start", "description": "завести прогон задачи: с него начинается всё, что о нём расскажут",
+            "inputSchema": { "type": "object", "properties": { "task": s("имя задачи"), "agent": s("кто ведёт"),
+                "note": s("с чего начали") }, "required": ["task"] } }));
+        tools.push(json!({ "name": "run-state", "description": "состояние прогона словом: running · waiting · finished · failed; кроме running нужна причина",
+            "inputSchema": { "type": "object", "properties": { "runId": s("прогон"), "state": s("running · waiting · finished · failed"),
+                "note": s("на чём встали либо чем кончилось") }, "required": ["runId", "state"] } }));
+        tools.push(json!({ "name": "run-event", "description": "шаг прогона: что сделано или на чём остановились",
+            "inputSchema": { "type": "object", "properties": { "runId": s("прогон"), "kind": s("род шага: шаг · вопрос · отказ · итог"),
+                "text": s("что случилось") }, "required": ["runId", "text"] } }));
+        tools.push(json!({ "name": "run-say", "description": "сказать прогону строку с пульта либо ответить от его имени",
+            "inputSchema": { "type": "object", "properties": { "runId": s("прогон"), "text": s("что сказано"),
+                "side": s("owner — с пульта, agent — от прогона; по умолчанию owner") }, "required": ["runId", "text"] } }));
+        tools.push(json!({ "name": "run-inbox", "description": "что человек сказал прогону и он ещё не прочёл; прочитанное помечается",
+            "inputSchema": { "type": "object", "properties": { "runId": s("прогон") }, "required": ["runId"] } }));
+        tools.push(json!({ "name": "runs", "description": "прогоны набора с последними шагами и сказанным",
+            "inputSchema": { "type": "object", "properties": { "limit": json!({"type":"integer","description":"сколько прогонов, по умолчанию 10"}) } } }));
+        tools.push(json!({ "name": "chat-start", "description": "завести беседу над набором: место, где думают вслух и спрашивают по ходу",
+            "inputSchema": { "type": "object", "properties": { "title": s("о чём беседа") } } }));
+        tools.push(json!({ "name": "chat-say", "description": "сказать в беседе: side owner — человек с пульта, agent — ответ",
+            "inputSchema": { "type": "object", "properties": { "thread": s("беседа"), "text": s("что сказано"),
+                "side": s("owner · agent; по умолчанию owner") }, "required": ["thread", "text"] } }));
+        tools.push(json!({ "name": "chat-inbox", "description": "непрочитанное беседой; тем же вызовом она называет свою сессию",
+            "inputSchema": { "type": "object", "properties": { "thread": s("беседа"), "sessionId": s("сессия, которой отвечают") },
+                "required": ["thread"] } }));
+        tools.push(json!({ "name": "chat", "description": "беседы набора, а с именем беседы — её строки",
+            "inputSchema": { "type": "object", "properties": { "thread": s("беседа; пусто — перечень бесед"),
+                "limit": json!({"type":"integer","description":"сколько строк, по умолчанию 50"}) } } }));
         tools.push(json!({ "name": "console", "description": "пульт: что делают агенты сейчас, что ждёт ответа человека, что поехало от правок",
             "inputSchema": { "type": "object", "properties": {} } }));
         tools.push(json!({ "name": "links-graph", "description": "скелет зависимостей: какие роды на каких стоят, сколькими связями, и где сейчас переоткрыто",
@@ -784,7 +827,7 @@ impl Mcp {
         // вызов и отдавал строку таблицы вместо вычисления.
         const RESERVED: &[&str] = &[
             "method-set", "gate-item-set", "question-holders", "preflight-push", "worktree-push",
-            "sensor-specs", "scheme-terms", "scheme-roles", "frozen-trees", "addresses-declared", "tree-declared", "donors", "skills-push", "skills", "agents", "code-facts-push", "code-facts", "summary", "links-of", "retired-terms", "term-retire", "entity-confirm", "order", "gate-measure", "gate-selftest", "links-rewrite", "links-retarget", "reparse", "screen-area-set", "skill-set", "skills-paths", "version-freeze", "version-delta", "generated-check", "principal-allow", "principals", "author-set", "authors", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "version-close", "phase-set", "gate-selftest", "next-step", "process-state", "statuses", "task-status", "status-anomaly", "pipeline", "board", "waves", "phases", "coverage", "blocks", "history", "at-revision", "process-history", "progress",
+            "sensor-specs", "scheme-terms", "scheme-roles", "frozen-trees", "addresses-declared", "tree-declared", "donors", "skills-push", "skills", "agents", "code-facts-push", "code-facts", "summary", "links-of", "retired-terms", "term-retire", "entity-confirm", "request-add", "approval-ask", "asks", "ask-decide", "chat-start", "chat-say", "chat-inbox", "chat", "run-start", "run-state", "run-event", "run-say", "run-inbox", "runs", "order", "gate-measure", "gate-selftest", "links-rewrite", "links-retarget", "reparse", "screen-area-set", "skill-set", "skills-paths", "version-freeze", "version-delta", "generated-check", "principal-allow", "principals", "author-set", "authors", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "version-close", "phase-set", "gate-selftest", "next-step", "process-state", "statuses", "task-status", "status-anomaly", "pipeline", "board", "waves", "phases", "coverage", "blocks", "history", "at-revision", "process-history", "progress",
             "kinds", "kinds-due", "readiness-gaps", "declared-unwritten", "blame-set", "doors", "derived-copy-set", "holders", "counts-sync", "kind-add", "kind-required", "kind-projection", "kind-reopens", "kind-proves", "kind-id-set", "kind-domain", "tree", "document-coverage", "sections", "section", "backlinks", "search", "put",
             "put-section", "rm", "document-add", "reproject", "sweep", "gate", "next-task", "what-if", "blockers", "events", "task-plan-push",
             "norm-versions", "measurements", "plan", "readiness", "requirements-of",
@@ -1082,6 +1125,103 @@ impl Mcp {
                 let holds = list(&args, "holds");
                 match crate::projector::set_kind_projection(&self.pool, kind_arg,
                         args.get("projection").and_then(|v| v.as_str()).unwrap_or(""), &holds).await {
+                    Ok(v) => ok(v),
+                    Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
+                }
+            }
+            "chat-start" => {
+                let title = args.get("title").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+                match crate::projector::start_chat(&self.pool, p, &title).await {
+                    Ok(v) => ok(v),
+                    Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
+                }
+            }
+            "chat-say" => {
+                let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
+                let side = if g("side").trim().is_empty() { "owner".to_owned() } else { g("side") };
+                match crate::projector::say_in_chat(&self.pool, p, &g("thread"), &side, &g("text")).await {
+                    Ok(v) => ok(v),
+                    Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
+                }
+            }
+            "chat-inbox" => {
+                let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
+                match crate::projector::chat_inbox(&self.pool, p, &g("thread"), &g("sessionId")).await {
+                    Ok(v) => ok(v),
+                    Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
+                }
+            }
+            "chat" => {
+                let thread = args.get("thread").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+                let limit = num(args, "limit").unwrap_or(50).clamp(1, 400);
+                match crate::projector::read_chat(&self.pool, p, &thread, limit).await {
+                    Ok(v) => ok(v),
+                    Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
+                }
+            }
+            "request-add" | "approval-ask" => {
+                let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
+                let kind = if name == "request-add" { "request" } else { "approval" };
+                match crate::projector::add_ask(&self.pool, p, kind, &g("title"), &g("body"), &g("runId"), &self.author).await {
+                    Ok(v) => ok(v),
+                    Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
+                }
+            }
+            "asks" => {
+                let state = args.get("state").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+                let limit = num(args, "limit").unwrap_or(40).clamp(1, 200);
+                match crate::projector::list_asks(&self.pool, p, &state, limit).await {
+                    Ok(v) => ok(v),
+                    Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
+                }
+            }
+            "ask-decide" => {
+                let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
+                match crate::projector::decide_ask(&self.pool, num(args, "ask").unwrap_or(0), &g("state"), &g("why"), &self.author).await {
+                    Ok(v) => ok(v),
+                    Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
+                }
+            }
+            "run-start" => {
+                let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
+                match crate::projector::start_run(&self.pool, p, &g("task"), &g("agent"), &g("note")).await {
+                    Ok(v) => ok(v),
+                    Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
+                }
+            }
+            "run-state" => {
+                let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
+                match crate::projector::set_run_state(&self.pool, p, &g("runId"), &g("state"), &g("note")).await {
+                    Ok(v) => ok(v),
+                    Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
+                }
+            }
+            "run-event" => {
+                let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
+                let kind = if g("kind").trim().is_empty() { "шаг".to_owned() } else { g("kind") };
+                match crate::projector::add_run_event(&self.pool, p, &g("runId"), &kind, &g("text")).await {
+                    Ok(v) => ok(v),
+                    Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
+                }
+            }
+            "run-say" => {
+                let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
+                let side = if g("side").trim().is_empty() { "owner".to_owned() } else { g("side") };
+                match crate::projector::say_to_run(&self.pool, p, &g("runId"), &side, &g("text")).await {
+                    Ok(v) => ok(v),
+                    Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
+                }
+            }
+            "run-inbox" => {
+                let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
+                match crate::projector::run_inbox(&self.pool, p, &g("runId")).await {
+                    Ok(v) => ok(v),
+                    Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
+                }
+            }
+            "runs" => {
+                let limit = num(args, "limit").unwrap_or(10).clamp(1, 60);
+                match crate::projector::list_runs(&self.pool, p, limit).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
                 }

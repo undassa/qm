@@ -2,6 +2,8 @@ import type React from "react";
 import { type Lang, kindName, say } from "./say";
 import { useEffect, useState } from "react";
 import { tool, write } from "./api";
+import { Asks } from "./Asks";
+import { Talk } from "./Talk";
 
 /**
  * Пульт — главный экран. Человек приходит с тремя вопросами, и ни один из них
@@ -216,6 +218,9 @@ export function Console({
           </button>
         )}
       </section>
+
+      <Asks projectId={projectId} lang={lang} />
+      <Talk projectId={projectId} lang={lang} />
 
       <section className="pu-band">
         <div className="pu-h">
