@@ -2204,6 +2204,7 @@ CREATE TABLE IF NOT EXISTS owner_ask (
   decided_at  bigint
 );
 CREATE INDEX IF NOT EXISTS owner_ask_open ON owner_ask (state, at DESC);
+ALTER TABLE owner_ask ADD COLUMN IF NOT EXISTS delivered_at bigint;
 
 -- Прогон задачи агентом: одна строка на попытку. Таблица досталась от прежнего
 -- харнеса вместе со своим словарём состояний и запретом двух живых прогонов
@@ -8593,17 +8594,18 @@ pub async fn console(pool: &Pool, project: &str) -> Result<Value, tokio_postgres
 pub async fn add_ask(
     pool: &Pool, project: &str, kind: &str, title: &str, body: &str, run_id: &str, by: &str,
 ) -> Result<Value, tokio_postgres::Error> {
-    if !["request", "approval"].contains(&kind) {
+    if !["request", "approval", "question"].contains(&kind) {
         return Ok(json!({ "status": "kind_unknown", "kind": kind,
-            "why": "заявка бывает двух родов: request — изменение харнеса, approval — подтверждение коммита и пуша" }));
+            "why": "заявка бывает трёх родов: request — изменение харнеса, approval — подтверждение коммита \
+                    и пуша, question — вопрос, без ответа на который прогон не идёт дальше" }));
     }
     if title.trim().is_empty() {
         return Ok(json!({ "status": "nameless",
             "why": "заявка без строки о том, что нужно, читается как пустое место в очереди" }));
     }
-    if kind == "approval" && run_id.trim().is_empty() {
+    if kind != "request" && run_id.trim().is_empty() {
         return Ok(json!({ "status": "no_run",
-            "why": "подтверждение просит прогон: без его имени решение некуда вернуть" }));
+            "why": "подтверждение и вопрос просит прогон: без его имени решение некуда вернуть" }));
     }
     let client = pool.get().await.expect("пул отдал соединение");
     let row = client
@@ -8662,6 +8664,23 @@ pub async fn decide_ask(
     Ok(json!({ "status": if n > 0 { "decided" } else { "not_found" }, "id": id, "state": state }))
 }
 
+/// Решения владельца, которых прогон ещё не видел. Помечаются тем же вызовом:
+/// иначе прогон брался бы за одно и то же подтверждение каждый круг.
+pub async fn ask_inbox(pool: &Pool, project: &str, run: &str) -> Result<Value, tokio_postgres::Error> {
+    let client = pool.get().await.expect("пул отдал соединение");
+    let rows = client
+        .query(
+            "UPDATE owner_ask SET delivered_at = $3
+              WHERE project_id = $1 AND run_id = $2 AND state <> 'open' AND delivered_at IS NULL
+              RETURNING id, kind, title, state, why",
+            &[&project, &run, &now_ms()],
+        )
+        .await?;
+    Ok(json!({ "count": rows.len(), "decided": rows.iter().map(|r| json!({
+        "id": r.get::<_, i64>(0), "kind": r.get::<_, String>(1), "title": r.get::<_, String>(2),
+        "state": r.get::<_, String>(3), "why": r.get::<_, String>(4) })).collect::<Vec<_>>() }))
+}
+
 /// Завести прогон задачи: с него начинается всё, что о нём потом рассказывают.
 ///
 /// ДВУХ ЖИВЫХ ПРОГОНОВ ОДНОЙ ЗАДАЧИ НЕ БЫВАЕТ — так сказано указателем самой
@@ -8715,7 +8734,7 @@ pub async fn start_run(
 /// всё, что не `done`, `failed` и `cancelled`, и своё слово вроде `finished`
 /// оставило бы задачу навсегда занятой.
 pub async fn set_run_state(
-    pool: &Pool, project: &str, run: &str, state: &str, note: &str, by: &str,
+    pool: &Pool, project: &str, run: &str, state: &str, note: &str, session: &str, by: &str,
 ) -> Result<Value, tokio_postgres::Error> {
     const СОСТОЯНИЯ: [&str; 5] = ["running", "waiting", "done", "failed", "cancelled"];
     if !СОСТОЯНИЯ.contains(&state) {
@@ -8738,9 +8757,10 @@ pub async fn set_run_state(
         .execute(
             "UPDATE project_task_runs
                 SET state = $3, note = $4, updated_at = $5,
+                    session_id = CASE WHEN $6 = '' THEN session_id ELSE $6 END,
                     finished_at = CASE WHEN $3 = ANY (ARRAY['done', 'failed', 'cancelled']) THEN $5 ELSE finished_at END
               WHERE project_id = $1 AND id = $2",
-            &[&project, &run, &state, &note, &now_ms()],
+            &[&project, &run, &state, &note, &now_ms(), &session],
         )
         .await?;
     client
@@ -8925,7 +8945,7 @@ pub async fn list_runs(pool: &Pool, project: &str, limit: i64) -> Result<Value, 
     let runs = client
         .query(
             "SELECT r.id, r.task_id, coalesce(t.title, ''), r.state, r.attempt, r.note,
-                    r.created_at, coalesce(r.updated_at, r.created_at)
+                    r.created_at, coalesce(r.updated_at, r.created_at), coalesce(r.session_id, '')
                FROM project_task_runs r
                LEFT JOIN project_plan_tasks t ON t.project_id = r.project_id AND t.id = r.task_id
               WHERE r.project_id = $1
@@ -8953,7 +8973,7 @@ pub async fn list_runs(pool: &Pool, project: &str, limit: i64) -> Result<Value, 
         out.push(json!({
             "runId": id, "task": r.get::<_, String>(1), "title": r.get::<_, String>(2),
             "state": r.get::<_, String>(3), "attempt": r.get::<_, i32>(4), "note": r.get::<_, String>(5),
-            "startedAt": r.get::<_, i64>(6), "at": r.get::<_, i64>(7),
+            "startedAt": r.get::<_, i64>(6), "at": r.get::<_, i64>(7), "sessionId": r.get::<_, String>(8),
             "events": events.iter().map(|e| json!({
                 "at": e.get::<_, i64>(0), "kind": e.get::<_, String>(1), "text": e.get::<_, String>(2) })).collect::<Vec<_>>(),
             "said": said.iter().map(|m| json!({

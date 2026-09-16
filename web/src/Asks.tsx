@@ -37,6 +37,9 @@ const РЕШЕНИЯ: Record<string, { state: string; label: string }[]> = {
     { state: "approved", label: "Подтвердить" },
     { state: "rejected", label: "Отказать" },
   ],
+  question: [
+    { state: "done", label: "Ответить" },
+  ],
 };
 
 const когда = (at: number): string =>
@@ -68,6 +71,29 @@ export function Asks({ projectId }: { projectId: string; lang: Lang }): React.JS
     setOpen(0);
     setWhy("");
     перечитать();
+  };
+
+  /**
+   * Следующая задача набора — и прогон под неё.
+   *
+   * Задачу называет лестница, а не пульт: пока она держит, `task` пуст, и
+   * запускать нечего. Взять «кандидата» в обход значило бы обойти саму лестницу.
+   */
+  const взять = async (): Promise<void> => {
+    setRan("Следующая задача: ищу…");
+    const next = await tool<{
+      task?: { id?: string } | string | null;
+      ladder?: { why?: string; holding?: string[] };
+    }>(projectId, "next-task");
+    const t = next?.task;
+    const id = typeof t === "string" ? t : (t?.id ?? "");
+    if (!id) {
+      const держит = next?.ladder?.why || next?.ladder?.holding?.[0] || "";
+      setRan(держит ? `Лестница держит: ${держит}` : "Следующей задачи нет");
+      return;
+    }
+    const r = await write(projectId, "run-start", { task: id, note: "запущено с пульта" });
+    setRan(r.ok ? `Прогон ${id}: заведён` : `Прогон ${id}: ${r.why || "отказ"}`);
   };
 
   /** Проверка на весь набор: ответ двери — одной строкой, чтобы было видно, что она прошла. */
@@ -108,7 +134,7 @@ export function Asks({ projectId }: { projectId: string; lang: Lang }): React.JS
                 </button>
                 <span className="pu-t">{a.title}</span>
                 <span className="pu-meta">
-                  {a.kind === "approval" ? "подтверждение" : "заявка"}
+                  {a.kind === "approval" ? "подтверждение" : a.kind === "question" ? "вопрос прогона" : "заявка"}
                   {a.askedBy && <> · {a.askedBy}</>}
                   {a.at > 0 && <> · {когда(a.at)}</>}
                 </span>
@@ -119,7 +145,11 @@ export function Asks({ projectId }: { projectId: string; lang: Lang }): React.JS
                       className="pu-draft"
                       value={why}
                       onChange={(e) => setWhy(e.target.value)}
-                      placeholder="Довод — он остаётся в очереди и читается спустя месяц"
+                      placeholder={
+                        a.kind === "question"
+                          ? "Ответ — он вернётся в прогон, и работа пойдёт дальше"
+                          : "Довод — он остаётся в очереди и читается спустя месяц"
+                      }
                       rows={3}
                       autoFocus
                     />
@@ -148,10 +178,13 @@ export function Asks({ projectId }: { projectId: string; lang: Lang }): React.JS
 
       <section className="pu-band">
         <div className="pu-h">
-          <h2>Проверки</h2>
+          <h2>Работа и проверки</h2>
           {ran && <span className="pu-note">{ran}</span>}
         </div>
         <div className="pu-act">
+          <button className="pu-do key" type="button" onClick={() => void взять()}>
+            Взять следующую задачу
+          </button>
           <button className="pu-do" type="button" onClick={() => void проверить("reproject", "Пересборка")}>
             Пересобрать набор
           </button>

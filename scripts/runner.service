@@ -1,8 +1,11 @@
 [Unit]
-Description=mh: воркер пульта — отвечает в беседах набора
+Description=mh: воркер пульта — отвечает в беседах набора и ведёт прогоны задач
 After=network.target
 
 [Service]
+User=undassa
+Environment=HOME=/home/undassa
+Environment=PATH=/home/undassa/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=/usr/bin/python3 /opt/src/github.com/undassa/mh/scripts/runner.py
 WorkingDirectory=/opt/src/github.com/undassa/mh
 Restart=always

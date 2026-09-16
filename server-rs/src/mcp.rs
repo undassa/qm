@@ -633,6 +633,10 @@ impl Mcp {
             "inputSchema": { "type": "object", "properties": { "title": s("одна строка: что коммитим"),
                 "body": s("дифф или его выжимка и почему так"), "runId": s("прогон, который ждёт ответа") },
                 "required": ["title", "runId"] } }));
+        tools.push(json!({ "name": "question-ask", "description": "вопрос владельцу из прогона: без ответа работа не идёт дальше",
+            "inputSchema": { "type": "object", "properties": { "title": s("вопрос одной строкой"),
+                "body": s("что уже известно и какие есть варианты"), "runId": s("прогон, который ждёт ответа") },
+                "required": ["title", "runId"] } }));
         tools.push(json!({ "name": "asks", "description": "очередь решений владельца: заявки на харнес и просьбы подтвердить коммит",
             "inputSchema": { "type": "object", "properties": {
                 "state": s("open · taken · owner · declined · done · approved · rejected; пусто — все"),
@@ -646,7 +650,10 @@ impl Mcp {
                 "note": s("с чего начали") }, "required": ["task"] } }));
         tools.push(json!({ "name": "run-state", "description": "состояние прогона словом: running · waiting · done · failed · cancelled; кроме running нужна причина",
             "inputSchema": { "type": "object", "properties": { "runId": s("прогон"), "state": s("running · waiting · done · failed · cancelled"),
-                "note": s("на чём встали либо чем кончилось") }, "required": ["runId", "state"] } }));
+                "note": s("на чём встали либо чем кончилось"), "session": s("сессия, которой прогон продолжается") },
+                "required": ["runId", "state"] } }));
+        tools.push(json!({ "name": "ask-inbox", "description": "решения владельца, которых прогон ещё не видел; прочитанное помечается",
+            "inputSchema": { "type": "object", "properties": { "runId": s("прогон") }, "required": ["runId"] } }));
         tools.push(json!({ "name": "run-event", "description": "шаг прогона: что сделано или на чём остановились",
             "inputSchema": { "type": "object", "properties": { "runId": s("прогон"), "kind": s("род шага: шаг · вопрос · отказ · итог"),
                 "text": s("что случилось") }, "required": ["runId", "text"] } }));
@@ -827,7 +834,7 @@ impl Mcp {
         // вызов и отдавал строку таблицы вместо вычисления.
         const RESERVED: &[&str] = &[
             "method-set", "gate-item-set", "question-holders", "preflight-push", "worktree-push",
-            "sensor-specs", "scheme-terms", "scheme-roles", "frozen-trees", "addresses-declared", "tree-declared", "donors", "skills-push", "skills", "agents", "code-facts-push", "code-facts", "summary", "links-of", "retired-terms", "term-retire", "entity-confirm", "request-add", "approval-ask", "asks", "ask-decide", "chat-start", "chat-say", "chat-inbox", "chat", "run-start", "run-state", "run-event", "run-say", "run-inbox", "runs", "order", "gate-measure", "gate-selftest", "links-rewrite", "links-retarget", "reparse", "screen-area-set", "skill-set", "skills-paths", "version-freeze", "version-delta", "generated-check", "principal-allow", "principals", "author-set", "authors", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "version-close", "phase-set", "gate-selftest", "next-step", "process-state", "statuses", "task-status", "status-anomaly", "pipeline", "board", "waves", "phases", "coverage", "blocks", "history", "at-revision", "process-history", "progress",
+            "sensor-specs", "scheme-terms", "scheme-roles", "frozen-trees", "addresses-declared", "tree-declared", "donors", "skills-push", "skills", "agents", "code-facts-push", "code-facts", "summary", "links-of", "retired-terms", "term-retire", "entity-confirm", "request-add", "approval-ask", "question-ask", "asks", "ask-decide", "ask-inbox", "chat-start", "chat-say", "chat-inbox", "chat", "run-start", "run-state", "run-event", "run-say", "run-inbox", "runs", "order", "gate-measure", "gate-selftest", "links-rewrite", "links-retarget", "reparse", "screen-area-set", "skill-set", "skills-paths", "version-freeze", "version-delta", "generated-check", "principal-allow", "principals", "author-set", "authors", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "version-close", "phase-set", "gate-selftest", "next-step", "process-state", "statuses", "task-status", "status-anomaly", "pipeline", "board", "waves", "phases", "coverage", "blocks", "history", "at-revision", "process-history", "progress",
             "kinds", "kinds-due", "readiness-gaps", "declared-unwritten", "blame-set", "doors", "derived-copy-set", "holders", "counts-sync", "kind-add", "kind-required", "kind-projection", "kind-reopens", "kind-proves", "kind-id-set", "kind-domain", "tree", "document-coverage", "sections", "section", "backlinks", "search", "put",
             "put-section", "rm", "document-add", "reproject", "sweep", "gate", "next-task", "what-if", "blockers", "events", "task-plan-push",
             "norm-versions", "measurements", "plan", "readiness", "requirements-of",
@@ -1159,9 +1166,13 @@ impl Mcp {
                     Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
                 }
             }
-            "request-add" | "approval-ask" => {
+            "request-add" | "approval-ask" | "question-ask" => {
                 let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
-                let kind = if name == "request-add" { "request" } else { "approval" };
+                let kind = match name {
+                    "request-add" => "request",
+                    "approval-ask" => "approval",
+                    _ => "question",
+                };
                 match crate::projector::add_ask(&self.pool, p, kind, &g("title"), &g("body"), &g("runId"), &self.author).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
@@ -1191,7 +1202,14 @@ impl Mcp {
             }
             "run-state" => {
                 let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
-                match crate::projector::set_run_state(&self.pool, p, &g("runId"), &g("state"), &g("note"), &self.author).await {
+                match crate::projector::set_run_state(&self.pool, p, &g("runId"), &g("state"), &g("note"), &g("session"), &self.author).await {
+                    Ok(v) => ok(v),
+                    Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
+                }
+            }
+            "ask-inbox" => {
+                let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
+                match crate::projector::ask_inbox(&self.pool, p, &g("runId")).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
                 }
