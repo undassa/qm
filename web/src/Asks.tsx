@@ -26,6 +26,7 @@ interface Ask {
   why: string;
   decidedBy: string;
   decidedAt: number;
+  questionId: string;
 }
 
 const РЕШЕНИЯ: Record<string, { state: string; label: string }[]> = {
@@ -134,7 +135,13 @@ export function Asks({ projectId }: { projectId: string; lang: Lang }): React.JS
                 </button>
                 <span className="pu-t">{a.title}</span>
                 <span className="pu-meta">
-                  {a.kind === "approval" ? "подтверждение" : a.kind === "question" ? "вопрос прогона" : "заявка"}
+                  {a.kind === "approval"
+                    ? "подтверждение"
+                    : a.kind === "question"
+                      ? a.questionId
+                        ? "вопрос набора"
+                        : "вопрос прогона"
+                      : "заявка"}
                   {a.askedBy && <> · {a.askedBy}</>}
                   {a.at > 0 && <> · {когда(a.at)}</>}
                 </span>
@@ -147,7 +154,9 @@ export function Asks({ projectId }: { projectId: string; lang: Lang }): React.JS
                       onChange={(e) => setWhy(e.target.value)}
                       placeholder={
                         a.kind === "question"
-                          ? "Ответ — он вернётся в прогон, и работа пойдёт дальше"
+                          ? a.questionId
+                            ? "Ответ — набор прочтёт его и закроет вопрос"
+                            : "Ответ — он вернётся в прогон, и работа пойдёт дальше"
                           : "Довод — он остаётся в очереди и читается спустя месяц"
                       }
                       rows={3}

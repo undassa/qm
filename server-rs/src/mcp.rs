@@ -316,11 +316,12 @@ impl Mcp {
                 "state": s("open · accepted · closed"), "mitigation": s("митигация"),
                 "trigger": s("признак срабатывания"), "owner": s("владелец"), "source": s("где записан") },
                 "required": ["id", "title"] } }));
-        tools.push(json!({ "name": "question-add", "description": "объявить вопрос прямо: имя, номер, заголовок, состояние, чем закрыт",
+        tools.push(json!({ "name": "question-add", "description": "объявить вопрос прямо: имя, номер, заголовок, состояние, чем закрыт; owner:=true — решает владелец: вопрос не держит ступень 5 и встаёт в очередь пульта, ответ владельца — `asks state=done`",
             "inputSchema": { "type": "object", "properties": { "id": s("имя, например OQ-01"),
                 "number": json!({"type":"integer"}), "title": s("о чём вопрос"),
                 "state": s("open · decided · closed"), "answer": s("ответ, если записан"),
                 "closedBy": s("решение, которым закрыт"),
+                "owner": json!({"type":"boolean","description":"решает владелец; объявление без него снимает пометку"}),
                 "drop": json!({"type":"boolean","description":"снять вопрос, а не объявить"}) },
                 "required": ["id", "title"] } }));
         tools.push(json!({ "name": "task-requirement-add", "description": "объявить, что задача несёт требование",
@@ -1843,7 +1844,9 @@ impl Mcp {
                 let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
                 let number = num(args, "number").unwrap_or(0) as i32;
                 match crate::projector::declare_question(&self.pool, p, &g("id"), number, &g("title"),
-                        &g("state"), &g("answer"), &g("closedBy"), args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
+                        &g("state"), &g("answer"), &g("closedBy"),
+                        args.get("owner").map(|v| v == "true" || v == true).unwrap_or(false),
+                        args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
                 }

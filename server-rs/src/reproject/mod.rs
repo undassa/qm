@@ -110,5 +110,6 @@ pub async fn reproject(pool: &Pool, project: &str) -> Result<Value, tokio_postgr
     done.insert("project_document_plan".into(), json!(dp));
     done.insert("project_document_plan_counts".into(), json!(dc));
     done.insert("entity_stamp_changed".into(), json!(proof::stamp(pool, project).await?));
+    done.insert("owner_questions_asked".into(), json!(crate::projector::sync_owner_questions(pool, project).await?));
     Ok(Value::Object(done))
 }

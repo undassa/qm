@@ -2214,6 +2214,10 @@ CREATE TABLE IF NOT EXISTS owner_ask (
 );
 CREATE INDEX IF NOT EXISTS owner_ask_open ON owner_ask (state, at DESC);
 ALTER TABLE owner_ask ADD COLUMN IF NOT EXISTS delivered_at bigint;
+-- Вопрос набора, отданный владельцу: его имя. Пометка «решает владелец» без
+-- записи в очереди прятала бы вопрос — ступень 5 его пропускает, а владелец не
+-- видит.
+ALTER TABLE owner_ask ADD COLUMN IF NOT EXISTS question_id text NOT NULL DEFAULT '';
 
 -- Прогон задачи агентом: одна строка на попытку. Таблица досталась от прежнего
 -- харнеса вместе со своим словарём состояний и запретом двух живых прогонов
@@ -6687,7 +6691,7 @@ pub async fn declare_risk(
 #[allow(clippy::too_many_arguments)]
 pub async fn declare_question(
     pool: &Pool, project: &str, id: &str, number: i32, title: &str, state: &str,
-    answer: &str, closed_by: &str, drop_it: bool,
+    answer: &str, closed_by: &str, owner: bool, drop_it: bool,
 ) -> Result<Value, tokio_postgres::Error> {
     if id.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "вопрос без имени не объявляется" }));
@@ -6719,7 +6723,7 @@ pub async fn declare_question(
            answer_state = EXCLUDED.answer_state, has_answer = EXCLUDED.has_answer,
            origin = 'declared'",
         &[&project, &id, &number, &title, &state, &answer,
-          &(if answer.trim().is_empty() { "unsaid" } else { "answered" }),
+          &(if !answer.trim().is_empty() { "answered" } else if owner { "owner" } else { "unsaid" }),
           &!answer.trim().is_empty()]).await?;
     // СВЯЗЬ «ЧЕМ ЗАКРЫТ» — ЧАСТЬ ОТВЕТА, а не побочное действие. Вставка стояла
     // под `.ok()`: связь молча не писалась, а дверь всё равно отвечала
@@ -8671,7 +8675,7 @@ pub async fn list_asks(pool: &Pool, project: &str, state: &str, limit: i64) -> R
     let rows = client
         .query(
             "SELECT id, project_id, kind, title, body, asked_by, at, run_id, state, why,
-                    decided_by, coalesce(decided_at, 0)
+                    decided_by, coalesce(decided_at, 0), question_id
                FROM owner_ask
               WHERE ($1 = '' OR project_id = $1 OR project_id = '')
                 AND ($2 = '' OR state = $2)
@@ -8684,7 +8688,43 @@ pub async fn list_asks(pool: &Pool, project: &str, state: &str, limit: i64) -> R
         "title": r.get::<_, String>(3), "body": r.get::<_, String>(4), "askedBy": r.get::<_, String>(5),
         "at": r.get::<_, i64>(6), "runId": r.get::<_, String>(7), "state": r.get::<_, String>(8),
         "why": r.get::<_, String>(9), "decidedBy": r.get::<_, String>(10),
-        "decidedAt": r.get::<_, i64>(11) })).collect::<Vec<_>>() }))
+        "decidedAt": r.get::<_, i64>(11), "questionId": r.get::<_, String>(12) })).collect::<Vec<_>>() }))
+}
+
+/// Вопросы, отданные владельцу, — в очереди пульта.
+///
+/// Решение владельца (#12): вопрос с пометкой «решает владелец» не держит
+/// ступень 5 и ОБЯЗАТЕЛЬНО виден владельцу. Пометка ставится двумя путями —
+/// ролью `section.owner-decides` у документа вопроса и доводом `owner` у
+/// `question-add`, — и сводятся они здесь, в пересборке, через которую идут оба.
+///
+/// Запись заводится один раз на вопрос: ответ владельца не повторяет вопрос.
+/// Вопрос, закрытый в наборе или снятый с владельца, закрывает свою запись.
+pub async fn sync_owner_questions(pool: &Pool, project: &str) -> Result<u64, tokio_postgres::Error> {
+    let client = pool.get().await.expect("пул отдал соединение");
+    let now = now_ms();
+    let asked = client
+        .execute(
+            "INSERT INTO owner_ask (project_id, kind, title, body, asked_by, at, question_id)
+             SELECT q.project_id, 'question', q.id || ' · ' || q.title, coalesce(q.state_text, ''), 'набор', $2, q.id
+               FROM project_questions q
+              WHERE q.project_id = $1 AND q.state = 'open' AND q.answer_state = 'owner'
+                AND NOT EXISTS (SELECT 1 FROM owner_ask a WHERE a.project_id = q.project_id AND a.question_id = q.id)",
+            &[&project, &now],
+        )
+        .await?;
+    client
+        .execute(
+            "UPDATE owner_ask a SET state = 'done', why = 'вопрос закрыт в наборе либо снят с владельца',
+                    decided_by = 'набор', decided_at = $2
+              WHERE a.project_id = $1 AND a.question_id <> '' AND a.state = 'open'
+                AND NOT EXISTS (SELECT 1 FROM project_questions q
+                                 WHERE q.project_id = a.project_id AND q.id = a.question_id
+                                   AND q.state = 'open' AND q.answer_state = 'owner')",
+            &[&project, &now],
+        )
+        .await?;
+    Ok(asked)
 }
 
 /// Решение по заявке. Довод обязателен: очередь без доводов через неделю
