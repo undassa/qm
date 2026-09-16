@@ -1133,6 +1133,10 @@ pub fn contract_vs_schema(
 ) -> Vec<Pair> {
     let inputs = inputs_of_table(doc);
     const SYSTEM: [&str; 5] = ["id", "account_id", "created_at", "updated_at", "rev"];
+    // Способ сказать «колонку пишет не контракт» был, а находка о нём молчала:
+    // набор искал его в дверях и в спецификации датчика и подал заявку.
+    const X_SOURCE: &str = ". Если колонку пишет не контракт, а сервер или воркер, — \
+                            источник называется в миграции: COMMENT ON COLUMN таблица.колонка IS 'x-source: чем'";
     let schemas: Vec<String> = doc
         .get("components")
         .and_then(|c| c.get("schemas"))
@@ -1245,9 +1249,9 @@ pub fn contract_vs_schema(
                     format!("помечено x-source: {s}")
                 } else if elsewhere {
                     format!("колонка без входа: имя есть в контракте, но в ЧУЖОЙ схеме — \
-                             положить в {} нечем", t.name)
+                             положить в {} нечем{X_SOURCE}", t.name)
                 } else {
-                    format!("колонка без входа: ни свойства, ни параметра с именем {}", c.name)
+                    format!("колонка без входа: ни свойства, ни параметра с именем {}{X_SOURCE}", c.name)
                 },
             });
         }
@@ -1357,9 +1361,8 @@ pub fn contract_vs_schema(
                 name: format!("{}.{} · обязательна", t.name, c.name),
                 detail: match &c.source {
                     Some(s) => format!("помечено x-source: {s}"),
-                    None => "колонка обязательна, а обязательного входа нет: NOT NULL без умолчания, \
-                             и ни одна схема семьи её не требует"
-                        .to_owned(),
+                    None => format!("колонка обязательна, а обязательного входа нет: NOT NULL без умолчания, \
+                             и ни одна схема семьи её не требует{X_SOURCE}"),
                 },
             });
         }
