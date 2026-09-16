@@ -736,10 +736,30 @@ CREATE TABLE IF NOT EXISTS task_redo (
   gate       text NOT NULL DEFAULT '',
   PRIMARY KEY (project_id, task_id)
 );
--- Закрытие судится ОДИН РАЗ — первой пересборкой, увидевшей его коммит. Судить
--- каждой пересборкой значило судить давнее закрытие по нынешней фазе: гейт,
--- покрасневший после, ставил долг задачам, закрытым в свой черёд.
-ALTER TABLE task_state ADD COLUMN IF NOT EXISTS judged_commit text;
+-- Закрытие судится ОДИН РАЗ — первым замером, начатым после того, как план его
+-- увидел, и отмечается своим коммитом. Судить каждой пересборкой значило судить
+-- давнее закрытие по нынешней фазе: гейт, покрасневший после, ставил долг
+-- задачам, закрытым в свой черёд. А судить пересборкой — по замеру, сделанному
+-- ДО закрытия.
+--
+-- Отметка — своей таблицей, а не колонкой `task_state`: подача полная и снимает
+-- строки задач, которых в ней нет. Задача, выпавшая из одной подачи, теряла бы
+-- отметку и судилась заново по нынешней фазе.
+CREATE TABLE IF NOT EXISTS task_closing_judged (
+  project_id     text NOT NULL,
+  task_id        text NOT NULL,
+  closing_commit text NOT NULL,
+  PRIMARY KEY (project_id, task_id, closing_commit)
+);
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns
+              WHERE table_schema = 'public' AND table_name = 'task_state' AND column_name = 'judged_commit') THEN
+    INSERT INTO task_closing_judged (project_id, task_id, closing_commit)
+      SELECT project_id, task_id, judged_commit FROM task_state WHERE judged_commit IS NOT NULL
+      ON CONFLICT DO NOTHING;
+    ALTER TABLE task_state DROP COLUMN judged_commit;
+  END IF;
+END $$;
 ALTER TABLE project_feature_stories ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'projected';
 ALTER TABLE project_story_requirements ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'projected';
 -- И ещё две того же рода: у `project_screen_references` есть дверь
@@ -2016,86 +2036,7 @@ END $$ LANGUAGE plpgsql;
 -- Снимается трёхдоводная: у неё не было слова о склейке, и склейку она делала
 -- всегда — молча и удалением.
 DROP FUNCTION IF EXISTS rename_in_columns(text, text, text);
-CREATE OR REPLACE FUNCTION rename_in_columns(п text, было text, стало text, слить boolean DEFAULT false)
-RETURNS TABLE(таблица text, колонка text, строк bigint, снято bigint) AS $$
-DECLARE c record; n bigint; d bigint; места tid[]; место tid;
-BEGIN
-  FOR c IN
-    SELECT k.table_name AS t, k.column_name AS col
-      FROM information_schema.columns k
-      JOIN information_schema.columns pid
-        ON pid.table_schema = k.table_schema AND pid.table_name = k.table_name
-       AND pid.column_name = 'project_id'
-     WHERE k.table_schema = 'public' AND k.data_type = 'text'
-       AND k.table_name LIKE 'project\_%'
-       -- Содержание документа правит сама дверь, и правит с ревизией; дважды
-       -- переписать — потерять след.
-       AND NOT (k.table_name = 'project_documents' AND k.column_name = 'content')
-       -- ИСТОРИЮ НЕ ПРАВИТЬ. `project_document_revisions.content` — запись о
-       -- том, что документ говорил ТОГДА, и обход хотел переписать 479 таких
-       -- записей. Это подделка прошлого: старое имя в старой ревизии — правда,
-       -- а не опечатка.
-       AND k.table_name <> 'project_document_revisions'
-       -- ЧТО ПЕРЕЕДЕТ САМО — НЕ ТРОГАТЬ. Пять колонок разбора ссылаются на
-       -- `project_documents.entity_name` связью `ON UPDATE CASCADE`: родитель
-       -- переименуется, дети переедут за ним. Обход же шёл по
-       -- `information_schema` в её собственном порядке и брал ребёнка РАНЬШЕ
-       -- родителя — тогда строка ячейки показывала на имя, которого ещё нет, и
-       -- вся правка падала `project_document_cells_document_fk`. Воспроизводилось
-       -- на любом виде с таблицей: `task`, `run`, `story`.
-       AND NOT EXISTS (
-             SELECT 1 FROM information_schema.referential_constraints rc
-               JOIN information_schema.key_column_usage u
-                 ON u.constraint_name = rc.constraint_name
-                AND u.constraint_schema = rc.constraint_schema
-              WHERE rc.update_rule = 'CASCADE'
-                AND u.table_schema = 'public'
-                AND u.table_name = k.table_name AND u.column_name = k.column_name)
-     ORDER BY k.table_name, k.column_name
-  LOOP
-    d := 0;
-    BEGIN
-      EXECUTE format(
-        'UPDATE %I SET %I = regexp_replace(%I, $1, $2, ''g'')
-          WHERE project_id = $3 AND %I ~ $1', c.t, c.col, c.col, c.col)
-        USING '\m' || было || '\M', стало, п;
-      GET DIAGNOSTICS n = ROW_COUNT;
-    EXCEPTION WHEN unique_violation THEN
-      -- ДВОЙНИК. Прежде здесь стояло удаление ВСЕХ строк со старым именем —
-      -- без спроса и без слова о склейке. Пять строк ссылались на старое имя,
-      -- одна из них сталкивалась с существующей — и удалялись все пять вместо
-      -- «четыре переименовать, одну слить». Итог писался как `строк=0`, то есть
-      -- дверь отвечала «ничего не переименовано» там, где потеряла запись.
-      IF NOT слить THEN
-        RAISE EXCEPTION
-          'имя «%» в %.% уже занято: переименование склеило бы две записи в одну',
-          стало, c.t, c.col USING ERRCODE = 'unique_violation',
-          HINT = 'если это одна и та же сущность, заведённая дважды, — скажите merge';
-      END IF;
-      -- Со словом о склейке — построчно: переименовывается всё, что может, и
-      -- снимается только то, что вправду столкнулось.
-      n := 0;
-      EXECUTE format('SELECT array_agg(ctid) FROM %I WHERE project_id = $1 AND %I ~ $2',
-                     c.t, c.col)
-        INTO места USING п, '\m' || было || '\M';
-      FOREACH место IN ARRAY coalesce(места, ARRAY[]::tid[]) LOOP
-        BEGIN
-          EXECUTE format(
-            'UPDATE %I SET %I = regexp_replace(%I, $1, $2, ''g'') WHERE ctid = $3',
-            c.t, c.col, c.col)
-            USING '\m' || было || '\M', стало, место;
-          n := n + 1;
-        EXCEPTION WHEN unique_violation THEN
-          EXECUTE format('DELETE FROM %I WHERE ctid = $1', c.t) USING место;
-          d := d + 1;
-        END;
-      END LOOP;
-    END;
-    IF n > 0 OR d > 0 THEN
-      таблица := c.t; колонка := c.col; строк := n; снято := d; RETURN NEXT;
-    END IF;
-  END LOOP;
-END $$ LANGUAGE plpgsql;
+-- Сама функция — `RENAME_IN_COLUMNS`: её заводит `ensure` следом за этой пачкой.
 
 -- ДОМА ПРАВИЛУ КОДА И УТВЕРЖДЕНИЮ. У `tot-ade` под видом `check` лежали три
 -- разные вещи: 56 критериев приёмки, 141 ИМЯ ПРАВИЛА В КОДЕ (11 из 12 найдены
@@ -2846,6 +2787,99 @@ CREATE TABLE IF NOT EXISTS gate_dirty (
   ran_ms integer);
 "#;
 
+/// Переименование внутри колонок. Отдельной пачкой, а не в `DDL`: её же заводит
+/// тест, и функция в нём та самая, что в базе.
+///
+/// Имя приходит ГОТОВЫМ ОБРАЗЦОМ (`name_in_text`), а новое — готовой заменой
+/// (`replacement_of`). Прежде образец собирался здесь же — `\m` имя `\M`, без
+/// экранирования: `/`, `.` и `-` считались границей слова, и переименование
+/// `20-surface` переписывало заодно `20-surface/configure` — имя ДРУГОГО
+/// документа, молча.
+const RENAME_IN_COLUMNS: &str = r#"
+DROP FUNCTION IF EXISTS rename_in_columns(text, text, text, boolean);
+CREATE OR REPLACE FUNCTION rename_matching_in_columns(п text, образец text, стало text, слить boolean DEFAULT false)
+RETURNS TABLE(таблица text, колонка text, строк bigint, снято bigint) AS $$
+DECLARE c record; n bigint; d bigint; места tid[]; место tid;
+BEGIN
+  FOR c IN
+    SELECT k.table_name AS t, k.column_name AS col
+      FROM information_schema.columns k
+      JOIN information_schema.columns pid
+        ON pid.table_schema = k.table_schema AND pid.table_name = k.table_name
+       AND pid.column_name = 'project_id'
+     WHERE k.table_schema = 'public' AND k.data_type = 'text'
+       AND k.table_name LIKE 'project\_%'
+       AND k.column_name <> 'project_id'
+       -- Содержание документа правит сама дверь, и правит с ревизией; дважды
+       -- переписать — потерять след.
+       AND NOT (k.table_name = 'project_documents' AND k.column_name = 'content')
+       -- ИСТОРИЮ НЕ ПРАВИТЬ. `project_document_revisions.content` — запись о
+       -- том, что документ говорил ТОГДА, и обход хотел переписать 479 таких
+       -- записей. Это подделка прошлого: старое имя в старой ревизии — правда,
+       -- а не опечатка.
+       AND k.table_name <> 'project_document_revisions'
+       -- ЧТО ПЕРЕЕДЕТ САМО — НЕ ТРОГАТЬ. Пять колонок разбора ссылаются на
+       -- `project_documents.entity_name` связью `ON UPDATE CASCADE`: родитель
+       -- переименуется, дети переедут за ним. Обход же шёл по
+       -- `information_schema` в её собственном порядке и брал ребёнка РАНЬШЕ
+       -- родителя — тогда строка ячейки показывала на имя, которого ещё нет, и
+       -- вся правка падала `project_document_cells_document_fk`. Воспроизводилось
+       -- на любом виде с таблицей: `task`, `run`, `story`.
+       AND NOT EXISTS (
+             SELECT 1 FROM information_schema.referential_constraints rc
+               JOIN information_schema.key_column_usage u
+                 ON u.constraint_name = rc.constraint_name
+                AND u.constraint_schema = rc.constraint_schema
+              WHERE rc.update_rule = 'CASCADE'
+                AND u.table_schema = 'public'
+                AND u.table_name = k.table_name AND u.column_name = k.column_name)
+     ORDER BY k.table_name, k.column_name
+  LOOP
+    d := 0;
+    BEGIN
+      EXECUTE format(
+        'UPDATE %I SET %I = regexp_replace(%I, $1, $2, ''g'')
+          WHERE project_id = $3 AND %I ~ $1', c.t, c.col, c.col, c.col)
+        USING образец, стало, п;
+      GET DIAGNOSTICS n = ROW_COUNT;
+    EXCEPTION WHEN unique_violation THEN
+      -- ДВОЙНИК. Прежде здесь стояло удаление ВСЕХ строк со старым именем —
+      -- без спроса и без слова о склейке. Пять строк ссылались на старое имя,
+      -- одна из них сталкивалась с существующей — и удалялись все пять вместо
+      -- «четыре переименовать, одну слить». Итог писался как `строк=0`, то есть
+      -- дверь отвечала «ничего не переименовано» там, где потеряла запись.
+      IF NOT слить THEN
+        RAISE EXCEPTION
+          'имя «%» в %.% уже занято: переименование склеило бы две записи в одну',
+          стало, c.t, c.col USING ERRCODE = 'unique_violation',
+          HINT = 'если это одна и та же сущность, заведённая дважды, — скажите merge';
+      END IF;
+      -- Со словом о склейке — построчно: переименовывается всё, что может, и
+      -- снимается только то, что вправду столкнулось.
+      n := 0;
+      EXECUTE format('SELECT array_agg(ctid) FROM %I WHERE project_id = $1 AND %I ~ $2',
+                     c.t, c.col)
+        INTO места USING п, образец;
+      FOREACH место IN ARRAY coalesce(места, ARRAY[]::tid[]) LOOP
+        BEGIN
+          EXECUTE format(
+            'UPDATE %I SET %I = regexp_replace(%I, $1, $2, ''g'') WHERE ctid = $3',
+            c.t, c.col, c.col)
+            USING образец, стало, место;
+          n := n + 1;
+        EXCEPTION WHEN unique_violation THEN
+          EXECUTE format('DELETE FROM %I WHERE ctid = $1', c.t) USING место;
+          d := d + 1;
+        END;
+      END LOOP;
+    END;
+    IF n > 0 OR d > 0 THEN
+      таблица := c.t; колонка := c.col; строк := n; снято := d; RETURN NEXT;
+    END IF;
+  END LOOP;
+END $$ LANGUAGE plpgsql;
+"#;
+
 /// Завести таблицы, если их ещё нет. Зовётся один раз при старте.
 ///
 /// Не при каждой пересборке: `CREATE TABLE IF NOT EXISTS` печатает NOTICE, а
@@ -2853,6 +2887,7 @@ CREATE TABLE IF NOT EXISTS gate_dirty (
 pub async fn ensure(pool: &Pool) -> Result<(), tokio_postgres::Error> {
     let client = pool.get().await.expect("пул отдал соединение");
     client.batch_execute(DDL).await?;
+    client.batch_execute(RENAME_IN_COLUMNS).await?;
     // Представления заводятся после таблиц: они их читают.
     client.batch_execute(VIEWS).await?;
     // Своей пачкой — чтобы ожидание замка на снятии не держало за собой схему.
@@ -2904,6 +2939,122 @@ pub async fn rebuild_before(pool: &Pool, project: &str) -> Result<Value, tokio_p
         .await?;
     tx.commit().await?;
     Ok(json!({ "task_requirements_declared": declared, "task_requirement": links }))
+}
+
+/// Снять переделанное: задача закрыта заново, коммитом позже замеченного долга.
+///
+/// Больше долг не уходит ничем. Задача, выпавшая из плана, своего долга не
+/// теряет: читают долг только через план, и выпавшая его не показывает, а
+/// вернувшись — показывает прежний. Иначе снять задачу и вернуть её было бы
+/// способом погасить долг без переделки.
+pub async fn clear_redone(
+    client: &impl deadpool_postgres::GenericClient,
+    project: &str,
+) -> Result<(), tokio_postgres::Error> {
+    client
+        .execute(
+            "DELETE FROM task_redo r
+              WHERE r.project_id = $1
+                AND EXISTS (SELECT 1 FROM task_state ts
+                             WHERE ts.project_id = r.project_id AND ts.task_id = r.task_id
+                               AND ts.state = 'closed' AND ts.closed_at > r.noticed_at)",
+            &[&project],
+        )
+        .await?;
+    Ok(())
+}
+
+/// Закрытия, какими их видит план перед замером: задача и закрывающий коммит.
+///
+/// Закрытие опознаётся коммитом, и другого опознания у него нет: подача без
+/// коммита не принимается (`closings_without_commit`), объявить задачу
+/// закрытой дверью нельзя (`declare_task`).
+pub async fn closings_to_judge(
+    client: &impl deadpool_postgres::GenericClient,
+    project: &str,
+) -> Result<Vec<(String, String)>, tokio_postgres::Error> {
+    let rows = client
+        .query(
+            "SELECT id, coalesce(closing_commit, '') FROM project_plan_tasks
+              WHERE project_id = $1 AND state = 'closed'",
+            &[&project],
+        )
+        .await?;
+    Ok(rows.iter().map(|r| (r.get(0), r.get(1))).collect())
+}
+
+/// Суд над закрытиями, взятыми до замера, — по фазе, какой её оставил замер.
+///
+/// Закрытая при закрытой фазе задача получает долг. Судится и отмечается одно и
+/// то же закрытие: тот коммит, что был взят, если история всё ещё держит его
+/// закрытым, суд его ещё не отметил, а вид задачи отображён на фазу.
+/// Сменилось за время замера — судит следующий замер; отметил другой замер —
+/// второго суда нет; фазы у вида нет — судить не по чему.
+pub async fn judge_closings(
+    client: &impl deadpool_postgres::GenericClient,
+    project: &str,
+    pending: &[(String, String)],
+) -> Result<u64, tokio_postgres::Error> {
+    if pending.is_empty() {
+        return Ok(0);
+    }
+    let (tasks, commits): (Vec<String>, Vec<String>) = pending.iter().cloned().unzip();
+    client
+        .execute(
+            "WITH j AS (
+               SELECT tp.project_id, tp.task_id, tp.open, coalesce(tp.phase, '') AS phase,
+                      coalesce(tp.gate, '') AS gate, p.closing_commit, ts.closed_at, ts.seen_at
+                 FROM unnest($2::text[], $3::text[]) AS p(task_id, closing_commit)
+                 JOIN task_phase tp ON tp.project_id = $1 AND tp.task_id = p.task_id
+                 JOIN task_state ts ON ts.project_id = tp.project_id AND ts.task_id = tp.task_id
+                                   AND ts.state = 'closed' AND ts.closing_commit = p.closing_commit
+                WHERE tp.open IS NOT NULL
+                  AND NOT EXISTS (SELECT 1 FROM task_closing_judged d
+                                   WHERE d.project_id = tp.project_id AND d.task_id = tp.task_id
+                                     AND d.closing_commit = p.closing_commit)
+             ), mark AS (
+               INSERT INTO task_closing_judged (project_id, task_id, closing_commit)
+               SELECT project_id, task_id, closing_commit FROM j
+               ON CONFLICT DO NOTHING
+             )
+             INSERT INTO task_redo (project_id, task_id, noticed_at, phase, gate)
+             SELECT project_id, task_id, coalesce(nullif(closed_at, 0), seen_at), phase, gate
+               FROM j WHERE open IS FALSE
+             ON CONFLICT (project_id, task_id) DO NOTHING",
+            &[&project, &tasks, &commits],
+        )
+        .await
+}
+
+/// Замер, вокруг которого судятся закрытия: взятые ДО него — по фазе, какой он
+/// её оставил. Порядок живёт здесь одним местом, а не у каждого, кто меряет.
+///
+/// Соединение берётся на каждый запрос и сразу отдаётся: держать его, пока замер
+/// берёт своё, значит занимать два слота на замер — а при восьми одновременных
+/// замерах это тупик, уже однажды снятый в пересборке.
+pub async fn judging_closings<T, F, Fut>(
+    pool: &Pool,
+    project: &str,
+    measure: F,
+) -> Result<T, tokio_postgres::Error>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<T, tokio_postgres::Error>>,
+{
+    let pending = closings_to_judge(&pool.get().await.expect("пул отдал соединение"), project).await?;
+    let out = measure().await?;
+    judge_closings(&pool.get().await.expect("пул отдал соединение"), project, &pending).await?;
+    Ok(out)
+}
+
+/// Закрытия без коммита в подаче. Закрытие опознаётся коммитом: без него суд
+/// порядка не отличит новое закрытие от прежнего, и такая подача не принимается.
+pub fn closings_without_commit(states: &[(String, String, String, i64)]) -> Vec<String> {
+    states
+        .iter()
+        .filter(|(_, state, commit, _)| state == "closed" && commit.trim().is_empty())
+        .map(|(id, _, _, _)| id.clone())
+        .collect()
 }
 
 /// Пересобрать проекции этого сервера. Возвращает счёт по каждой.
@@ -3165,57 +3316,10 @@ pub async fn rebuild(pool: &Pool, project: &str) -> Result<Value, tokio_postgres
         )
         .await?;
 
-    // Переделанное снимается: закрыта заново, коммитом позже замеченного долга.
-    // Вместе с ним уходит и долг задачи, которой в плане больше нет: переделывать
-    // нечего, а запись жила бы вечно — плана она не касается и ничем не гасится.
-    // Снимается ДО суда: новое закрытие при всё ещё закрытой фазе судится ниже и
-    // ставит долг заново, а снятое после суда уходило бы вместе с ним.
-    tx.execute(
-        "DELETE FROM task_redo r
-          WHERE r.project_id = $1
-            AND (EXISTS (SELECT 1 FROM task_state ts
-                          WHERE ts.project_id = r.project_id AND ts.task_id = r.task_id
-                            AND ts.state = 'closed' AND ts.closed_at > r.noticed_at)
-                 OR NOT EXISTS (SELECT 1 FROM project_plan_tasks t
-                                 WHERE t.project_id = r.project_id AND t.id = r.task_id))",
-        &[&project],
-    )
-    .await?;
-    tx.execute(
-        "UPDATE task_state s SET judged_commit = NULL
-          WHERE s.project_id = $1 AND s.judged_commit IS NOT NULL
-            AND NOT EXISTS (SELECT 1 FROM project_plan_tasks t
-                             WHERE t.project_id = s.project_id AND t.id = s.task_id)",
-        &[&project],
-    )
-    .await?;
-
-    // Долг замечается ЗДЕСЬ, сразу после состояний: фаза уже известна, гейт
-    // измерен прошлым кругом. Судится и помечается одно и то же — закрытие,
-    // каким его видит план этой транзакции, у задачи, чья фаза известна. Без
-    // коммита закрытие не опознать, и оно судится каждый раз.
-    tx.execute(
-        "WITH j AS (
-           SELECT tp.project_id, tp.task_id, tp.open, coalesce(tp.phase, '') AS phase,
-                  coalesce(tp.gate, '') AS gate, t.closing_commit, ts.closed_at, ts.seen_at
-             FROM task_phase tp
-             JOIN project_plan_tasks t ON t.project_id = tp.project_id AND t.id = tp.task_id
-             LEFT JOIN task_state ts ON ts.project_id = tp.project_id AND ts.task_id = tp.task_id
-            WHERE tp.project_id = $1 AND tp.state = 'closed' AND tp.open IS NOT NULL
-              AND (ts.task_id IS NULL OR t.closing_commit = ''
-                   OR ts.judged_commit IS DISTINCT FROM t.closing_commit)
-         ), mark AS (
-           UPDATE task_state s SET judged_commit = j.closing_commit
-             FROM j
-            WHERE s.project_id = j.project_id AND s.task_id = j.task_id AND j.closing_commit <> ''
-         )
-         INSERT INTO task_redo (project_id, task_id, noticed_at, phase, gate)
-         SELECT project_id, task_id, coalesce(nullif(closed_at, 0), seen_at, $2), phase, gate
-           FROM j WHERE open IS FALSE
-         ON CONFLICT (project_id, task_id) DO NOTHING",
-        &[&project, &now_ms()],
-    )
-    .await?;
+    // Долг «закрыта не в свой черёд» здесь только СНИМАЕТСЯ. Ставится он замером
+    // (`judge_closings`): судить закрытие по гейту, измеренному до него, значило
+    // бы судить по прошлому.
+    clear_redone(&tx, project).await?;
 
     // ── Пункт готовности ─────────────────────────────────────────────────────
     // Переносятся ВСЕ пункты со способом `unknown`. Это ничего не проверяет — и
@@ -4555,6 +4659,12 @@ pub async fn push_task_state(
     states: &[(String, String, String, i64)],
     seen_at: i64,
 ) -> Result<Value, tokio_postgres::Error> {
+    let bare = closings_without_commit(states);
+    if !bare.is_empty() {
+        return Ok(json!({ "status": "closed_without_commit", "tasks": bare,
+            "why": "закрытие приходит закрывающим трейлером и опознаётся его коммитом: без коммита \
+                    нельзя отличить новое закрытие от прежнего. Ничего не записано" }));
+    }
     let mut client = pool.get().await.expect("пул отдал соединение");
     let tx = client.transaction().await?;
     // Подача полная, а не добавочная: задача, исчезнувшая из подачи, потеряла
@@ -6940,9 +7050,14 @@ pub async fn declare_task(
     if id.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "задача без имени не объявляется" }));
     }
-    // Состояние объявляется тремя словами и только ими: незнание называется
-    // «не начата», а не выдумывается четвёртым словом.
-    let state = if matches!(state, "not_started" | "claimed" | "closed") { state } else { "not_started" };
+    // Взятие и закрытие приходят трейлером, а не словом двери: объявленное
+    // закрытие не опознать коммитом, и суд порядка обошёл бы его. Незнание
+    // называется «не начата».
+    if matches!(state, "claimed" | "closed") {
+        return Ok(json!({ "status": "state_from_history", "id": id, "state": state,
+            "why": "взятие и закрытие задачи приходят закрывающим трейлером (`Task: <id> closed`) \
+                    и подачей `task-state-push`, а не объявлением" }));
+    }
     let client = pool.get().await.expect("пул отдал соединение");
     // Объявление поверх документа роняло пересборку всего набора: строка
     // красной задачи ложилась в план второй раз. Документ полнее объявления, и
@@ -6963,12 +7078,12 @@ pub async fn declare_task(
     client.execute(
         "INSERT INTO project_plan_tasks (project_id, id, milestone_id, ord, title, size, state,
                                          closing_commit, kind, entity_kind, entity_name, origin)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,'',$8,'task',$2,'declared')
+         VALUES ($1,$2,$3,$4,$5,$6,'not_started','',$7,'task',$2,'declared')
          ON CONFLICT (project_id, id) DO UPDATE SET milestone_id = EXCLUDED.milestone_id,
            ord = EXCLUDED.ord, title = EXCLUDED.title, size = EXCLUDED.size,
-           state = EXCLUDED.state, kind = EXCLUDED.kind, origin = 'declared'",
-        &[&project, &id, &milestone, &ord, &title, &size, &state, &kind]).await?;
-    Ok(json!({ "status": "declared", "id": id, "state": state }))
+           kind = EXCLUDED.kind, origin = 'declared'",
+        &[&project, &id, &milestone, &ord, &title, &size, &kind]).await?;
+    Ok(json!({ "status": "declared", "id": id }))
 }
 
 pub async fn declare_decision(
@@ -8071,19 +8186,35 @@ pub async fn set_kind_reopens(
     Ok(json!({ "status": "declared", "kind": kind, "reopens": false }))
 }
 
-/// Таблицы, которые вид объявил своими (`kind-projection … holds`).
+/// Таблицы, где записи вида лежат под своими именами: объявленные видом своими
+/// (`kind-projection … holds`) и держащие запись колонкой `id` рядом с
+/// `project_id`.
+///
+/// Держатель бывает и чужих строк: у `index` это связи и источники поверхностей,
+/// у них `id` нет. Спрашивать их по имени записи значило ронять дверь
+/// «column id does not exist» — `entity-rename` падала на всём виде.
 async fn своих_таблиц(
-    client: &deadpool_postgres::Client, kind: &str,
+    client: &impl deadpool_postgres::GenericClient, kind: &str,
 ) -> Result<Vec<String>, tokio_postgres::Error> {
     Ok(client
-        .query_opt("SELECT spec->'holds' FROM kind_layout WHERE name = $1", &[&kind])
+        .query(
+            "SELECT h.t
+               FROM kind_layout k
+              CROSS JOIN LATERAL jsonb_array_elements_text(
+                      CASE WHEN jsonb_typeof(k.spec->'holds') = 'array' THEN k.spec->'holds' ELSE '[]' END
+                    ) WITH ORDINALITY AS h(t, n)
+              WHERE k.name = $1
+                AND EXISTS (SELECT 1 FROM information_schema.columns c
+                             WHERE c.table_schema = 'public' AND c.table_name = h.t AND c.column_name = 'id')
+                AND EXISTS (SELECT 1 FROM information_schema.columns c
+                             WHERE c.table_schema = 'public' AND c.table_name = h.t AND c.column_name = 'project_id')
+              ORDER BY h.n",
+            &[&kind],
+        )
         .await?
-        .and_then(|r| r.get::<_, Option<Value>>(0))
-        .and_then(|v| {
-            v.as_array()
-                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
-        })
-        .unwrap_or_default())
+        .iter()
+        .map(|r| r.get(0))
+        .collect())
 }
 
 /// Переименовать сущность во ВСЁМ наборе.
@@ -8093,22 +8224,61 @@ async fn своих_таблиц(
 /// вместо `FR-UI-01`. Живут они в двух документах, а УПОМИНАЮТСЯ в 427: руками
 /// такое не правят, а мимо сервера — тем более.
 ///
-/// Сухой ход по умолчанию: сперва показывается, что изменится, и только по
-/// `apply` пишется. Ревизия документа сохраняется, как при всякой правке.
+/// Сухой ход по умолчанию, и это та же правка, откаченная, а не её пересказ:
+/// показано ровно то, что сделает запись, — колонки, записи и снятое. Ревизия
+/// документа сохраняется, как при всякой правке.
 ///
 /// Новое имя проверяется ОБЩИМ образцом вида, а не проектным: переименование
 /// ради того и делается, чтобы расхождение ушло.
 pub async fn rename_entity(
     pool: &Pool, project: &str, kind: &str, from: &str, to: &str, apply: bool, merge: bool,
 ) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+    let mut client = pool.get().await.expect("пул отдал соединение");
+    let tx = client.transaction().await?;
+    tx.batch_execute("SET LOCAL lock_timeout = '2s'").await?;
+    let mut report = renaming(&tx, project, kind, from, to, merge).await?;
+    if report["status"] != "renamed" || !apply {
+        tx.rollback().await?;
+        if report["status"] == "renamed" {
+            report["status"] = json!("dry");
+            report["means"] = json!("показано ровно то, что сделает запись, и ничего не записано. \
+                                     Запись — тем же вызовом с `apply=true`");
+        }
+        return Ok(report);
+    }
+    tx.commit().await?;
+    drop(client);
+    // РАЗБОР ДОКУМЕНТА — ЧАСТЬЮ ПРАВКИ. Дверь правила текст и на этом
+    // останавливалась: блоки, секции и ячейки оставались прежними, и вниз по
+    // течению не менялось НИЧЕГО — переименовал 71 вопрос, а проекция
+    // показывала прежние имена, потому что читала старые ячейки.
+    //
+    // Правка документа мимо разбора — это правка, которой набор не увидит.
+    crate::store::reparse_all(pool, project).await?;
+    report["means"] = json!(if report["dropped"].as_i64().unwrap_or(0) > 0 {
+        "документы разобраны заново; проекции устарели — позовите `reproject`. \
+         ВНИМАНИЕ: снято строк — это склейка, названная словом `merge`"
+    } else {
+        "документы разобраны заново; проекции устарели — позовите `reproject`"
+    });
+    Ok(report)
+}
+
+async fn renaming(
+    tx: &impl deadpool_postgres::GenericClient, project: &str, kind: &str, from: &str, to: &str, merge: bool,
+) -> Result<Value, tokio_postgres::Error> {
     if from.trim().is_empty() || to.trim().is_empty() {
         return Ok(json!({ "status": "empty", "why": "нужны оба имени: старое и новое" }));
     }
     if from == to {
         return Ok(json!({ "status": "same", "why": "имена совпадают: переименовывать нечего" }));
     }
-    let Some(образец) = client
+    if tx.query_opt("SELECT 1 FROM kind_layout WHERE name = $1", &[&from]).await?.is_some() {
+        return Ok(json!({ "status": "kind_word", "from": from,
+            "why": "старое имя совпадает с именем вида: правка идёт по всем колонкам набора и \
+                    переписала бы вид у всех его записей вместе с именем" }));
+    }
+    let Some(образец) = tx
         .query_opt("SELECT spec->>'id' FROM kind_layout WHERE name = $1", &[&kind])
         .await?
         .and_then(|r| r.get::<_, Option<String>>(0))
@@ -8116,32 +8286,25 @@ pub async fn rename_entity(
         return Ok(json!({ "status": "no_pattern", "kind": kind,
             "why": "у вида не объявлен образец имени: сверить новое имя не с чем" }));
     };
-    let подходит: bool = client
-        .query_one("SELECT $1 ~ $2", &[&to, &образец])
-        .await?
-        .get(0);
+    let сверка = tx.query_one("SELECT $1 ~ $2, ($1 || '/' || $1) ~ $2", &[&to, &образец]).await?;
+    let (подходит, косая_в_имени): (bool, bool) =
+        (сверка.get(0), сверка.get::<_, bool>(1) || from.contains('/') || to.contains('/'));
     if !подходит {
         return Ok(json!({ "status": "not_by_pattern", "to": to, "pattern": образец,
             "why": "новое имя не следует общему образцу вида: переименование ради того и \
                     делается, чтобы расхождение ушло, а не переехало" }));
     }
-    // Занятое имя — молчаливая склейка двух сущностей в одну. Отказ.
-    let свои = своих_таблиц(&client, kind).await?;
+    let свои = своих_таблиц(tx, kind).await?;
     // ЗАНЯТОСТЬ — ЭТО ЧУЖАЯ ЗАПИСЬ, а не упоминание в тексте. Проверка по
     // документам отвергала законное доделывание: текст уже переименован
     // половинным ходом, а объявленная запись осталась со старым именем, и
     // дверь отказывала «занято» — самой себе.
     //
     // Запись же — доказательство: две сущности с одним именем не бывают.
-    let mut занято: i64 = 0;
+    let документ_занят = документов_вида(tx, project, kind, to).await?;
+    let mut занято: i64 = документ_занят;
     for table in &свои {
-        занято += client
-            .query_one(
-                &format!("SELECT count(*) FROM {table} WHERE project_id = $1 AND id = $2"),
-                &[&project, &to],
-            )
-            .await?
-            .get::<_, i64>(0);
+        занято += записей_под_именем(tx, table, project, to).await?;
     }
     // `merge` — ЯВНОЕ слово о том, что это одна и та же сущность, заведённая
     // дважды: разбором под новым именем и остатком под старым. Без него отказ
@@ -8149,13 +8312,20 @@ pub async fn rename_entity(
     // молчаливое слияние двух сущностей в одну не заметит никто.
     if занято > 0 && !merge {
         return Ok(json!({ "status": "taken", "to": to, "mentions": занято,
-            "why": "запись под новым именем уже есть. Если это ТА ЖЕ сущность, заведённая \
-                    дважды, скажите об этом словом: `merge=true` — старая строка будет снята, \
-                    и снятое посчитано отдельно" }));
+            "why": if документ_занят > 0 {
+                "документ этого вида под новым именем уже есть. `merge=true` СНИМЕТ документ \
+                 под старым именем целиком — его текст, ячейки, блоки и связи — и оставит \
+                 документ под новым; сухой ход с `merge=true` покажет снятое"
+            } else {
+                "запись под новым именем уже есть. Если это ТА ЖЕ сущность, заведённая \
+                 дважды, скажите об этом словом: `merge=true` — старая строка будет снята, \
+                 и снятое посчитано отдельно"
+            } }));
     }
 
-    let образец_слова = format!("\\m{}\\M", regex_escape(from));
-    let затронуто = client
+    let образец_слова = name_in_text(from, косая_в_имени);
+    let замена = replacement_of(to);
+    let затронуто = tx
         .query(
             "SELECT entity_kind, entity_name,
                     ((length(content) - length(regexp_replace(content, $2, '', 'g')))
@@ -8166,54 +8336,46 @@ pub async fn rename_entity(
             &[&project, &образец_слова, &from],
         )
         .await?;
-    let документов = затронуто.len();
     let упоминаний: i64 = затронуто.iter().map(|r| r.get::<_, i64>(2)).sum();
     // ПРЕДМЕТ — И ЗАПИСЬ ТОЖЕ, не только текст. Документы могли быть уже
     // переименованы, а объявленная запись остаться со старым именем: тогда
     // «в документах не нашли» — это не «нечего делать», а ровно половина
     // работы, которую и надо доделать.
-    let есть_запись: bool = {
-        let mut нашлась = false;
-        for table in &свои {
-            let n: i64 = client
-                .query_one(
-                    &format!("SELECT count(*) FROM {table} WHERE project_id = $1 AND id = $2"),
-                    &[&project, &from],
-                )
-                .await?
-                .get(0);
-            if n > 0 {
-                нашлась = true;
-            }
-        }
-        нашлась
-    };
-    if документов == 0 && !есть_запись {
+    let документ_старый = документов_вида(tx, project, kind, from).await?;
+    let mut записей: i64 = 0;
+    for table in &свои {
+        записей += записей_под_именем(tx, table, project, from).await?;
+    }
+    if затронуто.is_empty() && документ_старый == 0 && записей == 0 {
         return Ok(json!({ "status": "not_found", "from": from,
             "why": "такого имени нет ни в одном документе и ни в одной записи" }));
     }
-    if !apply {
-        return Ok(json!({ "status": "dry", "from": from, "to": to,
-            "documents": документов, "mentions": упоминаний,
-            "where": затронуто.iter().take(8).map(|r| json!({
-                "kind": r.get::<_, String>(0), "name": r.get::<_, String>(1),
-                "times": r.get::<_, i64>(2) })).collect::<Vec<_>>(),
-            "means": "показано, что изменится. Запись — тем же вызовом с `apply=true`" }));
+    let документ_переезжает = документ_старый > 0 && документ_занят == 0;
+    let чужая_история: i64 = tx
+        .query_one(
+            "SELECT count(*) FROM project_document_revisions
+              WHERE project_id = $1 AND entity_kind = $2 AND entity_name = $3",
+            &[&project, &kind, &to],
+        )
+        .await?
+        .get(0);
+    if документ_переезжает && чужая_история > 0 {
+        return Ok(json!({ "status": "history_taken", "to": to, "revisions": чужая_история,
+            "why": "под новым именем лежит история ревизий документа, которого уже нет: \
+                    переезд смешал бы её с историей переименуемого документа" }));
     }
 
-    let mut client = pool.get().await.expect("пул отдал соединение");
-    let tx = client.transaction().await?;
     // Правка сперва, ревизия следом: текущее содержимое уже записано под своим
     // номером, и попытка записать его второй раз падала на уникальности пары
     // «документ, ревизия». Ревизия — это НОВАЯ версия, а не копия старой.
-    let n = tx
+    let документов = tx
         .execute(
             "UPDATE project_documents
                 SET content = regexp_replace(content, $2, $3, 'g'),
                     revision = revision + 1,
                     updated_at = $4
               WHERE project_id = $1 AND content ~ $2",
-            &[&project, &образец_слова, &to, &now_ms()],
+            &[&project, &образец_слова, &замена, &now_ms()],
         )
         .await?;
     tx.execute(
@@ -8238,8 +8400,8 @@ pub async fn rename_entity(
     // действительно стоит, и правит только там; перечень колонок в коде
     // разошёлся бы со схемой.
     let в_колонках = tx
-        .query("SELECT таблица, колонка, строк, снято FROM rename_in_columns($1, $2, $3, $4)",
-               &[&project, &from, &to, &merge])
+        .query("SELECT таблица, колонка, строк, снято FROM rename_matching_in_columns($1, $2, $3, $4)",
+               &[&project, &образец_слова, &замена, &merge])
         .await?;
     // СНЯТОЕ НАЗЫВАЕТСЯ. Колонка `снято` считалась и отбрасывалась: ответ нёс
     // `rows: 0` там, где строку удалили, и удаление под видом переименования
@@ -8251,41 +8413,64 @@ pub async fn rename_entity(
         .map(|r| json!({ "table": r.get::<_, String>(0), "column": r.get::<_, String>(1),
                          "rows": r.get::<_, i64>(2), "dropped": r.get::<_, i64>(3) }))
         .collect();
-    let mut записей = 0u64;
     for table in &свои {
-        let есть: bool = tx
-            .query_one(
-                "SELECT EXISTS (SELECT 1 FROM information_schema.columns
-                                 WHERE table_schema='public' AND table_name=$1 AND column_name='id')",
-                &[table],
-            )
-            .await?
-            .get(0);
-        if есть {
-            записей += tx
-                .execute(
-                    &format!("UPDATE {table} SET id = $2 WHERE project_id = $1 AND id = $3"),
-                    &[&project, &to, &from],
-                )
-                .await?;
-        }
+        tx.execute(
+            &format!("UPDATE {table} SET id = $2 WHERE project_id = $1 AND id = $3"),
+            &[&project, &to, &from],
+        )
+        .await?;
     }
-    tx.commit().await?;
-    // РАЗБОР ДОКУМЕНТА — ЧАСТЬЮ ПРАВКИ. Дверь правила текст и на этом
-    // останавливалась: блоки, секции и ячейки оставались прежними, и вниз по
-    // течению не менялось НИЧЕГО — переименовал 71 вопрос, а проекция
-    // показывала прежние имена, потому что читала старые ячейки.
-    //
-    // Правка документа мимо разбора — это правка, которой набор не увидит.
-    crate::store::reparse_all(pool, project).await?;
+    let ревизий = if документ_переезжает {
+        tx.execute(
+            "UPDATE project_document_revisions SET entity_name = $4
+              WHERE project_id = $1 AND entity_kind = $2 AND entity_name = $3",
+            &[&project, &kind, &from, &to],
+        )
+        .await?
+    } else {
+        0
+    };
     Ok(json!({ "status": "renamed", "from": from, "to": to,
-               "documents": n, "mentions": упоминаний, "records": записей,
-               "columns": колонки, "dropped": снято,
-               "means": if снято > 0 {
-                   "документы разобраны заново; проекции устарели — позовите `reproject`.                     ВНИМАНИЕ: снято строк — это склейка, названная словом `merge`"
-               } else {
-                   "документы разобраны заново; проекции устарели — позовите `reproject`"
-               } }))
+               "documents": документов, "mentions": упоминаний, "records": записей,
+               "columns": колонки, "dropped": снято, "revisions": ревизий,
+               "where": затронуто.iter().take(8).map(|r| json!({
+                   "kind": r.get::<_, String>(0), "name": r.get::<_, String>(1),
+                   "times": r.get::<_, i64>(2) })).collect::<Vec<_>>() }))
+}
+
+async fn записей_под_именем(
+    client: &impl deadpool_postgres::GenericClient, table: &str, project: &str, name: &str,
+) -> Result<i64, tokio_postgres::Error> {
+    Ok(client
+        .query_one(&format!("SELECT count(*) FROM {table} WHERE project_id = $1 AND id = $2"), &[&project, &name])
+        .await?
+        .get(0))
+}
+
+/// Документ вида под этим именем — тоже запись: у `index` и `mockup` другой нет.
+async fn документов_вида(
+    client: &impl deadpool_postgres::GenericClient, project: &str, kind: &str, name: &str,
+) -> Result<i64, tokio_postgres::Error> {
+    Ok(client
+        .query_one(
+            "SELECT count(*) FROM project_documents WHERE project_id = $1 AND entity_kind = $2 AND entity_name = $3",
+            &[&project, &kind, &name],
+        )
+        .await?
+        .get(0))
+}
+
+/// Образец имени в тексте и в колонках. Граница — не `\m…\M`: имена бывают
+/// путями, и `.`, `-` — их буквы, а не края. Точка краем остаётся, если по ту
+/// сторону не буква: конец предложения — не расширение файла, `...` — не `v1.`.
+/// Косая — буква имени только у вида, чей образец пускает её внутрь имени: у
+/// `index` `20-surface/configure` — другое имя, у вопросов `OQ-01/OQ-02` — два.
+fn name_in_text(name: &str, slash_in_name: bool) -> String {
+    let (before, after) = if slash_in_name { ("/", "|/[[:alnum:]_.-]") } else { ("", "") };
+    format!(
+        "(?<![[:alnum:]_{before}-])(?<![[:alnum:]]\\.){}(?![[:alnum:]_-]|\\.[[:alnum:]]{after})",
+        regex_escape(name)
+    )
 }
 
 /// Экранирование имени для регулярного выражения: имя приходит снаружи, и
@@ -8300,6 +8485,10 @@ fn regex_escape(s: &str) -> String {
             }
         })
         .collect()
+}
+
+fn replacement_of(name: &str) -> String {
+    name.replace('\\', "\\\\")
 }
 
 /// Завести вид сущности.
@@ -8437,17 +8626,6 @@ pub async fn set_kind_id(
     let mut подошло = 0i64;
     let mut всего = 0i64;
     for table in &свои {
-        let есть: bool = client
-            .query_one(
-                "SELECT EXISTS (SELECT 1 FROM information_schema.columns
-                                 WHERE table_schema='public' AND table_name=$1 AND column_name='id')",
-                &[table],
-            )
-            .await?
-            .get(0);
-        if !есть {
-            continue;
-        }
         let r = client
             .query_one(
                 &format!(
@@ -11514,17 +11692,6 @@ pub async fn scheme_roles(pool: &Pool, project: &str) -> Result<Value, tokio_pos
         }
         let (mut подошло, mut всего) = (0i64, 0i64);
         for table in своих_таблиц(&client, вид).await? {
-            let есть: bool = client
-                .query_one(
-                    "SELECT EXISTS (SELECT 1 FROM information_schema.columns
-                                     WHERE table_schema='public' AND table_name=$1 AND column_name='id')",
-                    &[&table],
-                )
-                .await?
-                .get(0);
-            if !есть {
-                continue;
-            }
             let r = client
                 .query_one(
                     &format!(
@@ -13658,5 +13825,542 @@ mod лестница {
             (Some("Q-1"), Some("Q-1 — открыт"))
         );
         assert!(решение_лестницы(&шаг(4), 9, &[]).unwrap()["first"].is_null());
+    }
+}
+
+#[cfg(test)]
+mod redo {
+    use super::{clear_redone, closings_to_judge, closings_without_commit, declare_task, judge_closings,
+                judging_closings, PHASE_VIEWS};
+    use deadpool_postgres::Pool;
+
+    const P: &str = "p";
+
+    async fn db() -> Pool {
+        let url = std::env::var("MH_TEST_DB_URL")
+            .expect("MH_TEST_DB_URL: адрес пустой базы; тест заводит только временные таблицы своего соединения");
+        let pool = crate::db::pool(&url, 1).expect("пул тестовой базы");
+        let c = pool.get().await.expect("соединение с тестовой базой");
+        let foreign: bool = c
+            .query_one("SELECT to_regclass('public.project_documents') IS NOT NULL", &[])
+            .await
+            .unwrap()
+            .get(0);
+        assert!(!foreign, "MH_TEST_DB_URL ведёт в базу с набором: тесту нужна пустая");
+        c.batch_execute(&format!(
+            "SET search_path TO pg_temp;
+             CREATE TEMP TABLE projects (id text PRIMARY KEY);
+             CREATE TEMP TABLE phase (id text PRIMARY KEY, ord integer NOT NULL, title text NOT NULL,
+                                      gate text NOT NULL DEFAULT '', task_kind text NOT NULL DEFAULT '');
+             CREATE TEMP TABLE project_gates (project_id text NOT NULL, phase text NOT NULL, id text NOT NULL,
+                                              result jsonb);
+             CREATE TEMP TABLE project_plan_tasks (project_id text NOT NULL, id text NOT NULL, kind text NOT NULL,
+                                                   state text NOT NULL DEFAULT 'not_started', closing_commit text);
+             CREATE TEMP TABLE task_state (project_id text NOT NULL, task_id text NOT NULL, state text NOT NULL,
+                                           closing_commit text NOT NULL DEFAULT '', seen_at bigint NOT NULL,
+                                           closed_at bigint NOT NULL DEFAULT 0,
+                                           PRIMARY KEY (project_id, task_id));
+             CREATE TEMP TABLE task_closing_judged (project_id text NOT NULL, task_id text NOT NULL,
+                                                    closing_commit text NOT NULL,
+                                                    PRIMARY KEY (project_id, task_id, closing_commit));
+             CREATE TEMP TABLE task_redo (project_id text NOT NULL, task_id text NOT NULL, noticed_at bigint NOT NULL,
+                                          phase text NOT NULL DEFAULT '', gate text NOT NULL DEFAULT '',
+                                          PRIMARY KEY (project_id, task_id));
+             INSERT INTO projects VALUES ('{P}');
+             INSERT INTO phase VALUES ('Ф2', 2, 'проект', 'G2', ''), ('Ф3', 3, 'тесты', 'G3', 'red');
+             INSERT INTO project_gates VALUES ('{P}', 'G2', 'пункт', '{{\"computed\": \"passed\"}}');"
+        ))
+        .await
+        .unwrap();
+        c.batch_execute(PHASE_VIEWS).await.unwrap();
+        drop(c);
+        pool
+    }
+
+    async fn sql(pool: &Pool, query: &str) {
+        pool.get().await.unwrap().batch_execute(query).await.unwrap();
+    }
+
+    async fn plan(pool: &Pool, task: &str, kind: &str) {
+        sql(pool, &format!("INSERT INTO project_plan_tasks (project_id, id, kind) VALUES ('{P}', '{task}', '{kind}')")).await;
+    }
+
+    async fn close(pool: &Pool, task: &str, commit: &str, at: i64) {
+        sql(pool, &format!(
+            "INSERT INTO task_state (project_id, task_id, state, closing_commit, seen_at, closed_at)
+             VALUES ('{P}', '{task}', 'closed', '{commit}', {at}, {at})
+             ON CONFLICT (project_id, task_id) DO UPDATE
+               SET state = 'closed', closing_commit = EXCLUDED.closing_commit, closed_at = EXCLUDED.closed_at"
+        ))
+        .await;
+    }
+
+    async fn rebuild(pool: &Pool) {
+        sql(pool, &format!(
+            "UPDATE project_plan_tasks t SET state = s.state, closing_commit = s.closing_commit
+               FROM task_state s WHERE s.project_id = t.project_id AND s.task_id = t.id AND t.project_id = '{P}'"
+        ))
+        .await;
+        clear_redone(&pool.get().await.unwrap(), P).await.unwrap();
+    }
+
+    async fn gate(pool: &Pool, passed: bool) {
+        let computed = if passed { "passed" } else { "failed" };
+        sql(pool, &format!(
+            "UPDATE project_gates SET result = jsonb_build_object('computed', '{computed}')
+              WHERE project_id = '{P}' AND phase = 'G2'"
+        ))
+        .await;
+    }
+
+    async fn cycle(pool: &Pool, passed: bool) {
+        rebuild(pool).await;
+        judging_closings(pool, P, || async {
+            gate(pool, passed).await;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    async fn debt(pool: &Pool, task: &str) -> Option<i64> {
+        pool.get()
+            .await
+            .unwrap()
+            .query_opt("SELECT noticed_at FROM task_redo WHERE project_id = $1 AND task_id = $2", &[&P, &task])
+            .await
+            .unwrap()
+            .map(|r| r.get(0))
+    }
+
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn closed_in_turn_stays_clear_when_the_gate_reddens_later() {
+        let db = db().await;
+        plan(&db, "X", "red").await;
+        close(&db, "X", "c1", 100).await;
+        cycle(&db, true).await;
+        cycle(&db, false).await;
+        cycle(&db, false).await;
+        assert_eq!(debt(&db, "X").await, None);
+    }
+
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn a_closing_is_judged_by_the_measurement_after_it() {
+        let db = db().await;
+        gate(&db, false).await;
+        plan(&db, "A", "red").await;
+        close(&db, "A", "a1", 100).await;
+        cycle(&db, true).await;
+        assert_eq!(debt(&db, "A").await, None, "гейт, красный до закрытия и зелёный после, долга не ставит");
+
+        plan(&db, "B", "red").await;
+        close(&db, "B", "b1", 100).await;
+        cycle(&db, false).await;
+        assert_eq!(debt(&db, "B").await, Some(100), "гейт, красный после закрытия, ставит долг");
+    }
+
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn a_closing_seen_during_a_measurement_waits_for_the_next() {
+        let db = db().await;
+        plan(&db, "W", "red").await;
+        rebuild(&db).await;
+        judging_closings(&db, P, || async {
+            close(&db, "W", "w1", 100).await;
+            rebuild(&db).await;
+            gate(&db, false).await;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(debt(&db, "W").await, None);
+        cycle(&db, false).await;
+        assert_eq!(debt(&db, "W").await, Some(100));
+    }
+
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn a_closing_replaced_during_a_measurement_waits_for_the_next() {
+        let db = db().await;
+        plan(&db, "Z", "red").await;
+        close(&db, "Z", "z1", 100).await;
+        rebuild(&db).await;
+        judging_closings(&db, P, || async {
+            close(&db, "Z", "z2", 200).await;
+            gate(&db, false).await;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(debt(&db, "Z").await, None, "подача, пришедшая до пересборки, — уже не то закрытие");
+        judging_closings(&db, P, || async {
+            rebuild(&db).await;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(debt(&db, "Z").await, None, "план за время замера сменил закрытие");
+        cycle(&db, false).await;
+        assert_eq!(debt(&db, "Z").await, Some(200));
+
+        plan(&db, "R", "red").await;
+        close(&db, "R", "r1", 100).await;
+        rebuild(&db).await;
+        judging_closings(&db, P, || async {
+            sql(&db, "UPDATE task_state SET state = 'claimed' WHERE task_id = 'R'").await;
+            rebuild(&db).await;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(debt(&db, "R").await, None, "переоткрытая за время замера задача не судится");
+    }
+
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn two_measurements_judge_a_closing_once() {
+        let db = db().await;
+        plan(&db, "D", "red").await;
+        close(&db, "D", "d1", 100).await;
+        rebuild(&db).await;
+        let first = closings_to_judge(&db.get().await.unwrap(), P).await.unwrap();
+        let second = closings_to_judge(&db.get().await.unwrap(), P).await.unwrap();
+        gate(&db, true).await;
+        judge_closings(&db.get().await.unwrap(), P, &first).await.unwrap();
+        gate(&db, false).await;
+        judge_closings(&db.get().await.unwrap(), P, &second).await.unwrap();
+        assert_eq!(debt(&db, "D").await, None);
+    }
+
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn a_task_missing_from_one_push_keeps_its_judgement() {
+        let db = db().await;
+        plan(&db, "M", "red").await;
+        close(&db, "M", "m1", 100).await;
+        cycle(&db, true).await;
+        sql(&db, "DELETE FROM task_state WHERE task_id = 'M'").await;
+        cycle(&db, false).await;
+        close(&db, "M", "m1", 100).await;
+        cycle(&db, false).await;
+        assert_eq!(debt(&db, "M").await, None);
+    }
+
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn debt_is_cleared_only_by_a_later_closing_at_an_open_phase() {
+        let db = db().await;
+        plan(&db, "Y", "red").await;
+        close(&db, "Y", "c1", 100).await;
+        cycle(&db, false).await;
+        cycle(&db, false).await;
+        assert_eq!(debt(&db, "Y").await, Some(100));
+        cycle(&db, true).await;
+        assert_eq!(debt(&db, "Y").await, Some(100), "позеленевший гейт долга не гасит");
+        gate(&db, false).await;
+        close(&db, "Y", "c0", 50).await;
+        cycle(&db, false).await;
+        assert_eq!(debt(&db, "Y").await, Some(100), "закрытие коммитом раньше замеченного долг не снимает");
+        close(&db, "Y", "c2", 200).await;
+        cycle(&db, false).await;
+        assert_eq!(debt(&db, "Y").await, Some(200), "закрыта заново при закрытой фазе — долг заново");
+        close(&db, "Y", "c3", 300).await;
+        cycle(&db, true).await;
+        assert_eq!(debt(&db, "Y").await, None);
+        cycle(&db, false).await;
+        assert_eq!(debt(&db, "Y").await, None);
+    }
+
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn leaving_the_plan_does_not_launder_debt() {
+        let db = db().await;
+        plan(&db, "V", "red").await;
+        close(&db, "V", "c1", 100).await;
+        cycle(&db, false).await;
+        assert_eq!(debt(&db, "V").await, Some(100));
+        sql(&db, "DELETE FROM project_plan_tasks WHERE id = 'V'").await;
+        cycle(&db, true).await;
+        plan(&db, "V", "red").await;
+        cycle(&db, true).await;
+        assert_eq!(debt(&db, "V").await, Some(100));
+    }
+
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn an_unmapped_kind_waits_for_its_phase() {
+        let db = db().await;
+        plan(&db, "U", "other").await;
+        close(&db, "U", "u1", 100).await;
+        cycle(&db, false).await;
+        let judged: i64 = db
+            .get()
+            .await
+            .unwrap()
+            .query_one("SELECT count(*) FROM task_closing_judged WHERE task_id = 'U'", &[])
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(judged, 0, "вид без фазы не судится");
+        sql(&db, "INSERT INTO phase VALUES ('Ф4', 4, 'прочее', 'G3', 'other')").await;
+        cycle(&db, false).await;
+        assert_eq!(debt(&db, "U").await, Some(100));
+    }
+
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn a_plan_row_without_a_commit_does_not_break_the_measurement() {
+        let db = db().await;
+        sql(&db, &format!("INSERT INTO project_plan_tasks (project_id, id, kind, state) VALUES ('{P}', 'N', 'red', 'closed')")).await;
+        cycle(&db, false).await;
+        assert_eq!(debt(&db, "N").await, None, "закрытие без истории не опознать, и судом оно не считается");
+    }
+
+    #[test]
+    fn a_push_closing_without_a_commit_is_named() {
+        let states = vec![
+            ("A".to_owned(), "closed".to_owned(), "abc".to_owned(), 1),
+            ("B".to_owned(), "closed".to_owned(), " ".to_owned(), 1),
+            ("C".to_owned(), "claimed".to_owned(), "".to_owned(), 1),
+        ];
+        assert_eq!(closings_without_commit(&states), vec!["B".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn a_task_is_not_declared_closed_or_claimed() {
+        let pool = crate::db::pool("postgres://nobody@127.0.0.1:1/nothing", 1).unwrap();
+        for state in ["closed", "claimed"] {
+            let out = declare_task(&pool, P, "T", "M1", 1, "заголовок", "dev", state, "", false).await.unwrap();
+            assert_eq!(out["status"], "state_from_history", "{state}: до базы дело не доходит");
+        }
+    }
+}
+
+#[cfg(test)]
+mod kind_tables {
+    use super::своих_таблиц;
+
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn only_holders_keyed_by_id_are_the_kinds_own_tables() {
+        let url = std::env::var("MH_TEST_DB_URL").expect("MH_TEST_DB_URL: адрес пустой базы");
+        let pool = crate::db::pool(&url, 1).expect("пул тестовой базы");
+        let mut c = pool.get().await.expect("соединение с тестовой базой");
+        let foreign: bool = c
+            .query_one("SELECT to_regclass('public.kind_layout') IS NOT NULL", &[])
+            .await
+            .unwrap()
+            .get(0);
+        assert!(!foreign, "MH_TEST_DB_URL ведёт в базу с раскладкой видов: тесту нужна пустая");
+        let tx = c.transaction().await.unwrap();
+        tx.batch_execute(
+            "CREATE TABLE public.kind_layout (name text PRIMARY KEY, spec jsonb NOT NULL);
+             CREATE TABLE public.holder_links (project_id text, entity_kind text, target text);
+             CREATE TABLE public.holder_rows (project_id text, id text);
+             CREATE TABLE public.holder_more (project_id text, id text);
+             CREATE TABLE public.holder_bare (id text);
+             INSERT INTO public.kind_layout VALUES
+               ('index', '{\"holds\": [\"holder_links\", \"holder_more\", \"holder_bare\", \"holder_rows\", \"no_such_table\"]}'),
+               ('mockup', '{\"holds\": []}'),
+               ('bare', '{}');",
+        )
+        .await
+        .unwrap();
+        assert_eq!(своих_таблиц(&tx, "index").await.unwrap(), vec!["holder_more".to_owned(), "holder_rows".to_owned()]);
+        assert!(своих_таблиц(&tx, "mockup").await.unwrap().is_empty());
+        assert!(своих_таблиц(&tx, "bare").await.unwrap().is_empty());
+        assert!(своих_таблиц(&tx, "unknown").await.unwrap().is_empty());
+        tx.rollback().await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod rename {
+    use super::{name_in_text, renaming, RENAME_IN_COLUMNS};
+
+    async fn empty_base() -> deadpool_postgres::Object {
+        let url = std::env::var("MH_TEST_DB_URL").expect("MH_TEST_DB_URL: адрес пустой базы");
+        let pool = crate::db::pool(&url, 1).expect("пул тестовой базы");
+        let c = pool.get().await.expect("соединение с тестовой базой");
+        let foreign: bool = c
+            .query_one(
+                "SELECT to_regclass('public.project_documents') IS NOT NULL OR to_regclass('public.kind_layout') IS NOT NULL",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert!(!foreign, "MH_TEST_DB_URL ведёт в базу с набором: тесту нужна пустая");
+        c
+    }
+
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn a_name_is_renamed_where_it_stands_whole() {
+        let mut c = empty_base().await;
+        let tx = c.transaction().await.unwrap();
+        tx.batch_execute(
+            "CREATE TABLE public.project_notes (project_id text, name text, note text);
+             INSERT INTO public.project_notes VALUES
+               ('p', '20-surface', 'см. 20-surface. и ../20-surface, 20-surface/ и `20-surface`'),
+               ('p', '20-surface/configure', 'ссылка на index:20-surface/configure'),
+               ('p', 'docs/20-surface.md', 'x-20-surface-y 20-surface.md v1.20-surface'),
+               ('p', 'a.b', 'axb'),
+               ('p', 'OQ-01', 'OQ-01/OQ-02, FR-01...OQ-01, v1.OQ-01, OQ-010, OQ-01-й, вопросOQ-01 (OQ-01)'),
+               ('q', '20-surface', 'чужой набор: 20-surface');",
+        )
+        .await
+        .unwrap();
+        tx.batch_execute(RENAME_IN_COLUMNS).await.unwrap();
+        for (name, slash, to) in [("20-surface", true, "surface"), ("a.b", true, "ab"), ("OQ-01", false, "Q-01")] {
+            tx.query("SELECT * FROM rename_matching_in_columns('p', $1, $2, false)", &[&name_in_text(name, slash), &to])
+                .await
+                .unwrap();
+        }
+        let got: Vec<(String, String, String)> = tx
+            .query("SELECT project_id, name, note FROM public.project_notes ORDER BY project_id, name COLLATE \"C\"", &[])
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| (r.get(0), r.get(1), r.get(2)))
+            .collect();
+        let row = |p: &str, n: &str, note: &str| (p.to_owned(), n.to_owned(), note.to_owned());
+        assert_eq!(got, vec![
+            row("p", "20-surface/configure", "ссылка на index:20-surface/configure"),
+            row("p", "Q-01", "Q-01/OQ-02, FR-01...Q-01, v1.OQ-01, OQ-010, OQ-01-й, вопросOQ-01 (Q-01)"),
+            row("p", "ab", "axb"),
+            row("p", "docs/20-surface.md", "x-20-surface-y 20-surface.md v1.20-surface"),
+            row("p", "surface", "см. surface. и ../20-surface, surface/ и `surface`"),
+            row("q", "20-surface", "чужой набор: 20-surface"),
+        ]);
+        tx.rollback().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn a_previous_server_still_starts_over_the_new_function() {
+        let mut c = empty_base().await;
+        let tx = c.transaction().await.unwrap();
+        let previous = "CREATE OR REPLACE FUNCTION rename_in_columns(п text, было text, стало text, слить boolean DEFAULT false)
+             RETURNS TABLE(таблица text, колонка text, строк bigint, снято bigint) AS $$ BEGIN RETURN; END $$
+             LANGUAGE plpgsql;";
+        tx.batch_execute(previous).await.unwrap();
+        tx.batch_execute(RENAME_IN_COLUMNS).await.unwrap();
+        tx.batch_execute(RENAME_IN_COLUMNS).await.unwrap();
+        tx.batch_execute(previous).await.unwrap();
+        tx.batch_execute(RENAME_IN_COLUMNS).await.unwrap();
+        let functions: Vec<String> = tx
+            .query("SELECT proname::text FROM pg_proc WHERE proname LIKE 'rename%in_columns' ORDER BY 1", &[])
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        assert_eq!(functions, vec!["rename_matching_in_columns".to_owned()]);
+        tx.rollback().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn renaming_moves_the_name_and_nothing_that_is_not_a_name() {
+        let mut c = empty_base().await;
+        let tx = c.transaction().await.unwrap();
+        tx.batch_execute(
+            r#"CREATE TABLE public.kind_layout (name text PRIMARY KEY, spec jsonb NOT NULL);
+             CREATE TABLE public.project_documents (project_id text, entity_kind text, entity_name text,
+               content text, revision int, updated_at bigint, UNIQUE (project_id, entity_kind, entity_name));
+             CREATE TABLE public.project_document_revisions (project_id text, entity_kind text, entity_name text,
+               content text, content_hash text, bytes int, revision int, written_at bigint, written_by text,
+               UNIQUE (project_id, entity_kind, entity_name, revision));
+             CREATE TABLE public.project_questions (project_id text, id text, state text);
+             INSERT INTO public.kind_layout VALUES
+               ('index', '{"id": "^[A-Za-z0-9][A-Za-z0-9/._-]*$"}'),
+               ('question', '{"id": "^Q-\\d+$", "holds": ["project_questions"]}'),
+               ('term', '{"id": "^.+$"}');
+             INSERT INTO public.project_documents VALUES
+               ('p', 'index', '20-surface', 'экраны', 1, 0),
+               ('p', 'index', '20-surface/configure', 'выше: [экраны](index:20-surface)', 1, 0),
+               ('p', 'index', 'p', 'имя как у набора', 1, 0),
+               ('p', 'term', 'словарь', 'T-1 и OQ-01/OQ-02', 1, 0);
+             INSERT INTO public.project_document_revisions VALUES
+               ('p', 'index', '20-surface', 'экраны', 'h', 6, 1, 0, 'x'),
+               ('p', 'index', 'gone', 'было', 'h', 4, 1, 0, 'x');
+             INSERT INTO public.kind_layout VALUES
+               ('run', '{"id": "^([MV][0-9]+(-T[0-9a-z]+)?|v[0-9]+|v[0-9]+/[A-Za-z0-9-]+(/[A-Za-z0-9-]+)?)$"}');
+             INSERT INTO public.project_documents VALUES
+               ('p', 'run', 'v1/M0', 'этап', 1, 0),
+               ('p', 'run', 'v1/M0/M0-T1', 'задача этапа v1/M0', 1, 0);
+             INSERT INTO public.project_questions VALUES ('p', 'OQ-01', 'open'), ('p', 'OQ-02', 'open');"#,
+        )
+        .await
+        .unwrap();
+        tx.batch_execute(RENAME_IN_COLUMNS).await.unwrap();
+
+        let refused = renaming(&tx, "p", "index", "index", "catalog", false).await.unwrap();
+        assert_eq!(refused["status"], "kind_word");
+
+        let taken = renaming(&tx, "p", "index", "20-surface/configure", "20-surface", false).await.unwrap();
+        assert_eq!(taken["status"], "taken", "{taken}");
+        assert!(taken["why"].as_str().unwrap().contains("целиком"), "{taken}");
+        let history = renaming(&tx, "p", "index", "20-surface", "gone", false).await.unwrap();
+        assert_eq!(history["status"], "history_taken", "{history}");
+        let run = renaming(&tx, "p", "run", "v1/M0", "v2/M0", false).await.unwrap();
+        assert_eq!(run["status"], "renamed", "{run}");
+        let moved = renaming(&tx, "p", "index", "20-surface", "20-screens", false).await.unwrap();
+        assert_eq!(moved["status"], "renamed", "{moved}");
+        assert_eq!(moved["revisions"], 1, "{moved}");
+        let project = renaming(&tx, "p", "index", "p", "p2", false).await.unwrap();
+        assert_eq!(project["status"], "renamed", "{project}");
+        let question = renaming(&tx, "p", "question", "OQ-01", "Q-01", false).await.unwrap();
+        assert_eq!(question["records"], 1, "{question}");
+        let term = renaming(&tx, "p", "term", "T-1", r"T-\1\&", false).await.unwrap();
+        assert_eq!(term["status"], "renamed", "{term}");
+
+        let documents: Vec<(String, String, String, String)> = tx
+            .query("SELECT project_id, entity_kind, entity_name, content FROM public.project_documents
+                     ORDER BY entity_kind, entity_name COLLATE \"C\"", &[])
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| (r.get(0), r.get(1), r.get(2), r.get(3)))
+            .collect();
+        let doc = |k: &str, n: &str, t: &str| ("p".to_owned(), k.to_owned(), n.to_owned(), t.to_owned());
+        assert_eq!(documents, vec![
+            doc("index", "20-screens", "экраны"),
+            doc("index", "20-surface/configure", "выше: [экраны](index:20-screens)"),
+            doc("index", "p2", "имя как у набора"),
+            doc("run", "v1/M0/M0-T1", "задача этапа v2/M0"),
+            doc("run", "v2/M0", "этап"),
+            doc("term", "словарь", r"T-\1\& и Q-01/OQ-02"),
+        ]);
+        let questions: Vec<(String, String, String)> = tx
+            .query("SELECT project_id, id, state FROM public.project_questions ORDER BY 2", &[])
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| (r.get(0), r.get(1), r.get(2)))
+            .collect();
+        let q = |id: &str| ("p".to_owned(), id.to_owned(), "open".to_owned());
+        assert_eq!(questions, vec![q("OQ-02"), q("Q-01")]);
+        let history: Vec<(String, String, i32)> = tx
+            .query("SELECT entity_kind, entity_name, revision FROM public.project_document_revisions
+                     ORDER BY entity_kind, entity_name COLLATE \"C\", revision", &[])
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| (r.get(0), r.get(1), r.get(2)))
+            .collect();
+        let rev = |k: &str, n: &str, r: i32| (k.to_owned(), n.to_owned(), r);
+        assert_eq!(history, vec![
+            rev("index", "20-screens", 1),
+            rev("index", "20-surface/configure", 2),
+            rev("index", "gone", 1),
+            rev("run", "v1/M0/M0-T1", 2),
+            rev("term", "словарь", 2),
+            rev("term", "словарь", 3),
+        ]);
+        tx.rollback().await.unwrap();
     }
 }

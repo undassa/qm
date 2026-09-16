@@ -11,6 +11,18 @@ jobs:
     defaults:
       run:
         working-directory: server-rs
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -21,6 +33,11 @@ jobs:
           workspaces: server-rs
       - run: cargo build --release --locked
       - run: cargo test --release --locked
+      # Тесты, которым нужна база, в обычном прогоне помечены `ignored` — видно, что
+      # их не гоняли. Здесь база есть, и они идут отдельным шагом.
+      - run: cargo test --release --locked -- --ignored
+        env:
+          MH_TEST_DB_URL: postgres://postgres@localhost:5432/postgres
       # ХРАПОВИК, А НЕ `-D warnings`. Предупреждений в дереве 79, и запрет
       # немедленно сделал бы работу вечно красной — проверка, к красноте которой
       # привыкли, хуже отсутствующей. Но и `cargo clippy` без запрета выходит
@@ -64,18 +81,23 @@ jobs:
   # которую все привыкли видеть красной, хуже отсутствующей.
   selftest:
     runs-on: ubuntu-latest
+    # Секрет в условии шага GitHub не принимает и отвергает из-за этого ВЕСЬ файл:
+    # ни одна работа не запускалась. Условие читает признак работы — есть секрет
+    # или нет, — а сам секрет в переменные каждого шага не попадает.
+    env:
+      HAS_EDGE_SECRET: ${{ secrets.MH_EDGE_SECRET != '' }}
     steps:
       - uses: actions/checkout@v4
       # `id` и ссылки на него — только латиницей: имена шагов GitHub проверяет
       # образцом `[A-Za-z_][A-Za-z0-9_-]*`, и кириллическое имя роняет разбор
       # ВСЕГО файла — вместе с работами, которые к нему отношения не имеют.
       # Заголовки работ при этом остаются какими угодно.
-      - if: ${{ secrets.MH_EDGE_SECRET != '' }}
+      - if: ${{ env.HAS_EDGE_SECRET == 'true' }}
         uses: dtolnay/rust-toolchain@stable
-      - if: ${{ secrets.MH_EDGE_SECRET != '' }}
+      - if: ${{ env.HAS_EDGE_SECRET == 'true' }}
         run: cargo build --release --locked --bin mh
         working-directory: server-rs
-      - if: ${{ secrets.MH_EDGE_SECRET != '' }}
+      - if: ${{ env.HAS_EDGE_SECRET == 'true' }}
         run: |
           export PATH="$PWD/server-rs/target/release:$PATH"
           ./scripts/selftest.sh
@@ -84,7 +106,7 @@ jobs:
           MH_EDGE_SECRET: ${{ secrets.MH_EDGE_SECRET }}
           MH_PROJECT: ${{ secrets.MH_PROJECT }}
           MH_PRINCIPAL: ${{ secrets.MH_PRINCIPAL }}
-      - if: ${{ secrets.MH_EDGE_SECRET == '' }}
+      - if: ${{ env.HAS_EDGE_SECRET != 'true' }}
         run: |
           echo "::notice::самотест пропущен: секретов живого экземпляра нет."
           echo "Заведите MH_URL, MH_EDGE_SECRET, MH_PROJECT, MH_PRINCIPAL —"

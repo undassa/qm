@@ -224,8 +224,11 @@ pub(crate) async fn recount(pool: &Pool, project: &str) -> Result<serde_json::Va
 ///
 /// Дверь `gate-measure` и пересборка после записи мерили только гейты: лестница
 /// ждала этого работника, и `next-step`, спрошенный сразу, отвечал прежним.
+///
+/// Закрытия задач судятся вокруг замера гейтов: взятые до него — по фазе, какой
+/// он её оставил (`judging_closings`).
 pub(crate) async fn measure(pool: &Pool, project: &str) -> Result<serde_json::Value, tokio_postgres::Error> {
-    let out = crate::projector::measure_gates(pool, project).await?;
+    let out = crate::projector::judging_closings(pool, project, || crate::projector::measure_gates(pool, project)).await?;
     crate::projector::measure_process(pool, project, "godzy", "godzy").await?;
     crate::projector::measure_phases(pool, project).await?;
     Ok(out)

@@ -343,7 +343,7 @@ impl Mcp {
         tools.push(json!({ "name": "task-add", "description": "объявить задачу прямо: имя, этап, порядок, заголовок, вид, состояние",
             "inputSchema": { "type": "object", "properties": { "drop": json!({"type":"boolean","description":"снять объявленное этой же дверью"}), "id": s("имя"), "milestone": s("этап"),
                 "ord": json!({"type":"integer"}), "title": s("заголовок"), "kind": s("вид: dev · red"),
-                "state": s("not_started · claimed · closed"), "size": s("размер") },
+                "state": s("not_started; взятие и закрытие приходят трейлером и подачей task-state-push"), "size": s("размер") },
                 "required": ["id", "milestone"] } }));
         tools.push(json!({ "name": "decision-add", "description": "объявить решение прямо: имя, номер, заголовок, состояние, дата, решающие, контекст, решение, последствия",
             "inputSchema": { "type": "object", "properties": { "drop": json!({"type":"boolean","description":"снять объявленное этой же дверью"}), "id": s("имя решения"),
@@ -998,6 +998,8 @@ impl Mcp {
                         "isError": true });
                 }
                 match crate::projector::push_task_state(&self.pool, p, &states, now).await {
+                    Ok(v) if v.get("status").is_some() => json!({ "content": [{ "type": "text",
+                        "text": serde_json::to_string_pretty(&v).unwrap_or_default() }], "isError": true }),
                     Ok(mut v) => {
                         // Состояния только что изменились — план обязан их увидеть
                         // сейчас, а не после следующей записи в набор.
