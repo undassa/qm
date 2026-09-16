@@ -73,7 +73,11 @@ pub fn leaves_of(content: &str, section: &str) -> Vec<Leaf> {
     }
     let head = format!("## {section}");
     let Some(after) = content.split(head.as_str()).nth(1) else { return Vec::new() };
-    let block = after.split("```diff").nth(1).unwrap_or(after);
+    // Блок не выходит за свой раздел: без ограды `diff` разбор шёл до ближайшей
+    // ограды документа, и пункт списка ниже («- `crates/x.rs` …») становился
+    // листом со снятием.
+    let section = after.split("\n## ").next().unwrap_or(after);
+    let block = section.split("```diff").nth(1).unwrap_or(section);
     let block = block.split("```").next().unwrap_or("");
     let mut out = Vec::new();
     let mut dir = String::new();
@@ -224,5 +228,15 @@ mod flat_tests {
             ('!', "backend/crates/app/src/evaluator.rs".to_owned()),
             ('+', "backend/crates/app/src/seed/".to_owned()),
         ]);
+    }
+}
+
+#[cfg(test)]
+mod section_tests {
+    #[test]
+    fn fenceless_block_stays_in_its_section() {
+        let doc = "## Что меняется в дереве\n\n+ crates/a/src/lib.rs\n\n## Где обычно ошибаются\n\n- `crates/b/src/x.rs` правят без теста\n\n```rust\nfn main() {}\n```\n";
+        let got: Vec<String> = super::leaves_of(doc, "Что меняется в дереве").iter().map(|l| l.leaf.clone()).collect();
+        assert_eq!(got, vec!["crates/a/src/lib.rs".to_owned()]);
     }
 }

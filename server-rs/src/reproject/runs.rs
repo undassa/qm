@@ -76,7 +76,7 @@ pub fn gone(line: &str) -> bool {
 }
 
 static GONE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)удал|отмен|снят|прежн|историч|устар").expect("образец оговорки")
+    Regex::new(r"(?i)удал|отмен|снят|прежн|историч|устар|не существ").expect("образец оговорки")
 });
 
 pub async fn project(
