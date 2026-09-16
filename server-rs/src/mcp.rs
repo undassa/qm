@@ -644,8 +644,8 @@ impl Mcp {
         tools.push(json!({ "name": "run-start", "description": "завести прогон задачи: с него начинается всё, что о нём расскажут",
             "inputSchema": { "type": "object", "properties": { "task": s("имя задачи"), "agent": s("кто ведёт"),
                 "note": s("с чего начали") }, "required": ["task"] } }));
-        tools.push(json!({ "name": "run-state", "description": "состояние прогона словом: running · waiting · finished · failed; кроме running нужна причина",
-            "inputSchema": { "type": "object", "properties": { "runId": s("прогон"), "state": s("running · waiting · finished · failed"),
+        tools.push(json!({ "name": "run-state", "description": "состояние прогона словом: running · waiting · done · failed · cancelled; кроме running нужна причина",
+            "inputSchema": { "type": "object", "properties": { "runId": s("прогон"), "state": s("running · waiting · done · failed · cancelled"),
                 "note": s("на чём встали либо чем кончилось") }, "required": ["runId", "state"] } }));
         tools.push(json!({ "name": "run-event", "description": "шаг прогона: что сделано или на чём остановились",
             "inputSchema": { "type": "object", "properties": { "runId": s("прогон"), "kind": s("род шага: шаг · вопрос · отказ · итог"),
@@ -1191,7 +1191,7 @@ impl Mcp {
             }
             "run-state" => {
                 let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
-                match crate::projector::set_run_state(&self.pool, p, &g("runId"), &g("state"), &g("note")).await {
+                match crate::projector::set_run_state(&self.pool, p, &g("runId"), &g("state"), &g("note"), &self.author).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(Miss::Db(crate::projector::db_says(&e))),
                 }

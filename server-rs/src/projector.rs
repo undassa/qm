@@ -2206,25 +2206,41 @@ CREATE TABLE IF NOT EXISTS owner_ask (
 CREATE INDEX IF NOT EXISTS owner_ask_open ON owner_ask (state, at DESC);
 
 -- Прогон задачи агентом: одна строка на попытку. Таблица досталась от прежнего
--- харнеса, и объявлена она здесь, чтобы у неё был один хозяин.
+-- харнеса вместе со своим словарём состояний и запретом двух живых прогонов
+-- одной задачи; объявлена она здесь, чтобы у неё был один хозяин, и в точности
+-- такой, какая лежит в базе.
 CREATE TABLE IF NOT EXISTS project_task_runs (
-  id           text NOT NULL PRIMARY KEY,
-  project_id   text NOT NULL,
-  task_id      text NOT NULL,
-  agent_id     text,
-  state        text NOT NULL DEFAULT 'running',
+  id           text    NOT NULL PRIMARY KEY,
+  project_id   text    NOT NULL,
+  task_id      text    NOT NULL,
+  agent_id     text    NOT NULL DEFAULT '',
+  state        text    NOT NULL DEFAULT 'running',
   attempt      integer NOT NULL DEFAULT 1,
-  run_id       text NOT NULL DEFAULT '',
-  session_id   text NOT NULL DEFAULT '',
-  note         text NOT NULL DEFAULT '',
-  created_at   bigint NOT NULL,
-  updated_at   bigint,
+  run_id       text,
+  session_id   text,
+  note         text    NOT NULL DEFAULT '',
+  created_at   bigint  NOT NULL,
+  updated_at   bigint  NOT NULL,
   finished_at  bigint
 );
+CREATE UNIQUE INDEX IF NOT EXISTS project_task_runs_one_active ON project_task_runs (project_id, task_id)
+  WHERE state <> ALL (ARRAY['done', 'failed', 'cancelled']);
 
--- ЧТО ПРОГОН УСПЕЛ: шаги, вопросы, отказы. Без этого «идёт» на пульте
--- неотличимо от «висит»: состояние говорит, что прогон жив, и молчит о том,
--- дошёл ли он хоть до чего-нибудь.
+-- Переход прогона из состояния в состояние: чем кончилась попытка и по чьей
+-- воле. Таблица тоже от прежнего харнеса.
+CREATE TABLE IF NOT EXISTS project_task_run_events (
+  id          bigserial PRIMARY KEY,
+  task_run_id text   NOT NULL REFERENCES project_task_runs (id) ON DELETE CASCADE,
+  from_state  text,
+  to_state    text   NOT NULL,
+  reason      text   NOT NULL DEFAULT '',
+  actor       text   NOT NULL,
+  at          bigint NOT NULL
+);
+
+-- ЧТО ПРОГОН УСПЕЛ: шаги, вопросы, отказы. Переход состояния лежит рядом, в
+-- своей таблице, и о работе не говорит ничего: состояние сообщает, что прогон
+-- жив, и молчит о том, дошёл ли он хоть до чего-нибудь.
 CREATE TABLE IF NOT EXISTS task_run_event (
   id          bigserial PRIMARY KEY,
   project_id  text   NOT NULL,
@@ -8514,7 +8530,7 @@ pub async fn console(pool: &Pool, project: &str) -> Result<Value, tokio_postgres
                  ON t.project_id = r.project_id AND t.id = r.task_id
                LEFT JOIN project_task_workspaces w
                  ON w.project_id = r.project_id AND w.task_run_id = r.id
-              WHERE r.project_id = $1 AND r.state <> 'finished'
+              WHERE r.project_id = $1 AND r.state <> ALL (ARRAY['done', 'failed', 'cancelled'])
               ORDER BY r.updated_at DESC NULLS LAST
               LIMIT 20",
             &[&project],
@@ -8647,6 +8663,9 @@ pub async fn decide_ask(
 }
 
 /// Завести прогон задачи: с него начинается всё, что о нём потом рассказывают.
+///
+/// ДВУХ ЖИВЫХ ПРОГОНОВ ОДНОЙ ЗАДАЧИ НЕ БЫВАЕТ — так сказано указателем самой
+/// таблицы. Второй зов отдаёт тот, что уже идёт, а не заводит соперника.
 pub async fn start_run(
     pool: &Pool, project: &str, task: &str, agent: &str, note: &str,
 ) -> Result<Value, tokio_postgres::Error> {
@@ -8654,6 +8673,17 @@ pub async fn start_run(
         return Ok(json!({ "status": "no_task", "why": "прогон заводится под задачу: без неё он ни о чём" }));
     }
     let client = pool.get().await.expect("пул отдал соединение");
+    let живой = client
+        .query_opt(
+            "SELECT id, state, attempt FROM project_task_runs
+              WHERE project_id = $1 AND task_id = $2 AND state <> ALL (ARRAY['done', 'failed', 'cancelled'])",
+            &[&project, &task],
+        )
+        .await?;
+    if let Some(r) = живой {
+        return Ok(json!({ "status": "already_running", "runId": r.get::<_, String>(0),
+                          "state": r.get::<_, String>(1), "attempt": r.get::<_, i32>(2), "task": task }));
+    }
     let attempt: i32 = client
         .query_one(
             "SELECT coalesce(max(attempt), 0) + 1 FROM project_task_runs WHERE project_id = $1 AND task_id = $2",
@@ -8664,18 +8694,30 @@ pub async fn start_run(
     let row = client
         .query_one(
             "INSERT INTO project_task_runs (id, project_id, task_id, agent_id, state, attempt, note, created_at, updated_at)
-             VALUES (gen_random_uuid()::text, $1, $2, nullif($3, ''), 'running', $4, $5, $6, $6) RETURNING id",
+             VALUES (gen_random_uuid()::text, $1, $2, $3, 'running', $4, $5, $6, $6) RETURNING id",
             &[&project, &task, &agent, &attempt, &note, &now_ms()],
         )
         .await?;
-    Ok(json!({ "status": "running", "runId": row.get::<_, String>(0), "task": task, "attempt": attempt }))
+    let id: String = row.get(0);
+    client
+        .execute(
+            "INSERT INTO project_task_run_events (task_run_id, from_state, to_state, reason, actor, at)
+             VALUES ($1, NULL, 'running', $2, $3, $4)",
+            &[&id, &note, &agent, &now_ms()],
+        )
+        .await?;
+    Ok(json!({ "status": "running", "runId": id, "task": task, "attempt": attempt }))
 }
 
-/// Состояние прогона словом: идёт · ждёт · кончился · сорвался.
+/// Состояние прогона словом: идёт · ждёт · сделан · сорвался · снят.
+///
+/// Словарь взят у таблицы, а не придуман заново: её указатель считает живым
+/// всё, что не `done`, `failed` и `cancelled`, и своё слово вроде `finished`
+/// оставило бы задачу навсегда занятой.
 pub async fn set_run_state(
-    pool: &Pool, project: &str, run: &str, state: &str, note: &str,
+    pool: &Pool, project: &str, run: &str, state: &str, note: &str, by: &str,
 ) -> Result<Value, tokio_postgres::Error> {
-    const СОСТОЯНИЯ: [&str; 4] = ["running", "waiting", "finished", "failed"];
+    const СОСТОЯНИЯ: [&str; 5] = ["running", "waiting", "done", "failed", "cancelled"];
     if !СОСТОЯНИЯ.contains(&state) {
         return Ok(json!({ "status": "state_unknown", "state": state,
             "why": format!("состояние прогона бывает такое: {}", СОСТОЯНИЯ.join(" · ")) }));
@@ -8685,16 +8727,30 @@ pub async fn set_run_state(
             "why": "остановка без причины не отличима от обрыва: скажите, на чём встали" }));
     }
     let client = pool.get().await.expect("пул отдал соединение");
-    let n = client
+    let Some(было) = client
+        .query_opt("SELECT state FROM project_task_runs WHERE project_id = $1 AND id = $2", &[&project, &run])
+        .await?
+    else {
+        return Ok(json!({ "status": "not_found", "runId": run }));
+    };
+    let from: String = было.get(0);
+    client
         .execute(
             "UPDATE project_task_runs
                 SET state = $3, note = $4, updated_at = $5,
-                    finished_at = CASE WHEN $3 IN ('finished', 'failed') THEN $5 ELSE finished_at END
+                    finished_at = CASE WHEN $3 = ANY (ARRAY['done', 'failed', 'cancelled']) THEN $5 ELSE finished_at END
               WHERE project_id = $1 AND id = $2",
             &[&project, &run, &state, &note, &now_ms()],
         )
         .await?;
-    Ok(json!({ "status": if n > 0 { "written" } else { "not_found" }, "runId": run, "state": state }))
+    client
+        .execute(
+            "INSERT INTO project_task_run_events (task_run_id, from_state, to_state, reason, actor, at)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+            &[&run, &from, &state, &note, &by, &now_ms()],
+        )
+        .await?;
+    Ok(json!({ "status": "written", "runId": run, "was": from, "state": state }))
 }
 
 /// Шаг прогона: что он сделал или на чём встал.
@@ -8732,7 +8788,7 @@ pub async fn say_to_run(
     client
         .execute(
             "INSERT INTO task_run_message (project_id, run_id, at, side, text, delivered_at)
-             VALUES ($1, $2, $3, $4, $5, CASE WHEN $4 = 'agent' THEN $3 END)",
+             VALUES ($1, $2, $3::bigint, $4, $5, CASE WHEN $4 = 'agent' THEN $3::bigint END)",
             &[&project, &run, &now_ms(), &side, &text],
         )
         .await?;
@@ -8783,7 +8839,7 @@ pub async fn say_in_chat(
     let n = client
         .execute(
             "INSERT INTO chat_message (project_id, thread_id, at, side, text, delivered_at)
-             SELECT $1, $2, $3, $4, $5, CASE WHEN $4 = 'agent' THEN $3 END
+             SELECT $1, $2, $3::bigint, $4, $5, CASE WHEN $4 = 'agent' THEN $3::bigint END
               WHERE EXISTS (SELECT 1 FROM chat_thread t WHERE t.project_id = $1 AND t.id = $2)",
             &[&project, &thread, &now_ms(), &side, &text],
         )
