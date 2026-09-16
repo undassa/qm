@@ -102,7 +102,9 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
     checks.dedup();
 
     // Каталоги дерева кода: из фактов о файлах. Каталог — то, в чём лежит хотя
-    // бы один файл; пустого каталога дерево не знает.
+    // бы один файл, прямо или глубже; пустого каталога дерево не знает. Без
+    // «глубже» `crates` не был каталогом — в нём только крейты, — и лист
+    // `! crates/tot-mcp/`, лежащий в `crates`, читался бы лежащим нигде.
     let files = client
         .query(
             "SELECT name FROM code_fact WHERE project_id = $1 AND kind = 'code-file'",
@@ -118,10 +120,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
     let mut dirs: Vec<String> = files
         .iter()
         .chain(more.iter())
-        .filter_map(|r| {
-            let name: String = r.get(0);
-            name.rfind('/').map(|i| name[..i].to_owned())
-        })
+        .flat_map(|r| ancestors(&r.get::<_, String>(0)))
         .collect();
     dirs.sort();
     dirs.dedup();
@@ -433,4 +432,18 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
         eprintln!("связи: словарь схемы неполон, не объявлено: {}", missing.join(" · "));
     }
     Ok(req_op.len() + task_op.len() + checks.len() + task_check.len() + dirs.len())
+}
+
+/// Каталоги, в которых лежит файл: `a/b/c.rs` лежит в `a/b` и в `a`.
+fn ancestors(file: &str) -> Vec<String> {
+    file.match_indices('/').map(|(i, _)| file[..i].to_owned()).filter(|d| !d.is_empty()).collect()
+}
+
+#[cfg(test)]
+mod code_dirs {
+    #[test]
+    fn a_file_lies_in_every_directory_above_it() {
+        assert_eq!(super::ancestors("crates/tot-mcp/src/lib.rs"), vec!["crates", "crates/tot-mcp", "crates/tot-mcp/src"]);
+        assert!(super::ancestors("Cargo.toml").is_empty());
+    }
 }

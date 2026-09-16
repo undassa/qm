@@ -321,9 +321,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize,
             let task: String = r.get(0);
             let content: String = r.get(1);
             for (i, l) in super::tree_leaf::leaves_of(&content, terms.one("section.tree").unwrap_or("")).into_iter().enumerate() {
-                let target = super::tree_leaf::target_dir(&l.dir, &l.leaf);
-                let path = super::tree_leaf::full_path(&l.dir, &l.leaf);
-                out.push((task.clone(), i as i32, l.dir, l.leaf, l.is_path, l.exempt, target, l.op.to_string(), path));
+                out.push((task.clone(), i as i32, l.dir, l.leaf, l.is_path, l.exempt, l.target, l.op.to_string(), l.path));
             }
         }
         out
