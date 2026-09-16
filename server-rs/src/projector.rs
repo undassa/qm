@@ -3009,10 +3009,14 @@ pub async fn rebuild(pool: &Pool, project: &str) -> Result<Value, tokio_postgres
                     -- «Веха». Прежние имена полей знал только один набор, и у
                     -- второго все 77 красных задач выходили без вехи — а
                     -- значит, и без места в плане.
+                    -- Имя — ПЕРВОЕ имя задачи в поле, а не всё значение:
+                    -- «`M1-T7` — критерий выхода вехи» давало родителя с
+                    -- пояснением, связь с зеркалом рвалась, и ни один гейт
+                    -- этого не видел. Не нашлось имени — значение как есть.
                     coalesce(max(CASE WHEN f.name ILIKE 'Родительская%' OR f.name = 'Пара'
-                                      THEN f.value END), ''),
+                                      THEN coalesce(substring(f.value from '[MmVv][0-9]+-[Tt][0-9A-Za-z]+(?:-[0-9A-Za-z]+)*'), f.value) END), ''),
                     coalesce(max(CASE WHEN f.name ILIKE 'Этап родителя%' OR f.name = 'Веха'
-                                      THEN f.value END), ''),
+                                      THEN coalesce(substring(f.value from '^[[:space:]`]*([A-Za-z]+[0-9]+)(?![A-Za-z0-9-])'), f.value) END), ''),
                     -- Число проверок — ЧИСЛО в начале значения, а не всё
                     -- значение: набор пишет «8, и все восемь названы парой…»,
                     -- и приведение целиком роняло пересчёт.
@@ -9613,6 +9617,26 @@ pub async fn declare_requirement(
         return Ok(json!({ "status": "empty", "why": "требование без имени и без формулировки не объявляется" }));
     }
     let client = pool.get().await.expect("пул отдал соединение");
+    // Способ доказательства, объявленный поверх абзаца «Проверяется», жил до
+    // первой пересборки: дверь отвечала `hasCheck: true`, а следующая запись
+    // любого документа молча возвращала поле к тексту документа.
+    if !measured_by.trim().is_empty() {
+        let written_in: Option<String> = client
+            .query_opt(
+                "SELECT d.entity_kind || ' ' || d.entity_name FROM project_documents d
+                  WHERE d.project_id = $1 AND d.content LIKE '%**' || $2 || ' ·%'
+                    AND EXISTS (SELECT 1 FROM scheme($1) m WHERE m.role = 'marker.verified-by'
+                                 AND d.content LIKE '%' || m.value || '%')
+                  ORDER BY 1 LIMIT 1",
+                &[&project, &id],
+            )
+            .await?
+            .map(|r| r.get(0));
+        if let Some(doc) = written_in {
+            return Ok(json!({ "status": "written_in_document", "id": id,
+                "why": format!("требование {id} записано блоком в «{doc}», и способ доказательства — его абзац «Проверяется»: пересборка берёт поле оттуда. Правьте документ") }));
+        }
+    }
     client
         .execute(
             "INSERT INTO project_requirements (project_id, id, kind, area, title, text, satisfied,

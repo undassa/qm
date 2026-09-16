@@ -399,6 +399,33 @@ async fn сказано_в(pool: &Pool, project: &str, id: &str) -> Value {
             "means": if всего > 40 { "показаны первые сорок" } else { "" } })
 }
 
+/// Строка сущности из её предметной таблицы — без проекта и адреса.
+///
+/// Строка приходит текстом JSON: типа `json` в tokio-postgres нет без
+/// отдельной возможности, а лишняя возможность ради одной колонки — плата
+/// большая, чем один разбор.
+async fn row_of(
+    client: &impl deadpool_postgres::GenericClient,
+    project: &str,
+    kind: &str,
+    id: &str,
+) -> Result<Option<Value>, Miss> {
+    let Some((table, id_col, _)) = table_of(kind) else { return Ok(None) };
+    let sql = format!(
+        "SELECT row_to_json(x)::text FROM (SELECT * FROM {table} WHERE project_id = $1 AND {id_col} = $2) x"
+    );
+    let rows = client.query(&sql, &[&project, &id]).await?;
+    let Some(r) = rows.first() else { return Ok(None) };
+    let mut row: Value = serde_json::from_str(&r.get::<_, String>(0)).map_err(|e| Miss::Db(e.to_string()))?;
+    if let Some(map) = row.as_object_mut() {
+        // Ни проекта, ни адреса наружу: первое известно спрашивающему,
+        // второго у сущности нет.
+        map.remove("project_id");
+        map.remove("path");
+    }
+    Ok(Some(row))
+}
+
 pub async fn entity(pool: &Pool, kinds: &Kinds, project: &str, kind: &str, id: Option<&str>) -> Result<Value, Miss> {
     let Some(k) = kinds.get(kind) else {
         return Err(Miss::NoKind(kind.to_owned()));
@@ -407,27 +434,12 @@ pub async fn entity(pool: &Pool, kinds: &Kinds, project: &str, kind: &str, id: O
 
     if k.is_inner() {
         let id = id.ok_or_else(|| Miss::NoEntity(kind.to_owned(), String::new()))?;
-        let Some((table, id_col, _)) = table_of(kind) else {
+        if table_of(kind).is_none() {
             return Err(Miss::Unprojected(kind.to_owned()));
-        };
-        // Строка приходит текстом JSON: типа `json` в tokio-postgres нет без
-        // отдельной возможности, а лишняя возможность ради одной колонки — плата
-        // большая, чем один разбор.
-        let sql = format!(
-            "SELECT row_to_json(x)::text FROM (SELECT * FROM {table} WHERE project_id = $1 AND {id_col} = $2) x"
-        );
-        let rows = client.query(&sql, &[&project, &id]).await?;
-        let raw: String = rows
-            .first()
-            .map(|r| r.get::<_, String>(0))
-            .ok_or_else(|| Miss::NoEntity(kind.to_owned(), id.to_owned()))?;
-        let mut row: Value = serde_json::from_str(&raw).map_err(|e| Miss::Db(e.to_string()))?;
-        if let Some(map) = row.as_object_mut() {
-            // Ни проекта, ни адреса наружу: первое известно спрашивающему,
-            // второго у сущности нет.
-            map.remove("project_id");
-            map.remove("path");
         }
+        let row = row_of(&client, project, kind, id)
+            .await?
+            .ok_or_else(|| Miss::NoEntity(kind.to_owned(), id.to_owned()))?;
         // Внутренняя сущность живёт строкой в чужом документе — связи считаются
         // по нему же: у неё своего документа нет.
         let (ok, oi) = Box::pin(locate(pool, kinds, project, kind, Some(id))).await
@@ -439,6 +451,30 @@ pub async fn entity(pool: &Pool, kinds: &Kinds, project: &str, kind: &str, id: O
     }
 
     let (owner_kind, owner_name) = locate(pool, kinds, project, kind, id).await?;
+    // Сущность записана СТРОКОЙ В ЧУЖОМ документе: вопрос `Q-83` живёт в
+    // реестре. Дверь отдавала реестр целиком — 88 КБ, — а состояния, ответа и
+    // того, чем вопрос закрыт, в ответе не было. Отдаётся строка сущности, а
+    // документ — ссылкой, как у внутренней.
+    if let (Some(id), true) = (id, owner_kind != kind) {
+        if let Some(row) = row_of(&client, project, kind, id).await? {
+            let doc = client
+                .query_opt(
+                    "SELECT revision, updated_at, updated_by FROM project_documents
+                      WHERE project_id = $1 AND entity_kind = $2 AND entity_name = $3",
+                    &[&project, &owner_kind, &owner_name],
+                )
+                .await?;
+            let revision: Option<i64> = doc.as_ref().map(|r| r.get(0));
+            let rel = relations_of(pool, project, kind, id, &owner_kind, &owner_name, true).await;
+            return Ok(json!({ "kind": kind, "id": id, "entity": row, "relations": rel,
+                              "revision": revision,
+                              "updatedAt": doc.as_ref().map(|r| r.get::<_, i64>(1)),
+                              "updatedBy": doc.as_ref().map(|r| r.get::<_, String>(2)),
+                              "document": { "kind": owner_kind, "name": owner_name, "revision": revision },
+                              "live": живое(pool, project, kind, id).await,
+                              "saidIn": сказано_в(pool, project, id).await }));
+        }
+    }
     let rows = client
         .query(
             "SELECT content, revision, updated_at, updated_by FROM project_documents
