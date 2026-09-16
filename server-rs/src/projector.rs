@@ -1272,6 +1272,15 @@ ALTER TABLE project_screens ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAUL
 ALTER TABLE project_plan_tasks ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'projected';
 ALTER TABLE project_plan_milestones ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'projected';
 ALTER TABLE project_plan_versions ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'projected';
+-- Ребро без происхождения пересборка не смела снять: оно могло быть объявлено
+-- дверью. И ребро, однажды выведенное из «Зависит от», жило вечно — имя
+-- убирали из документа, а задача продолжала ждать.
+--
+-- Прежние рёбра ложатся ОБЪЯВЛЕННЫМИ: отличить их нечем, а снятое по ошибке
+-- объявление делает задачу готовой раньше срока. Первая пересборка переметит
+-- выведенными те, что называет документ.
+ALTER TABLE project_plan_task_deps ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'declared';
+ALTER TABLE project_plan_task_deps ALTER COLUMN origin SET DEFAULT 'projected';
 
 -- Отвергнутый вариант тоже бывает объявленным.
 ALTER TABLE project_decision_alternatives ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'projected';
@@ -3070,7 +3079,12 @@ pub async fn rebuild(pool: &Pool, project: &str) -> Result<Value, tokio_postgres
                 -- раз из семидесяти семи. Пропуск здесь виден в числе строк, а
                 -- падение не видно ничем, кроме отказа всей ручки.
                 AND EXISTS (SELECT 1 FROM project_plan_milestones ms
-                             WHERE ms.project_id = r.project_id AND ms.id = r.milestone)",
+                             WHERE ms.project_id = r.project_id AND ms.id = r.milestone)
+             ON CONFLICT (project_id, id) DO UPDATE SET milestone_id = EXCLUDED.milestone_id,
+               ord = EXCLUDED.ord, title = EXCLUDED.title, entity_kind = EXCLUDED.entity_kind,
+               entity_name = EXCLUDED.entity_name, size = EXCLUDED.size, kind = EXCLUDED.kind,
+               state = EXCLUDED.state, closing_commit = EXCLUDED.closing_commit, origin = 'projected'
+             WHERE project_plan_tasks.origin = 'declared'",
             &[&project],
         )
         .await?;
@@ -5432,11 +5446,15 @@ pub async fn links_of(pool: &Pool, project: &str, kind: &str, id: &str) -> Resul
                                WHERE r.project_id = $1 AND r.task_id = $2 ORDER BY r.requirement_id"),
             ("checks", "SELECT c.check_id, c.said_as, 'check' FROM project_task_check c
                          WHERE c.project_id = $1 AND c.task_id = $2 ORDER BY c.check_id"),
-            ("dependsOn", "SELECT d.depends_on, coalesce(left(t.title, 90), ''), 'task'
+            // Ребро, объявленное дверью, документ не называет: без пометки его
+            // искали в «Зависит от» и не находили.
+            ("dependsOn", "SELECT d.depends_on, coalesce(left(t.title, 90), '')
+                                  || CASE WHEN d.origin = 'declared' THEN ' · объявлено дверью task-dep-add' ELSE '' END, 'task'
                              FROM project_plan_task_deps d
                              LEFT JOIN project_plan_tasks t ON t.project_id = d.project_id AND t.id = d.depends_on
                             WHERE d.project_id = $1 AND d.task_id = $2 ORDER BY d.depends_on"),
-            ("blocks", "SELECT d.task_id, coalesce(left(t.title, 90), ''), 'task'
+            ("blocks", "SELECT d.task_id, coalesce(left(t.title, 90), '')
+                               || CASE WHEN d.origin = 'declared' THEN ' · объявлено дверью task-dep-add' ELSE '' END, 'task'
                           FROM project_plan_task_deps d
                           LEFT JOIN project_plan_tasks t ON t.project_id = d.project_id AND t.id = d.task_id
                          WHERE d.project_id = $1 AND d.depends_on = $2 ORDER BY d.task_id"),
@@ -6888,6 +6906,22 @@ pub async fn declare_task(
     // «не начата», а не выдумывается четвёртым словом.
     let state = if matches!(state, "not_started" | "claimed" | "closed") { state } else { "not_started" };
     let client = pool.get().await.expect("пул отдал соединение");
+    // Объявление поверх документа роняло пересборку всего набора: строка
+    // красной задачи ложилась в план второй раз. Документ полнее объявления, и
+    // пересборка всё равно перепишет строку по нему.
+    if let Some(row) = client
+        .query_opt(
+            "SELECT entity_kind FROM project_documents
+              WHERE project_id = $1 AND entity_kind IN ('task', 'red-task') AND lower(entity_name) = lower($2)
+              LIMIT 1",
+            &[&project, &id],
+        )
+        .await?
+    {
+        let kind: String = row.get(0);
+        return Ok(json!({ "status": "has_document", "id": id,
+            "why": format!("у задачи есть документ вида {kind}: документ полнее объявления, и план строится по нему — объявлять не нужно") }));
+    }
     client.execute(
         "INSERT INTO project_plan_tasks (project_id, id, milestone_id, ord, title, size, state,
                                          closing_commit, kind, entity_kind, entity_name, origin)
@@ -7082,16 +7116,24 @@ pub async fn declare_task_dep(
     let client = pool.get().await.expect("пул отдал соединение");
     // Обе стороны обязаны существовать: ребро в несуществующую задачу тихо
     // выпадает из порядка и делает волну шире, чем она есть.
-    let known: i64 = client
-        .query_one("SELECT count(*) FROM project_plan_tasks WHERE project_id = $1 AND id = ANY($2)",
-                   &[&project, &vec![task.to_owned(), depends_on.to_owned()]]).await?.get(0);
-    if known < 2 {
+    let known = client
+        .query("SELECT id, entity_kind FROM project_plan_tasks WHERE project_id = $1 AND id = ANY($2)",
+               &[&project, &vec![task.to_owned(), depends_on.to_owned()]]).await?;
+    if known.len() < 2 {
         return Ok(json!({ "status": "unknown_task",
                           "why": format!("нет задачи: {task} либо {depends_on}") }));
     }
+    // Строки красных задач каждая пересборка сносит и кладёт заново, и ребро
+    // уходит с ними каскадом: дверь отвечала «объявлено» про то, что не
+    // доживало до следующей записи.
+    if known.iter().any(|r| r.get::<_, String>(0) == task && r.get::<_, String>(1) == "red-task") {
+        return Ok(json!({ "status": "red_task",
+            "why": format!("{task} — красная задача: её строка пересобирается из документа, и объявленное ребро уйдёт с первой же пересборкой. Зависимость от обычной задачи пишется полем «Зависит от» её документа; зависимость от другой красной задачи поле не выражает") }));
+    }
     client.execute(
-        "INSERT INTO project_plan_task_deps (project_id, task_id, depends_on) VALUES ($1,$2,$3)
-         ON CONFLICT DO NOTHING", &[&project, &task, &depends_on]).await?;
+        "INSERT INTO project_plan_task_deps (project_id, task_id, depends_on, origin) VALUES ($1,$2,$3,'declared')
+         ON CONFLICT (project_id, task_id, depends_on) DO UPDATE SET origin = 'declared'",
+        &[&project, &task, &depends_on]).await?;
     Ok(json!({ "status": "declared", "task": task, "dependsOn": depends_on }))
 }
 
@@ -9721,7 +9763,8 @@ pub async fn sensors(pool: &Pool, project: &str) -> Result<Value, tokio_postgres
     let client = pool.get().await.expect("пул отдал соединение");
     let rows = client
         .query(
-            "SELECT s.fact, s.about, s.stale_after_ms, f.at, f.rows, f.actor
+            "SELECT s.fact, s.about, s.stale_after_ms, f.at, f.rows, f.actor,
+                    f.at IS NOT NULL AND NOT fact_fresh(s.project_id, s.fact)
                FROM sensor s LEFT JOIN fact_push f
                  ON f.project_id = s.project_id AND f.fact = s.fact
               WHERE s.project_id = $1 ORDER BY s.fact",
@@ -9737,35 +9780,21 @@ pub async fn sensors(pool: &Pool, project: &str) -> Result<Value, tokio_postgres
             &[&project],
         )
         .await?;
-    // Часы здесь — НЕ настенные. Датчики запускает харнес, а не расписание, и
-    // «час назад никто не подавал» значило бы всего лишь «час никто не работал».
-    // Отсчёт идёт от самого свежего из объявленных датчиков: отстал тот, кто
-    // промолчал, когда остальные отчитались.
-    let clock: Option<i64> = client
-        .query_one(
-            "SELECT max(f.at) FROM fact_push f JOIN sensor s
-                     ON s.project_id = f.project_id AND s.fact = f.fact
-              WHERE f.project_id = $1",
-            &[&project],
-        )
-        .await?
-        .get(0);
+    // Протухание — ТО ЖЕ, что у гейта: `fact_fresh`. Своими часами дверь
+    // отвечала «протухших 0» в ту же секунду, когда гейт печатал «ПРОТУХ», и
+    // спросить причину красноты было не у кого.
     Ok(json!({
-        "clock": clock,
         "sensors": rows.iter().map(|r| {
             let at: Option<i64> = r.get(3);
-            let stale_after: Option<i64> = r.get(2);
             json!({
                 "fact": r.get::<_, String>(0),
                 "about": r.get::<_, String>(1),
                 "lastAt": at,
+                "staleAfterMs": r.get::<_, Option<i64>>(2),
                 "rows": r.get::<_, Option<i32>>(4),
                 "by": r.get::<_, Option<String>>(5),
                 "silent": at.is_none(),
-                "stale": match (at, stale_after, clock) {
-                    (Some(at), Some(after), Some(clock)) => clock - at > after,
-                    _ => false,
-                },
+                "stale": r.get::<_, bool>(6),
             })
         }).collect::<Vec<_>>(),
         // Подающий, которого никто не объявлял, — не ошибка и не порядок: это

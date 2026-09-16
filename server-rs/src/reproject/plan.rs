@@ -289,7 +289,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize,
             "INSERT INTO project_plan_versions(project_id, id, entity_kind, entity_name)
              VALUES ($1,$2,$3,$4)
              ON CONFLICT (project_id, id) DO UPDATE SET entity_kind = EXCLUDED.entity_kind,
-               entity_name = EXCLUDED.entity_name",
+               entity_name = EXCLUDED.entity_name, origin = 'projected'",
             &[&project, id, kind, name],
         ).await?;
     }
@@ -372,7 +372,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize,
              VALUES ($1,$2,$3,$4,$5,$6,$7)
              ON CONFLICT (project_id, id) DO UPDATE SET version_id = EXCLUDED.version_id,
                ord = EXCLUDED.ord, title = EXCLUDED.title, entity_kind = EXCLUDED.entity_kind,
-               entity_name = EXCLUDED.entity_name",
+               entity_name = EXCLUDED.entity_name, origin = 'projected'",
             &[&project, id, version, ord, title, kind, name],
         ).await?;
     }
@@ -404,13 +404,17 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize,
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
              ON CONFLICT (project_id, id) DO UPDATE SET milestone_id = EXCLUDED.milestone_id,
                ord = EXCLUDED.ord, title = EXCLUDED.title, entity_kind = EXCLUDED.entity_kind,
-               entity_name = EXCLUDED.entity_name, size = EXCLUDED.size, kind = EXCLUDED.kind",
+               entity_name = EXCLUDED.entity_name, size = EXCLUDED.size, kind = EXCLUDED.kind,
+               origin = 'projected'",
             &[&project, id, milestone, ord, title, ekind, ename, size, kind, state, commit],
         ).await?;
     }
     // Состояние задачи здесь не трогается умышленно: его кладёт подача датчика
     // из закрывающих трейлеров, и переписать его выведенным «не запущена»
     // значило бы стереть свидетельство заявлением.
+    tx.execute("DELETE FROM project_plan_task_deps
+                 WHERE project_id = $1 AND origin = 'projected' AND task_id = ANY($2)",
+               &[&project, &task_ids]).await?;
     let mut written = 0;
     for (task, on) in &deps {
         let Some(on) = known.get(&on.to_lowercase()) else { continue };
@@ -420,7 +424,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize,
         written += tx
             .execute(
                 "INSERT INTO project_plan_task_deps(project_id, task_id, depends_on) VALUES ($1,$2,$3)
-                 ON CONFLICT DO NOTHING",
+                 ON CONFLICT (project_id, task_id, depends_on) DO UPDATE SET origin = 'projected'",
                 &[&project, task, on],
             )
             .await?;

@@ -49,6 +49,19 @@ fn refusal(m: Miss) -> Value {
     json!({ "content": [{ "type": "text", "text": text }], "isError": true })
 }
 
+/// Запись прошла, а пересборка за ней упала.
+///
+/// Ответ «база не ответила» читался как «ничего не записано», хотя ревизии уже
+/// сдвинулись: вызвавший повторял запись или искал соединение, а не причину.
+fn written_unprojected(done: &str, m: Miss) -> Value {
+    let why = match m {
+        Miss::Db(e) | Miss::Refused(e) => e,
+        other => return refusal(other),
+    };
+    refusal(Miss::Refused(format!(
+        "{done}, но проекции не собраны: {why}. Пока `reproject` не пройдёт, гейт и план судят по прежним")))
+}
+
 /// Число, пришедшее СТРОКОЙ, — то же число.
 ///
 /// Двери читали `as_i64()`, а клиент передаёт доводы как `ключ=значение`, то
@@ -994,7 +1007,7 @@ impl Mcp {
                                 }
                                 ok(v)
                             }
-                            Err(e) => refusal(e),
+                            Err(e) => written_unprojected("состояния записаны", e),
                         }
                     }
                     Err(e) => refusal(Miss::Db(e.to_string())),
@@ -3111,7 +3124,10 @@ impl Mcp {
                         m.insert("own".into(), own);
                     }
                 }
-                Err(e) => return refusal(e),
+                Err(e) => {
+                    let done = if status == "deleted" { "документ снят".to_owned() } else { format!("правка записана: ревизия {revision}") };
+                    return written_unprojected(&done, e);
+                }
             }
         }
         if matches!(status.as_str(), "conflict" | "not_found" | "no_such_section" | "invalid_path") {
