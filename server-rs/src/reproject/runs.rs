@@ -205,7 +205,10 @@ pub async fn project(
             milestone_id,
             is_milestone,
             list.iter().any(|t| t.trim() == LEFT_OPEN),
-            list.len() as i32,
+            // Разделы — без заголовка документа: первый в перечне и есть
+            // заголовок. С ним выжимка версии всегда выходила на раздел длиннее
+            // числа этапов, и `version-digest-matches` краснел на верной.
+            list.len().saturating_sub(1) as i32,
             is_version,
         ));
     }

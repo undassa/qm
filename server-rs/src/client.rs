@@ -66,6 +66,11 @@ impl Door {
     /// Спросить сервер, какому проекту принадлежит текущее дерево.
     fn ask_whose(url: &str, secret: &str, principal: &str) -> Option<String> {
         let here = std::env::current_dir().ok()?;
+        Self::ask_whose_at(url, secret, principal, &here)
+    }
+
+    /// То же — для названного дерева.
+    fn ask_whose_at(url: &str, secret: &str, principal: &str, here: &std::path::Path) -> Option<String> {
         let out = std::process::Command::new("curl")
             .arg("-sS")
             .arg("-H").arg(format!("X-Mh-Edge: {secret}"))
@@ -1164,6 +1169,11 @@ fn walk(root: &str, pattern: &str) -> Vec<String> {
     out
 }
 
+/// Поставлен ли файл установкой: её шапка несёт имя и описание в кавычках.
+fn installed_head(text: &str, name: &str) -> bool {
+    text.starts_with(&format!("---\nname: {name}\ndescription: \""))
+}
+
 pub fn install(door: &Door, into: &str) -> Result<Value, String> {
     use std::io::Write;
     let mut written = Vec::new();
@@ -1187,6 +1197,21 @@ pub fn install(door: &Door, into: &str) -> Result<Value, String> {
                         declared.display()
                     ));
                 }
+            }
+        }
+    }
+
+    // Чей это репозиторий, знает сервер. Оставшийся от другой работы
+    // `MH_PROJECT` поставил бы сюда чужой набор — а теперь установка ещё и
+    // снимает поставленное: чужой набор стёр бы свой.
+    if let Ok(target) = std::fs::canonicalize(into) {
+        if let Some(owner) = Door::ask_whose_at(&door.url, &door.secret, &door.principal, &target) {
+            if owner != door.project {
+                return Err(format!(
+                    "{} принадлежит проекту {owner}, а ставится {}: снимите MH_PROJECT или поставьте из своего дерева",
+                    target.display(),
+                    door.project
+                ));
             }
         }
     }
@@ -1247,6 +1272,64 @@ pub fn install(door: &Door, into: &str) -> Result<Value, String> {
         let text = format!("{head}---\n\n{}", a["body"].as_str().unwrap_or(""));
         let path = std::path::Path::new(into).join(".claude/agents").join(format!("{name}.md"));
         if put(&path, &text)? { written.push(format!("субагент {name}")) } else { same += 1 }
+    }
+
+    // Снятое на сервере снимается и здесь. Установка писала и не стирала: скилл,
+    // убранный из набора, оставался в `.claude/skills` и звался дальше — копия
+    // без источника отстаёт навсегда. Трогается только поставленное установкой:
+    // его шапка несёт описание в кавычках, как пишет `quoted`; свой файл проекта
+    // так не выглядит, и его не касаемся. Пустой перечень с сервера не снимает
+    // ничего: сбой ответа не должен стереть всё поставленное.
+    let names_of = |list: &Value, key: &str| -> std::collections::HashSet<String> {
+        list.get(key)
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x["name"].as_str().map(str::to_owned)).collect())
+            .unwrap_or_default()
+    };
+    let ours = |path: &std::path::Path, name: &str| {
+        std::fs::read_to_string(path).map(|t| installed_head(&t, name)).unwrap_or(false)
+    };
+    let kept_skills = names_of(&skills, "skills");
+    if !kept_skills.is_empty() {
+        if let Ok(dirs) = std::fs::read_dir(std::path::Path::new(into).join(".claude/skills")) {
+            for dir in dirs.flatten() {
+                // Ссылка — не каталог установки: файл за ней лежит где угодно, и
+                // снимать его значило бы стирать вне репозитория.
+                if dir.file_type().map(|t| t.is_symlink()).unwrap_or(true) {
+                    continue;
+                }
+                let name = dir.file_name().to_string_lossy().into_owned();
+                let file = dir.path().join("SKILL.md");
+                if kept_skills.contains(&name) || !ours(&file, &name) {
+                    continue;
+                }
+                // Установке принадлежит только её файл. Каталог снимается, лишь
+                // если опустел: чужой файл рядом — не наш, и стирать его нельзя.
+                std::fs::remove_file(&file).map_err(|e| format!("{file:?} не снимается: {e}"))?;
+                if std::fs::remove_dir(dir.path()).is_ok() {
+                    written.push(format!("снято умение {name}"));
+                } else {
+                    written.push(format!("снято умение {name}; каталог оставлен — в нём чужие файлы"));
+                }
+            }
+        }
+    }
+    let kept_agents = names_of(&agents, "agents");
+    if !kept_agents.is_empty() {
+        if let Ok(files) = std::fs::read_dir(std::path::Path::new(into).join(".claude/agents")) {
+            for file in files.flatten() {
+                if file.file_type().map(|t| t.is_symlink()).unwrap_or(true) {
+                    continue;
+                }
+                let path = file.path();
+                let Some(name) = path.file_stem().map(|s| s.to_string_lossy().into_owned()) else { continue };
+                if path.extension().and_then(|e| e.to_str()) != Some("md") || kept_agents.contains(&name) || !ours(&path, &name) {
+                    continue;
+                }
+                std::fs::remove_file(&path).map_err(|e| format!("{path:?} не снимается: {e}"))?;
+                written.push(format!("снят субагент {name}"));
+            }
+        }
     }
 
     // Сторож подключается хуком: `mh guard` перехватывает вызов инструмента до
@@ -1641,5 +1724,18 @@ pub struct Keys {
             ("Target", "перечисление без множества CHECK (a.rs), значений 2"),
             ("Operator", "помечено x-stored-in: monitors.condition"),
         ]);
+    }
+}
+
+#[cfg(test)]
+mod install_tests {
+    use super::installed_head;
+
+    #[test]
+    fn only_installer_heads_are_ours() {
+        assert!(installed_head("---\nname: godzy-gate\ndescription: \"Check a gate\"\n---\n", "godzy-gate"));
+        assert!(!installed_head("---\nname: godzy-gate\ndescription: Check a gate\n---\n", "godzy-gate"), "свой файл проекта без кавычек");
+        assert!(!installed_head("---\nname: other\ndescription: \"x\"\n---\n", "godzy-gate"), "имя в шапке — другого скилла");
+        assert!(!installed_head("# notes", "godzy-gate"));
     }
 }

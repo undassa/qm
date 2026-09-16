@@ -731,7 +731,7 @@ async fn абзацы_с_какого_времени(
         let mut документ: (String, String) = (String::new(), String::new());
         let mut было: HashMap<String, (String, i64)> = HashMap::new();
         let mut итог: HashMap<String, Vec<(String, i64)>> = HashMap::new();
-        let mut сдать = |было: &mut HashMap<String, (String, i64)>, итог: &mut HashMap<String, Vec<(String, i64)>>| {
+        let сдать = |было: &mut HashMap<String, (String, i64)>, итог: &mut HashMap<String, Vec<(String, i64)>>| {
             for (id, v) in было.drain() {
                 итог.entry(id).or_default().push(v);
             }
@@ -748,11 +748,11 @@ async fn абзацы_с_какого_времени(
                 if текст.is_empty() || сейчас.contains_key(&id) {
                     continue;
                 }
-                let с = match было.get(&id) {
-                    Some((прежний, с)) if *прежний == текст => *с,
+                let начало = match было.get(&id) {
+                    Some((прежний, давно)) if *прежний == текст => *давно,
                     _ => at,
                 };
-                сейчас.insert(id, (текст, с));
+                сейчас.insert(id, (текст, начало));
             }
             было = сейчас;
         }
@@ -767,13 +767,13 @@ async fn абзацы_с_какого_времени(
             .await?;
         for r in &поля {
             let (id, поле): (String, String) = (r.get(0), r.get(1));
-            let Some(с) = итог.get(&id).and_then(|v| v.iter().filter(|(t, _)| *t == поле).map(|(_, с)| *с).min()) else {
+            let Some(начало) = итог.get(&id).and_then(|v| v.iter().filter(|(t, _)| *t == поле).map(|(_, давно)| *давно).min()) else {
                 continue;
             };
             tx.execute(
                 "UPDATE entity_stamp SET updated_at = $3
                   WHERE project_id = $1 AND kind = 'requirement' AND id = $2 AND updated_at > $3",
-                &[&project, &id, &с],
+                &[&project, &id, &начало],
             )
             .await?;
         }
