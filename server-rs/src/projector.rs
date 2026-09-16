@@ -736,6 +736,10 @@ CREATE TABLE IF NOT EXISTS task_redo (
   gate       text NOT NULL DEFAULT '',
   PRIMARY KEY (project_id, task_id)
 );
+-- Закрытие судится ОДИН РАЗ — первой пересборкой, увидевшей его коммит. Судить
+-- каждой пересборкой значило судить давнее закрытие по нынешней фазе: гейт,
+-- покрасневший после, ставил долг задачам, закрытым в свой черёд.
+ALTER TABLE task_state ADD COLUMN IF NOT EXISTS judged_commit text;
 ALTER TABLE project_feature_stories ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'projected';
 ALTER TABLE project_story_requirements ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'projected';
 -- И ещё две того же рода: у `project_screen_references` есть дверь
@@ -3161,24 +3165,11 @@ pub async fn rebuild(pool: &Pool, project: &str) -> Result<Value, tokio_postgres
         )
         .await?;
 
-    // Долг замечается ЗДЕСЬ, сразу после состояний: фаза уже известна, гейт
-    // измерен прошлым кругом, и это последний момент, когда «закрыта при
-    // закрытой фазе» ещё видно.
-    tx.execute(
-        "INSERT INTO task_redo (project_id, task_id, noticed_at, phase, gate)
-         SELECT tp.project_id, tp.task_id,
-                coalesce(nullif(ts.closed_at, 0), ts.seen_at, $2), coalesce(tp.phase, ''),
-                coalesce(tp.gate, '')
-           FROM task_phase tp
-           LEFT JOIN task_state ts ON ts.project_id = tp.project_id AND ts.task_id = tp.task_id
-          WHERE tp.project_id = $1 AND tp.state = 'closed' AND tp.open IS FALSE
-         ON CONFLICT (project_id, task_id) DO NOTHING",
-        &[&project, &now_ms()],
-    )
-    .await?;
     // Переделанное снимается: закрыта заново, коммитом позже замеченного долга.
     // Вместе с ним уходит и долг задачи, которой в плане больше нет: переделывать
     // нечего, а запись жила бы вечно — плана она не касается и ничем не гасится.
+    // Снимается ДО суда: новое закрытие при всё ещё закрытой фазе судится ниже и
+    // ставит долг заново, а снятое после суда уходило бы вместе с ним.
     tx.execute(
         "DELETE FROM task_redo r
           WHERE r.project_id = $1
@@ -3188,6 +3179,41 @@ pub async fn rebuild(pool: &Pool, project: &str) -> Result<Value, tokio_postgres
                  OR NOT EXISTS (SELECT 1 FROM project_plan_tasks t
                                  WHERE t.project_id = r.project_id AND t.id = r.task_id))",
         &[&project],
+    )
+    .await?;
+    tx.execute(
+        "UPDATE task_state s SET judged_commit = NULL
+          WHERE s.project_id = $1 AND s.judged_commit IS NOT NULL
+            AND NOT EXISTS (SELECT 1 FROM project_plan_tasks t
+                             WHERE t.project_id = s.project_id AND t.id = s.task_id)",
+        &[&project],
+    )
+    .await?;
+
+    // Долг замечается ЗДЕСЬ, сразу после состояний: фаза уже известна, гейт
+    // измерен прошлым кругом. Судится и помечается одно и то же — закрытие,
+    // каким его видит план этой транзакции, у задачи, чья фаза известна. Без
+    // коммита закрытие не опознать, и оно судится каждый раз.
+    tx.execute(
+        "WITH j AS (
+           SELECT tp.project_id, tp.task_id, tp.open, coalesce(tp.phase, '') AS phase,
+                  coalesce(tp.gate, '') AS gate, t.closing_commit, ts.closed_at, ts.seen_at
+             FROM task_phase tp
+             JOIN project_plan_tasks t ON t.project_id = tp.project_id AND t.id = tp.task_id
+             LEFT JOIN task_state ts ON ts.project_id = tp.project_id AND ts.task_id = tp.task_id
+            WHERE tp.project_id = $1 AND tp.state = 'closed' AND tp.open IS NOT NULL
+              AND (ts.task_id IS NULL OR t.closing_commit = ''
+                   OR ts.judged_commit IS DISTINCT FROM t.closing_commit)
+         ), mark AS (
+           UPDATE task_state s SET judged_commit = j.closing_commit
+             FROM j
+            WHERE s.project_id = j.project_id AND s.task_id = j.task_id AND j.closing_commit <> ''
+         )
+         INSERT INTO task_redo (project_id, task_id, noticed_at, phase, gate)
+         SELECT project_id, task_id, coalesce(nullif(closed_at, 0), seen_at, $2), phase, gate
+           FROM j WHERE open IS FALSE
+         ON CONFLICT (project_id, task_id) DO NOTHING",
+        &[&project, &now_ms()],
     )
     .await?;
 
