@@ -46,7 +46,7 @@ mod surface;
 ///
 /// Снимается только ОДНА форма: имя в начале и сразу за ним разделитель. Имя
 /// внутри фразы — часть фразы, и его никто не трогает.
-pub fn title_without_name(title: &str, name: &str) -> String {
+pub(crate) fn title_without_name(title: &str, name: &str) -> String {
     let t = title.trim();
     if name.is_empty() || !t.starts_with(name) {
         return t.to_owned();
@@ -82,12 +82,12 @@ pub async fn reproject(pool: &Pool, project: &str) -> Result<Value, crate::db::F
     let (n, ns) = needs::project(pool, project).await?;
     done.insert("project_needs".into(), json!(n));
     done.insert("project_need_stories".into(), json!(ns));
-    let (req, chk, rn, дом) = proof::project(pool, project).await?;
+    let (req, chk, rn, home) = proof::project(pool, project).await?;
     done.insert("project_requirements".into(), json!(req));
     done.insert("project_checks".into(), json!(chk));
     done.insert("project_requirement_needs".into(), json!(rn));
-    if дом > 0 {
-        done.insert("проверок переписан источник".into(), json!(дом));
+    if home > 0 {
+        done.insert("проверок переписан источник".into(), json!(home));
     }
     done.insert("project_questions".into(), json!(questions::project(pool, project).await?));
     let (d, dl, da) = decisions::project(pool, project).await?;

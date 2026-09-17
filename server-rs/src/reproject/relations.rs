@@ -49,10 +49,10 @@ fn checks_in(line: &str, res: &[Regex], caveats: &[String]) -> Vec<String> {
     out
 }
 
-pub const FACT_KINDS: [&str; 7] =
+pub(crate) const FACT_KINDS: [&str; 7] =
     ["code-file", "crate-manifest", "repo-file", "requirement-op", "test-fn", "tree-file", "written-tc"];
 
-pub async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fail> {
+pub(crate) async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fail> {
     let mut connection = crate::db::conn(pool).await?;
     let tx = connection.transaction().await?;
     tx.execute("SELECT pg_advisory_xact_lock(hashtext('relations:' || $1))", &[&project]).await?;
@@ -238,8 +238,8 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fai
     //
     // Образец вида — якорный (`^…$`), он для сверки имени целиком; здесь имя
     // ищут внутри строки, поэтому якоря снимаются, а границы слова ставятся.
-    let образцы_задачи = crate::scheme::id_pattern(client, project, "task").await?;
-    let task_id: Vec<Regex> = образцы_задачи
+    let patterns_tasks = crate::scheme::id_pattern(client, project, "task").await?;
+    let task_id: Vec<Regex> = patterns_tasks
         .iter()
         .filter_map(|p| Regex::new(&format!(r"\b(?:{})\b", p.trim_start_matches('^').trim_end_matches('$'))).ok())
         .collect();
@@ -296,9 +296,9 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fai
         // вперёд. Вниз — по потомкам: объявлено `mobile/src/app`, значит и сам
         // `mobile` ещё не заведён, иначе документ не называл бы вложенное
         // отсутствующим.
-        let под = ahead.iter().any(|a| a.starts_with(&format!("{dir}/")));
+        let under = ahead.iter().any(|a| a.starts_with(&format!("{dir}/")));
         let mut at = dir.as_str();
-        let mut hit = под;
+        let mut hit = under;
         while !hit {
             if ahead.contains(at) {
                 hit = true;

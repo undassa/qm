@@ -63,7 +63,7 @@ pub struct Author(pub String);
 
 /// Отказ называется словом, а не только числом: интерфейс уже различает
 /// `not_found` и `upstream_error`, и по одному лишь коду он этого не сможет.
-pub enum Failure {
+pub(crate) enum Failure {
     NoKind(String),
     NoEntity(String, String),
     /// Вид есть, проекции у него нет. Отказ с именем, а не пустой список.
@@ -124,8 +124,8 @@ impl IntoResponse for Failure {
         if code == StatusCode::SERVICE_UNAVAILABLE {
             // Срок у каждого отказанного СВОЙ: отказы идут очередью в один и тот
             // же миг, и общее число собрало бы их обратно в одну секунду.
-            static СЛЕДУЮЩИЙ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let retry = 2 + (СЛЕДУЮЩИЙ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 4);
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let retry = 2 + (NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 4);
             let mut body = json!({ "error": name, "retryAfter": retry });
             if !note.is_empty() {
                 body["message"] = json!(note);
@@ -151,8 +151,8 @@ impl From<Miss> for Failure {
             Miss::NoKind(k) => Failure::NoKind(k),
             Miss::NoEntity(k, id) => Failure::NoEntity(k, id),
             Miss::Unprojected(k) => Failure::Unprojected(k),
-            Miss::Busy(почему) => Failure::Busy(почему),
-            Miss::Refused(почему) => Failure::Upstream(почему),
+            Miss::Busy(why) => Failure::Busy(why),
+            Miss::Refused(why) => Failure::Upstream(why),
             Miss::Db(e) => Failure::Upstream(e),
         }
     }
@@ -180,7 +180,7 @@ fn now_ms() -> i64 {
 ///
 /// Подделки с чужой страницы это не открывает: все ручки — чтение, а ответ
 /// чужому источнику не отдаётся, потому что заголовков CORS сервер не ставит.
-pub fn token_of(header: Option<&str>, cookie: Option<&str>) -> Option<String> {
+pub(crate) fn token_of(header: Option<&str>, cookie: Option<&str>) -> Option<String> {
     if let Some(token) = header.map(str::trim).filter(|t| !t.is_empty()) {
         return Some(token.to_owned());
     }
@@ -325,7 +325,7 @@ async fn with_own_projections(
 /// Здесь больше нет донора. Тридцать таблиц, которые считал Node-процесс,
 /// считаются в этом же сервере и сверены с ним до хеша упорядоченного дампа —
 /// на пустых таблицах, а не поверх донорских.
-pub async fn finish_write(app: &App, project: &str) -> Result<serde_json::Value, Failure> {
+pub(crate) async fn finish_write(app: &App, project: &str) -> Result<serde_json::Value, Failure> {
     let before = crate::projector::rebuild_before(&app.pool, project).await?;
     let subject = crate::reproject::reproject(&app.pool, project).await?;
     let after = crate::projector::rebuild(&app.pool, project).await?;
@@ -520,7 +520,7 @@ async fn put_entity(
     let who = author.map(|a| a.0 .0).unwrap_or_default();
     let now = std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64).unwrap_or(0);
-    let out = crate::store::put(&app.pool, &project, &kind, &name, &body.content, &who, body.expected_revision, now).await?;
+    let out = crate::store::put(&app.pool, &project, crate::store::Document { kind: &kind, name: &name, content: &body.content }, &who, body.expected_revision, now).await?;
     writer_answer(with_own_projections(&app, &project, out).await?)
 }
 
@@ -534,8 +534,7 @@ async fn put_entity_section(
     let who = author.map(|a| a.0 .0).unwrap_or_default();
     let now = std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64).unwrap_or(0);
-    let out = crate::store::put_section(&app.pool, &project, &kind, &name, &body.anchor, &body.body, &who,
-                                        body.expected_revision, now).await?;
+    let out = crate::store::put_section(&app.pool, &project, crate::store::SectionEdit { kind: &kind, name: &name, anchor: &body.anchor, body: &body.body }, &who, body.expected_revision, now).await?;
     writer_answer(with_own_projections(&app, &project, out).await?)
 }
 
@@ -712,24 +711,24 @@ mod tests {
     use super::token_of;
 
     #[test]
-    fn заголовок_главнее_печенья() {
+    fn title_outranks_cookie() {
         assert_eq!(token_of(Some("из-заголовка"), Some("mh_identity=из-печенья")).as_deref(), Some("из-заголовка"));
     }
 
     #[test]
-    fn печенье_читается_когда_заголовка_нет() {
+    fn cookie_read_when_title_missing() {
         assert_eq!(token_of(None, Some("a=1; mh_identity=токен; b=2")).as_deref(), Some("токен"));
     }
 
     #[test]
-    fn чужое_печенье_личностью_не_считается() {
+    fn foreign_cookie_identity_not_counted() {
         // `mh_identity_other` начинается так же; поиск по префиксу принял бы его
         // за нашу и отдал бы корпус по чужому имени.
         assert_eq!(token_of(None, Some("mh_identity_other=токен")), None);
     }
 
     #[test]
-    fn пустое_значение_не_личность() {
+    fn empty_value_not_identity() {
         assert_eq!(token_of(Some("  "), Some("mh_identity=")), None);
     }
 }
@@ -767,16 +766,16 @@ mod busy_tests {
     /// `POST`, и срок возврата стоит в обоих.
     #[test]
     fn a_busy_door_answers_the_same_both_ways() {
-        let занято = serde_json::json!({
+        let busy = serde_json::json!({
             "content": [{ "type": "text", "text": "сервер перегружен" }],
             "isError": true, "_meta": { "busy": true } });
-        let r = super::door_answer(занято).expect_err("занятость — отказ").into_response();
+        let r = super::door_answer(busy).expect_err("занятость — отказ").into_response();
         assert_eq!(r.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
         assert!(r.headers().contains_key(axum::http::header::RETRY_AFTER));
-        let отказ = serde_json::json!({
+        let refusal = serde_json::json!({
             "content": [{ "type": "text", "text": "довода нет" }], "isError": true,
             "_meta": { "busy": false } });
-        let r = super::door_answer(отказ).expect_err("отказ").into_response();
+        let r = super::door_answer(refusal).expect_err("отказ").into_response();
         assert_eq!(r.status(), axum::http::StatusCode::BAD_GATEWAY);
     }
 

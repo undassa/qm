@@ -29,6 +29,9 @@ static REQUIREMENT_ID: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"\b((?:FR|NFR)-[A-Z0-9]+(?:-\d+[a-z]?)?)\b").expect("образец требования"));
 static SEPARATOR: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[\s|:-]+$").expect("образец разделителя"));
 
+/// Строка истории: имя, область, персона, источник и связи.
+type StoryRow = (String, String, String, String, String, String, String, String);
+
 /// Первые ячейки строк таблицы, склеенные переводом строки: место, где имя
 /// объявлено, а не помянуто. Строки не-таблицы и разделитель `|---|` отброшены.
 fn declared_column(body: &str) -> String {
@@ -45,7 +48,7 @@ fn declared_column(body: &str) -> String {
     out.join("\n")
 }
 
-pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize, usize), crate::db::Fail> {
+pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize, usize), crate::db::Fail> {
     const KINDS: [&str; 3] = ["story", "screen", "task"];
     let named = super::runs::named_of_kinds(pool, project, &KINDS).await?;
     // Область экрана — объявленная величина: её держит `screen_area`, и больше
@@ -85,7 +88,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize,
     let empty_fields = HashMap::new();
     let empty_titles: Vec<String> = Vec::new();
 
-    let mut stories: Vec<(String, String, String, String, String, String, String, String)> = Vec::new();
+    let mut stories: Vec<StoryRow> = Vec::new();
     let mut screens: Vec<(String, String, String, String, String)> = Vec::new();
     let mut references: Vec<(String, &str, String)> = Vec::new();
     let mut story_requirements: Vec<(String, String)> = Vec::new();
@@ -101,8 +104,8 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize,
         let f = fields.get(&key).unwrap_or(&empty_fields);
         let got = |name: &str| f.get(name).map(String::as_str).unwrap_or("");
 
-        if e.0 == "story" {
-        if STORY_NAME.is_match(path) {
+        if e.0 == "story"
+        && STORY_NAME.is_match(path) {
             let id = e.1.clone();
             stories.push((
                 id.clone(),
@@ -135,7 +138,6 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize,
             }
             continue;
         }
-        }
 
         if e.0 == "screen" {
             // Экран объявлен заголовком: один документ держит и один экран, и
@@ -145,7 +147,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize,
                 let Some(id) = SCREEN_IN_TITLE.captures(title) else { continue };
                 let id = id[1].to_owned();
                 let area = areas.get(&id).cloned().unwrap_or_default();
-                let title = super::title_without_name(&title, &id);
+                let title = super::title_without_name(title, &id);
                 screens.push((id, title, e.0.clone(), e.1.clone(), area));
                 declared += 1;
             }

@@ -70,7 +70,7 @@ const ALTERNATIVES: [&str; 4] = [
     "Alternatives",
 ];
 
-pub struct Alternative {
+pub(crate) struct Alternative {
     pub ord: i32,
     pub title: String,
     pub body: String,
@@ -82,7 +82,7 @@ pub struct Alternative {
 /// списком, поздние абзацем. Единица — АБЗАЦ, а не строка: у части решений зачин
 /// растянут на две строки, и построчный разбор терял вариант целиком. Абзац без
 /// зачина принадлежит предыдущему варианту — это его продолжение.
-pub fn split_alternatives(body: &str) -> Vec<Alternative> {
+pub(crate) fn split_alternatives(body: &str) -> Vec<Alternative> {
     let mut out: Vec<Alternative> = Vec::new();
     let open = |out: &mut Vec<Alternative>, title: &str, rest: &str| {
         let clean = SPACES.replace_all(title, " ");
@@ -115,7 +115,7 @@ pub fn split_alternatives(body: &str) -> Vec<Alternative> {
         // Форма списком — ранние решения: «- **Stay on Rust.** Fully viable…».
         if BULLET_BOLD.is_match(text) {
             let mut item = String::new();
-            let mut flush = |item: &mut String, out: &mut Vec<Alternative>| {
+            let flush = |item: &mut String, out: &mut Vec<Alternative>| {
                 let piece = item.trim().to_owned();
                 item.clear();
                 if piece.is_empty() {
@@ -146,6 +146,9 @@ pub fn split_alternatives(body: &str) -> Vec<Alternative> {
     out
 }
 
+/// Строка решения для записи: имя, номер, заголовок, состояние и разделы.
+type DecisionRow = (String, i32, String, String, String, &'static str, String, String, String, String, String, String);
+
 /// Тело раздела по любому из имён; имя ищется НАЧАЛОМ заголовка: набор пишет
 /// «Отвергнутые варианты и их цена», «Последствия, измеренные» — заголовок несёт уточнение.
 fn body_of(titles: &[String], bodies: &HashMap<String, String>, names: &[&str]) -> String {
@@ -161,7 +164,7 @@ fn body_of(titles: &[String], bodies: &HashMap<String, String>, names: &[&str]) 
     String::new()
 }
 
-pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize), crate::db::Fail> {
+pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize), crate::db::Fail> {
     let named = super::runs::named_of_kinds(pool, project, &["decision"]).await?;
     let fields = {
         let client = crate::db::conn(pool).await?;
@@ -231,8 +234,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize)
             .collect()
     };
     let no_head = (String::new(), String::new());
-    let mut decisions: Vec<(String, i32, String, String, String, &str, String, String, String, String, String, String)> =
-        Vec::new();
+    let mut decisions: Vec<DecisionRow> = Vec::new();
     let mut alternatives: Vec<(String, Alternative)> = Vec::new();
     let mut links: Vec<(String, &str, String)> = Vec::new();
     let mut seen = HashSet::new();

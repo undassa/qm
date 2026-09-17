@@ -14,7 +14,7 @@ use serde::Deserialize;
 use sha2::Sha256;
 
 #[derive(Debug, Deserialize)]
-pub struct Claims {
+pub(crate) struct Claims {
     /// Кто: идентификатор участника.
     pub p: String,
     /// Докуда действителен, в миллисекундах.
@@ -22,13 +22,13 @@ pub struct Claims {
 }
 
 #[derive(Debug, PartialEq)]
-pub enum Refusal {
+pub(crate) enum Refusal {
     Malformed,
     BadSignature,
     Expired,
 }
 
-pub fn verify(token: &str, secret: &[u8], now_ms: i64) -> Result<Claims, Refusal> {
+pub(crate) fn verify(token: &str, secret: &[u8], now_ms: i64) -> Result<Claims, Refusal> {
     let dot = token.rfind('.').ok_or(Refusal::Malformed)?;
     let (payload, signature) = token.split_at(dot);
     let signature = &signature[1..];
@@ -71,13 +71,13 @@ mod tests {
     }
 
     #[test]
-    fn живая_личность_принимается() {
+    fn live_identity_accepted() {
         let token = mint(r#"{"p":"кто-то","exp":2000}"#, SECRET);
         assert_eq!(verify(&token, SECRET, 1000).unwrap().p, "кто-то");
     }
 
     #[test]
-    fn срок_читается_миллисекундами() {
+    fn deadline_read_milliseconds() {
         // 2000 мс — это будущее для 1000 мс и прошлое для 3000 мс. Прочитанный
         // секундами, тот же токен протух бы в обоих случаях.
         let token = mint(r#"{"p":"кто-то","exp":2000}"#, SECRET);
@@ -85,20 +85,20 @@ mod tests {
     }
 
     #[test]
-    fn чужая_подпись_не_проходит() {
+    fn foreign_signature_not_passes() {
         let token = mint(r#"{"p":"кто-то","exp":2000}"#, b"another");
         assert_eq!(verify(&token, SECRET, 1000).unwrap_err(), Refusal::BadSignature);
     }
 
     #[test]
-    fn подмена_полезной_части_ломает_подпись() {
+    fn swap_payload_parts_breaks_signature() {
         let token = mint(r#"{"p":"кто-то","exp":2000}"#, SECRET);
         let forged = format!("{}.{}", URL_SAFE_NO_PAD.encode(r#"{"p":"чужой","exp":2000}"#), token.split('.').nth(1).unwrap());
         assert_eq!(verify(&forged, SECRET, 1000).unwrap_err(), Refusal::BadSignature);
     }
 
     #[test]
-    fn токен_без_точки_не_личность() {
+    fn token_without_point_not_identity() {
         assert_eq!(verify("простострока", SECRET, 1000).unwrap_err(), Refusal::Malformed);
     }
 }

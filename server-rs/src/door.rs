@@ -15,8 +15,8 @@ pub fn mark_busy(busy: bool) -> Value {
 }
 
 /// Сказала ли дверь «занято».
-pub fn busy_said(ответ: &Value) -> bool {
-    ответ["_meta"]["busy"].as_bool().unwrap_or(false)
+pub fn busy_said(answer: &Value) -> bool {
+    answer["_meta"]["busy"].as_bool().unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -26,10 +26,10 @@ mod tests {
 
     #[test]
     fn what_is_written_is_what_is_read() {
-        let занято = json!({ "content": [], "isError": true, "_meta": mark_busy(true) });
-        assert!(busy_said(&занято));
-        let по_существу = json!({ "content": [], "isError": true, "_meta": mark_busy(false) });
-        assert!(!busy_said(&по_существу));
+        let busy = json!({ "content": [], "isError": true, "_meta": mark_busy(true) });
+        assert!(busy_said(&busy));
+        let by_merits = json!({ "content": [], "isError": true, "_meta": mark_busy(false) });
+        assert!(!busy_said(&by_merits));
         assert!(!busy_said(&json!({ "content": [], "isError": false })), "ответ без пометки — не занятость");
         assert!(!busy_said(&json!("строка")), "не предмет — не занятость");
     }

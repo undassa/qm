@@ -97,7 +97,7 @@ impl Says for Fail {
 }
 
 impl Fail {
-    pub fn busy(&self) -> bool {
+    pub(crate) fn busy(&self) -> bool {
         matches!(self, Fail::Busy(_))
     }
 }
@@ -113,15 +113,15 @@ tokio::task_local! {
 }
 
 /// Сколько раз соединение брали, уже держа другое. Ноль — правило соблюдено.
-pub static NESTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(crate) static NESTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Сколько раз отказали из-за перегрузки: не отдали соединение или не пустили
 /// в дверь. Счёт живёт в памяти минуту, а потом ложится строкой в базу —
 /// иначе от перегрузки не остаётся следа, который можно прочесть потом.
-pub static BUSY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(crate) static BUSY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Снять счётчики и обнулить: возвращается то, что накопилось с прошлого раза.
-pub fn strain() -> (u64, u64) {
+pub(crate) fn strain() -> (u64, u64) {
     use std::sync::atomic::Ordering::Relaxed;
     (BUSY.swap(0, Relaxed), NESTED.swap(0, Relaxed))
 }
@@ -132,7 +132,7 @@ pub fn strain() -> (u64, u64) {
 /// шестнадцать запросов держат по одному и ждут второго, и ни один не может
 /// его получить. Такое место считается и называется в журнале; чинится оно
 /// передачей соединения вниз, а не размером пула.
-pub async fn conn(pool: &Pool) -> Result<Held, Fail> {
+pub(crate) async fn conn(pool: &Pool) -> Result<Held, Fail> {
     let depth = DEPTH.try_with(|d| d.get()).unwrap_or(0);
     if depth > 0 {
         NESTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -193,14 +193,14 @@ mod tests {
         let url = std::env::var("MH_TEST_DB_URL").expect("MH_TEST_DB_URL: адрес базы");
         let pool = pool(&url, 1).expect("пул тестовой базы");
         let held = conn(&pool).await.expect("первое соединение");
-        let начало = std::time::Instant::now();
+        let start = std::time::Instant::now();
         let busy = conn(&pool).await.expect_err("второе соединение: пул пуст");
-        let ждали = начало.elapsed();
+        let waited = start.elapsed();
         assert!(busy.busy(), "{}", busy.says());
         assert!(busy.says().contains("перегружен"), "{}", busy.says());
         // Срок ожидания — часть ответа, а не мелочь настройки: тридцать секунд
         // превращали перегрузку в час простоя, и цифру держит этот предел.
-        assert!(ждали < std::time::Duration::from_secs(5), "ждали {ждали:?}: отказ должен быть скорым");
+        assert!(waited < std::time::Duration::from_secs(5), "ждали {waited:?}: отказ должен быть скорым");
         drop(held);
         assert!(conn(&pool).await.is_ok(), "освободившееся соединение снова выдаётся");
     }
@@ -213,23 +213,23 @@ mod tests {
     async fn a_second_connection_while_holding_one_is_counted() {
         let url = std::env::var("MH_TEST_DB_URL").expect("MH_TEST_DB_URL: адрес базы");
         let pool = pool(&url, 4).expect("пул тестовой базы");
-        let было = NESTED.load(std::sync::atomic::Ordering::Relaxed);
+        let was = NESTED.load(std::sync::atomic::Ordering::Relaxed);
         super::counting(async {
-            let первое = conn(&pool).await.expect("первое соединение");
-            assert_eq!(NESTED.load(std::sync::atomic::Ordering::Relaxed), было, "одно соединение — не вложенность");
-            let второе = conn(&pool).await.expect("второе соединение");
-            assert_eq!(NESTED.load(std::sync::atomic::Ordering::Relaxed), было + 1, "второе при живом первом считается");
-            drop(второе);
-            drop(первое);
+            let first = conn(&pool).await.expect("первое соединение");
+            assert_eq!(NESTED.load(std::sync::atomic::Ordering::Relaxed), was, "одно соединение — не вложенность");
+            let second = conn(&pool).await.expect("второе соединение");
+            assert_eq!(NESTED.load(std::sync::atomic::Ordering::Relaxed), was + 1, "второе при живом первом считается");
+            drop(second);
+            drop(first);
         })
         .await;
         super::counting(async {
-            let _по_очереди = conn(&pool).await.expect("соединение");
+            let _by_queue = conn(&pool).await.expect("соединение");
         })
         .await;
         super::counting(async {
-            let _снова = conn(&pool).await.expect("соединение");
-            assert_eq!(NESTED.load(std::sync::atomic::Ordering::Relaxed), было + 1, "после освобождения счёт не растёт");
+            let _again = conn(&pool).await.expect("соединение");
+            assert_eq!(NESTED.load(std::sync::atomic::Ordering::Relaxed), was + 1, "после освобождения счёт не растёт");
         })
         .await;
     }

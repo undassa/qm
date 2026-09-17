@@ -53,7 +53,7 @@ pub struct Kind {
 }
 
 impl Kind {
-    pub fn is_inner(&self) -> bool {
+    pub(crate) fn is_inner(&self) -> bool {
         self.shape == "inner"
     }
 }
@@ -67,7 +67,7 @@ struct Layout {
 ///
 /// Те же имена, что у потребителя в харнесе: словарь один на обе стороны, иначе
 /// переключение источника станет переводом.
-pub const TABLES: &[(&str, &str, &str, &str)] = &[
+pub(crate) const TABLES: &[(&str, &str, &str, &str)] = &[
     ("question", "project_questions", "id", "title"),
     ("decision", "project_decisions", "id", "title"),
     ("requirement", "project_requirements", "id", "text"),
@@ -94,7 +94,7 @@ pub const TABLES: &[(&str, &str, &str, &str)] = &[
     ("assertion", "project_assertions", "id", "area"),
 ];
 
-pub fn table_of(kind: &str) -> Option<(&'static str, &'static str, &'static str)> {
+pub(crate) fn table_of(kind: &str) -> Option<(&'static str, &'static str, &'static str)> {
     TABLES.iter().find(|t| t.0 == kind).map(|t| (t.1, t.2, t.3))
 }
 
@@ -124,7 +124,7 @@ impl Kinds {
     }
 
     /// Записать раскладку в базу: файл → таблица, один раз при переносе.
-    pub async fn into_db(&self, pool: &deadpool_postgres::Pool, by: &str) -> Result<usize, String> {
+    pub async fn write_to_db(&self, pool: &deadpool_postgres::Pool, by: &str) -> Result<usize, String> {
         let client = crate::db::conn(pool).await.map_err(|e| e.says())?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
@@ -145,15 +145,11 @@ impl Kinds {
         Ok(n)
     }
 
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
-    pub fn get(&self, name: &str) -> Option<&Kind> {
+    pub(crate) fn get(&self, name: &str) -> Option<&Kind> {
         self.0.get(name)
     }
 

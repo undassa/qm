@@ -15,8 +15,8 @@ use std::collections::{HashMap, HashSet};
 /// Документ, который эта проекция разбирает: вид и имя, а не адрес.
 const REGISTER_KIND: &str = "strs";
 const REGISTER_NAME: &str = "";
-pub const STORY_NEEDS_SECTION: &str = "Потребности, из которых это выросло";
-pub const STORY_REQUIREMENTS_SECTION: &str = "Требования, на которые опирается";
+pub(crate) const STORY_NEEDS_SECTION: &str = "Потребности, из которых это выросло";
+pub(crate) const STORY_REQUIREMENTS_SECTION: &str = "Требования, на которые опирается";
 static NEED_ID: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\s*(ST-(\d+))\s*$").expect("образец потребности"));
 static NEED_IN_TEXT: Lazy<Regex> = Lazy::new(|| Regex::new(r"\b(ST-\d+)\b").expect("образец упоминания"));
 /// Имя истории — её собственный идентификатор: `US-ONB-01`.
@@ -33,8 +33,11 @@ fn priority_of(mark: &str) -> &'static str {
     }
 }
 
+/// Строка нужды: имя, номер, заголовок, тема, стороны и источник.
+type NeedRow = (String, i32, String, String, String, &'static str, String, Option<i32>);
+
 /// Тела одноимённых разделов по документам: первый раздел с таким заголовком.
-pub async fn section_bodies(
+pub(crate) async fn section_bodies(
     pool: &Pool,
     project: &str,
     title: &str,
@@ -57,11 +60,11 @@ pub async fn section_bodies(
     Ok(rows.iter().map(|r| (r.get(0), r.get(1))).collect())
 }
 
-pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize), crate::db::Fail> {
+pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize), crate::db::Fail> {
     let blocks = cells(pool, project, REGISTER_KIND, REGISTER_NAME, false).await?;
     let heads = headings(pool, project, REGISTER_KIND, REGISTER_NAME).await?;
 
-    let mut needs: Vec<(String, i32, String, String, String, &str, String, Option<i32>)> = Vec::new();
+    let mut needs: Vec<NeedRow> = Vec::new();
     let mut claimed = HashSet::new();
     for (block, rows) in &blocks {
         for row in rows.values() {
@@ -107,12 +110,12 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize), crate
     let tx = client.transaction().await?;
     tx.execute("DELETE FROM project_need_stories WHERE project_id = $1", &[&project]).await?;
     tx.execute("DELETE FROM project_needs WHERE project_id = $1", &[&project]).await?;
-    for (id, number, text, sides, sources, priority, theme, секция) in &needs {
+    for (id, number, text, sides, sources, priority, theme, section) in &needs {
         tx.execute(
             "INSERT INTO project_needs(project_id, id, number, text, sides, sources, theme, priority,
                                         entity_kind, entity_name, section_ord)
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
-            &[&project, id, number, text, sides, sources, theme, priority, &REGISTER_KIND, &REGISTER_NAME, секция],
+            &[&project, id, number, text, sides, sources, theme, priority, &REGISTER_KIND, &REGISTER_NAME, section],
         )
         .await?;
     }

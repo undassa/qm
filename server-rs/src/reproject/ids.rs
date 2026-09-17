@@ -113,7 +113,7 @@ fn read_prefix(b: &[char], i: usize) -> Option<(String, usize)> {
 }
 
 /// Раскрывает текст в имена, по порядку первого появления.
-pub fn expand(text: &str) -> Vec<String> {
+pub(crate) fn expand(text: &str) -> Vec<String> {
     let b: Vec<char> = text.chars().collect();
     let mut out: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -164,9 +164,9 @@ pub fn expand(text: &str) -> Vec<String> {
                     // Буквенный диапазон работает ВНУТРИ одного числа:
                     // `05a…05d` — это a, b, c, d. Через число букву не тянем:
                     // `05a…06c` даёт `05a` и `06`, а не выдуманный ряд.
-                    if last_suf.is_some() && end.suf.is_some() && end.n == last {
-                        let from = last_suf.unwrap() as u8 + 1;
-                        for c in from..=end.suf.unwrap() as u8 {
+                    if let (Some(was), Some(before), true) = (last_suf, end.suf, end.n == last) {
+                        let from = was as u8 + 1;
+                        for c in from..=before as u8 {
                             take(end.n, Some(c as char), &mut out);
                         }
                         last_suf = end.suf;
@@ -298,7 +298,7 @@ mod tests {
 /// «`NFR-02` — 272 FR и 32 NFR» прочиталась бы диапазоном до двухсот
 /// семидесяти двух, и правило «имя ведёт в никуда» нашло бы двести
 /// выдуманных имён. Указатель называет имя, а не перечень.
-pub fn plain(text: &str) -> Vec<String> {
+pub(crate) fn plain(text: &str) -> Vec<String> {
     let b: Vec<char> = text.chars().collect();
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -335,7 +335,7 @@ pub fn plain(text: &str) -> Vec<String> {
 /// которой раскрыватель не знает, — и перечень, читаемый глазом как полный,
 /// на деле короче. Строка, где остались СЛОВА, перечнем не считается: это
 /// проза, и числа в ней говорят не об именах.
-pub fn hidden_numbers(text: &str) -> Vec<String> {
+pub(crate) fn hidden_numbers(text: &str) -> Vec<String> {
     let b: Vec<char> = text.chars().collect();
     // Границы того, что раскрыватель разобрал: повторяем его проход и
     // отмечаем съеденное.
@@ -422,7 +422,7 @@ pub fn hidden_numbers(text: &str) -> Vec<String> {
 ///
 /// Строка НЕ таблицы даёт пусто, а не имена всей строки: иначе «первой ячейкой»
 /// оказалось бы всякое имя в прозе, и различие исчезло бы.
-pub fn heading_cell(line: &str) -> Vec<String> {
+pub(crate) fn heading_cell(line: &str) -> Vec<String> {
     match line.trim_start().strip_prefix('|') {
         Some(rest) => expand(rest.split('|').next().unwrap_or("")),
         None => Vec::new(),
@@ -430,26 +430,26 @@ pub fn heading_cell(line: &str) -> Vec<String> {
 }
 
 #[cfg(test)]
-mod ячейка {
+mod cell {
     use super::heading_cell;
 
     #[test]
-    fn первая_ячейка_отдаёт_своё_имя() {
+    fn first_cell_returns_own_name() {
         assert_eq!(heading_cell("| `FR-SIG-10` | держит подпись |"), vec!["FR-SIG-10"]);
     }
 
     #[test]
-    fn проза_не_первая_ячейка() {
+    fn prose_not_first_cell() {
         assert!(heading_cell("тот же принцип, что у `FR-SIG-10`").is_empty());
     }
 
     #[test]
-    fn имя_из_второй_ячейки_не_считается_своим() {
+    fn name_from_second_cells_not_counted_own() {
         assert!(heading_cell("| держит | `FR-SIG-10` |").is_empty());
     }
 
     #[test]
-    fn перечень_в_первой_ячейке_раскрывается() {
+    fn list_at_first_cell_expands() {
         // `FR-SIT-04, 07, 09` — три имени состава, а не одно.
         let got = heading_cell("| `FR-SIT-04, 07, 09` | наблюдение |");
         assert_eq!(got.len(), 3, "раскрылось: {got:?}");
@@ -457,13 +457,13 @@ mod ячейка {
     }
 
     #[test]
-    fn разделитель_таблицы_имён_не_даёт() {
+    fn a_table_separator_row_gives_no_names() {
         assert!(heading_cell("| --- | --- |").is_empty());
     }
 }
 
 #[cfg(test)]
-mod заголовок_объявляет {
+mod title_declares {
     use super::expand;
 
     /// Имя, введённое ЗАГОЛОВКОМ, — объявление, и его надо видеть.
@@ -473,24 +473,24 @@ mod заголовок_объявляет {
     /// правило «сущность написана в том документе, который назван её
     /// источником» честно отвечало «документа, где она написана, нет».
     #[test]
-    fn имя_из_заголовка_видно() {
+    fn name_from_title_visible() {
         // Все двенадцать, которых не видел перечень у `tot-ade`.
-        let имена = [
+        let names = [
             "TC-AGENT-02", "TC-CLIENT-01", "TC-HONEST-01", "TC-PROV-01",
             "TC-SANDBOX-01", "TC-SANDBOX-02", "TC-SANDBOX-03", "TC-SANDBOX-04",
             "TC-SESSION-01", "TC-SESSION-02", "TC-SIZE-02", "FR-UI-55",
         ];
-        let mut невидимы: Vec<&str> = Vec::new();
-        for имя in имена {
-            let строка = format!("### {имя} · Необратимое не проходит молча");
-            if !expand(&строка).contains(&имя.to_owned()) {
-                невидимы.push(имя);
+        let mut invisible: Vec<&str> = Vec::new();
+        for name_said in names {
+            let row = format!("### {name_said} · Необратимое не проходит молча");
+            if !expand(&row).contains(&name_said.to_owned()) {
+                invisible.push(name_said);
             }
         }
         assert!(
-            невидимы.is_empty(),
+            invisible.is_empty(),
             "заголовок вводит имя, а перечень его не видит: {}",
-            невидимы.join(" · ")
+            invisible.join(" · ")
         );
     }
 }

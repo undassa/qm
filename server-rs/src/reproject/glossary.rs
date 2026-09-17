@@ -17,7 +17,7 @@ const HEADER: [&str; 3] = ["Термин", "Идентификатор", "Что
 static IDENTIFIER: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^\s*`?([A-Za-z][A-Za-z0-9_.-]*)`?\s*$").expect("образец имени"));
 
-pub async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fail> {
+pub(crate) async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fail> {
     let blocks = cells(pool, project, KIND, NAME, false).await?;
     let heads = headings(pool, project, KIND, NAME).await?;
 
@@ -31,7 +31,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fai
             continue;
         }
         let area = title_of(&heads, *block);
-        let секция = ord_of(&heads, *block);
+        let section = ord_of(&heads, *block);
         for (ord, row) in rows {
             if *ord == 0 {
                 continue;
@@ -46,7 +46,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fai
             if !seen.insert(id.clone()) {
                 continue;
             }
-            terms.push((id, term, at(row, 2).trim().to_owned(), area.clone(), секция));
+            terms.push((id, term, at(row, 2).trim().to_owned(), area.clone(), section));
         }
     }
 
@@ -64,11 +64,11 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fai
     let ids: Vec<String> = terms.iter().map(|t| t.0.clone()).collect();
     tx.execute("DELETE FROM project_terms WHERE project_id = $1 AND id = ANY($2)",
                &[&project, &ids]).await?;
-    for (id, term, meaning, area, секция) in &terms {
+    for (id, term, meaning, area, section) in &terms {
         tx.execute(
             "INSERT INTO project_terms(project_id, id, term, meaning, area, entity_kind, entity_name, section_ord)
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
-            &[&project, id, term, meaning, area, &KIND, &NAME, секция],
+            &[&project, id, term, meaning, area, &KIND, &NAME, section],
         )
         .await?;
     }

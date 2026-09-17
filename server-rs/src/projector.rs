@@ -1147,10 +1147,16 @@ ALTER TABLE project_gates ADD COLUMN IF NOT EXISTS result jsonb;
 -- нарушение в откатываемой транзакции. Ступень без пробы не «прошла самотест» —
 -- про неё просто не сказано, чем её ронять, и это разные ответы.
 ALTER TABLE harness_process_step ADD COLUMN IF NOT EXISTS probe text NOT NULL DEFAULT '';
--- Команда, которой ЕДИНИЦА РАБОТЫ этой ступени видна. `{имя}` подставляется
+-- Команда, которой ЕДИНИЦА РАБОТЫ этой ступени видна. `{name}` подставляется
 -- первым словом находки. Пусто — команды нет, и это видно: `next-step` не
 -- выдумывает её за набор.
 ALTER TABLE harness_process_step ADD COLUMN IF NOT EXISTS work_run text NOT NULL DEFAULT '';
+-- МЕТКА ПЕРЕЕХАЛА ВМЕСТЕ С ЗАПИСЯМИ. Метка подстановки — не имя в коде, а
+-- слово внутри строки, которая ЛЕЖИТ В БАЗЕ: сменить её в коде и не тронуть
+-- записанное значит молча перестать подставлять имя во всех объявленных
+-- ступенях. Перенос идёт здесь и один раз: после него `{имя}` в колонке нет.
+UPDATE harness_process_step SET work_run = replace(work_run, '{имя}', '{name}')
+ WHERE work_run LIKE '%{имя}%';
 -- ВИД ЕДИНИЦЫ РАБОТЫ СТУПЕНИ: документ, вопрос, гейт, задача. Без него ответ
 -- `next-step` неисполним без догадки — `name` и `run` есть, а что это за имя,
 -- вызывающий угадывал. И второе, важнее: `next-task` должен знать, с какой
@@ -2958,7 +2964,7 @@ pub async fn rebuild_before(pool: &Pool, project: &str) -> Result<Value, crate::
 /// теряет: читают долг только через план, и выпавшая его не показывает, а
 /// вернувшись — показывает прежний. Иначе снять задачу и вернуть её было бы
 /// способом погасить долг без переделки.
-pub async fn clear_redone(
+pub(crate) async fn clear_redone(
     client: &impl deadpool_postgres::GenericClient,
     project: &str,
 ) -> Result<(), crate::db::Fail> {
@@ -2980,7 +2986,7 @@ pub async fn clear_redone(
 /// Закрытие опознаётся коммитом, и другого опознания у него нет: подача без
 /// коммита не принимается (`closings_without_commit`), объявить задачу
 /// закрытой дверью нельзя (`declare_task`).
-pub async fn closings_to_judge(
+pub(crate) async fn closings_to_judge(
     client: &impl deadpool_postgres::GenericClient,
     project: &str,
 ) -> Result<Vec<(String, String)>, crate::db::Fail> {
@@ -3001,7 +3007,7 @@ pub async fn closings_to_judge(
 /// закрытым, суд его ещё не отметил, а вид задачи отображён на фазу.
 /// Сменилось за время замера — судит следующий замер; отметил другой замер —
 /// второго суда нет; фазы у вида нет — судить не по чему.
-pub async fn judge_closings(
+pub(crate) async fn judge_closings(
     client: &impl deadpool_postgres::GenericClient,
     project: &str,
     pending: &[(String, String)],
@@ -3043,7 +3049,7 @@ pub async fn judge_closings(
 /// Соединение берётся на каждый запрос и сразу отдаётся: держать его, пока замер
 /// берёт своё, значит занимать два слота на замер — а при восьми одновременных
 /// замерах это тупик, уже однажды снятый в пересборке.
-pub async fn judging_closings<T, F, Fut>(
+pub(crate) async fn judging_closings<T, F, Fut>(
     pool: &Pool,
     project: &str,
     measure: F,
@@ -3060,7 +3066,7 @@ where
 
 /// Закрытия без коммита в подаче. Закрытие опознаётся коммитом: без него суд
 /// порядка не отличит новое закрытие от прежнего, и такая подача не принимается.
-pub fn closings_without_commit(states: &[(String, String, String, i64)]) -> Vec<String> {
+pub(crate) fn closings_without_commit(states: &[(String, String, String, i64)]) -> Vec<String> {
     states
         .iter()
         .filter(|(_, state, commit, _)| state == "closed" && commit.trim().is_empty())
@@ -3627,7 +3633,7 @@ pub async fn rebuild(pool: &Pool, project: &str) -> Result<Value, crate::db::Fai
 /// задач: раскрытое при записи протухнет, как только в этап добавят задачу, и
 /// задача прочтётся готовой, хотя ждёт новичка. Именно на этом `M8-T10` сегодня
 /// читается свободной: рёбер у неё ноль, а документ говорит «все задачи M8».
-pub async fn next_task(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn next_task(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
@@ -3679,7 +3685,7 @@ pub async fn next_task(pool: &Pool, project: &str) -> Result<Value, crate::db::F
         // стояло. Пока фаза закрыта, брать её нельзя — тот же барьер; открылась
         // — её надо переделать, и сказать об этом больше некому: в плане она
         // числится закрытой и в перечень незакрытых не попадает никогда.
-        let долг = client
+        let debt = client
             .query(
                 "SELECT r.task_id, r.phase, r.gate, t.title, tp.phase_ord
                    FROM task_redo r
@@ -3691,25 +3697,25 @@ pub async fn next_task(pool: &Pool, project: &str) -> Result<Value, crate::db::F
                 &[&project],
             )
             .await?;
-        if let Some(первая) = долг.first() {
-            if let Some(держит) = лестница_держит(&*client, project, первая.get(4)).await? {
-                return Ok(json!({ "task": null, "candidate": первая.get::<_, String>(0), "redo": true,
-                                  "why": держит["why"], "ladder": держит }));
+        if let Some(first_one) = debt.first() {
+            if let Some(holds_rows) = ladder_holds(&*client, project, first_one.get(4)).await? {
+                return Ok(json!({ "task": null, "candidate": first_one.get::<_, String>(0), "redo": true,
+                                  "why": holds_rows["why"], "ladder": holds_rows }));
             }
             return Ok(json!({
                 "task": {
-                    "id": первая.get::<_, String>(0),
-                    "title": первая.get::<_, Option<String>>(3),
-                    "phase": первая.get::<_, String>(1),
-                    "gate": первая.get::<_, String>(2),
+                    "id": first_one.get::<_, String>(0),
+                    "title": first_one.get::<_, Option<String>>(3),
+                    "phase": first_one.get::<_, String>(1),
+                    "gate": first_one.get::<_, String>(2),
                     "redo": true,
                 },
                 "why": format!(
                     "незакрытых задач нет, но {} закрыты не в свой черёд: их фаза тогда не была \
                      открыта, и то, на что работа опиралась, ещё не стояло. Фаза открыта сейчас — \
                      переделать их можно и нужно. Долг гасится НОВЫМ закрывающим коммитом, а не \
-                     словом", долг.len()),
-                "redo": долг.iter().map(|r| json!({
+                     словом", debt.len()),
+                "redo": debt.iter().map(|r| json!({
                     "id": r.get::<_, String>(0), "phase": r.get::<_, String>(1),
                     "gate": r.get::<_, String>(2) })).collect::<Vec<_>>(),
             }));
@@ -3822,11 +3828,11 @@ pub async fn next_task(pool: &Pool, project: &str) -> Result<Value, crate::db::F
             // Что делать фазой ниже, лестница знает и без нас — она это и
             // считает. Держать здесь второй ответ на тот же вопрос значило бы
             // завести два порядка работ, расходящихся молча.
-            "instead": шаг_вместо(&*client, project).await?,
+            "instead": step_instead(&*client, project).await?,
         }));
     }
-    if let Some(держит) = лестница_держит(&*client, project, phase_ord).await? {
-        return Ok(json!({ "task": null, "candidate": id, "why": держит["why"], "ladder": держит }));
+    if let Some(holds_rows) = ladder_holds(&*client, project, phase_ord).await? {
+        return Ok(json!({ "task": null, "candidate": id, "why": holds_rows["why"], "ladder": holds_rows }));
     }
     // ДОЛГ ВИДЕН СРАЗУ, А НЕ В КОНЦЕ ОЧЕРЕДИ.
     //
@@ -3835,7 +3841,7 @@ pub async fn next_task(pool: &Pool, project: &str) -> Result<Value, crate::db::F
     // переделок за 122 задачами. Агент прошёл бы весь черёд и лишь потом узнал,
     // что девяносто девять шагов надо повторить. Очередь они при этом не
     // перехватывают — задача выдаётся та же; долг едет рядом числом и именами.
-    let долг = client
+    let debt = client
         .query(
             "SELECT r.task_id FROM task_redo r
                JOIN task_phase tp ON tp.project_id = r.project_id AND tp.task_id = r.task_id
@@ -3844,7 +3850,7 @@ pub async fn next_task(pool: &Pool, project: &str) -> Result<Value, crate::db::F
             &[&project],
         )
         .await?;
-    let mut ответ = json!({
+    let mut answer = json!({
         "task": {
             "id": id,
             "milestone": r.get::<_, String>(1),
@@ -3857,20 +3863,20 @@ pub async fn next_task(pool: &Pool, project: &str) -> Result<Value, crate::db::F
             "checks": r.get::<_, String>(10),
         }
     });
-    if !долг.is_empty() {
-        ответ["redo"] = json!({
-            "count": долг.len(),
-            "tasks": долг.iter().take(20).map(|r| r.get::<_, String>(0)).collect::<Vec<_>>(),
+    if !debt.is_empty() {
+        answer["redo"] = json!({
+            "count": debt.len(),
+            "tasks": debt.iter().take(20).map(|r| r.get::<_, String>(0)).collect::<Vec<_>>(),
             "why": "эти задачи закрыты не в свой черёд: их фаза тогда не была открыта, и то, на \
                     что работа опиралась, ещё не стояло. Фаза открыта сейчас — переделать их \
                     можно. Долг гасится НОВЫМ закрывающим коммитом, а не словом",
         });
     }
-    Ok(ответ)
+    Ok(answer)
 }
 
 /// Почему задача не берётся: перечень того, чего она ждёт.
-pub async fn task_blockers(pool: &Pool, project: &str, task: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn task_blockers(pool: &Pool, project: &str, task: &str) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     // ПУСТОЙ СПИСОК ВМЕСТО ОТВЕТА ВРЁТ. Ручку звали без задачи, и она отвечала
     // `{"task": "", "waitsForMilestones": [], "waitsForTasks": []}` — неотличимо
@@ -3979,7 +3985,7 @@ pub async fn task_blockers(pool: &Pool, project: &str, task: &str) -> Result<Val
 /// колонке `state` лежало заявление, написанное когда-то руками. Рядом они
 /// читались как два мнения, и «расхождением» звалось то, что было просто
 /// непересчитанной записью.
-pub async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
     let mut conn = crate::db::conn(pool).await?;
     // ВЕСЬ КРУГ — ОДНОЙ ТРАНЗАКЦИЕЙ, и это не про скорость.
     //
@@ -4184,11 +4190,12 @@ async fn measure_item(
                         if kind == "manual" { "проиграно ли — не записано" } else { "требуется, но машинного способа нет" }
                     } else { why_col.as_str() } })
         } else if kind == "query" {
-            match query.as_deref() {
+            {
                 // Запрос гейта исполняется ОБЩИМ исполнителем — тем же, что у
                 // пункта готовности и ступени лестницы. Свой здесь мерил бы не
                 // то, что обещано пунктом, и разошёлся бы молча.
-                sql => {
+                let sql = query;
+                {
                     let since: i64 = r.try_get("since").unwrap_or(0);
                     let v = execute_method_upto(client, project, "query", sql.unwrap_or(""), 200, since).await;
                     json!({
@@ -4217,7 +4224,7 @@ async fn measure_item(
         Ok(entry)
 }
 
-pub async fn gate(pool: &Pool, project: &str, phase: Option<&str>) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn gate(pool: &Pool, project: &str, phase: Option<&str>) -> Result<Value, crate::db::Fail> {
     let mut conn = crate::db::conn(pool).await?;
     // ВЕРДИКТ И ЕГО ОСНОВАНИЕ ЧИТАЮТСЯ ОДНИМ СНИМКОМ. Числа гейта берутся у
     // `gate_state`, а пункты, из которых они сложены, — у `project_gates`; это
@@ -4456,7 +4463,7 @@ pub async fn gate(pool: &Pool, project: &str, phase: Option<&str>) -> Result<Val
 /// Сверка заявленного числа с фактом — но сперва сказав, что именно считается.
 ///
 /// Без оговорки сверка кричит волком дважды и топит единственный настоящий крик.
-pub async fn claims(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn claims(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
@@ -4475,7 +4482,7 @@ pub async fn claims(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail
         let claimed: i32 = r.get(2);
         let counts: Option<String> = r.get(3);
         let fact = match counts.as_deref() {
-            Some(sql) => match client.query_one(&sql.replace("$1", "$1"), &[&project]).await {
+            Some(sql) => match client.query_one(sql, &[&project]).await {
                 Ok(row) => Some(row.get::<_, i64>(0)),
                 Err(_) => None,
             },
@@ -4500,42 +4507,9 @@ pub async fn claims(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail
     Ok(json!({ "claims": out, "disagree": disagree }))
 }
 
-/// Чек-лист сущности с честным `unknown` там, где способа нет.
-pub async fn readiness(pool: &Pool, project: &str, kind: &str, id: &str) -> Result<Value, crate::db::Fail> {
-    let client = crate::db::conn(pool).await?;
-    let rows = client
-        .query(
-            "SELECT ord, text, declared, method_kind, state FROM readiness_state
-              WHERE project_id = $1 AND owner_kind = $2 AND owner_id = $3 ORDER BY ord",
-            &[&project, &kind, &id],
-        )
-        .await?;
-    let items: Vec<Value> = rows
-        .iter()
-        .map(|r| {
-            json!({
-                "ord": r.get::<_, i32>(0), "text": r.get::<_, String>(1),
-                "declared": r.get::<_, Option<bool>>(2),
-                "methodKind": r.get::<_, String>(3), "state": r.get::<_, String>(4),
-            })
-        })
-        .collect();
-    let unmeasurable = items.iter().filter(|i| i["state"] == "unknown").count();
-    let declared_done = items.iter().filter(|i| i["declared"] == json!(true)).count();
-    Ok(json!({
-        "owner": { "kind": kind, "id": id },
-        "items": items,
-        "total": items.len(),
-        "declaredDone": declared_done,
-        "unmeasurable": unmeasurable,
-        // Самое опасное сочетание: галочка стоит, а мерить нечем.
-        "declaredDoneButUnmeasurable": items.iter()
-            .filter(|i| i["declared"] == json!(true) && i["state"] == "unknown").count(),
-    }))
-}
 
 /// Требования задачи — с объявленным отсутствием как ответом, а не пустотой.
-pub async fn requirements_of(pool: &Pool, project: &str, task: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn requirements_of(pool: &Pool, project: &str, task: &str) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let declared = client
         .query(
@@ -4572,7 +4546,7 @@ pub async fn requirements_of(pool: &Pool, project: &str, task: &str) -> Result<V
 }
 
 /// Задачи истории — через требования, с исключением как ответом.
-pub async fn tasks_of_story(pool: &Pool, project: &str, story: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn tasks_of_story(pool: &Pool, project: &str, story: &str) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let known = client
         .query("SELECT id FROM project_stories WHERE project_id = $1 AND id = $2", &[&project, &story])
@@ -4603,7 +4577,7 @@ pub async fn tasks_of_story(pool: &Pool, project: &str, story: &str) -> Result<V
 }
 
 /// Очередь предполёта: чего ещё не смотрели или смотрели до правки.
-pub async fn preflight_queue(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn preflight_queue(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
@@ -4667,7 +4641,7 @@ pub async fn preflight_queue(pool: &Pool, project: &str) -> Result<Value, crate:
 /// Подаёт тот, у кого есть репозиторий: состояние выводится из закрывающего
 /// трейлера, а трейлеры знает история. Сервер их не читает и читать не должен —
 /// он принимает поданное и запоминает, когда видел.
-pub async fn push_task_state(
+pub(crate) async fn push_task_state(
     pool: &Pool,
     project: &str,
     states: &[(String, String, String, i64)],
@@ -4745,7 +4719,7 @@ pub async fn push_task_state(
 /// верить, а сквозь неё проходит настоящее.
 ///
 /// Расхождение — это когда документ говорит ДРУГОЕ.
-pub async fn state_disagreements(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn state_disagreements(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
@@ -4789,6 +4763,17 @@ pub async fn state_disagreements(pool: &Pool, project: &str) -> Result<Value, cr
     }))
 }
 
+/// Поля способа, как их принимает дверь `method-set`.
+pub(crate) struct Method<'a> {
+    pub kind: &'a str,
+    pub id: &'a str,
+    pub ord: i32,
+    pub method_kind: &'a str,
+    pub method: &'a str,
+    pub declared_by: &'a str,
+    pub drop: bool,
+}
+
 /// Объявить способ проверки пункта готовности.
 ///
 /// Способ **объявляется**, а не добывается разбором. Я пробовал добыть: правило
@@ -4801,17 +4786,8 @@ pub async fn state_disagreements(pool: &Pool, project: &str) -> Result<Value, cr
 /// репозитория, ни оболочки, и заводить их ради чек-листа значит менять, чем
 /// сервер является. Команду выполняет харнес и подаёт итог — тем же путём, что
 /// состояния задач.
-pub async fn set_method(
-    pool: &Pool,
-    project: &str,
-    kind: &str,
-    id: &str,
-    ord: i32,
-    method_kind: &str,
-    method: &str,
-    declared_by: &str,
-    drop: bool,
-) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn set_method(pool: &Pool, project: &str, fields: Method<'_>) -> Result<Value, crate::db::Fail> {
+    let Method { kind, id, ord, method_kind, method, declared_by, drop } = fields;
     let client = crate::db::conn(pool).await?;
     if drop {
         let n = client
@@ -4856,7 +4832,7 @@ pub async fn set_method(
 }
 
 /// Сейчас в миллисекундах — время подачи, а не время события.
-pub fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::SystemTime::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -4868,7 +4844,7 @@ pub fn now_ms() -> i64 {
 /// Пишется на КАЖДУЮ принятую запись: вид, имя, ревизия, кто и что изменилось.
 /// Прежде правка меняла `content` и `revision`, не оставляя следа «кто и
 /// когда»; пока был волт, на это отвечал `git log`, а после его удаления — никто.
-pub async fn record_edit(
+pub(crate) async fn record_edit(
     pool: &Pool,
     project: &str,
     kind: &str,
@@ -4894,7 +4870,7 @@ pub async fn record_edit(
 /// Датчик подаёт то, что видит: «такие таблицы есть в миграциях», «в контракте
 /// столько операций». Ни одного вывода: сошлось ли это с набором — вопрос к
 /// серверу, у которого лежит и то и другое.
-pub async fn push_code_facts(
+pub(crate) async fn push_code_facts(
     pool: &Pool,
     project: &str,
     kind: &str,
@@ -4930,7 +4906,7 @@ pub async fn push_code_facts(
 ///
 /// Пока скиллы лежали только на диске, `owner` ступени указывал на то, чего
 /// база не подтвердит, а переименованный скилл ломал предложение, а не связь.
-pub async fn push_skills(
+pub(crate) async fn push_skills(
     pool: &Pool,
     set_name: &str,
     skills: &[(String, String, String)],
@@ -4973,7 +4949,7 @@ pub async fn push_skills(
     // не ссылается: ступень с владельцем-скиллом держит его внешним ключом, и
     // отказ здесь честнее тихого удаления.
     let mut kept: Vec<Value> = Vec::new();
-    for (name, _) in &was {
+    for name in was.keys() {
         if names.contains(name) {
             continue;
         }
@@ -5013,7 +4989,7 @@ pub async fn push_skills(
 /// доказывается порядком, и порядок, названный тем же, кто его нарушает, ничего
 /// не доказывает. По той же причине правка задачи обесценивает план — он
 /// привязан к правке, которую читал.
-pub async fn push_task_plan(
+pub(crate) async fn push_task_plan(
     pool: &Pool,
     project: &str,
     task: &str,
@@ -5058,7 +5034,7 @@ pub async fn push_task_plan(
                } else { "" } }))
 }
 
-pub async fn push_preflight(
+pub(crate) async fn push_preflight(
     pool: &Pool,
     project: &str,
     verdicts: &[(String, i64, i64, String, i32, String)],
@@ -5179,7 +5155,7 @@ pub async fn push_preflight(
 /// интерфейс и смотрят. Факт знает только тот, у кого есть репозиторий:
 /// `git worktree list`. Подача полная — закрытое дерево исчезает тем, что не
 /// пришло.
-pub async fn push_worktrees(
+pub(crate) async fn push_worktrees(
     pool: &Pool,
     project: &str,
     open: &[(String, String, i64)],
@@ -5230,7 +5206,7 @@ pub async fn push_worktrees(
 ///   `byText` — вопрос, чьё ЗАКРЫТИЕ обосновано фразой «держатель написан»,
 ///     при том что ни одна названная в тексте задача не закрыта. Это чтение
 ///     текста, а не связь, и оно так и подписано: находка для человека.
-pub async fn question_holders(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn question_holders(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
 
     // 1. Объявленная связь — ПОЛЕ «Держатель» в шапке вопроса, и только оно.
@@ -5357,7 +5333,7 @@ pub async fn question_holders(pool: &Pool, project: &str) -> Result<Value, crate
 ///
 /// Вид, для которого сводка не написана, отвечает ОТКАЗОМ с именем вида, а не
 /// пустым перечнем: пустой список тут читался бы как «сущностей нет».
-pub async fn summary(pool: &Pool, project: &str, kind: &str) -> Result<Value, Miss> {
+pub(crate) async fn summary(pool: &Pool, project: &str, kind: &str) -> Result<Value, Miss> {
     let client = crate::db::conn(pool).await?;
     let (sql, words, numbers) = match kind {
         "requirement" => (
@@ -5523,12 +5499,12 @@ pub async fn summary(pool: &Pool, project: &str, kind: &str) -> Result<Value, Mi
 /// какие истории, какие задачи», панель истории — «какие требования, какие
 /// экраны». Разные предметы, один вопрос. Вид без описанных связей отвечает
 /// отказом, а не пустотой.
-pub async fn links_of(pool: &Pool, project: &str, kind: &str, id: &str) -> Result<Value, Miss> {
+pub(crate) async fn links_of(pool: &Pool, project: &str, kind: &str, id: &str) -> Result<Value, Miss> {
     let client = crate::db::conn(pool).await?;
     links_at(&*client, project, kind, id).await
 }
 
-pub async fn links_at(
+pub(crate) async fn links_at(
     client: &impl deadpool_postgres::GenericClient,
     project: &str,
     kind: &str,
@@ -5652,7 +5628,7 @@ pub async fn links_at(
 /// Автор — не «кто правил последним»: машинный проход правит сотни документов и
 /// автором от этого не становится. Поэтому запись отдельная и проходами не
 /// трогается.
-pub async fn set_author(
+pub(crate) async fn set_author(
     pool: &Pool,
     project: &str,
     kind: &str,
@@ -5686,7 +5662,7 @@ pub async fn set_author(
 }
 
 /// Кто за какими документами стоит.
-pub async fn authors(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn authors(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
@@ -5718,7 +5694,7 @@ pub async fn authors(pool: &Pool, project: &str) -> Result<Value, crate::db::Fai
 ///
 /// Один вызов на запрос, и он же ведёт след: отдельный «журнал входов» рядом с
 /// проверкой разошёлся бы с ней в первый же отказ.
-pub async fn edge_admits(pool: &Pool, principal: &str) -> Result<bool, crate::db::Fail> {
+pub(crate) async fn edge_admits(pool: &Pool, principal: &str) -> Result<bool, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let declared: i64 = client
         .query_one("SELECT count(*) FROM edge_principal", &[])
@@ -5753,7 +5729,7 @@ pub async fn edge_admits(pool: &Pool, principal: &str) -> Result<bool, crate::db
 }
 
 /// Объявить, что этому человеку можно войти. Пустая пометка снимает объявление.
-pub async fn allow_principal(
+pub(crate) async fn allow_principal(
     pool: &Pool,
     principal: &str,
     note: Option<&str>,
@@ -5780,7 +5756,7 @@ pub async fn allow_principal(
 }
 
 /// Кто объявлен допущенным и кто на самом деле ходит.
-pub async fn principals(pool: &Pool) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn principals(pool: &Pool) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let declared = client
         .query("SELECT principal, note FROM edge_principal ORDER BY principal", &[])
@@ -5819,7 +5795,7 @@ pub async fn principals(pool: &Pool) -> Result<Value, crate::db::Fail> {
 /// — это они. Повторная заморозка того же выпуска отказывает, а не переписывает:
 /// заморозка, сдвинутая задним числом, отвечает на вопрос «что изменилось» так,
 /// будто ничего.
-pub async fn freeze_version(
+pub(crate) async fn freeze_version(
     pool: &Pool,
     project: &str,
     version: &str,
@@ -5850,7 +5826,7 @@ pub async fn freeze_version(
 }
 
 /// Что выпуск сделал с набором: изменил, удалил, добавил.
-pub async fn version_delta(pool: &Pool, project: &str, version: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn version_delta(pool: &Pool, project: &str, version: &str) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
@@ -5892,6 +5868,16 @@ pub async fn version_delta(pool: &Pool, project: &str, version: &str) -> Result<
     Ok(json!({ "version": version, "frozen": frozen, "fates": counts, "examples": examples }))
 }
 
+/// Поля помощника, как их принимает дверь `agent-set`.
+pub(crate) struct Agent<'a> {
+    pub set_name: &'a str,
+    pub name: &'a str,
+    pub description: Option<&'a str>,
+    pub body: &'a str,
+    pub tools: Option<&'a str>,
+    pub model: Option<&'a str>,
+}
+
 /// Записать один скилл. Подача целым набором (`skills-push`) для этого не годится:
 /// она снимает всё, что не пришло, а исходников скиллов на машине больше нет —
 /// база единственное место, где они есть.
@@ -5901,18 +5887,8 @@ pub async fn version_delta(pool: &Pool, project: &str, version: &str) -> Result<
 /// тела делали ручкой УМЕНИЯ, и она заводила умение с именем субагента, а одно
 /// такое имя совпало и перезаписало настоящее умение. Дверь, которой нет,
 /// заставляет ходить в соседнюю.
-#[allow(clippy::too_many_arguments)]
-pub async fn set_agent(
-    pool: &Pool,
-    set_name: &str,
-    name: &str,
-    description: Option<&str>,
-    body: &str,
-    tools: Option<&str>,
-    model: Option<&str>,
-    actor: &str,
-    drop_it: bool,
-) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn set_agent(pool: &Pool, fields: Agent<'_>, actor: &str, drop_it: bool) -> Result<Value, crate::db::Fail> {
+    let Agent { set_name, name, description, body, tools, model } = fields;
     if name.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "субагент без имени не объявляется" }));
     }
@@ -5958,17 +5934,18 @@ pub async fn set_agent(
                "agent": name, "bytes": body.len(), "was": old_hash, "now": hash }))
 }
 
-pub async fn set_skill(
-    pool: &Pool,
-    set_name: &str,
-    name: &str,
-    description: Option<&str>,
-    body: &str,
-    allowed_tools: Option<&str>,
-    disable_model_invocation: Option<bool>,
-    actor: &str,
-    drop_it: bool,
-) -> Result<Value, crate::db::Fail> {
+/// Поля умения, как их принимает дверь `skill-set`.
+pub(crate) struct Skill<'a> {
+    pub set_name: &'a str,
+    pub name: &'a str,
+    pub description: Option<&'a str>,
+    pub body: &'a str,
+    pub allowed_tools: Option<&'a str>,
+    pub disable_model_invocation: Option<bool>,
+}
+
+pub(crate) async fn set_skill(pool: &Pool, fields: Skill<'_>, actor: &str, drop_it: bool) -> Result<Value, crate::db::Fail> {
+    let Skill { set_name, name, description, body, allowed_tools, disable_model_invocation } = fields;
     let client = crate::db::conn(pool).await?;
         // Снятие — той же ручкой, что и объявление. Без него объявленное
         // убирается только запросом мимо сервера, и сервер перестаёт быть
@@ -5998,7 +5975,7 @@ pub async fn set_skill(
     let tools = allowed_tools.map(str::to_owned).unwrap_or(old_tools.clone());
     let flag = disable_model_invocation.or(old_flag);
     if old_hash == hash
-        && description.map_or(true, |d| d == old_description)
+        && description.is_none_or(|d| d == old_description)
         && tools == old_tools
         && flag == old_flag
     {
@@ -6027,7 +6004,7 @@ pub async fn set_skill(
 /// Проверка машинная и потому годная: корни набора и `.md` рядом с ними — то,
 /// чего в теле скилла быть не должно. Своя машинерия харнеса (`.harness/`,
 /// `core/`) под правило не подпадает: это не набор.
-pub async fn skills_with_paths(pool: &Pool, set_name: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn skills_with_paths(pool: &Pool, set_name: &str) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
@@ -6057,7 +6034,7 @@ pub async fn skills_with_paths(pool: &Pool, set_name: &str) -> Result<Value, cra
 /// Область ниоткуда не выводится — ни из имени экрана, ни из текста документа.
 /// Это ДАННЫЕ, и ставятся они прямо. Пересборку переживают, потому что живут в
 /// своей таблице, а не в той, которую пересборка удаляет и пишет заново.
-pub async fn set_screen_area(
+pub(crate) async fn set_screen_area(
     pool: &Pool,
     project: &str,
     screen: &str,
@@ -6107,7 +6084,7 @@ pub async fn set_screen_area(
 ///
 /// Гейт читает запросом; вычисление живёт на Rust. Мост между ними — строка в
 /// `generated_drift`: есть строка — файл отстал.
-pub async fn check_generated(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn check_generated(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
     let computed = order(pool, project).await?;
     let want = computed["content"].as_str().unwrap_or("");
     let client = crate::db::conn(pool).await?;
@@ -6218,7 +6195,7 @@ async fn subject_planted(
 /// неё в способе, умении и журнале прогонов, и все они едут вместе. Способ и
 /// проба снятой ступени уходят вместе с ней: оставленные, они однажды
 /// достанутся чужой ступени, въехавшей на освободившийся номер.
-pub async fn remove_step(
+pub(crate) async fn remove_step(
     pool: &Pool,
     project: &str,
     set_name: &str,
@@ -6278,6 +6255,19 @@ pub async fn remove_step(
     Ok(json!({ "status": "removed", "ord": ord, "question": question }))
 }
 
+/// Поля записи прогона, как их принимает дверь `run-record-add`.
+pub(crate) struct RunRecord<'a> {
+    pub id: &'a str,
+    pub task: &'a str,
+    pub milestone: &'a str,
+    pub title: &'a str,
+    pub commits: &'a str,
+    pub dates: &'a str,
+    pub review: &'a str,
+    pub appeared: &'a str,
+    pub left_open: &'a str,
+}
+
 /// Объявить требование снятым: имя, причина и чем снято.
 /// Объявить статью конституции — прямо, а не выводом из текста.
 ///
@@ -6315,11 +6305,8 @@ pub async fn remove_step(
 /// ADR-0037» — разные отношения, и сливать их в «связано» значит терять то
 /// единственное, ради чего связь записывают.
 /// Объявить запись прогона: чем задача закончилась и что осталось открытым.
-pub async fn declare_run_record(
-    pool: &Pool, project: &str, id: &str, task: &str, milestone: &str, title: &str,
-    commits: &str, dates: &str, review: &str, appeared: &str, left_open: &str,
-    drop_it: bool,
-) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn declare_run_record(pool: &Pool, project: &str, fields: RunRecord<'_>, drop_it: bool) -> Result<Value, crate::db::Fail> {
+    let RunRecord { id, task, milestone, title, commits, dates, review, appeared, left_open } = fields;
     if id.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "прогон без имени не объявляется" }));
     }
@@ -6348,7 +6335,7 @@ pub async fn declare_run_record(
     Ok(json!({ "status": "declared", "id": id, "leftOpen": !left_open.trim().is_empty() }))
 }
 
-pub async fn declare_decision_link(
+pub(crate) async fn declare_decision_link(
     pool: &Pool, project: &str, decision: &str, kind: &str, target: &str,
     drop_it: bool,
 ) -> Result<Value, crate::db::Fail> {
@@ -6377,10 +6364,17 @@ pub async fn declare_decision_link(
     Ok(json!({ "status": "declared", "decision": decision, "kind": kind, "target": target }))
 }
 
-pub async fn declare_frame_rule(
-    pool: &Pool, project: &str, kind: &str, number: i32, title: &str, body: &str, held_by: &str,
-    drop_it: bool,
-) -> Result<Value, crate::db::Fail> {
+/// Поля правила рамки, как их принимает дверь `frame-rule-add`.
+pub(crate) struct FrameRule<'a> {
+    pub kind: &'a str,
+    pub number: i32,
+    pub title: &'a str,
+    pub body: &'a str,
+    pub held_by: &'a str,
+}
+
+pub(crate) async fn declare_frame_rule(pool: &Pool, project: &str, fields: FrameRule<'_>, drop_it: bool) -> Result<Value, crate::db::Fail> {
+    let FrameRule { kind, number, title, body, held_by } = fields;
     if title.trim().is_empty() {
         return Ok(json!({ "status": "empty", "why": "без формулировки не объявляется" }));
     }
@@ -6420,11 +6414,17 @@ pub async fn declare_frame_rule(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub async fn declare_process_row(
-    pool: &Pool, project: &str, kind: &str, a: &str, b: &str, c: &str, d: &str, ord: i32,
-    drop_it: bool,
-) -> Result<Value, crate::db::Fail> {
+/// Поля строки процесса, как их принимает дверь `process-row-add`.
+pub(crate) struct ProcessRow<'a> {
+    pub kind: &'a str,
+    pub a: &'a str,
+    pub b: &'a str,
+    pub c: &'a str,
+    pub d: &'a str,
+    pub ord: i32,
+}
+pub(crate) async fn declare_process_row(pool: &Pool, project: &str, fields: ProcessRow<'_>, drop_it: bool) -> Result<Value, crate::db::Fail> {
+    let ProcessRow { kind, a, b, c, d, ord } = fields;
     let client = crate::db::conn(pool).await?;
     // Снятие — той же ручкой, что и объявление: строка, заведённая по ошибке
     // (шапка таблицы, прочитанная как данные), иначе снимается только руками в
@@ -6462,12 +6462,17 @@ pub async fn declare_process_row(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub async fn declare_milestone_detail(
-    pool: &Pool, project: &str, milestone: &str, what: &str, blocked_by: &str,
-    requirement: &str, gate: &str, closed: &str,
-    drop_it: bool,
-) -> Result<Value, crate::db::Fail> {
+/// Поля подробности этапа, как их принимает дверь `milestone-detail-add`.
+pub(crate) struct MilestoneDetail<'a> {
+    pub milestone: &'a str,
+    pub what: &'a str,
+    pub blocked_by: &'a str,
+    pub requirement: &'a str,
+    pub gate: &'a str,
+    pub closed: &'a str,
+}
+pub(crate) async fn declare_milestone_detail(pool: &Pool, project: &str, fields: MilestoneDetail<'_>, drop_it: bool) -> Result<Value, crate::db::Fail> {
+    let MilestoneDetail { milestone, what, blocked_by, requirement, gate, closed } = fields;
     if milestone.trim().is_empty() {
         return Ok(json!({ "status": "empty", "why": "подробность без этапа не объявляется" }));
     }
@@ -6522,11 +6527,17 @@ pub async fn declare_milestone_detail(
     Ok(json!({ "status": "declared", "milestone": milestone }))
 }
 
-pub async fn declare_screen_detail(
-    pool: &Pool, project: &str, screen: &str, purpose: &str, opens_when: &str,
-    empty_and_broken: &str, requirement: &str,
-    drop_it: bool,
-) -> Result<Value, crate::db::Fail> {
+/// Поля подробности экрана, как их принимает дверь `screen-detail-add`.
+pub(crate) struct ScreenDetail<'a> {
+    pub screen: &'a str,
+    pub purpose: &'a str,
+    pub opens_when: &'a str,
+    pub empty_and_broken: &'a str,
+    pub requirement: &'a str,
+}
+
+pub(crate) async fn declare_screen_detail(pool: &Pool, project: &str, fields: ScreenDetail<'_>, drop_it: bool) -> Result<Value, crate::db::Fail> {
+    let ScreenDetail { screen, purpose, opens_when, empty_and_broken, requirement } = fields;
     if screen.trim().is_empty() {
         return Ok(json!({ "status": "empty", "why": "подробность без экрана не объявляется" }));
     }
@@ -6558,7 +6569,7 @@ pub async fn declare_screen_detail(
     Ok(json!({ "status": "declared", "screen": screen }))
 }
 
-pub async fn declare_story_detail(
+pub(crate) async fn declare_story_detail(
     pool: &Pool, project: &str, story: &str, screen: &str, persona: &str,
     drop_it: bool,
 ) -> Result<Value, crate::db::Fail> {
@@ -6607,7 +6618,7 @@ pub async fn declare_story_detail(
 ///
 /// Обе стороны ПРОВЕРЯЮТСЯ: связь на несуществующее — подписанная пустота,
 /// и читается она как знание.
-pub async fn declare_story_requirement(
+pub(crate) async fn declare_story_requirement(
     pool: &Pool, project: &str, story: &str, requirement: &str, drop_it: bool,
 ) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
@@ -6661,7 +6672,7 @@ pub async fn declare_story_requirement(
 /// `tot-ade` эту связь не говорит НИ ОДНА сторона: обход пятидесяти фич не
 /// нашёл ни одного имени истории, обратной строки «**Фича:**» нет ни в одной
 /// из семнадцати. Там пункт красен по делу — и закрыть его было нечем.
-pub async fn declare_feature_story(
+pub(crate) async fn declare_feature_story(
     pool: &Pool, project: &str, feature: &str, story: &str, drop_it: bool,
 ) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
@@ -6709,7 +6720,7 @@ pub async fn declare_feature_story(
                "feature": feature, "story": story }))
 }
 
-pub async fn declare_feature_link(
+pub(crate) async fn declare_feature_link(
     pool: &Pool, project: &str, feature: &str, requirement: &str, article: i32,
     drop_it: bool,
 ) -> Result<Value, crate::db::Fail> {
@@ -6743,11 +6754,20 @@ pub async fn declare_feature_link(
     Ok(json!({ "status": "declared", "feature": feature }))
 }
 
-pub async fn declare_acceptance(
-    pool: &Pool, project: &str, id: &str, story: &str, number: i32, title: &str,
-    preconditions: &str, steps: &str, observed: &str, fails_when: &str,
-    drop_it: bool,
-) -> Result<Value, crate::db::Fail> {
+/// Поля критерия приёмки, как их принимает дверь `acceptance-add`.
+pub(crate) struct Acceptance<'a> {
+    pub id: &'a str,
+    pub story: &'a str,
+    pub number: i32,
+    pub title: &'a str,
+    pub preconditions: &'a str,
+    pub steps: &'a str,
+    pub observed: &'a str,
+    pub fails_when: &'a str,
+}
+
+pub(crate) async fn declare_acceptance(pool: &Pool, project: &str, fields: Acceptance<'_>, drop_it: bool) -> Result<Value, crate::db::Fail> {
+    let Acceptance { id, story, number, title, preconditions, steps, observed, fails_when } = fields;
     if id.trim().is_empty() || title.trim().is_empty() {
         return Ok(json!({ "status": "empty", "why": "сценарий без имени или без названия не объявляется" }));
     }
@@ -6777,11 +6797,20 @@ pub async fn declare_acceptance(
                "isCheck": !observed.trim().is_empty() && !fails_when.trim().is_empty() }))
 }
 
-pub async fn declare_goal(
-    pool: &Pool, project: &str, id: &str, number: i32, level: &str, title: &str,
-    measured_by: &str, checked_when: &str, fails_when: &str, state_now: &str,
-    drop_it: bool,
-) -> Result<Value, crate::db::Fail> {
+/// Поля цели, как их принимает дверь `goal-add`.
+pub(crate) struct Goal<'a> {
+    pub id: &'a str,
+    pub number: i32,
+    pub level: &'a str,
+    pub title: &'a str,
+    pub measured_by: &'a str,
+    pub checked_when: &'a str,
+    pub fails_when: &'a str,
+    pub state_now: &'a str,
+}
+
+pub(crate) async fn declare_goal(pool: &Pool, project: &str, fields: Goal<'_>, drop_it: bool) -> Result<Value, crate::db::Fail> {
+    let Goal { id, number, level, title, measured_by, checked_when, fails_when, state_now } = fields;
     if id.trim().is_empty() || title.trim().is_empty() {
         return Ok(json!({ "status": "empty", "why": "цель без имени или без формулировки не объявляется" }));
     }
@@ -6810,11 +6839,20 @@ pub async fn declare_goal(
     Ok(json!({ "status": "declared", "id": id, "kind": state }))
 }
 
-pub async fn declare_risk(
-    pool: &Pool, project: &str, id: &str, number: i32, title: &str, state: &str,
-    mitigation: &str, trigger: &str, owner: &str, source: &str,
-    drop_it: bool,
-) -> Result<Value, crate::db::Fail> {
+/// Поля риска, как их принимает дверь `risk-add`.
+pub(crate) struct Risk<'a> {
+    pub id: &'a str,
+    pub number: i32,
+    pub title: &'a str,
+    pub state: &'a str,
+    pub mitigation: &'a str,
+    pub trigger: &'a str,
+    pub owner: &'a str,
+    pub source: &'a str,
+}
+
+pub(crate) async fn declare_risk(pool: &Pool, project: &str, fields: Risk<'_>, drop_it: bool) -> Result<Value, crate::db::Fail> {
+    let Risk { id, number, title, state, mitigation, trigger, owner, source } = fields;
     if id.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "риск без имени не объявляется" }));
     }
@@ -6841,11 +6879,18 @@ pub async fn declare_risk(
     Ok(json!({ "status": "declared", "id": id, "state": state }))
 }
 
-#[allow(clippy::too_many_arguments)]
-pub async fn declare_question(
-    pool: &Pool, project: &str, id: &str, number: i32, title: &str, state: &str,
-    answer: &str, closed_by: &str, owner: bool, drop_it: bool,
-) -> Result<Value, crate::db::Fail> {
+/// Поля вопроса, как их принимает дверь `question-add`.
+pub(crate) struct Question<'a> {
+    pub id: &'a str,
+    pub number: i32,
+    pub title: &'a str,
+    pub state: &'a str,
+    pub answer: &'a str,
+    pub closed_by: &'a str,
+    pub owner: bool,
+}
+pub(crate) async fn declare_question(pool: &Pool, project: &str, fields: Question<'_>, drop_it: bool) -> Result<Value, crate::db::Fail> {
+    let Question { id, number, title, state, answer, closed_by, owner } = fields;
     if id.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "вопрос без имени не объявляется" }));
     }
@@ -6881,7 +6926,7 @@ pub async fn declare_question(
     // СВЯЗЬ «ЧЕМ ЗАКРЫТ» — ЧАСТЬ ОТВЕТА, а не побочное действие. Вставка стояла
     // под `.ok()`: связь молча не писалась, а дверь всё равно отвечала
     // «declared». Спросивший получал слово о том, чего не произошло.
-    let mut закрыт = json!(closed_by);
+    let mut closed = json!(closed_by);
     if !closed_by.is_empty() {
         match client.execute(
             "INSERT INTO project_decision_links (project_id, decision_id, kind, target, origin)
@@ -6889,14 +6934,14 @@ pub async fn declare_question(
             &[&project, &closed_by, &id]).await
         {
             Ok(_) => {}
-            Err(e) => закрыт = json!({ "asked": closed_by, "written": false,
+            Err(e) => closed = json!({ "asked": closed_by, "written": false,
                                        "why": e.says() }),
         }
     }
-    Ok(json!({ "status": "declared", "id": id, "state": state, "closedBy": закрыт }))
+    Ok(json!({ "status": "declared", "id": id, "state": state, "closedBy": closed }))
 }
 
-pub async fn declare_task_requirement(
+pub(crate) async fn declare_task_requirement(
     pool: &Pool, project: &str, task: &str, requirement: &str, drop_it: bool,
 ) -> Result<Value, crate::db::Fail> {
     if task.trim().is_empty() || requirement.trim().is_empty() {
@@ -6924,7 +6969,7 @@ pub async fn declare_task_requirement(
     Ok(json!({ "status": "declared", "task": task, "requirement": requirement }))
 }
 
-pub async fn declare_screen_reference(
+pub(crate) async fn declare_screen_reference(
     pool: &Pool, project: &str, source: &str, source_kind: &str, screen: &str, drop: bool,
 ) -> Result<Value, crate::db::Fail> {
     if source.trim().is_empty() || screen.trim().is_empty() {
@@ -6958,7 +7003,7 @@ pub async fn declare_screen_reference(
     Ok(json!({ "status": "declared", "source": source, "screen": screen }))
 }
 
-pub async fn declare_alternative(
+pub(crate) async fn declare_alternative(
     pool: &Pool, project: &str, decision: &str, ord: i32, title: &str, body: &str,
     drop_it: bool,
 ) -> Result<Value, crate::db::Fail> {
@@ -6985,7 +7030,7 @@ pub async fn declare_alternative(
     Ok(json!({ "status": "declared", "decision": decision, "ord": ord }))
 }
 
-pub async fn declare_version(
+pub(crate) async fn declare_version(
     pool: &Pool, project: &str, id: &str,
     drop_it: bool,
 ) -> Result<Value, crate::db::Fail> {
@@ -7011,7 +7056,7 @@ pub async fn declare_version(
     Ok(json!({ "status": "declared", "id": id }))
 }
 
-pub async fn declare_milestone(
+pub(crate) async fn declare_milestone(
     pool: &Pool, project: &str, id: &str, version: &str, ord: i32, title: &str,
     drop_it: bool,
 ) -> Result<Value, crate::db::Fail> {
@@ -7039,10 +7084,8 @@ pub async fn declare_milestone(
     Ok(json!({ "status": "declared", "id": id }))
 }
 
-pub async fn declare_task(
-    pool: &Pool, project: &str, id: &str, milestone: &str, ord: i32, title: &str,
-    kind: &str, state: &str, size: &str, drop_it: bool,
-) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn declare_task(pool: &Pool, project: &str, fields: Task<'_>, drop_it: bool) -> Result<Value, crate::db::Fail> {
+    let Task { id, milestone, ord, title, kind, state, size } = fields;
     // Снятие идёт той же дверью, и только объявленное: спроецированная задача
     // уходит со своим документом, а не отдельной рукой.
     if drop_it {
@@ -7099,12 +7142,22 @@ pub async fn declare_task(
     Ok(json!({ "status": "declared", "id": id }))
 }
 
-pub async fn declare_decision(
-    pool: &Pool, project: &str, id: &str, number: i32, title: &str, status: &str,
-    status_text: &str, date: &str, deciders: &str, context: &str, decision: &str,
-    consequences: &str,
-    drop_it: bool,
-) -> Result<Value, crate::db::Fail> {
+/// Поля решения, как их принимает дверь `decision-add`.
+pub(crate) struct Decision<'a> {
+    pub id: &'a str,
+    pub number: i32,
+    pub title: &'a str,
+    pub status: &'a str,
+    pub status_text: &'a str,
+    pub date: &'a str,
+    pub deciders: &'a str,
+    pub context: &'a str,
+    pub decision: &'a str,
+    pub consequences: &'a str,
+}
+
+pub(crate) async fn declare_decision(pool: &Pool, project: &str, fields: Decision<'_>, drop_it: bool) -> Result<Value, crate::db::Fail> {
+    let Decision { id, number, title, status, status_text, date, deciders, context, decision, consequences } = fields;
     if id.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "решение без имени не объявляется" }));
     }
@@ -7136,7 +7189,7 @@ pub async fn declare_decision(
 }
 
 /// Объявить историю.
-pub async fn declare_story(
+pub(crate) async fn declare_story(
     pool: &Pool, project: &str, id: &str, title: &str, area: &str, drop_it: bool,
 ) -> Result<Value, crate::db::Fail> {
     if id.trim().is_empty() {
@@ -7169,7 +7222,7 @@ pub async fn declare_story(
 }
 
 /// Объявить экран.
-pub async fn declare_screen(
+pub(crate) async fn declare_screen(
     pool: &Pool, project: &str, id: &str, title: &str, area: &str, drop_it: bool,
 ) -> Result<Value, crate::db::Fail> {
     if id.trim().is_empty() {
@@ -7199,7 +7252,7 @@ pub async fn declare_screen(
     Ok(json!({ "status": "declared", "id": id }))
 }
 
-pub async fn declare_article(
+pub(crate) async fn declare_article(
     pool: &Pool, project: &str, number: i32, title: &str, body: &str, anchor: &str,
     drop_it: bool,
 ) -> Result<Value, crate::db::Fail> {
@@ -7230,6 +7283,17 @@ pub async fn declare_article(
     Ok(json!({ "status": "declared", "number": number, "title": title }))
 }
 
+/// Поля задачи, как их принимает дверь `task-add`.
+pub(crate) struct Task<'a> {
+    pub id: &'a str,
+    pub milestone: &'a str,
+    pub ord: i32,
+    pub title: &'a str,
+    pub kind: &'a str,
+    pub state: &'a str,
+    pub size: &'a str,
+}
+
 /// Объявить требование.
 /// Объявить требование вне выпуска либо сквозным — с причиной.
 /// Объявить, на что требование опирается: решение, статью, экран, требование.
@@ -7255,7 +7319,7 @@ pub async fn declare_article(
 /// Без неё порядок работ схлопывается в одну волну: сто пятьдесят четыре задачи
 /// объявляются готовыми к запуску разом, хотя сами документы называют, кто кого
 /// ждёт. Волна есть топологический слой, и без рёбер слой один.
-pub async fn declare_task_dep(
+pub(crate) async fn declare_task_dep(
     pool: &Pool, project: &str, task: &str, depends_on: &str, drop_it: bool,
 ) -> Result<Value, crate::db::Fail> {
     if task.trim().is_empty() || depends_on.trim().is_empty() {
@@ -7303,7 +7367,7 @@ pub async fn declare_task_dep(
     Ok(json!({ "status": "declared", "task": task, "dependsOn": depends_on }))
 }
 
-pub async fn declare_release_artifact(
+pub(crate) async fn declare_release_artifact(
     pool: &Pool, project: &str, name: &str, what: &str, installed_to: &str,
     drop_it: bool,
 ) -> Result<Value, crate::db::Fail> {
@@ -7330,10 +7394,16 @@ pub async fn declare_release_artifact(
     Ok(json!({ "status": "declared", "artifact": name }))
 }
 
-pub async fn declare_freeze_row(
-    pool: &Pool, project: &str, version: &str, kind: &str, name: &str, hash: &str, actor: &str,
-    drop_it: bool,
-) -> Result<Value, crate::db::Fail> {
+/// Поля строки заморозки, как их принимает дверь `freeze-row-add`.
+pub(crate) struct FreezeRow<'a> {
+    pub version: &'a str,
+    pub kind: &'a str,
+    pub name: &'a str,
+    pub hash: &'a str,
+}
+
+pub(crate) async fn declare_freeze_row(pool: &Pool, project: &str, fields: FreezeRow<'_>, actor: &str, drop_it: bool) -> Result<Value, crate::db::Fail> {
+    let FreezeRow { version, kind, name, hash } = fields;
     if version.trim().is_empty() || kind.trim().is_empty() {
         return Ok(json!({ "status": "empty", "why": "строка слепка без выпуска или без вида не вносится" }));
     }
@@ -7357,11 +7427,18 @@ pub async fn declare_freeze_row(
     Ok(json!({ "status": "declared", "version": version, "entity": format!("{kind} {name}") }))
 }
 
-pub async fn declare_postmortem(
-    pool: &Pool, project: &str, id: &str, title: &str, summary: &str, timeline: &str,
-    root_cause: &str, lesson: &str,
-    drop_it: bool,
-) -> Result<Value, crate::db::Fail> {
+/// Поля разбора, как их принимает дверь `postmortem-add`.
+pub(crate) struct Postmortem<'a> {
+    pub id: &'a str,
+    pub title: &'a str,
+    pub summary: &'a str,
+    pub timeline: &'a str,
+    pub root_cause: &'a str,
+    pub lesson: &'a str,
+}
+
+pub(crate) async fn declare_postmortem(pool: &Pool, project: &str, fields: Postmortem<'_>, drop_it: bool) -> Result<Value, crate::db::Fail> {
+    let Postmortem { id, title, summary, timeline, root_cause, lesson } = fields;
     if id.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "разбор без имени не объявляется" }));
     }
@@ -7387,10 +7464,17 @@ pub async fn declare_postmortem(
     Ok(json!({ "status": "declared", "id": id, "hasRootCause": !root_cause.trim().is_empty() }))
 }
 
-pub async fn declare_token(
-    pool: &Pool, project: &str, name: &str, dark: &str, light: &str, purpose: &str, section: &str,
-    drop_it: bool,
-) -> Result<Value, crate::db::Fail> {
+/// Поля знака оформления, как их принимает дверь `token-add`.
+pub(crate) struct Token<'a> {
+    pub name: &'a str,
+    pub dark: &'a str,
+    pub light: &'a str,
+    pub purpose: &'a str,
+    pub section: &'a str,
+}
+
+pub(crate) async fn declare_token(pool: &Pool, project: &str, fields: Token<'_>, drop_it: bool) -> Result<Value, crate::db::Fail> {
+    let Token { name, dark, light, purpose, section } = fields;
     if name.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "токен без имени не объявляется" }));
     }
@@ -7416,13 +7500,24 @@ pub async fn declare_token(
                "bothThemes": !dark.trim().is_empty() && !light.trim().is_empty() }))
 }
 
-#[allow(clippy::too_many_arguments)]
-pub async fn declare_reference_source(
-    pool: &Pool, project: &str, name: &str, source: &str, note: &str, taken: &str,
-    sha: &str, ref_type: &str, from_project: &str, repo: &str,
-    written: &str, updated: &str, status: &str, tags: &str, role: &str,
-    drop_it: bool,
-) -> Result<Value, crate::db::Fail> {
+/// Поля источника ссылки, как их принимает дверь `reference-source-add`.
+pub(crate) struct ReferenceSource<'a> {
+    pub name: &'a str,
+    pub source: &'a str,
+    pub note: &'a str,
+    pub taken: &'a str,
+    pub sha: &'a str,
+    pub ref_type: &'a str,
+    pub from_project: &'a str,
+    pub repo: &'a str,
+    pub written: &'a str,
+    pub updated: &'a str,
+    pub status: &'a str,
+    pub tags: &'a str,
+    pub role: &'a str,
+}
+pub(crate) async fn declare_reference_source(pool: &Pool, project: &str, fields: ReferenceSource<'_>, drop_it: bool) -> Result<Value, crate::db::Fail> {
+    let ReferenceSource { name, source, note, taken, sha, ref_type, from_project, repo, written, updated, status, tags, role } = fields;
     if name.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "происхождение без документа не объявляется" }));
     }
@@ -7453,11 +7548,21 @@ pub async fn declare_reference_source(
     Ok(json!({ "status": "declared", "name": name, "hasSha": !sha.trim().is_empty() }))
 }
 
-pub async fn declare_algorithm(
-    pool: &Pool, project: &str, id: &str, story: &str, title: &str, preconditions: &str,
-    flow: &str, failure: &str, not_covered: &str, link_kind: &str, link_target: &str,
-    drop_it: bool,
-) -> Result<Value, crate::db::Fail> {
+/// Поля алгоритма, как их принимает дверь `algorithm-add`.
+pub(crate) struct Algorithm<'a> {
+    pub id: &'a str,
+    pub story: &'a str,
+    pub title: &'a str,
+    pub preconditions: &'a str,
+    pub flow: &'a str,
+    pub failure: &'a str,
+    pub not_covered: &'a str,
+    pub link_kind: &'a str,
+    pub link_target: &'a str,
+}
+
+pub(crate) async fn declare_algorithm(pool: &Pool, project: &str, fields: Algorithm<'_>, drop_it: bool) -> Result<Value, crate::db::Fail> {
+    let Algorithm { id, story, title, preconditions, flow, failure, not_covered, link_kind, link_target } = fields;
     if id.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "алгоритм без имени не объявляется" }));
     }
@@ -7495,7 +7600,7 @@ pub async fn declare_algorithm(
     Ok(json!({ "status": "declared", "id": id, "hasFailures": !failure.trim().is_empty() }))
 }
 
-pub async fn declare_stand_row(
+pub(crate) async fn declare_stand_row(
     pool: &Pool, project: &str, section: &str, name: &str, value: &str,
     drop_it: bool,
 ) -> Result<Value, crate::db::Fail> {
@@ -7520,12 +7625,20 @@ pub async fn declare_stand_row(
     Ok(json!({ "status": "declared", "name": name }))
 }
 
+/// Поля спецификации датчика, как их принимает дверь `sensor-spec-add`.
+pub(crate) struct SensorSpec<'a> {
+    pub fact: &'a str,
+    pub reads: &'a str,
+    pub extract: &'a str,
+    pub note: &'a str,
+    pub how: &'a str,
+    pub skip: &'a str,
+    pub allow: &'a str,
+}
+
 /// Объявить датчик: где искать, чем вынимать, как назвать факт.
-#[allow(clippy::too_many_arguments)]
-pub async fn declare_sensor_spec(
-    pool: &Pool, project: &str, fact: &str, reads: &str, extract: &str, note: &str, how: &str,
-    skip: &str, allow: &str, drop_it: bool,
-) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn declare_sensor_spec(pool: &Pool, project: &str, fields: SensorSpec<'_>, drop_it: bool) -> Result<Value, crate::db::Fail> {
+    let SensorSpec { fact, reads, extract, note, how, skip, allow } = fields;
     if fact.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "датчик без имени факта не объявляется" }));
     }
@@ -7611,7 +7724,7 @@ pub async fn declare_sensor_spec(
 /// Пишется ТОЛЬКО чистый счёт — число, стоящее перед именем вида. Колонка «в
 /// коде (домен)» меряется прогоном, а не набором, и такая дверь обязана её не
 /// знать: записать туда посчитанное значило бы объявить сделанным то, чего нет.
-pub async fn counts_sync(
+pub(crate) async fn counts_sync(
     pool: &Pool,
     project: &str,
     // Область: вид и имя документа. Пусто — все. Запись без области правит
@@ -7729,7 +7842,7 @@ pub async fn counts_sync(
 ///
 /// Объявление ОБЩЕЕ: минимальный набор документов один для всех, как гейты,
 /// фазы и лестница.
-pub async fn set_kind_required(
+pub(crate) async fn set_kind_required(
     pool: &Pool, kind: &str, required: bool, why: &str,
 ) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
@@ -7769,17 +7882,17 @@ pub async fn set_kind_required(
 /// Для `container` названные таблицы ПРОВЕРЯЮТСЯ по связи `entity_kind`.
 /// Вид, объявленный держателем того, чего в таблицах нет, — это пустота,
 /// только подписанная; она читается как знание. Дверь отказывает.
-pub async fn set_kind_projection(
+pub(crate) async fn set_kind_projection(
     pool: &Pool, kind: &str, projection: &str, holds: &[String],
 ) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     if kind.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "вид без имени не объявляется" }));
     }
-    const СЛОВАРЬ: [&str; 6] = ["done", "container", "due", "prose", "render", "provenance"];
-    if !СЛОВАРЬ.contains(&projection) {
+    const GLOSSARY: [&str; 6] = ["done", "container", "due", "prose", "render", "provenance"];
+    if !GLOSSARY.contains(&projection) {
         return Ok(json!({ "status": "unknown_word", "word": projection,
-            "vocabulary": СЛОВАРЬ,
+            "vocabulary": GLOSSARY,
             "why": "проекция объявляется словом из словаря: новое слово не поймут ни ручки, \
                     ни правила, и вид останется невидимым при живой записи" }));
     }
@@ -7793,12 +7906,12 @@ pub async fn set_kind_projection(
     }
 
     // Держатель без содержимого — отказ. Проверяется КАЖДАЯ названная таблица.
-    let mut держит = Vec::new();
+    let mut holds_rows = Vec::new();
     // `done` и `container` — оба УТВЕРЖДЕНИЯ ПРО ТАБЛИЦЫ, и проверяются одинаково.
     // Проверять только контейнер значило бы верить `done` на слово: `red-task`
     // стоял `due` при живой таблице, и заметить это было нечем.
-    let про_таблицы = matches!(projection, "container" | "done");
-    if про_таблицы {
+    let about_table = matches!(projection, "container" | "done");
+    if about_table {
         if holds.is_empty() {
             return Ok(json!({ "status": "holds_nothing", "kind": kind,
                 "projection": projection,
@@ -7838,12 +7951,12 @@ pub async fn set_kind_projection(
             // Второй способ так же строг: образец имени, объявленный самим
             // видом. Пустой перечень им не пройдёт.
             if n == 0 {
-                if let Some(обр) = client
+                if let Some(pattern) = client
                     .query_opt("SELECT spec->>'id' FROM kind_layout WHERE name = $1", &[&kind])
                     .await?
                     .and_then(|r| r.get::<_, Option<String>>(0))
                 {
-                    let есть: bool = client
+                    let exists: bool = client
                         .query_one(
                             "SELECT EXISTS (SELECT 1 FROM information_schema.columns
                                              WHERE table_schema='public' AND table_name=$1
@@ -7852,9 +7965,9 @@ pub async fn set_kind_projection(
                         )
                         .await?
                         .get(0);
-                    if есть {
+                    if exists {
                         n = client
-                            .query_one(&format!("SELECT count(*) FROM {table} WHERE id ~ $1"), &[&обр])
+                            .query_one(&format!("SELECT count(*) FROM {table} WHERE id ~ $1"), &[&pattern])
                             .await?
                             .get(0);
                     }
@@ -7865,7 +7978,7 @@ pub async fn set_kind_projection(
                     "why": "ни одной строки этого вида в названной таблице: объявление \
                             описывает то, чего набор не делает" }));
             }
-            держит.push(json!({ "table": table, "rows": n }));
+            holds_rows.push(json!({ "table": table, "rows": n }));
         }
     } else if !holds.is_empty() {
         return Ok(json!({ "status": "holds_without_container", "kind": kind,
@@ -7874,19 +7987,22 @@ pub async fn set_kind_projection(
                     как раз и говорят, что предметом вид не становится" }));
     }
 
-    let список = json!(holds);
+    let list = json!(holds);
     client
         .execute(
             "UPDATE kind_layout
                 SET spec = spec || jsonb_build_object('projection', $2::text, 'holds', $3::jsonb)
               WHERE name = $1",
-            &[&kind, &projection, &список],
+            &[&kind, &projection, &list],
         )
         .await?;
     Ok(json!({ "status": "declared", "kind": kind, "projection": projection,
-               "holds": держит,
+               "holds": holds_rows,
                "means": "объявление ОБЩЕЕ: чем вид становится — одно для всех проектов" }))
 }
+
+/// Ребро графа связей: откуда, куда — и сколько раз с примерами.
+type EdgeSeen = std::collections::HashMap<(String, String, String, String), (i64, Vec<String>)>;
 
 /// Дерево связанного: от одного документа — всё, что с ним связано, по записям.
 ///
@@ -7900,7 +8016,7 @@ pub async fn set_kind_projection(
 ///
 /// Замер на `myack`: от `srs` первый уровень — `strs` через 77 потребностей и
 /// `test-cases` через 19 проверок; второй — сорок документов.
-pub async fn tree(
+pub(crate) async fn tree(
     pool: &Pool, project: &str, kind: &str, name: &str, depth: i32,
 ) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
@@ -7945,7 +8061,7 @@ pub async fn tree(
 
     // Чем ребро держится: имена, из-за которых родитель дошёл до ребёнка.
     // Без них ответ «srs связан с strs» ничего не даёт: связь надо открыть.
-    let через = client
+    let through = client
         .query(
             "SELECT a.entity_kind, a.entity_name, b.entity_kind, b.entity_name,
                     count(DISTINCT a.said_id)::bigint, (array_agg(DISTINCT a.said_id))[1:3]
@@ -7958,10 +8074,9 @@ pub async fn tree(
             &[&project],
         )
         .await?;
-    let mut ребро: std::collections::HashMap<(String, String, String, String), (i64, Vec<String>)> =
-        std::collections::HashMap::new();
-    for r in &через {
-        ребро.insert(
+    let mut edge: EdgeSeen = std::collections::HashMap::new();
+    for r in &through {
+        edge.insert(
             (r.get(0), r.get(1), r.get(2), r.get(3)),
             (r.get(4), r.get::<_, Vec<String>>(5)),
         );
@@ -7970,39 +8085,39 @@ pub async fn tree(
     // Сборка в дерево: у каждого узла записан родитель, которым до него дошли
     // ПЕРВЫМ — самым коротким путём. Документ, до которого ведёт двадцать
     // дорог, стоит в ответе один раз.
-    let mut дети: std::collections::HashMap<(String, String), Vec<Value>> =
+    let mut children: std::collections::HashMap<(String, String), Vec<Value>> =
         std::collections::HashMap::new();
-    let mut узлов = 0usize;
+    let mut nodes = 0usize;
     for r in rows.iter().rev() {
         let (k, n): (String, String) = (r.get(0), r.get(1));
         let d: i32 = r.get(2);
         if d == 0 {
             continue;
         }
-        узлов += 1;
+        nodes += 1;
         let (pk, pn): (String, String) = (r.get(3), r.get(4));
-        let (сколько, примеры) = ребро
+        let (how_many, examples) = edge
             .get(&(pk.clone(), pn.clone(), k.clone(), n.clone()))
             .cloned()
             .unwrap_or((0, Vec::new()));
-        let свои = дети.remove(&(k.clone(), n.clone())).unwrap_or_default();
-        let mut узел = serde_json::Map::new();
-        узел.insert("kind".into(), json!(k));
-        узел.insert("name".into(), json!(n));
-        узел.insert("depth".into(), json!(d));
-        узел.insert("via".into(), json!(сколько));
-        узел.insert("names".into(), json!(примеры));
-        узел.insert("by".into(), json!(format!("mh call {k} id={n}")));
-        if !свои.is_empty() {
-            узел.insert("children".into(), json!(свои));
+        let own = children.remove(&(k.clone(), n.clone())).unwrap_or_default();
+        let mut node = serde_json::Map::new();
+        node.insert("kind".into(), json!(k));
+        node.insert("name".into(), json!(n));
+        node.insert("depth".into(), json!(d));
+        node.insert("via".into(), json!(how_many));
+        node.insert("names".into(), json!(examples));
+        node.insert("by".into(), json!(format!("mh call {k} id={n}")));
+        if !own.is_empty() {
+            node.insert("children".into(), json!(own));
         }
-        дети.entry((pk, pn)).or_default().push(Value::Object(узел));
+        children.entry((pk, pn)).or_default().push(Value::Object(node));
     }
     Ok(json!({
         "root": { "kind": kind, "name": name },
         "depth": depth,
-        "documents": узлов,
-        "tree": дети.remove(&(kind.to_owned(), name.to_owned())).unwrap_or_default(),
+        "documents": nodes,
+        "tree": children.remove(&(kind.to_owned(), name.to_owned())).unwrap_or_default(),
         "means": "ребро: этот документ называет имя, которое написано в том. \
                   Связь по записям, глубина ограничена четырьмя шагами",
     }))
@@ -8018,7 +8133,7 @@ pub async fn tree(
 ///
 /// Блок относится к САМОМУ ВНУТРЕННЕМУ разделу: у родителя `last_block`
 /// накрывает и детей, и по нему абзац ребёнка засчитался бы дважды.
-pub async fn document_coverage(
+pub(crate) async fn document_coverage(
     pool: &Pool, project: &str, kind: &str, name: &str,
 ) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
@@ -8074,36 +8189,36 @@ pub async fn document_coverage(
         )
         .await?;
 
-    let (mut в_таблице, mut только_текст, mut смешано, mut пусто) = (0, 0, 0, 0);
-    let mut прозы_байт: i64 = 0;
-    let mut разделы = Vec::new();
+    let (mut at_table, mut only_text, mut mixed, mut empty) = (0, 0, 0, 0);
+    let mut prose_bytes: i64 = 0;
+    let mut sections = Vec::new();
     for r in &rows {
-        let строк: i64 = r.get(3);
-        let прозы: i64 = r.get(5);
-        let байт: i64 = r.get(6);
-        let родитель: bool = r.get(7);
+        let row_count: i64 = r.get(3);
+        let prose: i64 = r.get(5);
+        let bytes: i64 = r.get(6);
+        let parent: bool = r.get(7);
         // Родительский заголовок без своего текста — не потеря и не находка:
         // он вернётся сам, когда соберутся дети.
-        let вердикт = match (строк > 0, прозы > 0, родитель) {
-            (true, false, _) => { в_таблице += 1; "воспроизводится из таблицы" }
-            (true, true, _) => { смешано += 1; прозы_байт += байт; "часть в таблице, часть только текстом" }
-            (false, true, _) => { только_текст += 1; прозы_байт += байт; "только текст" }
-            (false, false, true) => { пусто += 1; "заголовок-родитель: соберётся из детей" }
-            (false, false, false) => { пусто += 1; "пусто" }
+        let verdict = match (row_count > 0, prose > 0, parent) {
+            (true, false, _) => { at_table += 1; "воспроизводится из таблицы" }
+            (true, true, _) => { mixed += 1; prose_bytes += bytes; "часть в таблице, часть только текстом" }
+            (false, true, _) => { only_text += 1; prose_bytes += bytes; "только текст" }
+            (false, false, true) => { empty += 1; "заголовок-родитель: соберётся из детей" }
+            (false, false, false) => { empty += 1; "пусто" }
         };
-        разделы.push(json!({
+        sections.push(json!({
             "ord": r.get::<_, i32>(0), "title": r.get::<_, String>(1),
             "level": r.get::<_, i32>(2),
-            "rows": строк, "tables": r.get::<_, i64>(4), "prose": прозы, "bytes": байт,
-            "verdict": вердикт,
+            "rows": row_count, "tables": r.get::<_, i64>(4), "prose": prose, "bytes": bytes,
+            "verdict": verdict,
         }));
     }
     Ok(json!({
         "kind": kind, "name": name,
         "sections": rows.len(),
-        "fromTable": в_таблице, "textOnly": только_текст, "mixed": смешано, "empty": пусто,
-        "proseBytes": прозы_байт,
-        "bySection": разделы,
+        "fromTable": at_table, "textOnly": only_text, "mixed": mixed, "empty": empty,
+        "proseBytes": prose_bytes,
+        "bySection": sections,
         "means": "«только текст» и «часть только текстом» — это и есть то, что \
                   потеряется, если убрать текст. Считано по разделам: среднее \
                   по документу врёт про обе половины",
@@ -8123,7 +8238,7 @@ pub async fn document_coverage(
 /// Проверяется возможность: у вида должна быть предметная таблица с колонкой
 /// состояния. Объявить переоткрываемым то, у чего состояния нет, — подписать
 /// намерение, которое никогда не исполнится.
-pub async fn set_kind_reopens(
+pub(crate) async fn set_kind_reopens(
     pool: &Pool, kind: &str, reopens: bool, why: &str,
 ) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
@@ -8155,9 +8270,9 @@ pub async fn set_kind_reopens(
             return Ok(json!({ "status": "no_tables", "kind": kind,
                 "why": "вид не назвал таблиц (`kind-projection ... holds`): искать состояние негде" }));
         }
-        let mut где = Vec::new();
+        let mut where_at = Vec::new();
         for table in &holds {
-            let есть: bool = client
+            let exists: bool = client
                 .query_one(
                     "SELECT EXISTS (SELECT 1 FROM information_schema.columns
                                      WHERE table_schema = 'public' AND table_name = $1
@@ -8166,11 +8281,11 @@ pub async fn set_kind_reopens(
                 )
                 .await?
                 .get(0);
-            if есть {
-                где.push(table.clone());
+            if exists {
+                where_at.push(table.clone());
             }
         }
-        if где.is_empty() {
+        if where_at.is_empty() {
             return Ok(json!({ "status": "no_state", "kind": kind, "tables": holds,
                 "why": "ни в одной таблице вида нет колонки состояния (`state`, `status`, \
                         `closed`, `satisfied`): переоткрывать нечего" }));
@@ -8184,7 +8299,7 @@ pub async fn set_kind_reopens(
             )
             .await?;
         return Ok(json!({ "status": "declared", "kind": kind, "reopens": true,
-                          "stateIn": где,
+                          "stateIn": where_at,
                           "means": "объявление ОБЩЕЕ: чем вид становится при правке связей — \
                                     одно для всех проектов" }));
     }
@@ -8206,7 +8321,7 @@ pub async fn set_kind_reopens(
 /// Держатель бывает и чужих строк: у `index` это связи и источники поверхностей,
 /// у них `id` нет. Спрашивать их по имени записи значило ронять дверь
 /// «column id does not exist» — `entity-rename` падала на всём виде.
-async fn своих_таблиц(
+async fn own_tables(
     client: &impl deadpool_postgres::GenericClient, kind: &str,
 ) -> Result<Vec<String>, crate::db::Fail> {
     Ok(client
@@ -8243,7 +8358,7 @@ async fn своих_таблиц(
 ///
 /// Новое имя проверяется ОБЩИМ образцом вида, а не проектным: переименование
 /// ради того и делается, чтобы расхождение ушло.
-pub async fn rename_entity(
+pub(crate) async fn rename_entity(
     pool: &Pool, project: &str, kind: &str, from: &str, to: &str, apply: bool, merge: bool,
 ) -> Result<Value, crate::db::Fail> {
     let mut client = crate::db::conn(pool).await?;
@@ -8291,7 +8406,7 @@ async fn renaming(
             "why": "старое имя совпадает с именем вида: правка идёт по всем колонкам набора и \
                     переписала бы вид у всех его записей вместе с именем" }));
     }
-    let Some(образец) = tx
+    let Some(pattern) = tx
         .query_opt("SELECT spec->>'id' FROM kind_layout WHERE name = $1", &[&kind])
         .await?
         .and_then(|r| r.get::<_, Option<String>>(0))
@@ -8299,33 +8414,33 @@ async fn renaming(
         return Ok(json!({ "status": "no_pattern", "kind": kind,
             "why": "у вида не объявлен образец имени: сверить новое имя не с чем" }));
     };
-    let сверка = tx.query_one("SELECT $1 ~ $2, ($1 || '/' || $1) ~ $2", &[&to, &образец]).await?;
-    let (подходит, косая_в_имени): (bool, bool) =
-        (сверка.get(0), сверка.get::<_, bool>(1) || from.contains('/') || to.contains('/'));
-    if !подходит {
-        return Ok(json!({ "status": "not_by_pattern", "to": to, "pattern": образец,
+    let compare = tx.query_one("SELECT $1 ~ $2, ($1 || '/' || $1) ~ $2", &[&to, &pattern]).await?;
+    let (matches, slash_at_name): (bool, bool) =
+        (compare.get(0), compare.get::<_, bool>(1) || from.contains('/') || to.contains('/'));
+    if !matches {
+        return Ok(json!({ "status": "not_by_pattern", "to": to, "pattern": pattern,
             "why": "новое имя не следует общему образцу вида: переименование ради того и \
                     делается, чтобы расхождение ушло, а не переехало" }));
     }
-    let свои = своих_таблиц(tx, kind).await?;
+    let own = own_tables(tx, kind).await?;
     // ЗАНЯТОСТЬ — ЭТО ЧУЖАЯ ЗАПИСЬ, а не упоминание в тексте. Проверка по
     // документам отвергала законное доделывание: текст уже переименован
     // половинным ходом, а объявленная запись осталась со старым именем, и
     // дверь отказывала «занято» — самой себе.
     //
     // Запись же — доказательство: две сущности с одним именем не бывают.
-    let документ_занят = документов_вида(tx, project, kind, to).await?;
-    let mut занято: i64 = документ_занят;
-    for table in &свои {
-        занято += записей_под_именем(tx, table, project, to).await?;
+    let document_taken = documents_kind(tx, project, kind, to).await?;
+    let mut busy: i64 = document_taken;
+    for table in &own {
+        busy += records_under_name(tx, table, project, to).await?;
     }
     // `merge` — ЯВНОЕ слово о том, что это одна и та же сущность, заведённая
     // дважды: разбором под новым именем и остатком под старым. Без него отказ
     // остаётся, потому что отличить «тот же» от «другой» машине нечем, а
     // молчаливое слияние двух сущностей в одну не заметит никто.
-    if занято > 0 && !merge {
-        return Ok(json!({ "status": "taken", "to": to, "mentions": занято,
-            "why": if документ_занят > 0 {
+    if busy > 0 && !merge {
+        return Ok(json!({ "status": "taken", "to": to, "mentions": busy,
+            "why": if document_taken > 0 {
                 "документ этого вида под новым именем уже есть. `merge=true` СНИМЕТ документ \
                  под старым именем целиком — его текст, ячейки, блоки и связи — и оставит \
                  документ под новым; сухой ход с `merge=true` покажет снятое"
@@ -8336,9 +8451,9 @@ async fn renaming(
             } }));
     }
 
-    let образец_слова = name_in_text(from, косая_в_имени);
-    let замена = replacement_of(to);
-    let затронуто = tx
+    let pattern_words = name_in_text(from, slash_at_name);
+    let replacement = replacement_of(to);
+    let affected = tx
         .query(
             "SELECT entity_kind, entity_name,
                     ((length(content) - length(regexp_replace(content, $2, '', 'g')))
@@ -8346,25 +8461,25 @@ async fn renaming(
                FROM project_documents
               WHERE project_id = $1 AND content ~ $2
               ORDER BY 1, 2",
-            &[&project, &образец_слова, &from],
+            &[&project, &pattern_words, &from],
         )
         .await?;
-    let упоминаний: i64 = затронуто.iter().map(|r| r.get::<_, i64>(2)).sum();
+    let mentions: i64 = affected.iter().map(|r| r.get::<_, i64>(2)).sum();
     // ПРЕДМЕТ — И ЗАПИСЬ ТОЖЕ, не только текст. Документы могли быть уже
     // переименованы, а объявленная запись остаться со старым именем: тогда
     // «в документах не нашли» — это не «нечего делать», а ровно половина
     // работы, которую и надо доделать.
-    let документ_старый = документов_вида(tx, project, kind, from).await?;
-    let mut записей: i64 = 0;
-    for table in &свои {
-        записей += записей_под_именем(tx, table, project, from).await?;
+    let document_old = documents_kind(tx, project, kind, from).await?;
+    let mut records: i64 = 0;
+    for table in &own {
+        records += records_under_name(tx, table, project, from).await?;
     }
-    if затронуто.is_empty() && документ_старый == 0 && записей == 0 {
+    if affected.is_empty() && document_old == 0 && records == 0 {
         return Ok(json!({ "status": "not_found", "from": from,
             "why": "такого имени нет ни в одном документе и ни в одной записи" }));
     }
-    let документ_переезжает = документ_старый > 0 && документ_занят == 0;
-    let чужая_история: i64 = tx
+    let document_moves = document_old > 0 && document_taken == 0;
+    let foreign_history: i64 = tx
         .query_one(
             "SELECT count(*) FROM project_document_revisions
               WHERE project_id = $1 AND entity_kind = $2 AND entity_name = $3",
@@ -8372,8 +8487,8 @@ async fn renaming(
         )
         .await?
         .get(0);
-    if документ_переезжает && чужая_история > 0 {
-        return Ok(json!({ "status": "history_taken", "to": to, "revisions": чужая_история,
+    if document_moves && foreign_history > 0 {
+        return Ok(json!({ "status": "history_taken", "to": to, "revisions": foreign_history,
             "why": "под новым именем лежит история ревизий документа, которого уже нет: \
                     переезд смешал бы её с историей переименуемого документа" }));
     }
@@ -8381,14 +8496,14 @@ async fn renaming(
     // Правка сперва, ревизия следом: текущее содержимое уже записано под своим
     // номером, и попытка записать его второй раз падала на уникальности пары
     // «документ, ревизия». Ревизия — это НОВАЯ версия, а не копия старой.
-    let документов = tx
+    let documents = tx
         .execute(
             "UPDATE project_documents
                 SET content = regexp_replace(content, $2, $3, 'g'),
                     revision = revision + 1,
                     updated_at = $4
               WHERE project_id = $1 AND content ~ $2",
-            &[&project, &образец_слова, &замена, &now_ms()],
+            &[&project, &pattern_words, &replacement, &now_ms()],
         )
         .await?;
     tx.execute(
@@ -8412,28 +8527,28 @@ async fn renaming(
     // Имя внутри КОЛОНОК — ссылочных и прозаических. Обход меряет, где имя
     // действительно стоит, и правит только там; перечень колонок в коде
     // разошёлся бы со схемой.
-    let в_колонках = tx
+    let at_columns = tx
         .query("SELECT таблица, колонка, строк, снято FROM rename_matching_in_columns($1, $2, $3, $4)",
-               &[&project, &образец_слова, &замена, &merge])
+               &[&project, &pattern_words, &replacement, &merge])
         .await?;
     // СНЯТОЕ НАЗЫВАЕТСЯ. Колонка `снято` считалась и отбрасывалась: ответ нёс
     // `rows: 0` там, где строку удалили, и удаление под видом переименования
     // оставалось невидимым — ровно то, чего довод у самой функции велит не
     // делать.
-    let снято: i64 = в_колонках.iter().map(|r| r.get::<_, i64>(3)).sum();
-    let колонки: Vec<Value> = в_колонках
+    let dropped: i64 = at_columns.iter().map(|r| r.get::<_, i64>(3)).sum();
+    let columns: Vec<Value> = at_columns
         .iter()
         .map(|r| json!({ "table": r.get::<_, String>(0), "column": r.get::<_, String>(1),
                          "rows": r.get::<_, i64>(2), "dropped": r.get::<_, i64>(3) }))
         .collect();
-    for table in &свои {
+    for table in &own {
         tx.execute(
             &format!("UPDATE {table} SET id = $2 WHERE project_id = $1 AND id = $3"),
             &[&project, &to, &from],
         )
         .await?;
     }
-    let ревизий = if документ_переезжает {
+    let revisions = if document_moves {
         tx.execute(
             "UPDATE project_document_revisions SET entity_name = $4
               WHERE project_id = $1 AND entity_kind = $2 AND entity_name = $3",
@@ -8444,14 +8559,14 @@ async fn renaming(
         0
     };
     Ok(json!({ "status": "renamed", "from": from, "to": to,
-               "documents": документов, "mentions": упоминаний, "records": записей,
-               "columns": колонки, "dropped": снято, "revisions": ревизий,
-               "where": затронуто.iter().take(8).map(|r| json!({
+               "documents": documents, "mentions": mentions, "records": records,
+               "columns": columns, "dropped": dropped, "revisions": revisions,
+               "where": affected.iter().take(8).map(|r| json!({
                    "kind": r.get::<_, String>(0), "name": r.get::<_, String>(1),
                    "times": r.get::<_, i64>(2) })).collect::<Vec<_>>() }))
 }
 
-async fn записей_под_именем(
+async fn records_under_name(
     client: &impl deadpool_postgres::GenericClient, table: &str, project: &str, name: &str,
 ) -> Result<i64, crate::db::Fail> {
     Ok(client
@@ -8461,7 +8576,7 @@ async fn записей_под_именем(
 }
 
 /// Документ вида под этим именем — тоже запись: у `index` и `mockup` другой нет.
-async fn документов_вида(
+async fn documents_kind(
     client: &impl deadpool_postgres::GenericClient, project: &str, kind: &str, name: &str,
 ) -> Result<i64, crate::db::Fail> {
     Ok(client
@@ -8515,7 +8630,7 @@ fn replacement_of(name: &str) -> String {
 ///
 /// Образец имени ПРОВЕРЯЕТСЯ: неразбираемое выражение молча не поймает ничего,
 /// и вид останется пустым при живых сущностях.
-pub async fn add_kind(
+pub(crate) async fn add_kind(
     pool: &Pool, name: &str, shape: &str, id_pattern: &str, why: &str,
 ) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
@@ -8568,7 +8683,7 @@ pub async fn add_kind(
 ///
 /// Проверяется, что такие связи ЕСТЬ: объявить доказательством род, которым
 /// ничего не доказано, — подписать намерение вместо факта.
-pub async fn set_kind_proves(
+pub(crate) async fn set_kind_proves(
     pool: &Pool, project: &str, kind: &str, proves: bool, why: &str,
 ) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
@@ -8582,7 +8697,7 @@ pub async fn set_kind_proves(
     {
         return Ok(json!({ "status": "no_kind", "kind": kind, "why": "вид не объявлен" }));
     }
-    let связей: i64 = client
+    let links: i64 = client
         .query_one(
             "SELECT count(*) FROM project_requirement_proof
               WHERE project_id = $1 AND proof_kind = $2",
@@ -8590,7 +8705,7 @@ pub async fn set_kind_proves(
         )
         .await?
         .get(0);
-    if proves && связей == 0 {
+    if proves && links == 0 {
         return Ok(json!({ "status": "proves_nothing", "kind": kind,
             "why": "этим родом в наборе не доказано ни одно требование: объявление \
                     описывало бы то, чего нет" }));
@@ -8603,7 +8718,7 @@ pub async fn set_kind_proves(
             &[&kind, &proves, &why],
         )
         .await?;
-    Ok(json!({ "status": "declared", "kind": kind, "proves": proves, "links": связей,
+    Ok(json!({ "status": "declared", "kind": kind, "proves": proves, "links": links,
                "means": "объявление ОБЩЕЕ: чем доказывают требование — одно для всех проектов" }))
 }
 
@@ -8616,7 +8731,7 @@ pub async fn set_kind_proves(
 ///
 /// Новый образец ПРОВЕРЯЕТСЯ на живых именах: тот, под который не подходит ни
 /// одно имя, не поймает ничего и промолчит об этом.
-pub async fn set_kind_id(
+pub(crate) async fn set_kind_id(
     pool: &Pool, project: &str, kind: &str, pattern: &str, why: &str,
 ) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
@@ -8635,10 +8750,10 @@ pub async fn set_kind_id(
             "why": "образец не разбирается" }));
     }
     // Сверка на живых именах: таблицы берутся из объявления вида.
-    let свои = своих_таблиц(&*client, kind).await?;
-    let mut подошло = 0i64;
-    let mut всего = 0i64;
-    for table in &свои {
+    let own = own_tables(&*client, kind).await?;
+    let mut matched = 0i64;
+    let mut total = 0i64;
+    for table in &own {
         let r = client
             .query_one(
                 &format!(
@@ -8647,11 +8762,11 @@ pub async fn set_kind_id(
                 &[&project, &pattern],
             )
             .await?;
-        подошло += r.get::<_, i64>(0);
-        всего += r.get::<_, i64>(1);
+        matched += r.get::<_, i64>(0);
+        total += r.get::<_, i64>(1);
     }
-    if всего > 0 && подошло == 0 {
-        return Ok(json!({ "status": "matches_nothing", "pattern": pattern, "names": всего,
+    if total > 0 && matched == 0 {
+        return Ok(json!({ "status": "matches_nothing", "pattern": pattern, "names": total,
             "why": "под этот образец не подходит ни одно живое имя вида: он не поймает \
                     ничего и промолчит об этом" }));
     }
@@ -8664,7 +8779,7 @@ pub async fn set_kind_id(
         )
         .await?;
     Ok(json!({ "status": "declared", "kind": kind, "id": pattern,
-               "matched": подошло, "of": всего }))
+               "matched": matched, "of": total }))
 }
 
 /// Скелет зависимостей набора: какие роды на каких стоят и сколькими связями.
@@ -8673,7 +8788,7 @@ pub async fn set_kind_id(
 /// Свёрнутые до родов, они умещаются в два десятка рёбер — и это карта того,
 /// как устроен проект: задача стоит на требовании, требование на потребности,
 /// этап на своих перечнях.
-pub async fn links_graph(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn links_graph(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let edges = client
         .query(
@@ -8705,13 +8820,13 @@ pub async fn links_graph(pool: &Pool, project: &str) -> Result<Value, crate::db:
     let dom = client
         .query("SELECT name, spec->>'domain' FROM kind_layout WHERE spec->>'domain' IS NOT NULL", &[])
         .await?;
-    let область: std::collections::HashMap<String, String> =
+    let area: std::collections::HashMap<String, String> =
         dom.iter().map(|r| (r.get(0), r.get(1))).collect();
-    let mut свод: std::collections::BTreeMap<(String, String), (i64, i64)> = Default::default();
+    let mut digest: std::collections::BTreeMap<(String, String), (i64, i64)> = Default::default();
     for r in &edges {
-        let f = область.get(&r.get::<_, String>(0)).cloned().unwrap_or_default();
-        let t = область.get(&r.get::<_, String>(1)).cloned().unwrap_or_default();
-        let e = свод.entry((f, t)).or_insert((0, 0));
+        let f = area.get(&r.get::<_, String>(0)).cloned().unwrap_or_default();
+        let t = area.get(&r.get::<_, String>(1)).cloned().unwrap_or_default();
+        let e = digest.entry((f, t)).or_insert((0, 0));
         e.0 += r.get::<_, i64>(2);
         e.1 += 1;
     }
@@ -8719,11 +8834,11 @@ pub async fn links_graph(pool: &Pool, project: &str) -> Result<Value, crate::db:
         "nodes": nodes.iter().map(|r| json!({
             "kind": r.get::<_, String>(0), "count": r.get::<_, i64>(1),
             "reopened": r.get::<_, i64>(2), "reopens": r.get::<_, bool>(3),
-            "domain": область.get(&r.get::<_, String>(0)).cloned().unwrap_or_default() })).collect::<Vec<_>>(),
+            "domain": area.get(&r.get::<_, String>(0)).cloned().unwrap_or_default() })).collect::<Vec<_>>(),
         "edges": edges.iter().map(|r| json!({
             "from": r.get::<_, String>(0), "to": r.get::<_, String>(1),
             "links": r.get::<_, i64>(2), "sources": r.get::<_, i64>(3) })).collect::<Vec<_>>(),
-        "domains": свод.iter().map(|((f, t), (n, pairs))| json!({
+        "domains": digest.iter().map(|((f, t), (n, pairs))| json!({
             "from": f, "to": t, "links": n, "pairs": pairs })).collect::<Vec<_>>(),
         "means": "ребро «А → Б» значит «А стоит на Б»: правка Б переоткрывает А",
     }))
@@ -8735,7 +8850,7 @@ pub async fn links_graph(pool: &Pool, project: &str) -> Result<Value, crate::db:
 /// пересобирали и смотрели. Здесь он задаётся ВПЕРЁД — обход идёт по тем же
 /// направленным связям и той же глубине, что и каскад, но от предполагаемой
 /// правки, а не от случившейся.
-pub async fn impact(
+pub(crate) async fn impact(
     pool: &Pool, project: &str, kind: &str, id: &str, depth: i32,
 ) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
@@ -8770,11 +8885,11 @@ pub async fn impact(
             &[&project, &kind, &id, &depth],
         )
         .await?;
-    let всего = rows.len();
-    let переоткроется = rows.iter().filter(|r| r.get::<_, bool>(3)).count();
+    let total = rows.len();
+    let reopens = rows.iter().filter(|r| r.get::<_, bool>(3)).count();
     Ok(json!({
         "root": { "kind": kind, "id": id }, "depth": depth,
-        "touched": всего, "reopens": переоткроется,
+        "touched": total, "reopens": reopens,
         "items": rows.iter().take(200).map(|r| json!({
             "kind": r.get::<_, String>(0), "id": r.get::<_, String>(1),
             "depth": r.get::<_, i32>(2), "reopens": r.get::<_, bool>(3) })).collect::<Vec<_>>(),
@@ -8789,7 +8904,7 @@ pub async fn impact(
 /// собирались руками из разных ручек. Работа агентов не отдавалась вовсе:
 /// `project_task_runs` знает, кто над чем сидит, и дверей к нему не было ни
 /// одной.
-pub async fn console(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn console(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
 
     // Что идёт ПРЯМО СЕЙЧАС: прогон задачи с агентом и состоянием.
@@ -8862,7 +8977,7 @@ pub async fn console(pool: &Pool, project: &str) -> Result<Value, crate::db::Fai
 }
 
 /// Заявка в очередь владельца: изменение харнеса либо подтверждение коммита.
-pub async fn add_ask(
+pub(crate) async fn add_ask(
     pool: &Pool, project: &str, kind: &str, title: &str, body: &str, run_id: &str, by: &str,
 ) -> Result<Value, crate::db::Fail> {
     if !["request", "approval", "question"].contains(&kind) {
@@ -8891,7 +9006,7 @@ pub async fn add_ask(
 
 /// Очередь: что ждёт решения. Решённое отдаётся по просьбе — им проверяют, что
 /// ответ доехал.
-pub async fn list_asks(pool: &Pool, project: &str, state: &str, limit: i64) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn list_asks(pool: &Pool, project: &str, state: &str, limit: i64) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
@@ -8921,7 +9036,7 @@ pub async fn list_asks(pool: &Pool, project: &str, state: &str, limit: i64) -> R
 ///
 /// Запись заводится один раз на вопрос: ответ владельца не повторяет вопрос.
 /// Вопрос, закрытый в наборе или снятый с владельца, закрывает свою запись.
-pub async fn sync_owner_questions(pool: &Pool, project: &str) -> Result<u64, crate::db::Fail> {
+pub(crate) async fn sync_owner_questions(pool: &Pool, project: &str) -> Result<u64, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let now = now_ms();
     let asked = client
@@ -8950,13 +9065,13 @@ pub async fn sync_owner_questions(pool: &Pool, project: &str) -> Result<u64, cra
 
 /// Решение по заявке. Довод обязателен: очередь без доводов через неделю
 /// неотличима от списка «почему-то отклонено».
-pub async fn decide_ask(
+pub(crate) async fn decide_ask(
     pool: &Pool, id: i64, state: &str, why: &str, by: &str,
 ) -> Result<Value, crate::db::Fail> {
-    const СОСТОЯНИЯ: [&str; 6] = ["taken", "owner", "declined", "done", "approved", "rejected"];
-    if !СОСТОЯНИЯ.contains(&state) {
+    const STATES: [&str; 6] = ["taken", "owner", "declined", "done", "approved", "rejected"];
+    if !STATES.contains(&state) {
         return Ok(json!({ "status": "state_unknown", "state": state,
-            "why": format!("решение бывает такое: {}", СОСТОЯНИЯ.join(" · ")) }));
+            "why": format!("решение бывает такое: {}", STATES.join(" · ")) }));
     }
     if why.trim().is_empty() {
         return Ok(json!({ "status": "no_why", "why": "решение без довода не читается и не спорится" }));
@@ -8973,7 +9088,7 @@ pub async fn decide_ask(
 
 /// Решения владельца, которых прогон ещё не видел. Помечаются тем же вызовом:
 /// иначе прогон брался бы за одно и то же подтверждение каждый круг.
-pub async fn ask_inbox(pool: &Pool, project: &str, run: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn ask_inbox(pool: &Pool, project: &str, run: &str) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
@@ -8992,21 +9107,21 @@ pub async fn ask_inbox(pool: &Pool, project: &str, run: &str) -> Result<Value, c
 ///
 /// ДВУХ ЖИВЫХ ПРОГОНОВ ОДНОЙ ЗАДАЧИ НЕ БЫВАЕТ — так сказано указателем самой
 /// таблицы. Второй зов отдаёт тот, что уже идёт, а не заводит соперника.
-pub async fn start_run(
+pub(crate) async fn start_run(
     pool: &Pool, project: &str, task: &str, agent: &str, note: &str,
 ) -> Result<Value, crate::db::Fail> {
     if task.trim().is_empty() {
         return Ok(json!({ "status": "no_task", "why": "прогон заводится под задачу: без неё он ни о чём" }));
     }
     let client = crate::db::conn(pool).await?;
-    let живой = client
+    let live = client
         .query_opt(
             "SELECT id, state, attempt FROM project_task_runs
               WHERE project_id = $1 AND task_id = $2 AND state <> ALL (ARRAY['done', 'failed', 'cancelled'])",
             &[&project, &task],
         )
         .await?;
-    if let Some(r) = живой {
+    if let Some(r) = live {
         return Ok(json!({ "status": "already_running", "runId": r.get::<_, String>(0),
                           "state": r.get::<_, String>(1), "attempt": r.get::<_, i32>(2), "task": task }));
     }
@@ -9040,26 +9155,26 @@ pub async fn start_run(
 /// Словарь взят у таблицы, а не придуман заново: её указатель считает живым
 /// всё, что не `done`, `failed` и `cancelled`, и своё слово вроде `finished`
 /// оставило бы задачу навсегда занятой.
-pub async fn set_run_state(
+pub(crate) async fn set_run_state(
     pool: &Pool, project: &str, run: &str, state: &str, note: &str, session: &str, by: &str,
 ) -> Result<Value, crate::db::Fail> {
-    const СОСТОЯНИЯ: [&str; 5] = ["running", "waiting", "done", "failed", "cancelled"];
-    if !СОСТОЯНИЯ.contains(&state) {
+    const STATES: [&str; 5] = ["running", "waiting", "done", "failed", "cancelled"];
+    if !STATES.contains(&state) {
         return Ok(json!({ "status": "state_unknown", "state": state,
-            "why": format!("состояние прогона бывает такое: {}", СОСТОЯНИЯ.join(" · ")) }));
+            "why": format!("состояние прогона бывает такое: {}", STATES.join(" · ")) }));
     }
     if state != "running" && note.trim().is_empty() {
         return Ok(json!({ "status": "no_note",
             "why": "остановка без причины не отличима от обрыва: скажите, на чём встали" }));
     }
     let client = crate::db::conn(pool).await?;
-    let Some(было) = client
+    let Some(was) = client
         .query_opt("SELECT state FROM project_task_runs WHERE project_id = $1 AND id = $2", &[&project, &run])
         .await?
     else {
         return Ok(json!({ "status": "not_found", "runId": run }));
     };
-    let from: String = было.get(0);
+    let from: String = was.get(0);
     client
         .execute(
             "UPDATE project_task_runs
@@ -9081,7 +9196,7 @@ pub async fn set_run_state(
 }
 
 /// Шаг прогона: что он сделал или на чём встал.
-pub async fn add_run_event(
+pub(crate) async fn add_run_event(
     pool: &Pool, project: &str, run: &str, kind: &str, text: &str,
 ) -> Result<Value, crate::db::Fail> {
     if run.trim().is_empty() || text.trim().is_empty() {
@@ -9102,7 +9217,7 @@ pub async fn add_run_event(
 }
 
 /// Слово человека прогону — и слово прогона в ответ.
-pub async fn say_to_run(
+pub(crate) async fn say_to_run(
     pool: &Pool, project: &str, run: &str, side: &str, text: &str,
 ) -> Result<Value, crate::db::Fail> {
     if !["owner", "agent"].contains(&side) {
@@ -9124,7 +9239,7 @@ pub async fn say_to_run(
 
 /// Что человек сказал прогону и он ещё не прочёл. Прочитанное помечается тем же
 /// вызовом: иначе агент отвечал бы на одно и то же каждый круг.
-pub async fn run_inbox(pool: &Pool, project: &str, run: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn run_inbox(pool: &Pool, project: &str, run: &str) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
@@ -9139,7 +9254,7 @@ pub async fn run_inbox(pool: &Pool, project: &str, run: &str) -> Result<Value, c
 }
 
 /// Завести беседу: место, где думают вслух над набором.
-pub async fn start_chat(pool: &Pool, project: &str, title: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn start_chat(pool: &Pool, project: &str, title: &str) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let row = client
         .query_one(
@@ -9153,7 +9268,7 @@ pub async fn start_chat(pool: &Pool, project: &str, title: &str) -> Result<Value
 
 /// Сказанное в беседе. Сторона названа: `owner` — человек, `agent` — тот, кто
 /// отвечает.
-pub async fn say_in_chat(
+pub(crate) async fn say_in_chat(
     pool: &Pool, project: &str, thread: &str, side: &str, text: &str,
 ) -> Result<Value, crate::db::Fail> {
     if !["owner", "agent"].contains(&side) {
@@ -9184,7 +9299,7 @@ pub async fn say_in_chat(
 /// Что человек сказал беседе и она ещё не прочла; прочитанное помечается.
 /// Здесь же беседа называет сессию, которой отвечает: без неё каждый ответ
 /// начинался бы с чистого листа.
-pub async fn chat_inbox(
+pub(crate) async fn chat_inbox(
     pool: &Pool, project: &str, thread: &str, session: &str,
 ) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
@@ -9213,7 +9328,7 @@ pub async fn chat_inbox(
 }
 
 /// Беседы набора, а с именем беседы — её строки.
-pub async fn read_chat(
+pub(crate) async fn read_chat(
     pool: &Pool, project: &str, thread: &str, limit: i64,
 ) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
@@ -9247,7 +9362,7 @@ pub async fn read_chat(
 }
 
 /// Прогоны с последними шагами: пульту нужен не список состояний, а рассказ.
-pub async fn list_runs(pool: &Pool, project: &str, limit: i64) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn list_runs(pool: &Pool, project: &str, limit: i64) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let runs = client
         .query(
@@ -9299,7 +9414,7 @@ pub async fn list_runs(pool: &Pool, project: &str, limit: i64) -> Result<Value, 
 /// нескольких (требование в G1, G2, G3, G5 и корпусе), а `in` говорит лишь,
 /// в каком документе род живёт. Область — суждение о смысле, и потому она
 /// ОБЪЯВЛЯЕТСЯ с доводом, как проекция и переоткрытие.
-pub async fn set_kind_domain(
+pub(crate) async fn set_kind_domain(
     pool: &Pool, kind: &str, domain: &str, why: &str,
 ) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
@@ -9321,7 +9436,7 @@ pub async fn set_kind_domain(
             &[&kind, &domain, &why],
         )
         .await?;
-    let рядом: Vec<String> = client
+    let beside: Vec<String> = client
         .query(
             "SELECT name FROM kind_layout WHERE spec->>'domain' = $1 ORDER BY name",
             &[&domain],
@@ -9330,11 +9445,11 @@ pub async fn set_kind_domain(
         .iter()
         .map(|r| r.get(0))
         .collect();
-    Ok(json!({ "status": "declared", "kind": kind, "domain": domain, "with": рядом,
+    Ok(json!({ "status": "declared", "kind": kind, "domain": domain, "with": beside,
                "means": "объявление ОБЩЕЕ: области одни для всех проектов" }))
 }
 
-pub async fn holders(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn holders(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
@@ -9347,14 +9462,24 @@ pub async fn holders(pool: &Pool, project: &str) -> Result<Value, crate::db::Fai
         "requirement": r.get::<_, String>(0), "path": r.get::<_, String>(1) })).collect::<Vec<_>>() }))
 }
 
+/// Поля выведенной копии, как их принимает дверь `derived-copy-set`.
+pub(crate) struct DerivedCopy<'a> {
+    pub name: &'a str,
+    pub source: &'a str,
+    pub copy: &'a str,
+    pub compare: &'a str,
+    pub pattern: &'a str,
+    pub source_pattern: &'a str,
+    pub why: &'a str,
+    pub decided_by: &'a str,
+}
+
 /// Объявить производную копию: вот источник, вот копия, вот чем сверять.
 ///
 /// Причина обязательна: копия без довода неотличима от случайного совпадения, и
 /// снять её потом будет не за что.
-pub async fn set_derived_copy(
-    pool: &Pool, project: &str, name: &str, source: &str, copy: &str,
-    compare: &str, pattern: &str, source_pattern: &str, why: &str, decided_by: &str, drop_it: bool,
-) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn set_derived_copy(pool: &Pool, project: &str, fields: DerivedCopy<'_>, drop_it: bool) -> Result<Value, crate::db::Fail> {
+    let DerivedCopy { name, source, copy, compare, pattern, source_pattern, why, decided_by } = fields;
     let split = |v: &str| -> (String, String) {
         match v.split_once(':') {
             Some((k, n)) => (k.trim().to_owned(), n.trim().to_owned()),
@@ -9404,7 +9529,7 @@ pub async fn set_derived_copy(
                "means": "равенство держит теперь машина, а не рука" }))
 }
 
-pub async fn declared_unwritten(
+pub(crate) async fn declared_unwritten(
     pool: &Pool,
     kinds: &crate::kinds::Kinds,
     project: &str,
@@ -9488,7 +9613,7 @@ pub async fn declared_unwritten(
 /// Разбивка идёт по ВИДУ ВЛАДЕЛЬЦА: пункт живёт строкой внутри задачи, вопроса
 /// или документа приёмки, и чинится он там же. «Тысяча шестьсот» не говорит, с
 /// чего начать; «тысяча пятьсот восемьдесят два у задач» — говорит.
-pub async fn readiness_gaps(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn readiness_gaps(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
@@ -9554,7 +9679,7 @@ pub async fn note_reproject(pool: &Pool, project: &str, ok: bool, why: &str) {
 }
 
 /// Что известно о последней пересборке: `None` — не пересобирали ни разу.
-pub async fn last_reproject(
+pub(crate) async fn last_reproject(
     client: &impl deadpool_postgres::GenericClient,
     project: &str,
 ) -> Option<(bool, String, i64)> {
@@ -9567,7 +9692,7 @@ pub async fn last_reproject(
 
 
 /// Чем снимать факты: перечень объявленных датчиков для клиента.
-pub async fn sensor_specs(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn sensor_specs(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let rows = client
         .query("SELECT fact, reads, extract_re, note, how, skip_re, allow FROM project_sensor_spec
@@ -9580,7 +9705,7 @@ pub async fn sensor_specs(pool: &Pool, project: &str) -> Result<Value, crate::db
 }
 
 /// Объявить проект: имя и репозиторий, которому он принадлежит.
-pub async fn declare_project(
+pub(crate) async fn declare_project(
     pool: &Pool, id: &str, name: &str, repo: &str, actor: &str,
     drop_it: bool,
 ) -> Result<Value, crate::db::Fail> {
@@ -9611,7 +9736,7 @@ pub async fn declare_project(
 /// Отвечает БЕЗ знания проекта — в этом весь смысл: клиент, стоящий в дереве,
 /// спрашивает, кому оно принадлежит, вместо того чтобы читать ответ файлом,
 /// лежащим в том же дереве.
-pub async fn whose_repo(pool: &Pool, path: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn whose_repo(pool: &Pool, path: &str) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let rows = client
         .query("SELECT id, name, repo FROM project WHERE repo <> '' ORDER BY length(repo) DESC", &[])
@@ -9631,7 +9756,7 @@ pub async fn whose_repo(pool: &Pool, path: &str) -> Result<Value, crate::db::Fai
 
 /// Доноры проекта и сторожа — читаются вместе: чужое дерево и то, что не даёт
 /// его тронуть, отвечают на один вопрос — «что здесь не наше и чем это держится».
-pub async fn donors_and_guards(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn donors_and_guards(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let d = client
         .query("SELECT path, what, frozen_by FROM project_donor WHERE project_id = $1 ORDER BY path",
@@ -9651,7 +9776,7 @@ pub async fn donors_and_guards(pool: &Pool, project: &str) -> Result<Value, crat
 }
 
 /// Донорское дерево: чужая реализация, замороженная на запись.
-pub async fn declare_donor(
+pub(crate) async fn declare_donor(
     pool: &Pool, project: &str, path: &str, what: &str, frozen_by: &str, drop_it: bool,
 ) -> Result<Value, crate::db::Fail> {
     if path.trim().is_empty() {
@@ -9673,12 +9798,21 @@ pub async fn declare_donor(
     Ok(json!({ "status": "declared", "path": path, "frozen": !frozen_by.trim().is_empty() }))
 }
 
+/// Поля сторожа, как их принимает дверь `guard-add`.
+pub(crate) struct Guard<'a> {
+    pub name: &'a str,
+    pub enforces: &'a str,
+    pub scope: &'a str,
+    pub refuses: &'a str,
+    pub acts_on: &'a str,
+    pub path_re: &'a str,
+    pub content_re: &'a str,
+    pub command_re: &'a str,
+}
+
 /// Сторож: чем правило принуждается ДО действия, а не меряется после.
-#[allow(clippy::too_many_arguments)]
-pub async fn declare_guard(
-    pool: &Pool, project: &str, name: &str, enforces: &str, scope: &str, refuses: &str,
-    acts_on: &str, path_re: &str, content_re: &str, command_re: &str, drop_it: bool,
-) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn declare_guard(pool: &Pool, project: &str, fields: Guard<'_>, drop_it: bool) -> Result<Value, crate::db::Fail> {
+    let Guard { name, enforces, scope, refuses, acts_on, path_re, content_re, command_re } = fields;
     if name.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "сторож без имени не объявляется" }));
     }
@@ -9705,7 +9839,7 @@ pub async fn declare_guard(
     Ok(json!({ "status": "declared", "guard": name, "enforces": enforces, "catches": catches }))
 }
 
-pub async fn declare_crate(
+pub(crate) async fn declare_crate(
     pool: &Pool, project: &str, name: &str, does: &str, does_not: &str,
     drop_it: bool,
 ) -> Result<Value, crate::db::Fail> {
@@ -9732,7 +9866,7 @@ pub async fn declare_crate(
     Ok(json!({ "status": "declared", "crate": name, "hasBoundary": !does_not.trim().is_empty() }))
 }
 
-pub async fn declare_protocol_op(
+pub(crate) async fn declare_protocol_op(
     pool: &Pool, project: &str, op: &str, group: &str, events: &str, requirement: &str,
     drop_it: bool,
 ) -> Result<Value, crate::db::Fail> {
@@ -9772,7 +9906,7 @@ pub async fn declare_protocol_op(
     Ok(json!({ "status": "declared", "op": op, "hasEvent": !events.trim().is_empty() }))
 }
 
-pub async fn declare_article_gate(
+pub(crate) async fn declare_article_gate(
     pool: &Pool, project: &str, article: i32, gate: &str, state: &str,
     drop_it: bool,
 ) -> Result<Value, crate::db::Fail> {
@@ -9800,7 +9934,7 @@ pub async fn declare_article_gate(
                "enforced": state == "enforced" }))
 }
 
-pub async fn declare_requirement_source(
+pub(crate) async fn declare_requirement_source(
     pool: &Pool, project: &str, id: &str, kind: &str, target: &str,
     drop_it: bool,
 ) -> Result<Value, crate::db::Fail> {
@@ -9825,7 +9959,7 @@ pub async fn declare_requirement_source(
     Ok(json!({ "status": "declared", "id": id, "kind": kind, "target": target }))
 }
 
-pub async fn declare_requirement_scope(
+pub(crate) async fn declare_requirement_scope(
     pool: &Pool, project: &str, id: &str, out_of_version: &str, crosscutting: &str,
     drop_it: bool,
 ) -> Result<Value, crate::db::Fail> {
@@ -9857,10 +9991,19 @@ pub async fn declare_requirement_scope(
     Ok(json!({ "status": if n > 0 { "declared" } else { "not_found" }, "id": id }))
 }
 
-pub async fn declare_requirement(
-    pool: &Pool, project: &str, id: &str, kind: &str, area: &str, title: &str, text: &str,
-    measured_by: &str, priority: &str, drop_it: bool,
-) -> Result<Value, crate::db::Fail> {
+/// Поля требования, как их принимает дверь `requirement-add`.
+pub(crate) struct Requirement<'a> {
+    pub id: &'a str,
+    pub kind: &'a str,
+    pub area: &'a str,
+    pub title: &'a str,
+    pub text: &'a str,
+    pub measured_by: &'a str,
+    pub priority: &'a str,
+}
+
+pub(crate) async fn declare_requirement(pool: &Pool, project: &str, fields: Requirement<'_>, drop_it: bool) -> Result<Value, crate::db::Fail> {
+    let Requirement { id, kind, area, title, text, measured_by, priority } = fields;
     // Снятие идёт той же дверью. Без него объявленное требование убирается
     // только запросом мимо сервера — а это уже вторая дверь, о которой сервер
     // не знает, и разойдутся они молча.
@@ -9922,7 +10065,7 @@ pub async fn declare_requirement(
 }
 
 /// Объявить термин словаря.
-pub async fn declare_term(
+pub(crate) async fn declare_term(
     pool: &Pool, project: &str, term: &str, meaning: &str, area: &str, drop_it: bool,
 ) -> Result<Value, crate::db::Fail> {
     if term.trim().is_empty() {
@@ -9949,7 +10092,7 @@ pub async fn declare_term(
     Ok(json!({ "status": "declared", "term": term }))
 }
 
-pub async fn retire_requirement(
+pub(crate) async fn retire_requirement(
     pool: &Pool,
     project: &str,
     id: &str,
@@ -10001,7 +10144,7 @@ pub async fn retire_requirement(
 
 /// Объявить датчик репозитория: что он подаёт и через сколько его молчание
 /// считается устареванием.
-pub async fn declare_sensor(
+pub(crate) async fn declare_sensor(
     pool: &Pool,
     project: &str,
     fact: &str,
@@ -10056,7 +10199,7 @@ pub async fn declare_sensor(
 /// Счёт живёт в памяти минуту, а строки — в базе: перегрузку читают ПОСЛЕ неё,
 /// и журнал процесса для этого не годится — он переживает не всякий перезапуск
 /// и его нельзя спросить дверью.
-pub async fn strain(pool: &Pool) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn strain(pool: &Pool) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
@@ -10079,7 +10222,7 @@ pub async fn strain(pool: &Pool) -> Result<Value, crate::db::Fail> {
     }))
 }
 
-pub async fn sensors(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn sensors(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
@@ -10123,6 +10266,17 @@ pub async fn sensors(pool: &Pool, project: &str) -> Result<Value, crate::db::Fai
     }))
 }
 
+/// Поля ступени лестницы, как их принимает дверь `step-add`.
+pub(crate) struct Step<'a> {
+    pub set_name: &'a str,
+    pub process: &'a str,
+    pub ord: i32,
+    pub question: &'a str,
+    pub owner_kind: &'a str,
+    pub owner: &'a str,
+    pub touches: &'a str,
+}
+
 /// Завести ступень лестницы на указанное место.
 ///
 /// Место — не украшение: лестница читается сверху вниз, и ступень «объявлен ли
@@ -10137,17 +10291,8 @@ pub async fn sensors(pool: &Pool, project: &str) -> Result<Value, crate::db::Fai
 /// Сдвиг идёт через отрицательные номера. Прямое `ord = ord + 1` натыкается на
 /// собственный первичный ключ на первой же строке: третья ступень становится
 /// четвёртой, а четвёртая ещё на месте.
-pub async fn add_step(
-    pool: &Pool,
-    project: &str,
-    set_name: &str,
-    process: &str,
-    ord: i32,
-    question: &str,
-    owner_kind: &str,
-    owner: &str,
-    touches: &str,
-) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn add_step(pool: &Pool, project: &str, fields: Step<'_>) -> Result<Value, crate::db::Fail> {
+    let Step { set_name, process, ord, question, owner_kind, owner, touches } = fields;
     if !matches!(owner_kind, "skill" | "agent" | "none") {
         return Ok(json!({ "status": "bad_owner_kind", "why": "закрывает ступень скилл, субагент либо человек" }));
     }
@@ -10211,7 +10356,7 @@ pub async fn add_step(
 ///
 /// Это решение человека, а не вывод из текста: «закрыт» значит, что от него
 /// начинают считать. Оттого записывается кто и когда.
-pub async fn set_version_state(
+pub(crate) async fn set_version_state(
     pool: &Pool,
     project: &str,
     version: &str,
@@ -10256,6 +10401,16 @@ pub async fn set_version_state(
     Ok(json!({ "version": version, "state": state, "by": actor }))
 }
 
+/// Поля фазы, как их принимает дверь `phase-set`.
+pub(crate) struct Phase<'a> {
+    pub phase: &'a str,
+    pub ord: Option<i32>,
+    pub title: Option<&'a str>,
+    pub gate: Option<&'a str>,
+    pub plan_level: Option<&'a str>,
+    pub task_kind: Option<&'a str>,
+}
+
 /// Объявить фазу: место в цепочке, заголовок, гейт и вид её задач.
 ///
 /// ВИД ЗАДАЧ — ЗАПИСЬ, А НЕ ПРОЗА. «Красная задача принадлежит Ф3, задача кода —
@@ -10266,17 +10421,8 @@ pub async fn set_version_state(
 ///
 /// Проект, не назвавший отображение, получает пустоту — «не объявлено», — и
 /// читатель обязан звать её словом, а не разрешением.
-#[allow(clippy::too_many_arguments)]
-pub async fn set_phase(
-    pool: &Pool,
-    phase: &str,
-    ord: Option<i32>,
-    title: Option<&str>,
-    gate: Option<&str>,
-    plan_level: Option<&str>,
-    task_kind: Option<&str>,
-    drop_it: bool,
-) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn set_phase(pool: &Pool, fields: Phase<'_>, drop_it: bool) -> Result<Value, crate::db::Fail> {
+    let Phase { phase, ord, title, gate, plan_level, task_kind } = fields;
     let client = crate::db::conn(pool).await?;
     if drop_it {
         let gone = client.execute("DELETE FROM phase WHERE id = $1", &[&phase]).await?;
@@ -10396,7 +10542,7 @@ pub async fn set_phase(
 }
 
 /// Объявить, когда ступень вообще в игре.
-pub async fn set_step_when(
+pub(crate) async fn set_step_when(
     pool: &Pool,
     set_name: &str,
     process: &str,
@@ -10430,7 +10576,7 @@ pub async fn set_step_when(
 }
 
 /// Объявить, чем ронять ступень.
-pub async fn set_step_probe(
+pub(crate) async fn set_step_probe(
     pool: &Pool,
     set_name: &str,
     process: &str,
@@ -10473,7 +10619,7 @@ pub async fn set_step_probe(
 ///
 /// Подсадка живёт внутри транзакции и умирает вместе с ней: набор после
 /// самотеста обязан остаться тем же, чем был.
-pub async fn step_selftest(
+pub(crate) async fn step_selftest(
     pool: &Pool,
     project: &str,
     set_name: &str,
@@ -10562,7 +10708,7 @@ pub async fn step_selftest(
 ///
 /// Пишется через сервер, а не правкой строки в базе: у ступени своя таблица со
 /// своей колонкой, и дверь к ней одна.
-pub async fn set_step_question(
+pub(crate) async fn set_step_question(
     pool: &Pool,
     set_name: &str,
     process: &str,
@@ -10597,26 +10743,30 @@ pub async fn set_step_question(
 }
 
 /// Виды единицы работы ступени. Перечень закрыт: слово вне него дверь не примет.
-const ЕДИНИЦЫ: [&str; 8] = ["document", "link", "version", "question", "gate", "sensor", "milestone", "task"];
+const UNITS: [&str; 8] = ["document", "link", "version", "question", "gate", "sensor", "milestone", "task"];
 
-pub async fn set_step_method(
-    pool: &Pool,
-    set_name: &str,
-    process: &str,
-    ord: i32,
-    method_kind: &str,
-    method: &str,
-    // Команда, которой видна единица работы этой ступени. `None` — не трогать
-    // уже объявленную.
-    run: Option<&str>,
-    // Вид единицы работы ступени. `None` — не трогать объявленный.
-    unit: Option<&str>,
-    // Запрос предмета ступени и слово о пустом предмете. `None` — не трогать.
-    subject: Option<&str>,
-    subject_why: Option<&str>,
-    declared_by: &str,
-    drop: bool,
-) -> Result<Value, crate::db::Fail> {
+/// Поля способа ступени, как их принимает дверь `step-method-set`.
+pub(crate) struct StepMethod<'a> {
+    pub set_name: &'a str,
+    pub process: &'a str,
+    pub ord: i32,
+    pub method_kind: &'a str,
+    pub method: &'a str,
+    /// Команда, которой видна единица работы этой ступени. `None` — не трогать
+    /// уже объявленную.
+    pub run: Option<&'a str>,
+    /// Вид единицы работы ступени. `None` — не трогать объявленный.
+    pub unit: Option<&'a str>,
+    /// Запрос предмета ступени и слово о пустом предмете. `None` — не трогать.
+    pub subject: Option<&'a str>,
+    pub subject_why: Option<&'a str>,
+    pub declared_by: &'a str,
+    pub drop: bool,
+}
+
+pub(crate) async fn set_step_method(pool: &Pool, fields: StepMethod<'_>) -> Result<Value, crate::db::Fail> {
+    let StepMethod { set_name, process, ord, method_kind, method, run, unit, subject,
+                        subject_why, declared_by, drop } = fields;
     let client = crate::db::conn(pool).await?;
     if drop {
         let n = client
@@ -10649,9 +10799,9 @@ pub async fn set_step_method(
     // бы барьер лестницы — задачная ступень перестала бы находиться.
     let unit: Option<&str> = unit.map(str::trim).filter(|u| !u.is_empty());
     if let Some(u) = unit {
-        if !ЕДИНИЦЫ.contains(&u) {
+        if !UNITS.contains(&u) {
             return Ok(json!({ "status": "unknown_unit", "unit": u,
-                              "why": format!("вида единицы «{u}» не бывает; бывают: {}", ЕДИНИЦЫ.join(" · ")) }));
+                              "why": format!("вида единицы «{u}» не бывает; бывают: {}", UNITS.join(" · ")) }));
         }
     }
     let method: Option<&str> = if method.trim().is_empty() { None } else { Some(method) };
@@ -10665,6 +10815,10 @@ pub async fn set_step_method(
             &[&set_name, &process, &ord, &method_kind, &method, &declared_by],
         )
         .await?;
+    // Метка имени приводится к объявленной: описания у наборов разъезжаются с
+    // кодом, и поданная по старой памяти `{имя}` не подставилась бы молча.
+    let run = run.map(|command| command.replace("{имя}", WORK_RUN_NAME));
+    let run = run.as_deref();
     // Команда, не переданная, БЕРЁТСЯ У СТРОКИ: правка запроса не должна стирать
     // уже объявленную команду — так же, как правка запроса пункта гейта не
     // стирает его пробу.
@@ -10762,7 +10916,7 @@ async fn force_gates(
     Ok(())
 }
 
-pub async fn gate_selftest(pool: &Pool, project: &str, under: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn gate_selftest(pool: &Pool, project: &str, under: &str) -> Result<Value, crate::db::Fail> {
     let mut client = crate::db::conn(pool).await?;
     // Замка проекта здесь нет по той же причине, что и у круга пересчёта, — см.
     // довод в `watch.rs`. Пока аренды со сроком нет, «сломан» у самотеста
@@ -10946,7 +11100,7 @@ pub async fn gate_selftest(pool: &Pool, project: &str, under: &str) -> Result<Va
 /// Волна здесь — топологический слой внутри этапа: задачи слоя не зависят друг
 /// от друга, и это всё, что она утверждает. Параллельного хода она не обещает —
 /// этап закрывается целиком.
-pub async fn order(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn order(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     // Задачи и их зависимости — из плана, а не из файлов: связь уже разобрана
     // при записи набора.
@@ -11121,7 +11275,7 @@ static LINK: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(||
 /// Зачем: пока цель — путь файла, она разрешается ОТНОСИТЕЛЬНО пути документа.
 /// Снять `path` и оставить такие ссылки значит получить набор, где 2083 связи
 /// молча перестанут находить документ при первом же перечитывании.
-pub async fn retarget_links(
+pub(crate) async fn retarget_links(
     pool: &Pool,
     project: &str,
     dry: bool,
@@ -11202,7 +11356,7 @@ pub async fn retarget_links(
     if !dry {
         let now = now_ms();
         for (kind, name, text, revision) in &changed {
-            match crate::store::put(pool, project, kind, name, text, "links-retarget", Some(*revision), now).await {
+            match crate::store::put(pool, project, crate::store::Document { kind, name, content: text }, "links-retarget", Some(*revision), now).await {
                 Ok(v) if v.get("status").and_then(|s| s.as_str()) == Some("written") => written += 1,
                 Ok(v) => conflicts.push(format!("{kind} {name}: {}",
                                                 v.get("status").and_then(|s| s.as_str()).unwrap_or("?"))),
@@ -11219,7 +11373,7 @@ pub async fn retarget_links(
     }))
 }
 
-pub async fn rewrite_links(
+pub(crate) async fn rewrite_links(
     pool: &Pool,
     project: &str,
     dry: bool,
@@ -11321,7 +11475,7 @@ pub async fn rewrite_links(
             .unwrap_or(0);
         for (kind, name, text, revision) in &changed {
             let who = if name.is_empty() { kind.clone() } else { format!("{kind} {name}") };
-            match crate::store::put(pool, project, kind, name, text, "links-rewrite", Some(*revision), now).await {
+            match crate::store::put(pool, project, crate::store::Document { kind, name, content: text }, "links-rewrite", Some(*revision), now).await {
                 Ok(v) if v.get("status").and_then(|s| s.as_str()) == Some("written") => written += 1,
                 Ok(v) => conflicts.push(format!("{who}: {}", v.get("status").and_then(|s| s.as_str()).unwrap_or("?"))),
                 Err(e) => conflicts.push(format!("{who}: {e}")),
@@ -11348,32 +11502,33 @@ pub async fn rewrite_links(
     }))
 }
 
+/// Поля пункта гейта, как их принимает дверь `gate-item-set`.
+pub(crate) struct GateItem<'a> {
+    pub phase: &'a str,
+    pub id: &'a str,
+    pub title: &'a str,
+    pub kind: &'a str,
+    pub query: Option<&'a str>,
+    pub owner: Option<&'a str>,
+    pub probe: Option<&'a str>,
+    pub why: &'a str,
+    /// Над чем пункт меряет. Пусто в ответе — «неизвестно», а не «пройдено».
+    pub subject: Option<&'a str>,
+    pub subject_why: Option<&'a str>,
+    /// С какого мгновения пункт судит. `None` — не трогать объявленное, 0 —
+    /// судить всё, и это умолчание нового пункта.
+    pub since: Option<i64>,
+}
+
 /// Объявить пункт гейта.
 ///
 /// Гейты — таблица ОБЪЯВЛЕННОГО, её не пересобирает ни один проход; до сих пор
 /// её наполняла команда донора, и потому у `G5` не было ни одного пункта, а
 /// «проект закончен» оставалось мнением. Дверь та же, что у всего остального:
 /// ручка, а не прямой запрос к базе.
-#[allow(clippy::too_many_arguments)]
-pub async fn set_gate_item(
-    pool: &Pool,
-    project: &str,
-    phase: &str,
-    id: &str,
-    title: &str,
-    kind: &str,
-    query: Option<&str>,
-    owner: Option<&str>,
-    probe: Option<&str>,
-    why: &str,
-    // Над чем пункт меряет. Пусто в ответе — «неизвестно», а не «пройдено».
-    subject: Option<&str>,
-    subject_why: Option<&str>,
-    // С какого мгновения пункт судит. `None` — не трогать объявленное; ноль —
-    // судить всё, и это умолчание нового пункта.
-    since: Option<i64>,
-    drop_it: bool,
-) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn set_gate_item(pool: &Pool, project: &str, fields: GateItem<'_>, drop_it: bool) -> Result<Value, crate::db::Fail> {
+    let GateItem { phase, id, title, kind, query, owner, probe, why, subject, subject_why, since } =
+        fields;
     let mut client = crate::db::conn(pool).await?;
     // Снятие пункта — той же ручкой. Без него пункт, оказавшийся неверным,
     // снимался бы только запросом в базу мимо сервера; замеры снятого пункта
@@ -11395,11 +11550,11 @@ pub async fn set_gate_item(
     // объявление, и падал уже замер — «new row violates check constraint».
     // Ограничение требует и согласия рода с запросом: запросный пункт без
     // запроса таблица не принимает, и это тоже лучше сказать здесь.
-    const РОДЫ: [&str; 4] = ["query", "command", "manual", "unknown"];
-    if !РОДЫ.contains(&kind) {
+    const KINDS: [&str; 4] = ["query", "command", "manual", "unknown"];
+    if !KINDS.contains(&kind) {
         return Ok(json!({ "status": "kind_unknown", "phase": phase, "id": id, "itemKind": kind,
                           "why": format!("рода «{kind}» у пунктов не бывает: замер такого пункта \
-                                          не записался бы вовсе. Бывают {}", РОДЫ.join(" · ")) }));
+                                          не записался бы вовсе. Бывают {}", KINDS.join(" · ")) }));
     }
     if (kind == "query") != query.map(|q| !q.trim().is_empty()).unwrap_or(false) {
         return Ok(json!({ "status": "kind_and_query_disagree", "phase": phase, "id": id,
@@ -11580,14 +11735,14 @@ pub async fn set_gate_item(
 /// Виды, чьи пункты готовности переносятся. Список назван здесь один раз и
 /// используется и переносом, и отказом: иначе «пунктов нет» и «спрашивать
 /// нечем» перестанут различаться.
-pub const READINESS_OWNERS: &[&str] =
+pub(crate) const READINESS_OWNERS: &[&str] =
     &["task", "red-task", "question", "acceptance", "test-plan", "document-plan"];
 
 /// Вычислить состояние пункта по объявленному способу.
 ///
 /// Пункт без способа остаётся `unknown` и `done` не становится ни от какого
 /// сопоставления слов.
-pub async fn readiness_computed(
+pub(crate) async fn readiness_computed(
     pool: &Pool,
     project: &str,
     kind: &str,
@@ -11647,21 +11802,11 @@ pub async fn readiness_computed(
 
 /// Вердикт способа проверки. Один на всех, кто спрашивает.
 #[derive(Debug, Clone)]
-pub struct Verdict {
+pub(crate) struct Verdict {
     pub state: &'static str,
     pub violations: usize,
     pub detail: Vec<String>,
     pub why: String,
-}
-
-impl Verdict {
-    pub fn to_json(&self) -> Value {
-        let mut v = json!({ "state": self.state, "violations": self.violations, "detail": self.detail });
-        if !self.why.is_empty() {
-            v["why"] = json!(self.why);
-        }
-        v
-    }
 }
 
 
@@ -11671,20 +11816,20 @@ impl Verdict {
 /// неотличимо от зелёного. Узнать, чего не хватает, можно было только чтением
 /// исходника; один набор объявил так семь ролей за день, каждую — после того,
 /// как нашёл её в коде.
-pub async fn scheme_roles(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn scheme_roles(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let rows = client
         .query("SELECT role, value, coalesce(nullif(project_id,''),'') AS чей
                   FROM scheme_term ORDER BY role, ord, value", &[])
         .await?;
-    let mut своё: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
-    let mut общее: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    let mut own: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    let mut shared: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
     for r in &rows {
-        let (role, value, чей): (String, String, String) = (r.get(0), r.get(1), r.get(2));
-        if чей == project {
-            своё.entry(role).or_default().push(value);
-        } else if чей.is_empty() {
-            общее.entry(role).or_default().push(value);
+        let (role, value, whose): (String, String, String) = (r.get(0), r.get(1), r.get(2));
+        if whose == project {
+            own.entry(role).or_default().push(value);
+        } else if whose.is_empty() {
+            shared.entry(role).or_default().push(value);
         }
     }
     // РОЛИ, КОТОРЫЕ СПРАШИВАЕТ SQL ПУНКТОВ, — из самих запросов, а не списком.
@@ -11698,7 +11843,7 @@ pub async fn scheme_roles(pool: &Pool, project: &str) -> Result<Value, crate::db
     //
     // Отсюда же берётся и «чего стоит»: пункт, который её спрашивает, назван
     // поимённо — точнее любого описания, которое можно придумать заранее.
-    let из_правил = client
+    let from_rules = client
         .query(
             // Роль спрашивают двумя формами — `role = 'x'` и `role IN ('x','y')`, —
             // и вторая несёт их несколько. Брать только первую значило бы снова
@@ -11714,17 +11859,17 @@ pub async fn scheme_roles(pool: &Pool, project: &str) -> Result<Value, crate::db
             &[],
         )
         .await?;
-    let mut спрошено: Vec<(String, String, String)> = crate::scheme::ROLES
+    let mut asked: Vec<(String, String, String)> = crate::scheme::ROLES
         .iter()
-        .map(|(r, как, чем)| ((*r).to_owned(), (*как).to_owned(), (*чем).to_owned()))
+        .map(|(r, how, than)| ((*r).to_owned(), (*how).to_owned(), (*than).to_owned()))
         .collect();
-    for r in &из_правил {
-        let (роль, пункты): (String, String) = (r.get(0), r.get(1));
-        if !спрошено.iter().any(|(имя, _, _)| *имя == роль) {
-            спрошено.push((роль, "all".to_owned(), format!("её спрашивает пункт гейта: {пункты}")));
+    for r in &from_rules {
+        let (role_name, items): (String, String) = (r.get(0), r.get(1));
+        if !asked.iter().any(|(name_said, _, _)| *name_said == role_name) {
+            asked.push((role_name, "all".to_owned(), format!("её спрашивает пункт гейта: {items}")));
         }
     }
-    спрошено.sort();
+    asked.sort();
 
     // ОБРАЗЕЦ, НЕ ПОЙМАВШИЙ НИ ОДНОГО ЖИВОГО ИМЕНИ, — находка, а не настройка.
     //
@@ -11732,80 +11877,80 @@ pub async fn scheme_roles(pool: &Pool, project: &str) -> Result<Value, crate::db
     // `NFR-07`: совпало с нулём имён и промолчало, а раздел держателей
     // инварианта не работал трое суток. Дверь `kind-id-set` этот приём знает —
     // «сверяется на живых именах»; здесь он тот же, только для роли.
-    let mut не_ловят: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
-    for (роль, _, _) in &спрошено {
-        let Some(вид) = роль.strip_prefix("id.") else { continue };
-        let образцы: Vec<String> = своё
-            .get(роль.as_str())
-            .or_else(|| общее.get(роль.as_str()))
+    let mut not_catch: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    for (role_name, _, _) in &asked {
+        let Some(kind_name) = role_name.strip_prefix("id.") else { continue };
+        let patterns: Vec<String> = own
+            .get(role_name.as_str())
+            .or_else(|| shared.get(role_name.as_str()))
             .cloned()
             .unwrap_or_default();
-        if образцы.is_empty() {
+        if patterns.is_empty() {
             continue;
         }
-        let (mut подошло, mut всего) = (0i64, 0i64);
-        for table in своих_таблиц(&*client, вид).await? {
+        let (mut matched, mut total) = (0i64, 0i64);
+        for table in own_tables(&*client, kind_name).await? {
             let r = client
                 .query_one(
                     &format!(
                         "SELECT count(*) FILTER (WHERE id ~ ANY($2)), count(*)
                            FROM {table} WHERE project_id = $1"
                     ),
-                    &[&project, &образцы],
+                    &[&project, &patterns],
                 )
                 .await?;
-            подошло += r.get::<_, i64>(0);
-            всего += r.get::<_, i64>(1);
+            matched += r.get::<_, i64>(0);
+            total += r.get::<_, i64>(1);
         }
         // Ноль живых имён — не находка: ловить нечего, и это другое.
-        if всего > 0 && подошло == 0 {
-            не_ловят.insert(роль.clone(), всего);
+        if total > 0 && matched == 0 {
+            not_catch.insert(role_name.clone(), total);
         }
     }
 
-    let mut молчат = 0usize;
-    let mut двусмысленны = 0usize;
-    let mut слепы = 0usize;
-    let out: Vec<Value> = спрошено
+    let mut stay_silent = 0usize;
+    let mut ambiguous = 0usize;
+    let mut blind = 0usize;
+    let out: Vec<Value> = asked
         .iter()
-        .map(|(role, как_спрашивают, чем_платит)| {
+        .map(|(role, how_asked, than_pays)| {
             let role = role.as_str();
-            let как_спрашивают = как_спрашивают.as_str();
-            let s = своё.get(role);
-            let o = общее.get(role);
-            let слова = s.or(o);
-            let сколько = слова.map(|v| v.len()).unwrap_or(0);
+            let how_asked = how_asked.as_str();
+            let s = own.get(role);
+            let o = shared.get(role);
+            let words = s.or(o);
+            let how_many = words.map(|v| v.len()).unwrap_or(0);
             // Ноль слов — беда всегда. Два слова — беда ТОЛЬКО у роли, которую
             // спрашивают одним: `one` про такую честно отвечает `None`, и
             // правило выключается. Роль-список двумя значениями не ломается, и
             // звать это двусмысленностью значит поднимать тревогу на здоровом.
-            let состояние = match (сколько, как_спрашивают) {
-                (0, _) => { молчат += 1; "молчит" }
-                (n, "one") if n > 1 => { двусмысленны += 1; "двусмысленна" }
-                _ if не_ловят.contains_key(role) => { слепы += 1; "не ловит имён" }
+            let state = match (how_many, how_asked) {
+                (0, _) => { stay_silent += 1; "молчит" }
+                (n, "one") if n > 1 => { ambiguous += 1; "двусмысленна" }
+                _ if not_catch.contains_key(role) => { blind += 1; "не ловит имён" }
                 _ => "считает",
             };
             json!({
-                "role": role, "state": состояние, "asked": как_спрашивают,
-                "liveNames": не_ловят.get(role).map(|n| json!(n)).unwrap_or(Value::Null),
-                "words": слова.cloned().unwrap_or_default(),
+                "role": role, "state": state, "asked": how_asked,
+                "liveNames": not_catch.get(role).map(|n| json!(n)).unwrap_or(Value::Null),
+                "words": words.cloned().unwrap_or_default(),
                 "from": if s.is_some() { "набор" } else if o.is_some() { "общее" } else { "нигде" },
-                "costs": чем_платит,
+                "costs": than_pays,
             })
         })
         .collect();
     Ok(json!({
         "roles": out,
         "asked": out.len(),
-        "silent": молчат,
-        "ambiguous": двусмысленны,
-        "catchesNothing": слепы,
+        "silent": stay_silent,
+        "ambiguous": ambiguous,
+        "catchesNothing": blind,
         "why": "молчащая роль ВЫКЛЮЧАЕТ правило, а не обнуляет его находки: снаружи это \
                 неотличимо от зелёного. Объявляется дверью `scheme-term-set`",
     }))
 }
 
-pub fn violator(detail: &str) -> String {
+pub(crate) fn violator(detail: &str) -> String {
     detail
         .split_whitespace()
         .next()
@@ -11825,7 +11970,7 @@ pub fn violator(detail: &str) -> String {
 /// `command` сервер не выполняет и выполнять не должен: у него нет ни
 /// репозитория, ни оболочки. Команду прогоняет тот, у кого они есть, и подаёт
 /// итог — как состояния задач.
-pub async fn execute_method(
+pub(crate) async fn execute_method(
     client: &impl deadpool_postgres::GenericClient,
     project: &str,
     method_kind: &str,
@@ -11840,7 +11985,7 @@ pub async fn execute_method(
 /// строка готовности. Гейту мало: его пункт открывают затем, чтобы починить, а
 /// чинить по пяти именам из тридцати восьми нельзя. Замер гейта хранится, и
 /// хранить в нём двести имён вместо пяти ничего не стоит.
-pub async fn execute_method_upto(
+pub(crate) async fn execute_method_upto(
     client: &impl deadpool_postgres::GenericClient,
     project: &str,
     method_kind: &str,
@@ -12030,7 +12175,7 @@ async fn compute_next_step(
         let here_run = if work_run.trim().is_empty() || here_name.is_empty() {
             Value::Null
         } else {
-            json!(work_run.replace("{имя}", &here_name))
+            json!(work_run.replace(WORK_RUN_NAME, &here_name))
         };
         open_work.push(json!({
             "ord": ord,
@@ -12060,7 +12205,7 @@ async fn compute_next_step(
                 // ручка `next-task` устроена наоборот и отдаёт задачу со всем
                 // контекстом внутри.
                 //
-                // Команду даёт САМА СТУПЕНЬ колонкой `work_run`, `{имя}` —
+                // Команду даёт САМА СТУПЕНЬ колонкой `work_run`, `{name}` —
                 // первое слово находки. Пусто — команды нет, и `next-step` её не
                 // выдумывает: угаданная команда хуже отсутствующей.
                 let first = verdict.detail.first().cloned().unwrap_or_default();
@@ -12068,7 +12213,7 @@ async fn compute_next_step(
                 let run = if work_run.trim().is_empty() || name.is_empty() {
                     Value::Null
                 } else {
-                    json!(work_run.replace("{имя}", &name))
+                    json!(work_run.replace(WORK_RUN_NAME, &name))
                 };
                 at = Some(json!({
                     "ord": ord, "question": question, "state": verdict.state,
@@ -12143,7 +12288,7 @@ async fn compute_next_step(
 /// Зовётся не на вопрос, а на изменение набора — тем же работником, что меряет
 /// гейты, и строго после них: ступени 4, 7 и 10 читают состояние пунктов гейта,
 /// и посчитанные до — прочли бы прошлый круг.
-pub async fn measure_process(
+pub(crate) async fn measure_process(
     pool: &Pool,
     project: &str,
     set_name: &str,
@@ -12377,22 +12522,23 @@ async fn subject_empty(
     }
 }
 
+/// Кто и чем виноват: поля двери `blame-set`.
+pub(crate) struct Blame<'a> {
+    pub rule: &'a str,
+    pub entity_id: &'a str,
+    pub blame: &'a str,
+    pub fixed_by: &'a str,
+    pub why: &'a str,
+    pub decided_by: &'a str,
+}
+
 /// Объявить, ЧЕЙ предмет спора у находки.
 ///
 /// Находка остаётся красной: признак делит счёт, а не уменьшает его. `fixedBy`
 /// обязателен — признак без указания, чем это чинится, ничем не отличается от
 /// жалобы, и следующий проход запишет её заново.
-pub async fn set_blame(
-    pool: &Pool,
-    project: &str,
-    rule: &str,
-    entity_id: &str,
-    blame: &str,
-    fixed_by: &str,
-    why: &str,
-    decided_by: &str,
-    drop_it: bool,
-) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn set_blame(pool: &Pool, project: &str, fields: Blame<'_>, drop_it: bool) -> Result<Value, crate::db::Fail> {
+    let Blame { rule, entity_id, blame, fixed_by, why, decided_by } = fields;
     let client = crate::db::conn(pool).await?;
     if drop_it {
         let gone = client
@@ -12440,7 +12586,7 @@ pub async fn set_blame(
                "means": "находка остаётся красной: счёт разделён, а не уменьшен" }))
 }
 
-pub async fn process_state(
+pub(crate) async fn process_state(
     pool: &Pool,
     project: &str,
     process: &str,
@@ -12538,17 +12684,17 @@ pub async fn process_state(
 /// Лестница — тот же вопрос «что делать дальше», только не про задачу, а про
 /// процесс, и держащий гейт стоит на ней ступенью. Ответ берётся у неё целиком,
 /// чтобы двух порядков работ не было.
-async fn шаг_вместо(
+async fn step_instead(
     client: &impl deadpool_postgres::GenericClient,
     project: &str,
 ) -> Result<Value, crate::db::Fail> {
-    let шаг = position(client, project, "godzy").await?;
+    let asked_step = position(client, project, "godzy").await?;
     Ok(json!({
         "why": "фаза закрыта, но работа есть: её называет лестница — это работа фазы НИЖЕ, та самая, что откроет гейт",
-        "step": шаг["at"]["question"],
-        "ord": шаг["at"]["ord"],
-        "first": шаг["at"]["first"],
-        "state": шаг["at"]["state"],
+        "step": asked_step["at"]["question"],
+        "ord": asked_step["at"]["ord"],
+        "first": asked_step["at"]["first"],
+        "state": asked_step["at"]["state"],
     }))
 }
 
@@ -12558,12 +12704,12 @@ async fn шаг_вместо(
 /// брать внутри волны», и сливать их нельзя. Но без связи вторая дверь была
 /// способом обойти порядок, не заметив, что обходишь: лестница стояла на
 /// корпусном гейте, а `next-task` называл кодовую задачу.
-async fn лестница_держит(
+async fn ladder_holds(
     client: &impl deadpool_postgres::GenericClient,
     project: &str,
-    своя_фаза: Option<i32>,
+    own_phase: Option<i32>,
 ) -> Result<Option<Value>, crate::db::Fail> {
-    let задачная: Option<i32> = client
+    let task: Option<i32> = client
         .query_one(
             "SELECT min(ord) FROM harness_process_step
               WHERE set_name = 'godzy' AND process = 'godzy' AND unit = 'task'",
@@ -12571,71 +12717,71 @@ async fn лестница_держит(
         )
         .await?
         .get(0);
-    let Some(задачная) = задачная else {
+    let Some(task) = task else {
         return Ok(Some(json!({
             "why": "задачная ступень лестницы не объявлена: где по порядку начинаются задачи, сказать \
                     нечем, и это не «можно всё». Объявляется дверью `step-method-set` доводом `unit=task`",
         })));
     };
-    let шаг = position(client, project, "godzy").await?;
-    let красные_раньше: Vec<String> = client
+    let asked_step = position(client, project, "godzy").await?;
+    let red_earlier: Vec<String> = client
         .query(
             "SELECT g.phase || ' · ' || g.item FROM project_gates g
               WHERE g.project_id = $1 AND g.state = 'failed'
                 AND g.phase NOT IN (SELECT ph.gate FROM phase ph WHERE ph.ord >= $2)
               ORDER BY g.phase, g.item",
-            &[&project, &своя_фаза.unwrap_or(i32::MAX)],
+            &[&project, &own_phase.unwrap_or(i32::MAX)],
         )
         .await?
         .iter()
         .map(|r| r.get(0))
         .collect();
-    Ok(решение_лестницы(&шаг, i64::from(задачная), &красные_раньше))
+    Ok(decision_ladder(&asked_step, i64::from(task), &red_earlier))
 }
 
-fn решение_лестницы(шаг: &Value, задачная: i64, красные_раньше: &[String]) -> Option<Value> {
-    if шаг["checkedAt"].is_null() || !шаг["openWork"].is_array() {
+fn decision_ladder(asked_step: &Value, task: i64, red_earlier: &[String]) -> Option<Value> {
+    if asked_step["checkedAt"].is_null() || !asked_step["openWork"].is_array() {
         return Some(json!({
             "why": "положение лестницы этим кодом ни разу не считали: держит ли она задачи, сказать нечем, и это не «можно всё»",
         }));
     }
-    let (ступень, держат, всего) = держащая_ступень(шаг, задачная, красные_раньше)?;
-    let at = &шаг["at"];
+    let (step, hold, total) = holding_step(asked_step, task, red_earlier)?;
+    let at = &asked_step["at"];
     Some(json!({
-        "ord": ступень["ord"],
-        "owner": ступень["owner"],
-        "question": ступень["question"],
-        "run": ступень["run"],
-        "first": if ступень["ord"] == at["ord"] { at["first"].clone() } else { Value::Null },
-        "holding": держат.iter().take(5).collect::<Vec<_>>(),
-        "holdingCount": всего,
-        "stale": шаг["stale"],
+        "ord": step["ord"],
+        "owner": step["owner"],
+        "question": step["question"],
+        "run": step["run"],
+        "first": if step["ord"] == at["ord"] { at["first"].clone() } else { Value::Null },
+        "holding": hold.iter().take(5).collect::<Vec<_>>(),
+        "holdingCount": total,
+        "stale": asked_step["stale"],
         "why": format!(
             "ступень {} не пройдена, владелец `{}`: «{}». Задачи не запрашиваются, пока не пройдены все \
-             ступени до {задачная}-й — сперва то, что держит эта",
-            ступень["ord"], ступень["owner"].as_str().unwrap_or(""), ступень["question"].as_str().unwrap_or("")),
+             ступени до {task}-й — сперва то, что держит эта",
+            step["ord"], step["owner"].as_str().unwrap_or(""), step["question"].as_str().unwrap_or("")),
     }))
 }
 
-fn держащая_ступень(шаг: &Value, задачная: i64, красные_раньше: &[String]) -> Option<(Value, Vec<String>, i64)> {
-    let корпус_без_ответа_раньше = |ord: i64| {
-        шаг["unanswerable"].as_array().is_some_and(|u| {
+fn holding_step(asked_step: &Value, task: i64, red_earlier: &[String]) -> Option<(Value, Vec<String>, i64)> {
+    let corpus_without_answer_earlier = |ord: i64| {
+        asked_step["unanswerable"].as_array().is_some_and(|u| {
             u.iter().any(|s| s["touches"] == "corpus" && s["ord"].as_i64().is_some_and(|o| o < ord))
         })
     };
-    шаг["openWork"]
+    asked_step["openWork"]
         .as_array()?
         .iter()
         .filter_map(|s| Some((s["ord"].as_i64()?, s)))
         .filter(|&(ord, s)| {
-            ord < задачная
+            ord < task
                 && s["state"] == "failed"
-                && !(s["touches"] == "repository" && корпус_без_ответа_раньше(ord))
+                && !(s["touches"] == "repository" && corpus_without_answer_earlier(ord))
         })
         .find_map(|(_, s)| {
             if s["kind"] == "gate" {
-                (!красные_раньше.is_empty())
-                    .then(|| (s.clone(), красные_раньше.to_vec(), красные_раньше.len() as i64))
+                (!red_earlier.is_empty())
+                    .then(|| (s.clone(), red_earlier.to_vec(), red_earlier.len() as i64))
             } else {
                 Some((
                     s.clone(),
@@ -12646,7 +12792,20 @@ fn держащая_ступень(шаг: &Value, задачная: i64, кра
         })
 }
 
-pub async fn next_step(pool: &Pool, project: &str, process: &str) -> Result<Value, crate::db::Fail> {
+/// Метка в команде ступени, вместо которой подставляется первое слово находки.
+///
+/// Объявлена ОДНАЖДЫ: она же стоит в описании двери, в доводе к колонке и в
+/// самих записях набора, и разъехавшись, они перестают подставляться молча.
+pub(crate) const WORK_RUN_NAME: &str = "{name}";
+
+/// Как дверь объясняет эту метку. Словами двери, а не второй копией строки:
+/// описание и подстановка разъезжаются молча, и набор пишет команду с меткой,
+/// которой никто не подставит.
+pub(crate) fn step_run_hint() -> String {
+    format!("команда, которой видна единица работы ступени; `{WORK_RUN_NAME}` — первое слово находки")
+}
+
+pub(crate) async fn next_step(pool: &Pool, project: &str, process: &str) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     position(&*client, project, process).await
 }
@@ -12686,7 +12845,7 @@ async fn position(
     Ok(answer)
 }
 
-pub async fn process_history(pool: &Pool, project: &str, process: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn process_history(pool: &Pool, project: &str, process: &str) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
@@ -12710,7 +12869,7 @@ pub async fn process_history(pool: &Pool, project: &str, process: &str) -> Resul
 }
 
 /// Плитки прогресса: три числа, никогда одно.
-pub async fn progress(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn progress(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
@@ -12749,7 +12908,7 @@ pub async fn progress(pool: &Pool, project: &str) -> Result<Value, crate::db::Fa
 /// достигнутых. Разрыв в середине не проглатывается: задача, имплементированная
 /// без предполёта, — это работа, прошедшая мимо проверки, и её надо уметь
 /// найти, а не сгладить.
-pub async fn task_status(pool: &Pool, project: &str, task: Option<&str>) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn task_status(pool: &Pool, project: &str, task: Option<&str>) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let statuses = client
         .query(
@@ -12835,7 +12994,7 @@ pub async fn task_status(pool: &Pool, project: &str, task: Option<&str>) -> Resu
 }
 
 /// Задачи, прошедшие мимо середины конвейера.
-pub async fn status_anomaly(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn status_anomaly(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
     let all = task_status(pool, project, None).await?;
     let list: Vec<Value> = all["tasks"]
         .as_array()
@@ -12845,7 +13004,7 @@ pub async fn status_anomaly(pool: &Pool, project: &str) -> Result<Value, crate::
 }
 
 /// Плитка конвейера: сколько задач на каждом статусе, и сколько неизвестно.
-pub async fn task_pipeline(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn task_pipeline(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let statuses = client
         .query("SELECT ord, name, title, fact, source FROM kind_status WHERE kind = 'task' ORDER BY ord", &[])
@@ -12901,7 +13060,7 @@ pub async fn task_pipeline(pool: &Pool, project: &str) -> Result<Value, crate::d
 /// Зеркала (`kind = 'red'`) в доску не идут. Они не проходят те же ступени, и
 /// смешивать их с задачами разработки — это ровно та ошибка, из-за которой
 /// «222 задачи» много недель значили 139 задач и 83 их пары.
-pub async fn task_board(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn task_board(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let statuses = client
         .query("SELECT ord, name, title, fact, durable FROM kind_status WHERE kind = 'task' ORDER BY ord", &[])
@@ -13035,7 +13194,7 @@ pub async fn task_board(pool: &Pool, project: &str) -> Result<Value, crate::db::
 ///
 /// Зависимость от **этапа** раскрывается в рёбра только при счёте — в базе она
 /// остаётся связью с этапом, иначе протухнет, когда в этап добавят задачу.
-pub async fn waves(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn waves(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let tasks = client
         .query(
@@ -13232,7 +13391,7 @@ async fn compute_phases(pool: &Pool, project: &str) -> Result<Value, crate::db::
 /// Считается после гейтов: состояние гейта фазы берётся у них. Пустое число
 /// документов или задач значит «фаза их не объявляет», и оно остаётся пустым:
 /// ноль сказал бы «объявила, и нет ни одной».
-pub async fn measure_phases(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn measure_phases(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
     let computed = compute_phases(pool, project).await?;
     let empty = Vec::new();
     let list = computed["phases"].as_array().unwrap_or(&empty);
@@ -13268,7 +13427,7 @@ pub async fn measure_phases(pool: &Pool, project: &str) -> Result<Value, crate::
 }
 
 /// Фазы — из сохранённого.
-pub async fn phases(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn phases(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
@@ -13316,7 +13475,7 @@ pub async fn phases(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail
     Ok(json!({ "phases": out, "checkedAt": rows[0].get::<_, Option<i64>>(10), "stale": stale }))
 }
 
-pub async fn coverage(pool: &Pool, kinds: &crate::kinds::Kinds, project: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn coverage(pool: &Pool, kinds: &crate::kinds::Kinds, project: &str) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
@@ -13357,7 +13516,7 @@ pub async fn coverage(pool: &Pool, kinds: &crate::kinds::Kinds, project: &str) -
         "why": "вид и имя записаны в документе, а ключ запрещает второе такое имя: ничьих и двойных быть неоткуда"
     }))
 }
-pub async fn history(
+pub(crate) async fn history(
     pool: &Pool,
     project: &str,
     kind: &str,
@@ -13389,7 +13548,7 @@ pub async fn history(
     }))
 }
 
-pub async fn confirm_entity(
+pub(crate) async fn confirm_entity(
     pool: &Pool,
     project: &str,
     kind: &str,
@@ -13438,7 +13597,7 @@ pub async fn confirm_entity(
     Ok(json!({ "status": "confirmed", "kind": kind, "id": id, "causes": causes, "at": at }))
 }
 
-pub async fn declare_retired_term(
+pub(crate) async fn declare_retired_term(
     pool: &Pool,
     project: &str,
     term: &str,
@@ -13473,7 +13632,7 @@ pub async fn declare_retired_term(
 }
 
 /// Текст сущности, каким он был на названной правке.
-pub async fn at_revision(
+pub(crate) async fn at_revision(
     pool: &Pool,
     project: &str,
     kind: &str,
@@ -13508,7 +13667,7 @@ pub async fn at_revision(
 /// Таблица отдаётся ЯЧЕЙКАМИ, а не строкой разметки: колонки в ней уже
 /// разделены — с учётом экранированной черты и черты внутри кодовой вставки,
 /// на которых наивное деление ошибается.
-pub async fn blocks(
+pub(crate) async fn blocks(
     pool: &Pool,
     project: &str,
     entity_kind: &str,
@@ -13612,7 +13771,7 @@ pub async fn blocks(
 ///
 /// Сравнивается не с «сейчас», а с самой копией ДО правки: обе стороны
 /// пересчитаны на копии одним кругом одного кода.
-pub async fn what_if(
+pub(crate) async fn what_if(
     pool: &Pool,
     kinds: &std::sync::Arc<crate::kinds::Kinds>,
     project: &str,
@@ -13620,47 +13779,47 @@ pub async fn what_if(
     tool: &str,
     args: &Value,
 ) -> Result<Value, crate::db::Fail> {
-    static НОМЕР: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let копия = format!(
+    static NUMBER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let copy = format!(
         "примерка·{project}·{}·{}-{}",
         now_ms(),
         std::process::id(),
-        НОМЕР.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        NUMBER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     );
-    let сделано = примерить(pool, kinds, project, &копия, author, tool, args).await;
+    let done = try_on(pool, kinds, project, &copy, author, tool, args).await;
     // КОПИЯ СНИМАЕТСЯ ВСЕГДА, и число снятого называется: молчаливая уборка,
     // которая не отработала, оставляет набор-призрак в каждой таблице сразу.
-    let убрано = забыть(pool, &копия).await;
-    let mut ответ = сделано?;
-    match убрано {
-        Ok(n) => ответ["снято строк копии"] = json!(n),
+    let removed = forget(pool, &copy).await;
+    let mut answer = done?;
+    match removed {
+        Ok(n) => answer["снято строк копии"] = json!(n),
         Err(e) => {
-            tracing::warn!("примерка не убралась за собой: копия {копия}, {}", e.says());
-            ответ["копия осталась"] = json!(копия);
-            ответ["почему осталась"] = json!(e.says());
+            tracing::warn!("примерка не убралась за собой: копия {copy}, {}", e.says());
+            answer["копия осталась"] = json!(copy);
+            answer["почему осталась"] = json!(e.says());
         }
     }
-    Ok(ответ)
+    Ok(answer)
 }
 
-async fn забыть(pool: &Pool, копия: &str) -> Result<i64, crate::db::Fail> {
+async fn forget(pool: &Pool, copy: &str) -> Result<i64, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
-    Ok(client.query_one("SELECT project_forget($1)", &[&копия]).await?.get(0))
+    Ok(client.query_one("SELECT project_forget($1)", &[&copy]).await?.get(0))
 }
 
-async fn примерить(
+async fn try_on(
     pool: &Pool,
     kinds: &std::sync::Arc<crate::kinds::Kinds>,
     project: &str,
-    копия: &str,
+    copy: &str,
     author: &str,
     tool: &str,
     args: &Value,
 ) -> Result<Value, crate::db::Fail> {
-    let начало = std::time::Instant::now();
-    let строк: i64 = {
+    let start = std::time::Instant::now();
+    let row_count: i64 = {
         let client = crate::db::conn(pool).await?;
-        client.query_one("SELECT project_copy($1, $2)", &[&project, &копия]).await?.get(0)
+        client.query_one("SELECT project_copy($1, $2)", &[&project, &copy]).await?.get(0)
     };
     // ОТМЕТКА «НАДО ПЕРЕСЧИТАТЬ» КОПИИ НЕ НАСЛЕДУЕТСЯ.
     //
@@ -13672,108 +13831,108 @@ async fn примерить(
     // оставлять ему повода — дешевле, и одно другому не мешает.
     {
         let client = crate::db::conn(pool).await?;
-        client.execute("DELETE FROM gate_dirty WHERE project_id = $1", &[&копия]).await?;
+        client.execute("DELETE FROM gate_dirty WHERE project_id = $1", &[&copy]).await?;
     }
-    crate::watch::recount(pool, копия).await?;
-    let до = снимок_гейта(pool, копия).await?;
+    crate::watch::recount(pool, copy).await?;
+    let before = snapshot_gate(pool, copy).await?;
 
     // Дверь зовётся по копии ТЕМ ЖЕ кодом: у примерки нет своей ветки, которая
     // могла бы разойтись с настоящей. Имя набора — единственное, что меняется.
     // Будущее кладётся в короб: `call` зовёт примерку, примерка зовёт `call`, и
     // без короба у состояния этой цепочки нет конечного размера.
-    let дверь = crate::mcp::Mcp {
+    let door_answer = crate::mcp::Mcp {
         pool: pool.clone(),
         kinds: kinds.clone(),
-        project: копия.to_owned(),
+        project: copy.to_owned(),
         author: author.to_owned(),
     };
-    let ответ_двери = Box::pin(дверь.call(tool, args)).await;
+    let answer_doors = Box::pin(door_answer.call(tool, args)).await;
     // ЗАНЯТОСТЬ — НЕ ПРИГОВОР КОПИИ. Отказ по существу на копии значит, что
     // и на подлиннике будет отказ; перегрузка не значит ничего, а примерка —
     // самый тяжёлый ход и первым упирается в потолок.
-    if crate::door::busy_said(&ответ_двери) {
-        let сказано = ответ_двери["content"][0]["text"].as_str().unwrap_or("").to_owned();
-        забыть(pool, копия).await.ok();
+    if crate::door::busy_said(&answer_doors) {
+        let said = answer_doors["content"][0]["text"].as_str().unwrap_or("").to_owned();
+        forget(pool, copy).await.ok();
         return Err(crate::db::Fail::Busy(format!(
-            "примерка не сделана: {сказано}. Копия убрана, набор не тронут"
+            "примерка не сделана: {said}. Копия убрана, набор не тронут"
         )));
     }
-    let отказ = ответ_двери.get("isError").and_then(Value::as_bool).unwrap_or(false);
+    let refusal = answer_doors.get("isError").and_then(Value::as_bool).unwrap_or(false);
     // Дверь отвечает подробно, и подробность её — о копии: счёт проекций копии
     // никому не нужен, а читать примерку мешает. Берётся слово исхода, а при
     // отказе — весь довод, потому что довод и есть ответ.
-    let полностью = ответ_двери["content"][0]["text"].as_str().unwrap_or("").to_owned();
-    let сказано = serde_json::from_str::<Value>(&полностью)
+    let fully = answer_doors["content"][0]["text"].as_str().unwrap_or("").to_owned();
+    let said = serde_json::from_str::<Value>(&fully)
         .ok()
         .and_then(|v| v["status"].as_str().map(str::to_owned))
-        .unwrap_or_else(|| полностью.clone());
-    if отказ {
+        .unwrap_or_else(|| fully.clone());
+    if refusal {
         return Ok(json!({
-            "примерено": false, "дверь": tool, "отказ": полностью,
+            "примерено": false, "дверь": tool, "отказ": fully,
             "почему": "дверь отказала на копии — на подлиннике отказала бы так же, \
                        и мерить нечего",
         }));
     }
 
-    crate::watch::recount(pool, копия).await?;
-    let после = снимок_гейта(pool, копия).await?;
+    crate::watch::recount(pool, copy).await?;
+    let after = snapshot_gate(pool, copy).await?;
 
-    let mut стало_красным = Vec::new();
-    let mut погасло = Vec::new();
-    let mut сдвинулось = Vec::new();
-    let mut сменилось = Vec::new();
-    let mut не_с_чем_сравнить = Vec::new();
-    for ((фаза, пункт), (было, было_найдено, _)) in &до {
-        let Some((стало, стало_найдено, чем)) = после.get(&(фаза.clone(), пункт.clone())) else {
+    let mut now_red = Vec::new();
+    let mut went_out = Vec::new();
+    let mut moved = Vec::new();
+    let mut changed = Vec::new();
+    let mut not_with_than_compare = Vec::new();
+    for ((phase, item), (was, was_found, _)) in &before {
+        let Some((became, now_found, than)) = after.get(&(phase.clone(), item.clone())) else {
             continue;
         };
-        let имя = format!("{фаза} · {пункт}");
+        let name_said = format!("{phase} · {item}");
         // НЕСВЕЖЕЕ «ДО» НЕ СРАВНИВАЕТСЯ, А НАЗЫВАЕТСЯ. Пункт, у которого до
         // правки не было ответа, после неё покажется покрасневшим от неё — хотя
         // краснел он и без всякой правки. Одной оговорки внизу мало: находка
         // уже прочитана к тому месту, где она опровергается.
-        if было == "unknown" || было == "stale" {
-            не_с_чем_сравнить.push(json!({ "пункт": имя, "до правки": было,
-                                           "после": стало, "находок после": стало_найдено }));
+        if was == "unknown" || was == "stale" {
+            not_with_than_compare.push(json!({ "пункт": name_said, "до правки": was,
+                                           "после": became, "находок после": now_found }));
             continue;
         }
-        match (было.as_str(), стало.as_str()) {
-            (_, "failed") if было != "failed" => {
-                стало_красным.push(json!({ "пункт": имя, "находок": стало_найдено, "чем": чем }))
+        match (was.as_str(), became.as_str()) {
+            (_, "failed") if was != "failed" => {
+                now_red.push(json!({ "пункт": name_said, "находок": now_found, "чем": than }))
             }
-            ("failed", "passed") => погасло.push(json!({ "пункт": имя })),
-            ("failed", "failed") if было_найдено != стало_найдено => сдвинулось.push(json!({
-                "пункт": имя, "было": было_найдено, "стало": стало_найдено })),
-            _ if было != стало => сменилось.push(json!({ "пункт": имя, "было": было, "стало": стало })),
+            ("failed", "passed") => went_out.push(json!({ "пункт": name_said })),
+            ("failed", "failed") if was_found != now_found => moved.push(json!({
+                "пункт": name_said, "было": was_found, "стало": now_found })),
+            _ if was != became => changed.push(json!({ "пункт": name_said, "было": was, "стало": became })),
             _ => {}
         }
     }
     // НОВЫЙ ПУНКТ — ТОЖЕ ИСХОД. Правка, заводящая сущность нового вида, приносит
     // с ней и пункты, которых у набора не было: без этого они прошли бы молча.
-    for ((фаза, пункт), (стало, найдено, чем)) in &после {
-        if стало == "failed" && !до.contains_key(&(фаза.clone(), пункт.clone())) {
-            стало_красным.push(json!({ "пункт": format!("{фаза} · {пункт}"),
-                                       "находок": найдено, "чем": чем, "пункт новый": true }));
+    for ((phase, item), (became, found, than)) in &after {
+        if became == "failed" && !before.contains_key(&(phase.clone(), item.clone())) {
+            now_red.push(json!({ "пункт": format!("{phase} · {item}"),
+                                       "находок": found, "чем": than, "пункт новый": true }));
         }
     }
 
     Ok(json!({
         "примерено": true,
         "дверь": tool,
-        "сказала": сказано,
-        "стало красным": стало_красным,
-        "погасло": погасло,
-        "сдвинулось": сдвинулось,
-        "сменилось": сменилось,
+        "сказала": said,
+        "стало красным": now_red,
+        "погасло": went_out,
+        "сдвинулось": moved,
+        "сменилось": changed,
         "цена": {
-            "строк скопировано": строк,
-            "мс": начало.elapsed().as_millis() as i64,
+            "строк скопировано": row_count,
+            "мс": start.elapsed().as_millis() as i64,
         },
-        "не с чем сравнить": не_с_чем_сравнить,
+        "не с чем сравнить": not_with_than_compare,
     }))
 }
 
-async fn снимок_гейта(
+async fn snapshot_gate(
     pool: &Pool,
     project: &str,
 ) -> Result<std::collections::HashMap<(String, String), (String, String, String)>, crate::db::Fail>
@@ -13801,13 +13960,13 @@ async fn снимок_гейта(
 }
 
 #[cfg(test)]
-mod лестница {
-    use super::{держащая_ступень, решение_лестницы};
+mod ladder {
+    use super::{holding_step, decision_ladder};
     use serde_json::json;
 
     #[test]
-    fn проваленная_корпусная_и_неотвечаемые_не_те_не_освобождают_красную() {
-        let шаг = json!({
+    fn failed_corpus_and_unanswerable_not_those_not_release_red() {
+        let asked_step = json!({
             "corpusPhaseOpen": true,
             "unanswerable": [{ "ord": 7, "touches": "repository" }, { "ord": 12, "touches": "corpus" }],
             "openWork": [
@@ -13817,79 +13976,79 @@ mod лестница {
                   "detail": ["M3 — задач нет"] },
             ],
         });
-        let (ступень, держат, всего) = держащая_ступень(&шаг, 9, &[]).unwrap();
-        assert_eq!((ступень["ord"].as_i64(), держат, всего), (Some(8), vec!["M3 — задач нет".to_owned()], 1));
+        let (step, hold, total) = holding_step(&asked_step, 9, &[]).unwrap();
+        assert_eq!((step["ord"].as_i64(), hold, total), (Some(8), vec!["M3 — задач нет".to_owned()], 1));
     }
 
     #[test]
-    fn ступени_от_задачной_не_держат() {
-        let шаг = json!({
+    fn step_from_task_not_hold() {
+        let asked_step = json!({
             "unanswerable": [],
             "openWork": [
                 { "ord": 9, "state": "failed", "kind": "task", "touches": "repository", "violations": 3 },
                 { "ord": 11, "state": "failed", "kind": "gate", "touches": "repository", "violations": 2 },
             ],
         });
-        assert!(держащая_ступень(&шаг, 9, &["corpus · x".to_owned()]).is_none());
+        assert!(holding_step(&asked_step, 9, &["corpus · x".to_owned()]).is_none());
     }
 
     #[test]
-    fn корпус_держит_гейтовую_ступень() {
-        let шаг = json!({ "unanswerable": [], "openWork": [
+    fn corpus_holds_gate_step() {
+        let asked_step = json!({ "unanswerable": [], "openWork": [
             { "ord": 6, "state": "failed", "kind": "gate", "touches": "corpus", "violations": 4 },
         ]});
-        let красные = vec!["corpus · x".to_owned(), "corpus · y".to_owned()];
-        let (ступень, держат, всего) = держащая_ступень(&шаг, 9, &красные).unwrap();
-        assert_eq!((ступень["ord"].as_i64(), держат, всего), (Some(6), красные, 2));
+        let red = vec!["corpus · x".to_owned(), "corpus · y".to_owned()];
+        let (step, hold, total) = holding_step(&asked_step, 9, &red).unwrap();
+        assert_eq!((step["ord"].as_i64(), hold, total), (Some(6), red, 2));
     }
 
     #[test]
-    fn репозиторная_после_неотвечаемой_корпусной_не_держит() {
-        let шаг = json!({
+    fn repository_after_unanswerable_corpus_not_holds() {
+        let asked_step = json!({
             "corpusPhaseOpen": true,
             "unanswerable": [{ "ord": 4, "touches": "corpus" }],
             "openWork": [
                 { "ord": 8, "state": "failed", "kind": "milestone", "touches": "repository", "violations": 1 },
             ],
         });
-        assert!(держащая_ступень(&шаг, 9, &[]).is_none());
+        assert!(holding_step(&asked_step, 9, &[]).is_none());
     }
 
     #[test]
-    fn корпусная_после_неотвечаемой_корпусной_держит() {
-        let шаг = json!({
+    fn corpus_after_unanswerable_corpus_holds() {
+        let asked_step = json!({
             "unanswerable": [{ "ord": 4, "touches": "corpus" }],
             "openWork": [
                 { "ord": 5, "state": "failed", "kind": "question", "touches": "corpus", "violations": 2,
                   "detail": ["Q-1 — открыт", "Q-2 — открыт"] },
             ],
         });
-        let (ступень, держат, всего) = держащая_ступень(&шаг, 9, &[]).unwrap();
-        assert_eq!((ступень["ord"].as_i64(), держат.len(), всего), (Some(5), 2, 2));
+        let (step, hold, total) = holding_step(&asked_step, 9, &[]).unwrap();
+        assert_eq!((step["ord"].as_i64(), hold.len(), total), (Some(5), 2, 2));
     }
 
     #[test]
-    fn непосчитанное_положение_держит_а_устаревшее_решает_по_последнему() {
-        let устаревшее = json!({ "checkedAt": 1, "stale": true, "unanswerable": [], "openWork": [] });
-        assert!(решение_лестницы(&устаревшее, 9, &[]).is_none());
-        assert!(решение_лестницы(&json!({ "checkedAt": 1 }), 9, &[]).is_some());
-        assert!(решение_лестницы(&json!({ "openWork": [] }), 9, &[]).is_some());
+    fn uncounted_position_holds_and_stale_decides_by_last() {
+        let stale = json!({ "checkedAt": 1, "stale": true, "unanswerable": [], "openWork": [] });
+        assert!(decision_ladder(&stale, 9, &[]).is_none());
+        assert!(decision_ladder(&json!({ "checkedAt": 1 }), 9, &[]).is_some());
+        assert!(decision_ladder(&json!({ "openWork": [] }), 9, &[]).is_some());
     }
 
     #[test]
-    fn первая_единица_только_у_текущей_ступени() {
-        let шаг = |at: i64| {
+    fn first_unit_only_at_current_step() {
+        let asked_step = |at: i64| {
             json!({ "checkedAt": 1, "stale": false, "unanswerable": [],
                     "at": { "ord": at, "first": { "name": "Q-1" } },
                     "openWork": [{ "ord": 5, "state": "failed", "kind": "question", "touches": "corpus", "violations": 1,
                                    "detail": ["Q-1 — открыт"] }] })
         };
-        let держит = решение_лестницы(&шаг(5), 9, &[]).unwrap();
+        let holds_rows = decision_ladder(&asked_step(5), 9, &[]).unwrap();
         assert_eq!(
-            (держит["first"]["name"].as_str(), держит["holding"][0].as_str()),
+            (holds_rows["first"]["name"].as_str(), holds_rows["holding"][0].as_str()),
             (Some("Q-1"), Some("Q-1 — открыт"))
         );
-        assert!(решение_лестницы(&шаг(4), 9, &[]).unwrap()["first"].is_null());
+        assert!(decision_ladder(&asked_step(4), 9, &[]).unwrap()["first"].is_null());
     }
 }
 
@@ -14197,15 +14356,39 @@ mod redo {
     async fn a_task_is_not_declared_closed_or_claimed() {
         let pool = crate::db::pool("postgres://nobody@127.0.0.1:1/nothing", 1).unwrap();
         for state in ["closed", "claimed"] {
-            let out = declare_task(&pool, P, "T", "M1", 1, "заголовок", "dev", state, "", false).await.unwrap();
+            let fields = super::Task { id: "T", milestone: "M1", ord: 1, title: "заголовок",
+                                kind: "dev", state, size: "" };
+            let out = declare_task(&pool, P, fields, false).await.unwrap();
             assert_eq!(out["status"], "state_from_history", "{state}: до базы дело не доходит");
         }
     }
 }
 
 #[cfg(test)]
+mod work_run_token {
+    use super::{step_run_hint, DDL, WORK_RUN_NAME};
+
+    /// Метка подстановки живёт В ЗАПИСЯХ набора, а не только в коде. Пока её
+    /// меняли правкой буквы в исходнике, все объявленные ступени переставали
+    /// подставлять имя — молча, и `next-step` отдавал команду с меткой внутри.
+    #[test]
+    fn the_token_moves_together_with_the_rows_that_hold_it() {
+        assert_eq!(WORK_RUN_NAME, "{name}");
+        assert!(
+            DDL.contains("replace(work_run, '{имя}', '{name}')"),
+            "перенос записанных ступеней на новую метку идёт схемой"
+        );
+        assert!(step_run_hint().contains(WORK_RUN_NAME), "дверь объясняет ту же метку, что подставляет");
+        let command = "mh call question id={name}";
+        assert_eq!(command.replace(WORK_RUN_NAME, "Q-1"), "mh call question id=Q-1");
+        let from_old_memory = "mh call question id={имя}".replace("{имя}", WORK_RUN_NAME);
+        assert_eq!(from_old_memory.replace(WORK_RUN_NAME, "Q-1"), "mh call question id=Q-1");
+    }
+}
+
+#[cfg(test)]
 mod kind_tables {
-    use super::своих_таблиц;
+    use super::own_tables;
 
     #[tokio::test]
     #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
@@ -14233,10 +14416,10 @@ mod kind_tables {
         )
         .await
         .unwrap();
-        assert_eq!(своих_таблиц(&tx, "index").await.unwrap(), vec!["holder_more".to_owned(), "holder_rows".to_owned()]);
-        assert!(своих_таблиц(&tx, "mockup").await.unwrap().is_empty());
-        assert!(своих_таблиц(&tx, "bare").await.unwrap().is_empty());
-        assert!(своих_таблиц(&tx, "unknown").await.unwrap().is_empty());
+        assert_eq!(own_tables(&tx, "index").await.unwrap(), vec!["holder_more".to_owned(), "holder_rows".to_owned()]);
+        assert!(own_tables(&tx, "mockup").await.unwrap().is_empty());
+        assert!(own_tables(&tx, "bare").await.unwrap().is_empty());
+        assert!(own_tables(&tx, "unknown").await.unwrap().is_empty());
         tx.rollback().await.unwrap();
     }
 }

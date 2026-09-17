@@ -52,7 +52,7 @@ impl Miss {
     /// занятостью: пока шаг дописывался склейкой в текст, `reproject` отвечал
     /// «база не ответила» и кодом отказа по существу — на перегрузке, и ровно
     /// на той двери, которую советуют позвать, когда что-то не досчиталось.
-    pub fn step(self, step: &str) -> Self {
+    pub(crate) fn step(self, step: &str) -> Self {
         match self {
             Miss::Busy(why) => Miss::Busy(format!("{step}: {why}")),
             Miss::Db(why) => Miss::Db(format!("{step}: {why}")),
@@ -77,7 +77,7 @@ impl From<crate::db::Fail> for Miss {
 /// один документ отзывался на два имени: `story README` и `index 10-intent/use-cases`.
 ///
 /// Пустое имя — законный ответ: у одиночки имени нет, его заменяет вид.
-pub async fn locate(
+pub(crate) async fn locate(
     pool: &Pool,
     kinds: &Kinds,
     project: &str,
@@ -94,7 +94,7 @@ pub async fn locate(
 /// помощник брал своё, один ответ о сущности держал три сразу — своё, своё у
 /// связей и своё у их перечня, — и шестнадцать одновременных чтений запирали
 /// пул целиком: каждое держало первое и ждало второго.
-pub async fn locate_at(
+pub(crate) async fn locate_at(
     client: &impl deadpool_postgres::GenericClient,
     kinds: &Kinds,
     project: &str,
@@ -169,7 +169,7 @@ pub async fn locate_at(
 /// Документный вид перечисляется САМИМИ документами: вид у каждого записан, и
 /// обход путей под корнем стал бы вторым правилом рядом с первым. Внутренний —
 /// своей предметной таблицей: собственного документа у него нет.
-pub async fn ids(pool: &Pool, kinds: &Kinds, project: &str, kind: &str) -> Result<Vec<String>, Miss> {
+pub(crate) async fn ids(pool: &Pool, kinds: &Kinds, project: &str, kind: &str) -> Result<Vec<String>, Miss> {
     let Some(k) = kinds.get(kind) else {
         return Err(Miss::NoKind(kind.to_owned()));
     };
@@ -183,14 +183,14 @@ pub async fn ids(pool: &Pool, kinds: &Kinds, project: &str, kind: &str) -> Resul
         //
         // Контроль, которым это поймано: у вида, где документ есть, ответ не
         // менялся, а у `postmortem` он честно пуст.
-        let есть = client
+        let exists = client
             .query_opt(
                 "SELECT 1 FROM project_documents WHERE project_id = $1 AND entity_kind = $2",
                 &[&project, &kind],
             )
             .await?
             .is_some();
-        return Ok(if есть { vec![kind.to_owned()] } else { Vec::new() });
+        return Ok(if exists { vec![kind.to_owned()] } else { Vec::new() });
     }
     if let Some((table, id_col, _)) = table_of(kind) {
         let sql = if kind == "task" {
@@ -220,11 +220,11 @@ pub async fn ids(pool: &Pool, kinds: &Kinds, project: &str, kind: &str) -> Resul
     // перечень, а `entity` и `document-add` его же отвергали.
     //
     // Образцы читаются ОДИН раз на перечень, а не на имя.
-    let own = образцы_вида(&*client, project, kind).await?;
+    let own = patterns_kind(&*client, project, kind).await?;
     let mut out = Vec::new();
     for r in &rows {
         let name: String = r.get(0);
-        if подходит_образцу(&own, kind, k, &name)? {
+        if matches_pattern(&own, kind, k, &name)? {
             out.push(name);
         }
     }
@@ -243,7 +243,7 @@ pub async fn ids(pool: &Pool, kinds: &Kinds, project: &str, kind: &str) -> Resul
 /// Читалка берёт текст блоками — теми, что разобраны при записи. Присылать ей
 /// вдобавок `content` значит гнать один документ дважды, и второй экземпляр
 /// выбрасывается. Одно место на обоих вызывающих: ручку и MCP.
-pub fn without_body(mut v: Value) -> Value {
+pub(crate) fn without_body(mut v: Value) -> Value {
     if let Some(len) = v.get("content").and_then(|c| c.as_str()).map(str::len) {
         v["bytes"] = json!(len);
         if let Some(m) = v.as_object_mut() {
@@ -268,8 +268,8 @@ pub fn without_body(mut v: Value) -> Value {
 /// этот ответ шёл наверх как есть, дверь сущности объявляла невыводимым видом
 /// живой вопрос, лежащий в таблице. Перегрузка и ошибка базы отказом остаются:
 /// пустые связи при них — тихая неправда, по которой считают гейты.
-fn связи_или_пусто(ответ: Result<Value, Miss>) -> Result<Value, Miss> {
-    match ответ {
+fn links_or_empty(answer: Result<Value, Miss>) -> Result<Value, Miss> {
+    match answer {
         Ok(v) => Ok(v),
         Err(Miss::Unprojected(_)) => Ok(Value::Null),
         Err(e) => Err(e),
@@ -298,7 +298,7 @@ async fn relations_of(
         // — это не отказ сущности: `links_at` знает семь видов, и для
         // остальных его «не спроецирован» отвечало бы за ВЕСЬ ответ, хотя
         // вопрос лежит в таблице и прекрасно читается.
-        let v = связи_или_пусто(crate::projector::links_at(client, project, kind, id).await)?;
+        let v = links_or_empty(crate::projector::links_at(client, project, kind, id).await)?;
         if !v.is_null() {
             if let Some(sets) = v.get("sets").and_then(|s| s.as_object()) {
                 let counted: serde_json::Map<String, Value> = sets
@@ -392,7 +392,7 @@ async fn relations_of(
 /// Объявленное состояние говорит, чем запись закончили; живое — можно ли этому
 /// ещё верить. Каскад считал это верно, а наружу отдавала одна дверь из пяти:
 /// `mh call task` показывал `closed` при переоткрытой задаче.
-async fn живое(
+async fn live(
     client: &impl deadpool_postgres::GenericClient,
     project: &str,
     kind: &str,
@@ -409,11 +409,11 @@ async fn живое(
     else {
         return Ok(Value::Null);
     };
-    let состояние: String = r.get(0);
-    if состояние != "reopened" {
-        return Ok(json!({ "state": состояние }));
+    let state: String = r.get(0);
+    if state != "reopened" {
+        return Ok(json!({ "state": state }));
     }
-    Ok(json!({ "state": состояние, "why": r.get::<_, String>(1),
+    Ok(json!({ "state": state, "why": r.get::<_, String>(1),
             "through": r.get::<_, i32>(2), "cause": r.get::<_, Option<String>>(3),
             "means": "запись стоит на том, что изменили после неё: закрытость держится памятью" }))
 }
@@ -424,7 +424,7 @@ async fn живое(
 /// экрана, какая секция его задаёт, было нечем — связь стояла на уровне
 /// документа, а `ui-spec` это сорок килобайт и двадцать шесть секций. Ответ
 /// выводится соединением таблиц, а не поиском подстроки в прозе.
-async fn сказано_в(
+async fn said_at(
     client: &impl deadpool_postgres::GenericClient,
     project: &str,
     id: &str,
@@ -444,17 +444,17 @@ async fn сказано_в(
     if rows.is_empty() {
         return Ok(Value::Null);
     }
-    let всего = rows.len();
+    let total = rows.len();
     // «Определяет» идёт первым: на вопрос «где это задано» ответ один, а
     // упоминаний два десятка, и без порядка первый ответ был случайным.
-    let определяет: Vec<Value> = rows
+    let defines: Vec<Value> = rows
         .iter()
         .filter(|r| r.get::<_, String>(5) == "defines")
         .map(|r| json!({ "kind": r.get::<_, String>(0), "name": r.get::<_, String>(1),
                          "section": r.get::<_, Option<i32>>(2),
                          "title": r.get::<_, Option<String>>(3).unwrap_or_default() }))
         .collect();
-    let места: Vec<Value> = rows
+    let place: Vec<Value> = rows
         .iter()
         .take(40)
         .map(|r| {
@@ -473,8 +473,8 @@ async fn сказано_в(
             })
         })
         .collect();
-    Ok(json!({ "count": всего, "definedIn": определяет, "where": места,
-               "means": if всего > 40 { "показаны первые сорок" } else { "" } }))
+    Ok(json!({ "count": total, "definedIn": defines, "where": place,
+               "means": if total > 40 { "показаны первые сорок" } else { "" } }))
 }
 
 /// Строка сущности из её предметной таблицы — без проекта и адреса.
@@ -504,7 +504,7 @@ async fn row_of(
     Ok(Some(row))
 }
 
-pub async fn entity(pool: &Pool, kinds: &Kinds, project: &str, kind: &str, id: Option<&str>) -> Result<Value, Miss> {
+pub(crate) async fn entity(pool: &Pool, kinds: &Kinds, project: &str, kind: &str, id: Option<&str>) -> Result<Value, Miss> {
     let Some(k) = kinds.get(kind) else {
         return Err(Miss::NoKind(kind.to_owned()));
     };
@@ -530,8 +530,8 @@ pub async fn entity(pool: &Pool, kinds: &Kinds, project: &str, kind: &str, id: O
         };
         let rel = relations_of(&*client, project, kind, id, &ok, &oi, true).await?;
         return Ok(json!({ "kind": kind, "id": id, "entity": row, "relations": rel,
-                          "live": живое(&*client, project, kind, id).await?,
-                          "saidIn": сказано_в(&*client, project, id).await? }));
+                          "live": live(&*client, project, kind, id).await?,
+                          "saidIn": said_at(&*client, project, id).await? }));
     }
 
     let (owner_kind, owner_name) = locate_at(&*client, kinds, project, kind, id).await?;
@@ -555,8 +555,8 @@ pub async fn entity(pool: &Pool, kinds: &Kinds, project: &str, kind: &str, id: O
                               "updatedAt": doc.as_ref().map(|r| r.get::<_, i64>(1)),
                               "updatedBy": doc.as_ref().map(|r| r.get::<_, String>(2)),
                               "document": { "kind": owner_kind, "name": owner_name, "revision": revision },
-                              "live": живое(&*client, project, kind, id).await?,
-                              "saidIn": сказано_в(&*client, project, id).await? }));
+                              "live": live(&*client, project, kind, id).await?,
+                              "saidIn": said_at(&*client, project, id).await? }));
         }
     }
     let rows = client
@@ -591,8 +591,8 @@ pub async fn entity(pool: &Pool, kinds: &Kinds, project: &str, kind: &str, id: O
         "id": id.unwrap_or(kind),
         "content": content,
         "relations": rel,
-        "live": живое(&*client, project, kind, id.unwrap_or(&owner_name)).await?,
-        "saidIn": сказано_в(&*client, project, id.unwrap_or(&owner_name)).await?,
+        "live": live(&*client, project, kind, id.unwrap_or(&owner_name)).await?,
+        "saidIn": said_at(&*client, project, id.unwrap_or(&owner_name)).await?,
         "revision": row.get::<_, i64>(1),
         "updatedAt": row.get::<_, i64>(2),
         "updatedBy": row.get::<_, String>(3),
@@ -603,7 +603,7 @@ pub async fn entity(pool: &Pool, kinds: &Kinds, project: &str, kind: &str, id: O
 ///
 /// Разрешается соединением с предметными таблицами. Что не разрешилось,
 /// остаётся видом одиночки либо адресом: выдуманное имя хуже честного адреса.
-pub async fn backlinks(
+pub(crate) async fn backlinks(
     pool: &Pool,
     kinds: &Kinds,
     project: &str,
@@ -660,7 +660,7 @@ pub async fn backlinks(
 }
 
 /// Подходит ли имя под объявленный образец. Образца нет — подходит любое.
-pub fn matches_id(k: &crate::kinds::Kind, id: &str) -> bool {
+pub(crate) fn matches_id(k: &crate::kinds::Kind, id: &str) -> bool {
     match k.id.as_deref() {
         Some(pattern) => regex::Regex::new(pattern).map(|re| re.is_match(id)).unwrap_or(true),
         None => true,
@@ -677,7 +677,7 @@ pub fn matches_id(k: &crate::kinds::Kind, id: &str) -> bool {
 ///
 /// Слово даёт набор: роль `id.<вид>` в словаре схемы. Не объявлена — образец
 /// раскладки, как и было.
-pub async fn matches_id_of(
+pub(crate) async fn matches_id_of(
     pool: &Pool,
     project: &str,
     kind: &str,
@@ -688,30 +688,30 @@ pub async fn matches_id_of(
     matches_id_at(&*client, project, kind, k, id).await
 }
 
-fn сломан_запомнить(куда: &mut Option<Miss>, kind: &str, образец: &str, e: &regex::Error) {
-    if куда.is_none() {
-        *куда = Some(Miss::Refused(format!(
-            "образец имени вида {kind} не разбирается: {образец} — {e}"
+fn broken_remember(where_to: &mut Option<Miss>, kind: &str, pattern: &str, e: &regex::Error) {
+    if where_to.is_none() {
+        *where_to = Some(Miss::Refused(format!(
+            "образец имени вида {kind} не разбирается: {pattern} — {e}"
         )));
     }
 }
 
-pub async fn matches_id_at(
+pub(crate) async fn matches_id_at(
     client: &impl deadpool_postgres::GenericClient,
     project: &str,
     kind: &str,
     k: &crate::kinds::Kind,
     id: &str,
 ) -> Result<bool, Miss> {
-    let own = образцы_вида(client, project, kind).await?;
-    подходит_образцу(&own, kind, k, id)
+    let own = patterns_kind(client, project, kind).await?;
+    matches_pattern(&own, kind, k, id)
 }
 
 /// Образцы имени, объявленные НАБОРОМ. Читаются один раз на перечень: по
 /// запросу на имя перечень из трёхсот документов давал триста одинаковых
 /// запросов в схему и держал соединение всё это время — той самой хваткой,
 /// от которой лечится пул.
-pub async fn образцы_вида(
+pub(crate) async fn patterns_kind(
     client: &impl deadpool_postgres::GenericClient,
     project: &str,
     kind: &str,
@@ -731,19 +731,19 @@ pub async fn образцы_вида(
 /// кривой образец называется, только если без него имя не подошло, — иначе
 /// сломанное объявление отвечало «нет такой сущности» на КАЖДОЕ имя вида, и
 /// чинить шли имя вместо образца.
-pub fn подходит_образцу(own: &[String], kind: &str, k: &crate::kinds::Kind, id: &str) -> Result<bool, Miss> {
+pub(crate) fn matches_pattern(own: &[String], kind: &str, k: &crate::kinds::Kind, id: &str) -> Result<bool, Miss> {
     if own.is_empty() {
         return Ok(matches_id(k, id));
     }
-    let mut сломан: Option<Miss> = None;
-    for образец in own {
-        match regex::Regex::new(образец) {
+    let mut broken: Option<Miss> = None;
+    for pattern in own {
+        match regex::Regex::new(pattern) {
             Ok(re) if re.is_match(id) => return Ok(true),
             Ok(_) => {}
-            Err(e) => сломан_запомнить(&mut сломан, kind, образец, &e),
+            Err(e) => broken_remember(&mut broken, kind, pattern, &e),
         }
     }
-    match сломан {
+    match broken {
         Some(e) => Err(e),
         None => Ok(false),
     }
@@ -751,24 +751,24 @@ pub fn подходит_образцу(own: &[String], kind: &str, k: &crate::ki
 
 #[cfg(test)]
 mod links_tests {
-    use super::{связи_или_пусто, Miss};
+    use super::{links_or_empty, Miss};
 
     /// «Связей у вида нет» — не приговор сущности. `links_at` знает семь видов,
     /// и его «не спроецирован» отвечал за ВЕСЬ ответ: живой вопрос, лежащий в
     /// таблице, дверь объявляла невыводимым видом.
     #[test]
     fn a_kind_without_links_is_still_an_entity() {
-        let пусто = связи_или_пусто(Err(Miss::Unprojected("question".to_owned())))
+        let empty = links_or_empty(Err(Miss::Unprojected("question".to_owned())))
             .expect("вид без перечня связей — не отказ");
-        assert!(пусто.is_null(), "у вида без перечня связей ответ — пусто");
-        let есть = связи_или_пусто(Ok(serde_json::json!({ "sets": {} }))).expect("связи отдаются как есть");
-        assert_eq!(есть, serde_json::json!({ "sets": {} }));
+        assert!(empty.is_null(), "у вида без перечня связей ответ — пусто");
+        let exists = links_or_empty(Ok(serde_json::json!({ "sets": {} }))).expect("связи отдаются как есть");
+        assert_eq!(exists, serde_json::json!({ "sets": {} }));
         assert!(
-            matches!(связи_или_пусто(Err(Miss::Busy("занято".to_owned()))), Err(Miss::Busy(_))),
+            matches!(links_or_empty(Err(Miss::Busy("занято".to_owned()))), Err(Miss::Busy(_))),
             "перегрузка остаётся отказом: пустые связи при ней — тихая неправда"
         );
         assert!(
-            matches!(связи_или_пусто(Err(Miss::Db("нет таблицы".to_owned()))), Err(Miss::Db(_))),
+            matches!(links_or_empty(Err(Miss::Db("нет таблицы".to_owned()))), Err(Miss::Db(_))),
             "ошибка базы остаётся отказом"
         );
     }

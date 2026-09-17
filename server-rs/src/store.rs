@@ -7,38 +7,16 @@
 //! текста.
 
 use deadpool_postgres::Pool;
-use once_cell::sync::Lazy;
-use regex::Regex;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::parse::{parse_document, Block};
 
 const MAX_DOCUMENT_BYTES: usize = 4 * 1024 * 1024;
-const MAX_PATH_LENGTH: usize = 512;
-static SEGMENT: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[A-Za-z0-9._][A-Za-z0-9 ._\-]*$").unwrap());
-
-pub fn hash_document(content: &str) -> String {
+pub(crate) fn hash_document(content: &str) -> String {
     hex::encode(Sha256::digest(content.as_bytes()))
 }
 
-/// Путь набора: без обратных косых, без нулей, без `.` и `..` сегментами и без
-/// хвостового пробела в сегменте.
-pub fn normalize_path(raw: &str) -> Option<String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() || trimmed.len() > MAX_PATH_LENGTH {
-        return None;
-    }
-    if trimmed.contains('\\') || trimmed.contains('\0') {
-        return None;
-    }
-    for segment in trimmed.split('/') {
-        if segment == "." || segment == ".." || !SEGMENT.is_match(segment) || segment.ends_with(' ') {
-            return None;
-        }
-    }
-    Some(trimmed.to_owned())
-}
 
 /// Завести НОВЫЙ документ.
 ///
@@ -50,16 +28,8 @@ pub fn normalize_path(raw: &str) -> Option<String> {
 /// Вид обязан быть объявлен раскладкой и быть документом: сущность, объявленная
 /// ВНУТРИ другого документа (требование, статья, термин), своего документа не
 /// имеет, и заводить его для неё — заводить двойника.
-pub async fn create(
-    pool: &Pool,
-    kinds: &crate::kinds::Kinds,
-    project: &str,
-    kind: &str,
-    name: &str,
-    content: &str,
-    author: &str,
-    now_ms: i64,
-) -> Result<Value, crate::entities::Miss> {
+pub(crate) async fn create(pool: &Pool, kinds: &crate::kinds::Kinds, project: &str, fields: Document<'_>, author: &str, now_ms: i64) -> Result<Value, crate::entities::Miss> {
+    let Document { kind, name, content } = fields;
     let Some(declared) = kinds.get(kind) else {
         return Ok(json!({ "status": "unknown_kind",
                           "why": format!("вид «{kind}» раскладкой не объявлен") }));
@@ -84,7 +54,7 @@ pub async fn create(
                               "why": format!("имя «{name}» не подходит под образец вида «{kind}»") }));
         }
     }
-    let bytes = content.as_bytes().len();
+    let bytes = content.len();
     if bytes > MAX_DOCUMENT_BYTES {
         return Ok(json!({ "status": "too_big", "bytes": bytes }));
     }
@@ -115,7 +85,7 @@ pub async fn create(
     //
     // `ON CONFLICT DO NOTHING` вместо проверки-и-вставки: двое заводящих
     // одновременно прочли бы «нет такого» оба, и второй затёр бы первого.
-    let занято = tx
+    let busy = tx
         .query_opt(
             "INSERT INTO project_documents
                 (project_id, entity_kind, entity_name, content, content_hash, bytes,
@@ -129,11 +99,11 @@ pub async fn create(
             &[&project, &kind, &name, &content, &content_hash, &bytes32, &now_ms, &author],
         )
         .await?;
-    let Some(строка) = занято else {
+    let Some(row) = busy else {
         return Ok(json!({ "status": "exists",
                           "why": "документ с таким видом и именем уже есть: заводить нечего" }));
     };
-    let revision: i64 = строка.get(0);
+    let revision: i64 = row.get(0);
     tx.execute(
         "INSERT INTO project_document_revisions
             (project_id, entity_kind, entity_name, content, content_hash, bytes, revision, written_at, written_by)
@@ -144,14 +114,14 @@ pub async fn create(
     write_structure(&tx, project, kind, name, content).await?;
     crate::watch::mark(&tx, project, "заведён документ").await?;
     tx.commit().await?;
-    let mut ответ = json!({ "status": "created", "kind": kind, "name": name,
+    let mut answer = json!({ "status": "created", "kind": kind, "name": name,
                             "revision": revision, "bytes": bytes });
     // Слово говорится только когда есть что сказать: всегда пустое `why` веб
     // читает как отказ без довода.
     if revision > 1 {
-        ответ["why"] = json!("имя уже жило: номер продолжает его летопись, а не начинает заново");
+        answer["why"] = json!("имя уже жило: номер продолжает его летопись, а не начинает заново");
     }
-    Ok(ответ)
+    Ok(answer)
 }
 
 /// Записать сущность целиком.
@@ -160,21 +130,13 @@ pub async fn create(
 /// читается у найденной строки и пишется как поле происхождения — то, откуда
 /// документ когда-то взялся. Пока он ещё первичный ключ, писать по нему
 /// приходится; но выбирать, КУДА писать, он уже не может.
-pub async fn put(
-    pool: &Pool,
-    project: &str,
-    kind: &str,
-    name: &str,
-    content: &str,
-    author: &str,
-    expected_revision: Option<i64>,
-    now_ms: i64,
-) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn put(pool: &Pool, project: &str, fields: Document<'_>, author: &str, expected_revision: Option<i64>, now_ms: i64) -> Result<Value, crate::db::Fail> {
+    let Document { kind, name, content } = fields;
     if kind.is_empty() {
         return Ok(json!({ "status": "not_found",
                           "why": "вид документа не назван, а без вида адреса нет: `kind=` обязателен" }));
     }
-    let bytes = content.as_bytes().len();
+    let bytes = content.len();
     if bytes > MAX_DOCUMENT_BYTES {
         return Ok(json!({ "status": "invalid_path" }));
     }
@@ -254,19 +216,25 @@ pub async fn put(
     Ok(json!({ "status": "written", "revision": revision, "bytes": bytes }))
 }
 
+/// Что за документ и что в нём: одни и те же три поля у заведения и у правки.
+pub(crate) struct Document<'a> {
+    pub kind: &'a str,
+    pub name: &'a str,
+    pub content: &'a str,
+}
+
+/// Поля правки одного раздела документа.
+pub(crate) struct SectionEdit<'a> {
+    pub kind: &'a str,
+    pub name: &'a str,
+    pub anchor: &'a str,
+    pub body: &'a str,
+}
+
 /// Заменить один раздел: голова до его первого блока, новое тело, хвост после
 /// последнего. Границы — те же блоки, которыми раздел читают.
-pub async fn put_section(
-    pool: &Pool,
-    project: &str,
-    kind: &str,
-    name: &str,
-    anchor: &str,
-    body: &str,
-    author: &str,
-    expected_revision: Option<i64>,
-    now_ms: i64,
-) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn put_section(pool: &Pool, project: &str, fields: SectionEdit<'_>, author: &str, expected_revision: Option<i64>, now_ms: i64) -> Result<Value, crate::db::Fail> {
+    let SectionEdit { kind, name, anchor, body } = fields;
     let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
@@ -297,7 +265,7 @@ pub async fn put_section(
         crate::parse::render_document(&tail)
     );
     drop(client);
-    put(pool, project, kind, name, &next, author, expected_revision, now_ms).await
+    put(pool, project, Document { kind, name, content: &next }, author, expected_revision, now_ms).await
 }
 
 /// Удалить документ вместе с его разбором.
@@ -305,7 +273,7 @@ pub async fn put_section(
 /// Донор чистил только документ: в базе от двух удалённых остались 132 блока,
 /// 739 ячеек и 242 ссылки. Ничего живого они не задевали лишь по случайности —
 /// осиротевшая ссылка на живой документ попала бы в обратные ссылки.
-pub async fn remove(pool: &Pool, project: &str, kind: &str, name: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn remove(pool: &Pool, project: &str, kind: &str, name: &str) -> Result<Value, crate::db::Fail> {
     // Безымянный документ не удаляется. Пустые вид и имя — не адрес одного
     // документа, а условие, под которое в песочных проектах подходят все сразу:
     // `p6` держит четыре таких, и одно удаление снесло бы четыре.
@@ -343,7 +311,7 @@ pub async fn remove(pool: &Pool, project: &str, kind: &str, name: &str) -> Resul
 }
 
 /// Убрать разбор документов, которых больше нет.
-pub async fn sweep_orphans(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn sweep_orphans(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
     let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
     let mut swept = serde_json::Map::new();
@@ -375,7 +343,7 @@ pub async fn sweep_orphans(pool: &Pool, project: &str) -> Result<Value, crate::d
 /// `unchanged` и правильно делает. Но правило разбора меняется отдельно от
 /// текста — как сменилось, когда ссылки стали адресовать сущность, — и тогда
 /// набору нужен проход, который перечитает старый текст новым правилом.
-pub async fn reparse_all(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn reparse_all(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let docs = client
         .query(

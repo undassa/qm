@@ -51,6 +51,9 @@ fn state_of(field: &str) -> (&'static str, String) {
     ("open", text)
 }
 
+/// Строка вопроса: имя, номер, заголовок, состояние, ответ и чем закрыт.
+type QuestionRow = (String, i32, String, String, String, &'static str, String, String, String, String, bool, (&'static str, String));
+
 /// Поля документов: имя → значение (не сырое: у вопроса важен текст, не разметка).
 async fn fields(pool: &Pool, project: &str) -> Result<HashMap<String, HashMap<String, String>>, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
@@ -69,7 +72,7 @@ async fn fields(pool: &Pool, project: &str) -> Result<HashMap<String, HashMap<St
     Ok(out)
 }
 
-pub async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fail> {
+pub(crate) async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fail> {
     // «Решение за владельцем» — ЧЕТВЁРТОЕ состояние ответа, и оно не выводится
     // из молчания. Вопрос, разобранный до конца и упирающийся в слово владельца,
     // и вопрос, которого никто не открывал, стояли одним `unsaid`: ступень
@@ -87,8 +90,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fai
     let empty_fields = HashMap::new();
     let empty_titles: Vec<String> = Vec::new();
 
-    let mut out: Vec<(String, i32, String, String, String, &str, String, String, String, String, bool,
-                      (&str, String))> = Vec::new();
+    let mut out: Vec<QuestionRow> = Vec::new();
     for e in &named {
         let Some(m) = QUESTION_NAME.captures(&e.1) else { continue };
         let f = fields.get(&e.1).unwrap_or(&empty_fields);
@@ -162,7 +164,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fai
     // ДАТЫ ИЗ ИСТОРИИ ДОКУМЕНТА, а не из прозы. Поле «Закрыт» у 290 вопросов
     // из 373 — прочерк: даты потеряли при переносе из реестра. История же
     // знает и первую запись, и последнюю, и знает про все.
-    let даты: std::collections::HashMap<String, (i64, i64)> = tx
+    let dates: std::collections::HashMap<String, (i64, i64)> = tx
         .query(
             "SELECT entity_name, min(written_at), max(written_at)
                FROM project_document_revisions
@@ -184,7 +186,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fai
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
             &[&project, id, number, title, kind, name, state, text, gate, opened, closed, has_answer,
               &answer.0, &answer.1,
-              &даты.get(id).map(|d| d.0), &даты.get(id).map(|d| d.1)],
+              &dates.get(id).map(|d| d.0), &dates.get(id).map(|d| d.1)],
         )
         .await?;
     }

@@ -9,7 +9,7 @@ use deadpool_postgres::Pool;
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
-pub struct Summary {
+pub(crate) struct Summary {
     pub bytes: i32,
     pub revision: i64,
     #[serde(rename = "updatedAt")]
@@ -19,7 +19,7 @@ pub struct Summary {
 }
 
 #[derive(Debug, Serialize)]
-pub struct Document {
+pub(crate) struct Document {
     #[serde(flatten)]
     pub summary: Summary,
     pub content: String,
@@ -32,7 +32,7 @@ pub struct Document {
 /// уже обжигалась — запрос с косой возвращал пусто, и пустота выглядела как
 /// «в каталоге ничего нет», а не как «спросили не так».
 /// Один документ целиком. `None` — документа нет; это `not_found`, а не ошибка.
-pub async fn read(
+pub(crate) async fn read(
     pool: &Pool,
     project: &str,
     kind: &str,

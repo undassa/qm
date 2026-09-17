@@ -10,7 +10,7 @@ use deadpool_postgres::Pool;
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
-pub struct Context {
+pub(crate) struct Context {
     #[serde(rename = "scopeId")]
     pub scope_id: String,
     pub name: Option<String>,
@@ -26,11 +26,11 @@ pub struct Context {
 }
 
 /// Область проекта кодируется идентификатором; интерфейс разбирает её обратно.
-pub fn scope_of(project_id: &str) -> String {
+pub(crate) fn scope_of(project_id: &str) -> String {
     format!("group:web-project-{project_id}")
 }
 
-pub async fn list(pool: &Pool) -> Result<Vec<Context>, crate::db::Fail> {
+pub(crate) async fn list(pool: &Pool) -> Result<Vec<Context>, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     // Архивированный проект в списке не показывается: он есть, но работой не является.
     //
@@ -64,7 +64,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn область_собирается_так_же_как_её_разбирает_интерфейс() {
+    fn the_scope_is_built_the_way_the_ui_reads_it() {
         assert_eq!(scope_of("308ed7a2"), "group:web-project-308ed7a2");
     }
 }

@@ -32,7 +32,6 @@ pub struct Terms {
 /// двусмысленную честно отвечает `None`. А роль-список двумя значениями не
 /// ломается — она для того и список, и звать это двусмысленностью значит
 /// поднимать тревогу на здоровом.
-
 /// ОБРАЗЕЦ ИМЕНИ ВИДА — ОДНИМ ЧИТАТЕЛЕМ НА ВСЕХ.
 ///
 /// Как выглядит имя задачи, требования, проверки — записано в раскладке вида
@@ -45,12 +44,12 @@ pub struct Terms {
 /// `V`, и для этого модуля их не существовало. `repo_corpus.rs` требовал букв в
 /// середине имени требования — подходило 55 имён из 203. Разошлись они молча:
 /// сравнивать копии между собой было некому.
-pub async fn id_pattern(
+pub(crate) async fn id_pattern(
     client: &impl deadpool_postgres::GenericClient,
     project: &str,
     kind: &str,
 ) -> Result<Vec<String>, crate::db::Fail> {
-    let своё = client
+    let own = client
         .query(
             "SELECT value FROM scheme($1) WHERE role = 'id.' || $2 ORDER BY ord, value",
             &[&project, &kind],
@@ -64,25 +63,25 @@ pub async fn id_pattern(
     // совпадает с нулевой длиной в любом месте любого значения. В `relations`
     // это стоило бы всех красных задач разом: родителем каждой стала бы пустая
     // строка, а `red_task` отбирает по `parent_task_id <> ''`.
-    let живой = |r: &tokio_postgres::Row| {
+    let live = |r: &tokio_postgres::Row| {
         let v: Option<String> = r.get(0);
         v.filter(|v| !v.trim().is_empty())
     };
-    let своё: Vec<String> = своё.iter().filter_map(живой).collect();
-    if !своё.is_empty() {
-        return Ok(своё);
+    let own: Vec<String> = own.iter().filter_map(live).collect();
+    if !own.is_empty() {
+        return Ok(own);
     }
     // Раскладка общая на все наборы; набора, поправившего образец, здесь уже нет.
     Ok(client
         .query_opt("SELECT spec->>'id' FROM kind_layout WHERE name = $1", &[&kind])
         .await?
         .as_ref()
-        .and_then(живой)
+        .and_then(live)
         .into_iter()
         .collect())
 }
 
-pub const ROLES: &[(&str, &str, &str)] = &[
+pub(crate) const ROLES: &[(&str, &str, &str)] = &[
     ("field.red-checks", "all", "перечень проверок красной задачи: без него `red-checks-match-parent` не с чем сверять"),
     ("field.red-parent", "all", "пара красной задачи: без неё у красных нет родителя, и `red_task` роняет их все"),
     ("field.requirements", "one", "требования экрана: без них связь экран→требование не выводится вовсе"),
@@ -110,7 +109,7 @@ impl Terms {
     /// То же на ГОТОВОМ соединении: словарь читается тем же соединением, что
     /// уже держит вызывающий. Второе соединение при открытой транзакции —
     /// способ запереть пул на себе же.
-    pub async fn load_at(
+    pub(crate) async fn load_at(
         client: &impl deadpool_postgres::GenericClient,
         project: &str,
     ) -> Result<Self, crate::db::Fail> {
@@ -137,34 +136,22 @@ impl Terms {
     ///
     /// Молча выбирать нельзя. Правило без слова не считается и говорит об этом;
     /// правило с двумя словами не считается тем более — оно не знает, каким.
-    pub fn one(&self, role: &str) -> Option<&str> {
+    pub(crate) fn one(&self, role: &str) -> Option<&str> {
         match self.by_role.get(role) {
             Some(v) if v.len() == 1 => v.first().map(String::as_str),
             _ => None,
         }
     }
 
-    /// Роли, у которых слов больше одного, а спрашивают их одним.
-    ///
-    /// Отдельным перечнем, потому что `one()` про такую роль отвечает `None` —
-    /// тем же словом, что и про необъявленную. Для человека это разные беды:
-    /// одну чинят объявлением, другую — снятием лишнего.
-    pub fn ambiguous(&self, roles: &[&str]) -> Vec<String> {
-        roles
-            .iter()
-            .filter(|r| self.by_role.get(**r).map(|v| v.len() > 1).unwrap_or(false))
-            .map(|r| format!("{}: {}", r, self.by_role[*r].join(" · ")))
-            .collect()
-    }
 
     /// Все слова роли: список стоп-слов, синонимы заголовка.
-    pub fn all(&self, role: &str) -> &[String] {
+    pub(crate) fn all(&self, role: &str) -> &[String] {
         static EMPTY: Vec<String> = Vec::new();
         self.by_role.get(role).unwrap_or(&EMPTY)
     }
 
     /// Роли, которых нет. Их называют вслух: правило без слова не считается.
-    pub fn missing(&self, roles: &[&str]) -> Vec<String> {
+    pub(crate) fn missing(&self, roles: &[&str]) -> Vec<String> {
         roles
             .iter()
             .filter(|r| !self.by_role.contains_key(**r))
@@ -186,87 +173,87 @@ mod tests {
     }
 
     #[test]
-    fn одно_слово_роли_отдаётся() {
+    fn one_word_roles_returned() {
         assert_eq!(terms(&[("field.parent", "Родитель")]).one("field.parent"), Some("Родитель"));
     }
 
     /// Ровно тот слом, что стоил восьмидесяти двух красных задач: у роли два
     /// слова, бралось первое по порядку, и о втором никто не узнавал.
     #[test]
-    fn два_слова_роли_не_выбираются_молча() {
+    fn two_words_for_one_role_are_not_chosen_silently() {
         let t = terms(&[("field.red-parent", "Пара"), ("field.red-parent", "Родительская задача")]);
         assert_eq!(t.one("field.red-parent"), None);
-        assert_eq!(t.ambiguous(&["field.red-parent"]).len(), 1);
+        assert_eq!(t.all("field.red-parent").len(), 2, "оба слова видны перечнем, а не выбираются молча");
     }
 
     #[test]
-    fn необъявленная_роль_и_двусмысленная_различаются() {
+    fn an_undeclared_role_and_one_declared_twice_differ() {
         let t = terms(&[("a", "x"), ("a", "y")]);
-        assert_eq!(t.missing(&["b"]), vec!["b".to_owned()]);
-        assert!(t.missing(&["a"]).is_empty());
-        assert_eq!(t.ambiguous(&["b"]).len(), 0);
+        assert_eq!(t.missing(&["b"]), vec!["b".to_owned()], "необъявленная роль называется");
+        assert!(t.missing(&["a"]).is_empty(), "объявленная дважды — объявлена");
+        assert_eq!(t.one("a"), None, "из двух слов роли не выбирается ни одно");
     }
 }
 
 #[cfg(test)]
-mod роли {
+mod roles {
     /// Перечень ролей сверяется С МЕСТАМИ ВЫЗОВА, а не с памятью правившего.
     ///
     /// Список, живущий отдельно от читателей, расходится с ними молча — и врёт
     /// ровно там, где нужен: при вопросе «чего набору не хватает».
     #[test]
-    fn перечень_совпадает_с_тем_что_спрашивают() {
+    fn list_matches_with_that_that_asked() {
         // ЧИТАТЕЛЕЙ ИЩЕМ НА ДИСКЕ, А НЕ В СПИСКЕ.
         //
         // Список стоял руками и отстал ровно так, как и должен был:
         // `traceability_said.rs` спрашивал `word.total` набором, реестр объявлял
         // её одиночной, а обход этого файла не видел и молчал. Список, который
         // надо помнить пополнять, — тот же дрейф, от которого этот тест заведён.
-        let корень = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut очередь = vec![корень];
-        let mut источники: Vec<(String, String)> = Vec::new();
-        while let Some(это) = очередь.pop() {
-            for вход in std::fs::read_dir(&это).expect("каталог исходников") {
-                let путь = вход.expect("запись каталога").path();
-                if путь.is_dir() {
-                    очередь.push(путь);
-                } else if путь.extension().is_some_and(|e| e == "rs") {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut queue = vec![root];
+        let mut sources: Vec<(String, String)> = Vec::new();
+        while let Some(dir) = queue.pop() {
+            for entry in std::fs::read_dir(&dir).expect("каталог исходников") {
+                let path_of = entry.expect("запись каталога").path();
+                if path_of.is_dir() {
+                    queue.push(path_of);
+                } else if path_of.extension().is_some_and(|e| e == "rs") {
                     // Спрошенное под `#[cfg(test)]` — заглушка, а не читатель:
                     // сам этот файл зовёт `.one("field.parent")` на выдуманном
                     // наборе, и считать его потребителем роли значит требовать
                     // объявления того, чего в работе никто не спрашивает.
-                    let текст = std::fs::read_to_string(&путь).expect("исходник");
-                    let рабочее = текст
+                    let text_of = std::fs::read_to_string(&path_of).expect("исходник");
+                    let working = text_of
                         .split_once("#[cfg(test)]")
-                        .map_or(текст.as_str(), |(до, _)| до)
+                        .map_or(text_of.as_str(), |(before, _)| before)
                         .to_owned();
-                    источники.push((путь.display().to_string(), рабочее));
+                    sources.push((path_of.display().to_string(), working));
                 }
             }
         }
-        assert!(источники.len() > 10, "исходников не нашлось: {}", источники.len());
+        assert!(sources.len() > 10, "исходников не нашлось: {}", sources.len());
         // Точка и вызов бывают на РАЗНЫХ строках: `.all("id.check")` стоит под
         // своим `terms`, и обход, требовавший их рядом, прошёл мимо двух ролей.
-        let образец = regex::Regex::new(r#"\.\s*(one|all)\("([a-z.\-]+)"\)"#).expect("образец роли");
-        let объявлено: std::collections::HashMap<&str, &str> =
-            super::ROLES.iter().map(|(r, как, _)| (*r, *как)).collect();
-        let mut не_названы: Vec<String> = Vec::new();
-        for (_, текст) in &источники {
-            for c in образец.captures_iter(текст) {
-                let (как, роль) = (c[1].to_owned(), c[2].to_owned());
-                match объявлено.get(роль.as_str()) {
+        let pattern = regex::Regex::new(r#"\.\s*(one|all)\("([a-z.\-]+)"\)"#).expect("образец роли");
+        let declared: std::collections::HashMap<&str, &str> =
+            super::ROLES.iter().map(|(r, how, _)| (*r, *how)).collect();
+        let mut not_named: Vec<String> = Vec::new();
+        for (_, text_of) in &sources {
+            for c in pattern.captures_iter(text_of) {
+                let (how, role_name) = (c[1].to_owned(), c[2].to_owned());
+                match declared.get(role_name.as_str()) {
                     None => {
-                        if !не_названы.contains(&роль) {
-                            не_названы.push(роль);
+                        if !not_named.contains(&role_name) {
+                            not_named.push(role_name);
                         }
                     }
                     // Арность тоже сверяется: список, записанный как «одним
                     // словом», поднял бы тревогу на здоровом — два значения у
                     // роли-списка законны.
-                    Some(было) if *было != как => {
-                        let слово = format!("{роль}: спрашивают `{как}`, записано `{было}`");
-                        if !не_названы.contains(&слово) {
-                            не_названы.push(слово);
+                    Some(was) if *was != how => {
+                        let word = format!("{role_name}: спрашивают `{how}`, записано `{was}`");
+                        if !not_named.contains(&word) {
+                            not_named.push(word);
                         }
                     }
                     Some(_) => {}
@@ -274,16 +261,16 @@ mod роли {
             }
         }
         assert!(
-            не_названы.is_empty(),
+            not_named.is_empty(),
             "роли спрашиваются и не названы в `ROLES`: {}. \
              Набор о них не узнает, и правило будет молчать без объяснения",
-            не_названы.join(" · ")
+            not_named.join(" · ")
         );
     }
 }
 
 #[cfg(test)]
-mod образцы_имён {
+mod patterns_names {
     /// ОДИН ВИД — ОДНО ПРАВИЛО ИМЕНОВАНИЯ, и здесь считаются копии.
     ///
     /// Как выглядит имя задачи или требования, записано в раскладке вида
@@ -302,8 +289,8 @@ mod образцы_имён {
     /// Она запрещает завести НОВЫЙ, не сказав об этом: линия двигается правкой
     /// этого числа, и правка видна в разборе.
     #[test]
-    fn копий_образца_имени_не_прибавилось() {
-        let источники: &[(&str, &str)] = &[
+    fn copies_pattern_name_not_grew() {
+        let sources: &[(&str, &str)] = &[
             ("reproject/relations.rs", include_str!("reproject/relations.rs")),
             ("reproject/surface.rs", include_str!("reproject/surface.rs")),
             ("reproject/runs.rs", include_str!("reproject/runs.rs")),
@@ -316,32 +303,182 @@ mod образцы_имён {
             ("repo_corpus.rs", include_str!("repo_corpus.rs")),
         ];
         // Имя вида в регулярке: `FR-`, `TC-`, `US-`, `SCR-`, `ST-`, `[MV]\d-T`.
-        let образец = regex::Regex::new(
+        let pattern = regex::Regex::new(
             r#"Regex::new\(r"[^"]*(?:\(\?:)?(?:FR|NFR|TC|US|SCR|ST)\b|Regex::new\(r"[^"]*\[MmVv\]|Regex::new\(r"[^"]*\[MV\]"#,
         )
         .expect("образец копии");
-        let mut найдено: Vec<String> = Vec::new();
-        for (имя, текст) in источники {
-            let n = образец.find_iter(текст).count();
+        let mut found: Vec<String> = Vec::new();
+        for (name_said, text_of) in sources {
+            let n = pattern.find_iter(text_of).count();
             if n > 0 {
-                найдено.push(format!("{имя}: {n}"));
+                found.push(format!("{name_said}: {n}"));
             }
         }
-        let всего: usize = найдено
+        let total: usize = found
             .iter()
             .filter_map(|s| s.rsplit(": ").next()?.parse::<usize>().ok())
             .sum();
         // Линия: столько копий было, когда её провели. Меньше — опустите число.
-        const ЛИНИЯ: usize = 22;
+        const LINE: usize = 22;
         assert!(
-            всего <= ЛИНИЯ,
-            "образцов имени, зашитых мимо раскладки, стало больше: {всего} против {ЛИНИЯ}. \
+            total <= LINE,
+            "образцов имени, зашитых мимо раскладки, стало больше: {total} против {LINE}. \
              Берите образец из `kind_layout`/`scheme` — иначе он разойдётся с раскладкой молча. \
              Где: {}",
-            найдено.join(" · ")
+            found.join(" · ")
         );
-        if всего < ЛИНИЯ {
-            eprintln!("копий стало меньше ({всего} из {ЛИНИЯ}) — опустите линию");
+        if total < LINE {
+            eprintln!("копий стало меньше ({total} из {LINE}) — опустите линию");
         }
+    }
+}
+
+#[cfg(test)]
+mod latin_only {
+    /// В КОДЕ — ТОЛЬКО ЛАТИНИЦА. Правило держалось одной большой уборкой, и
+    /// первая же правка после неё вернула кириллическое имя: `команда` в
+    /// проде и два имени в тесте. Правило, которое некому проверить, живёт до
+    /// первой спешки — этот обход и есть его проверка.
+    ///
+    /// Комментарии и строки НЕ трогаются: сообщения людям и разбор ошибок
+    /// написаны по-русски, и это отдельное решение.
+    #[test]
+    fn no_cyrillic_identifiers_in_code() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut queue = vec![root];
+        let mut found: Vec<String> = Vec::new();
+        while let Some(dir) = queue.pop() {
+            for entry in std::fs::read_dir(&dir).expect("каталог исходников") {
+                let path = entry.expect("запись каталога").path();
+                if path.is_dir() {
+                    queue.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|e| e != "rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).expect("файл исходника");
+                for (n, line) in code_only(&text).lines().enumerate() {
+                    if let Some(name) = cyrillic_identifier(line) {
+                        found.push(format!("{}:{}: {name}", path.display(), n + 1));
+                    }
+                }
+            }
+        }
+        assert!(found.is_empty(), "кириллица в именах:\n{}", found.join("\n"));
+    }
+
+    /// Строки и комментарии вырезаются: в них кириллица законна. Разбор идёт
+    /// по всему файлу, а не построчно: в коде есть многострочные строки — SQL
+    /// пачками, — и построчный разбор принял бы их за код.
+    fn code_only(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let bytes: Vec<char> = text.chars().collect();
+        let mut i = 0;
+        while i < bytes.len() {
+            let c = bytes[i];
+            let next = bytes.get(i + 1).copied();
+            if c == '/' && next == Some('/') {
+                while i < bytes.len() && bytes[i] != '\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            if c == '/' && next == Some('*') {
+                let mut depth = 1;
+                i += 2;
+                while i < bytes.len() && depth > 0 {
+                    if bytes[i] == '/' && bytes.get(i + 1) == Some(&'*') {
+                        depth += 1;
+                        i += 2;
+                    } else if bytes[i] == '*' && bytes.get(i + 1) == Some(&'/') {
+                        depth -= 1;
+                        i += 2;
+                    } else {
+                        if bytes[i] == '\n' {
+                            out.push('\n');
+                        }
+                        i += 1;
+                    }
+                }
+                continue;
+            }
+            if c == 'r' && matches!(next, Some('#') | Some('"')) {
+                let mut hashes = 0;
+                let mut j = i + 1;
+                while bytes.get(j) == Some(&'#') {
+                    hashes += 1;
+                    j += 1;
+                }
+                if bytes.get(j) == Some(&'"') {
+                    j += 1;
+                    loop {
+                        if j >= bytes.len() {
+                            break;
+                        }
+                        if bytes[j] == '\n' {
+                            out.push('\n');
+                        }
+                        if bytes[j] == '"' && (1..=hashes).all(|k| bytes.get(j + k) == Some(&'#')) {
+                            j += hashes + 1;
+                            break;
+                        }
+                        j += 1;
+                    }
+                    i = j;
+                    continue;
+                }
+            }
+            // Знаковый литерал `'"'` — не начало строки, а буква. Пока он им
+            // считался, разбор терял кавычку и читал остаток файла наизнанку.
+            if c == '\'' {
+                let escaped = next == Some('\\');
+                let end = if escaped { i + 3 } else { i + 2 };
+                if bytes.get(end) == Some(&'\'') {
+                    i = end + 1;
+                    continue;
+                }
+                // Иначе это имя времени жизни: `'a`, `'static` — обычный код.
+                out.push(c);
+                i += 1;
+                continue;
+            }
+            if c == '"' {
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == '\\' {
+                        i += 2;
+                        continue;
+                    }
+                    if bytes[i] == '\n' {
+                        out.push('\n');
+                    }
+                    if bytes[i] == '"' {
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+            out.push(c);
+            i += 1;
+        }
+        out
+    }
+
+    fn cyrillic_identifier(line: &str) -> Option<String> {
+        let mut name = String::new();
+        for c in line.chars() {
+            if c.is_alphanumeric() || c == '_' {
+                name.push(c);
+                continue;
+            }
+            if name.chars().any(|c| ('а'..='я').contains(&c) || ('А'..='Я').contains(&c) || c == 'ё' || c == 'Ё') {
+                return Some(name);
+            }
+            name.clear();
+        }
+        None
     }
 }

@@ -3,24 +3,9 @@
 //! Рубеж первый — только чтение документов: `contexts`, `documents`, `document`.
 //! Границы и порядок работы описаны в `DESIGN.md` рядом.
 
-mod api;
-mod corpus;
-mod entities;
-mod kinds;
-mod mcp;
-mod parse;
-mod db;
-mod door;
-mod documents;
-mod identity;
-mod projector;
-mod reproject;
-mod scheme;
-mod projects;
-mod store;
-mod watch;
 
-use crate::db::Says;
+use mh_server::{api, db, kinds, mcp, parse, projector, reproject, watch};
+use mh_server::db::Says;
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use tower_http::services::{ServeDir, ServeFile};
@@ -82,7 +67,7 @@ async fn main() {
     let kinds = match std::env::var("MH_CORPUS_LAYOUT") {
         Ok(path) if !path.trim().is_empty() => match kinds::Kinds::load(&path) {
             Ok(k) => {
-                match k.into_db(&pool, "MH_CORPUS_LAYOUT").await {
+                match k.write_to_db(&pool, "MH_CORPUS_LAYOUT").await {
                     Ok(n) => eprintln!("mh-server: раскладка видов перенесена в базу, {n} видов"),
                     Err(why) => {
                         eprintln!("mh-server: {why}");
@@ -152,7 +137,7 @@ async fn main() {
         };
         let args = match std::env::args().nth(3) {
             None => serde_json::json!({}),
-            Some(текст) => match serde_json::from_str(&текст) {
+            Some(json) => match serde_json::from_str(&json) {
                 Ok(v) => v,
                 Err(e) => {
                     eprintln!("mh-server call: доводы не разбираются как JSON: {e}");

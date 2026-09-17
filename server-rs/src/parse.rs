@@ -85,7 +85,7 @@ static ITALIC: Lazy<Regex> = Lazy::new(|| Regex::new(r"(^|[^*])\*([^*]+)\*").unw
 static STRIKE: Lazy<Regex> = Lazy::new(|| Regex::new(r"~~([^~]*)~~").unwrap());
 static SPACES: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+").unwrap());
 
-pub fn strip_markup(raw: &str) -> String {
+pub(crate) fn strip_markup(raw: &str) -> String {
     let s = LINK.replace_all(raw, "$1");
     let s = CODE_SPAN.replace_all(&s, "$1");
     let s = BOLD.replace_all(&s, "$1");
@@ -94,7 +94,7 @@ pub fn strip_markup(raw: &str) -> String {
     s.trim().to_owned()
 }
 
-pub fn anchor_of(title: &str) -> String {
+pub(crate) fn anchor_of(title: &str) -> String {
     let stripped = strip_markup(title).to_lowercase();
     let kept: String = stripped
         .chars()
@@ -150,7 +150,7 @@ fn kind_of_line(raw: &str, next: Option<&String>) -> &'static str {
 /// чертам резало ячейку надвое, а проекции читают ячейки ПО НОМЕРУ КОЛОНКИ и
 /// получали сдвинутое. **Черта внутри кодовой вставки** — текст, а не граница.
 /// Экранирование снимается: в значении живёт черта, а `\|` — способ её записать.
-pub fn split_row(inner: &str) -> Vec<String> {
+pub(crate) fn split_row(inner: &str) -> Vec<String> {
     let chars: Vec<char> = inner.chars().collect();
     let mut cells = Vec::new();
     let mut current = String::new();
@@ -307,12 +307,14 @@ fn fields_of_table(section_ord: i32, cells: &[Cell], block_ord: i32, raw: &str) 
 /// Пункт списка может переноситься: продолжение идёт с отступом и без маркера.
 /// Читая по одной строке, значение обрывалось посреди фразы и уносило с собой
 /// незакрытую разметку.
+static BULLET_START: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\s*[-*+]\s").expect("образец начала пункта"));
+
 fn join_wrapped_bullets(raw: &str) -> Vec<String> {
     let mut joined: Vec<String> = Vec::new();
     for line in raw.split('\n') {
         let indented = line.starts_with(char::is_whitespace) && !line.trim().is_empty();
         let is_continuation = indented && !LIST_ITEM.is_match(line) && line.trim_start().chars().next().is_some();
-        let bullet_start = Regex::new(r"^\s*[-*+]\s").unwrap().is_match(line);
+        let bullet_start = BULLET_START.is_match(line);
         if indented && !bullet_start && !joined.is_empty() {
             let last = joined.last_mut().unwrap();
             last.push(' ');
@@ -343,7 +345,26 @@ fn fields_of_list(section_ord: i32, raw: &str) -> Vec<Field> {
     out
 }
 
-pub fn parse_document(content: &str) -> Structure {
+/// Сложить накопленное блоком и начать новое.
+///
+/// Функцией, а не телом макроса: в макросе последний сброс — в конце разбора —
+/// присваивал роду `None`, которое уже никто не читает, и это единственное
+/// место в файле, где компилятор был прав, а поправить его было нечем.
+fn flush_block(blocks: &mut Vec<Block>, buffer: &mut Vec<String>, kind: &mut Option<&'static str>) {
+    let Some(row_kind) = *kind else { return };
+    if !buffer.is_empty() {
+        blocks.push(Block {
+            ord: blocks.len() as i32,
+            kind: row_kind,
+            level: None,
+            raw: buffer.join(""),
+        });
+    }
+    buffer.clear();
+    *kind = None;
+}
+
+pub(crate) fn parse_document(content: &str) -> Structure {
     let lines = split_lines(content);
     let mut blocks: Vec<Block> = Vec::new();
     let mut buffer: Vec<String> = Vec::new();
@@ -351,18 +372,7 @@ pub fn parse_document(content: &str) -> Structure {
 
     macro_rules! flush {
         () => {
-            if let Some(kind) = buffer_kind {
-                if !buffer.is_empty() {
-                    blocks.push(Block {
-                        ord: blocks.len() as i32,
-                        kind,
-                        level: None,
-                        raw: buffer.join(""),
-                    });
-                }
-                buffer.clear();
-                buffer_kind = None;
-            }
+            flush_block(&mut blocks, &mut buffer, &mut buffer_kind);
         };
     }
 
@@ -396,9 +406,10 @@ pub fn parse_document(content: &str) -> Structure {
         }
         if kind == "table" || buffer_kind == Some("table") {
             let still_table = TABLE_ROW.is_match(&line);
-            if buffer_kind == Some("table") && !still_table {
-                flush!();
-            } else if buffer_kind != Some("table") && buffer_kind.is_some() {
+            // Накопленное сбрасывается на СМЕНЕ рода: таблица кончилась или
+            // копилось другое. Оба случая — одно и то же действие.
+            let changed = if buffer_kind == Some("table") { !still_table } else { buffer_kind.is_some() };
+            if changed {
                 flush!();
             }
             if still_table {
@@ -486,7 +497,7 @@ pub fn parse_document(content: &str) -> Structure {
 }
 
 /// Документ обратно из блоков — склейкой `raw` без разделителя.
-pub fn render_document(blocks: &[Block]) -> String {
+pub(crate) fn render_document(blocks: &[Block]) -> String {
     let mut sorted: Vec<&Block> = blocks.iter().collect();
     sorted.sort_by_key(|b| b.ord);
     sorted.iter().map(|b| b.raw.as_str()).collect()

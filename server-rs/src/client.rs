@@ -130,7 +130,7 @@ impl Door {
     }
 
     /// Где лежит секрет края, когда его нет в окружении.
-    pub fn secret_file() -> std::path::PathBuf {
+    pub(crate) fn secret_file() -> std::path::PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
         std::path::Path::new(&home).join(".config/mh/edge-secret")
     }
@@ -1462,6 +1462,40 @@ pub fn install(door: &Door, into: &str) -> Result<Value, String> {
     }))
 }
 
+/// Объявление без приставки видимости: `pub`, `pub(crate)`, `pub(super)`,
+/// `pub(in …)`. Перечислять написания — значит отставать от кода при первой же
+/// правке видимости.
+pub(crate) fn without_visibility(line: &str) -> &str {
+    let t = line.trim_start();
+    let Some(rest) = t.strip_prefix("pub") else { return t };
+    let rest = match rest.strip_prefix('(') {
+        Some(inner) => match inner.find(')') {
+            Some(at) => &inner[at + 1..],
+            None => return t,
+        },
+        None => rest,
+    };
+    if rest.starts_with(char::is_whitespace) || rest.is_empty() {
+        rest.trim_start()
+    } else {
+        t
+    }
+}
+
+/// Слово объявления: `fn`, `struct`, `enum`, `type`, `const`, `static`.
+/// `async fn` и `unsafe fn` — то же объявление, только с оговоркой впереди.
+fn head_of(line: &str) -> Option<&'static str> {
+    let mut t = without_visibility(line);
+    for prefix in ["async ", "unsafe ", "extern ", "default "] {
+        if let Some(rest) = t.strip_prefix(prefix) {
+            t = rest.trim_start();
+        }
+    }
+    ["fn ", "struct ", "enum ", "type ", "const ", "static "]
+        .into_iter()
+        .find(|word| t.starts_with(*word))
+}
+
 /// Настоящий ли держатель: разбор ПОЭЛЕМЕНТНО, а не по файлу.
 ///
 /// Первая редакция решала не тот вопрос дважды.
@@ -1492,13 +1526,13 @@ fn holder_verdict(text: Option<&str>, req: &str) -> Option<String> {
         return Some("пути нет: держатель объявлен, а файла в дереве не существует".to_owned());
     };
     #[derive(Default)]
-    struct Элемент {
+    struct Element {
         docs: String,
         attrs: String,
         body: String,
     }
-    let mut elements: Vec<Элемент> = Vec::new();
-    let mut cur = Элемент::default();
+    let mut elements: Vec<Element> = Vec::new();
+    let mut cur = Element::default();
     let mut depth = 0i32;
     let mut inside = false;
     for line in text.lines() {
@@ -1524,19 +1558,22 @@ fn holder_verdict(text: Option<&str>, req: &str) -> Option<String> {
             // метод с настоящим телом получал вердикт «тело не написано», потому
             // что где-то в том же блоке стоял `todo!` соседа. Спускаемся внутрь,
             // а докблок контейнера ничего не держит — он объясняет блок.
-            let container = ["impl ", "impl<", "mod ", "pub mod ", "trait ", "pub trait "];
-            if container.iter().any(|h| t.starts_with(h)) {
-                cur = Элемент::default();
+            let container = ["impl ", "impl<", "mod ", "trait "];
+            if container.iter().any(|h| without_visibility(t).starts_with(h)) {
+                cur = Element::default();
                 continue;
             }
-            let head = ["fn ", "pub fn ", "struct ", "pub struct ", "enum ", "pub enum ",
-                        "type ", "pub type ", "const ", "static ",
-                        "async fn ", "pub async fn ", "pub(crate) fn "];
-            if head.iter().any(|h| t.starts_with(h)) {
+            // ВИДИМОСТЬ СНИМАЕТСЯ, А НЕ ПЕРЕЧИСЛЯЕТСЯ. Перечень написаний
+            // («pub fn», «pub(crate) fn», «pub(super) fn», …) отстаёт от кода:
+            // стоило закрыть видимость в библиотеке, и `pub(crate) fn` выпал из
+            // перечня — файл с настоящей работой читался как «без единого
+            // элемента», а заглушка соседа доставалась ему в вердикт. Здесь
+            // снимается приставка видимости, а дальше смотрится само слово.
+            if head_of(t).is_some() {
                 inside = true;
                 depth = 0;
             } else {
-                cur = Элемент::default();
+                cur = Element::default();
                 continue;
             }
         }
@@ -1553,7 +1590,7 @@ fn holder_verdict(text: Option<&str>, req: &str) -> Option<String> {
     if inside {
         elements.push(cur);
     }
-    let named: Vec<&Элемент> = elements
+    let named: Vec<&Element> = elements
         .iter()
         .filter(|e| e.docs.contains(req) || e.body.contains(req))
         .collect();
@@ -1586,12 +1623,12 @@ fn holder_verdict(text: Option<&str>, req: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-mod держатель {
+mod holder {
     use super::holder_verdict;
 
     /// Порядок этого проекта — проверки до кода: пока идёт фаза тестов, файл с
     /// проверкой ОБЯЗАН содержать `todo!`, и это её краснота, а не заглушка.
-    const С_ПРОВЕРКОЙ: &str = r#"
+    const WITH_WITH_CHECK: &str = r#"
 //! Доставка.
 
 /// `TC-ESC-07` (`FR-ESC-06`) — намерение и попытка это разные записи.
@@ -1606,7 +1643,7 @@ pub fn attempt() -> u8 {
 }
 "#;
 
-    const БЕЗ_ПРОВЕРКИ: &str = r#"
+    const WITHOUT_CHECKS: &str = r#"
 //! Доставка.
 
 /// Здесь держится `FR-ESC-06`.
@@ -1615,53 +1652,53 @@ pub fn attempt() -> u8 {
 }
 "#;
 
-    const ТОЛЬКО_ШАПКА: &str = r#"
+    const ONLY_HEADER: &str = r#"
 //! `FR-ESC-06` — намерение и попытка разные записи.
 
 pub fn unrelated() -> u8 { 1 }
 "#;
 
     #[test]
-    fn докблок_при_проверке_держит() {
-        assert_eq!(holder_verdict(Some(С_ПРОВЕРКОЙ), "FR-ESC-06"), None,
+    fn doc_block_during_check_holds() {
+        assert_eq!(holder_verdict(Some(WITH_WITH_CHECK), "FR-ESC-06"), None,
                    "проверка заглушкой не бывает, а чужой `todo!` рядом ничего не значит");
     }
 
     #[test]
-    fn тот_же_файл_без_проверки_красен() {
-        assert!(holder_verdict(Some(БЕЗ_ПРОВЕРКИ), "FR-ESC-06").is_some());
+    fn that_same_file_without_checks_red() {
+        assert!(holder_verdict(Some(WITHOUT_CHECKS), "FR-ESC-06").is_some());
     }
 
     #[test]
-    fn шапка_модуля_ничего_не_держит() {
-        let v = holder_verdict(Some(ТОЛЬКО_ШАПКА), "FR-ESC-06");
+    fn header_module_nothing_not_holds() {
+        let v = holder_verdict(Some(ONLY_HEADER), "FR-ESC-06");
         assert!(v.as_deref().map(|s| s.contains("шапкой")).unwrap_or(false), "{v:?}");
     }
 
     #[test]
-    fn пути_нет_это_заглушка() {
+    fn path_missing_is_stub() {
         // Проба из просьбы: держатель на `crates/tot-nowhere/src/lib.rs`.
         let v = holder_verdict(None, "FR-116");
         assert!(v.as_deref().map(|s| s.contains("пути нет")).unwrap_or(false), "{v:?}");
     }
 
     #[test]
-    fn пустой_файл_это_заглушка() {
+    fn empty_file_is_stub() {
         let v = holder_verdict(Some("//! Только шапка.\n"), "FR-116");
         assert!(v.is_some(), "файл без единого элемента прошёл");
     }
 
     #[test]
-    fn докблок_не_выпадает_вместе_с_комментарием() {
+    fn doc_block_not_falls_out_together_with_comment() {
         // Первая редакция роняла `///` фильтром `starts_with("//")`, и требование,
         // названное докблоком, считалось не названным нигде.
-        let v = holder_verdict(Some(С_ПРОВЕРКОЙ), "FR-ESC-06");
+        let v = holder_verdict(Some(WITH_WITH_CHECK), "FR-ESC-06");
         assert!(v.is_none(), "докблок снова не читается: {v:?}");
     }
 }
 
 #[cfg(test)]
-mod секреты {
+mod secrets {
     use super::{declared_types, facts_of, secret_fields};
     use crate::repo_corpus::Pair;
 
@@ -1702,7 +1739,7 @@ pub struct Keys {
     const NAMES: &str = r"(?i)(^|_)(password|token|secret|url|credential)($|_)|(^|_)(api|private|secret|signing)_key($|_)";
 
     #[test]
-    fn подозрительно_всё_кроме_secret_и_типа_корпуса() {
+    fn suspicious_everything_except_secret_and_type_corpus() {
         let found: Vec<String> = secret_fields(RS, NAMES, &declared_types(RS))
             .into_iter()
             .map(|(decl, field, ty)| format!("{decl}.{field}: {ty}"))
@@ -1721,7 +1758,7 @@ pub struct Keys {
     }
 
     #[test]
-    fn тип_корпуса_узнаётся_голым_именем_или_путём_крейта() {
+    fn type_corpus_recognised_bare_name_or_path_crate() {
         let rs = "#[derive(Debug)]\npub struct Url(pub String);\n\n#[derive(Debug)]\npub struct Hook {\n    pub webhook_url: reqwest::Url,\n    pub callback_url: Option<Url>,\n    pub public_url: crate::Url,\n}\n";
         let found: Vec<String> = secret_fields(rs, NAMES, &declared_types(rs)).into_iter().map(|(_, f, _)| f).collect();
         assert_eq!(found, vec!["webhook_url"]);
@@ -1734,21 +1771,21 @@ pub struct Keys {
     }
 
     #[test]
-    fn тип_не_из_корпуса_подозрения_не_снимает() {
+    fn type_not_from_corpus_suspicion_not_clears() {
         let found = secret_fields(RS, NAMES, &[]);
         assert!(found.iter().any(|(d, f, _)| d == "Issued" && f == "token"), "{found:?}");
         assert!(found.iter().any(|(d, f, _)| d == "Target" && f == "public_url"), "{found:?}");
     }
 
     #[test]
-    fn поле_bool_секрета_не_несёт() {
+    fn field_bool_secret_not_carries() {
         let rs = "#[derive(Debug)]\npub enum Platform {\n    Windows { restricted_token: bool },\n}\n\n#[derive(Debug)]\npub struct Keys {\n    pub token_ttl: u64,\n    pub token: String,\n}\n";
         let found: Vec<String> = secret_fields(rs, NAMES, &[]).into_iter().map(|(_, f, _)| f).collect();
         assert_eq!(found, vec!["token_ttl", "token"]);
     }
 
     #[test]
-    fn помеченное_не_вытесняет_находку_того_же_имени() {
+    fn marked_not_displaces_finding_that_same_name() {
         let p = |name: &str, detail: &str| Pair { name: name.into(), detail: detail.into() };
         let facts = facts_of(&[
             p("Target", "перечисление без множества CHECK (a.rs), значений 2"),
@@ -1785,17 +1822,59 @@ mod tests {
     /// телами, и цикл повторов у агента по телу их не различал.
     #[test]
     fn busyness_is_marked_from_the_code() {
-        let занято = parse("{\"error\":\"busy\",\"message\":\"сервер занят\"}\n503".as_bytes()).expect("тело разобрано");
-        assert!(crate::door::busy_said(&занято));
-        let отказ = parse("{\"error\":\"upstream_error\"}\n502".as_bytes()).expect("тело разобрано");
-        assert!(!crate::door::busy_said(&отказ), "отказ по существу занятостью не помечается");
+        let busy = parse("{\"error\":\"busy\",\"message\":\"сервер занят\"}\n503".as_bytes()).expect("тело разобрано");
+        assert!(crate::door::busy_said(&busy));
+        let refusal = parse("{\"error\":\"upstream_error\"}\n502".as_bytes()).expect("тело разобрано");
+        assert!(!crate::door::busy_said(&refusal), "отказ по существу занятостью не помечается");
         // Край отвечает своей строкой, и она не предмет: пометка по такому
         // телу роняла клиента ровно в час перегрузки.
-        let краем = parse("\"service unavailable\"\n503".as_bytes()).expect("тело разобрано");
-        assert!(crate::door::busy_said(&краем));
-        assert_eq!(краем["message"], serde_json::json!("service unavailable"));
-        let ответ = parse("{\"count\":3}\n200".as_bytes()).expect("тело разобрано");
-        assert_eq!(ответ["count"], serde_json::json!(3));
-        assert!(!crate::door::busy_said(&ответ));
+        let edge = parse("\"service unavailable\"\n503".as_bytes()).expect("тело разобрано");
+        assert!(crate::door::busy_said(&edge));
+        assert_eq!(edge["message"], serde_json::json!("service unavailable"));
+        let answer = parse("{\"count\":3}\n200".as_bytes()).expect("тело разобрано");
+        assert_eq!(answer["count"], serde_json::json!(3));
+        assert!(!crate::door::busy_said(&answer));
+    }
+}
+
+#[cfg(test)]
+mod heads {
+    use super::{head_of, holder_verdict, without_visibility};
+
+    /// Приставка видимости СНИМАЕТСЯ. Перечень написаний отставал от кода: как
+    /// только библиотека закрыла видимость, `pub(crate) fn` перестал быть
+    /// элементом — файл с настоящей работой читался «без единого элемента», а
+    /// заглушка соседа доставалась ему в вердикт. Оба вранья из одной строки.
+    #[test]
+    fn visibility_is_stripped_not_listed() {
+        assert_eq!(without_visibility("pub(crate) fn a() {"), "fn a() {");
+        assert_eq!(without_visibility("    pub(super) async fn b() {"), "async fn b() {");
+        assert_eq!(without_visibility("pub(in crate::corpus) struct C {"), "struct C {");
+        assert_eq!(without_visibility("pub fn d() {"), "fn d() {");
+        assert_eq!(without_visibility("fn e() {"), "fn e() {");
+        // `publisher` — не видимость: имя, начинающееся на «pub».
+        assert_eq!(without_visibility("publisher() {"), "publisher() {");
+        assert_eq!(head_of("pub(crate) async fn f() {"), Some("fn "));
+        assert_eq!(head_of("pub(crate) const G: u8 = 1;"), Some("const "));
+        assert_eq!(head_of("let x = 1;"), None);
+    }
+
+    #[test]
+    fn a_closed_visibility_element_is_still_an_element() {
+        let has_work = "\
+/// Держит FR-X-01.
+pub(crate) fn real(a: u8) -> u8 {
+    a + 1
+}
+";
+        assert_eq!(holder_verdict(Some(has_work), "FR-X-01"), None, "работа есть — вердикта нет");
+        let stub_body = "\
+/// Держит FR-X-04.
+pub(crate) fn stub() {
+    todo!()
+}
+";
+        let verdict = holder_verdict(Some(stub_body), "FR-X-04").expect("заглушка называется");
+        assert!(verdict.contains("тело не написано"), "{verdict}");
     }
 }

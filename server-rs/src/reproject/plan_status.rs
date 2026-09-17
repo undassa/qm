@@ -17,19 +17,19 @@ const HEADER: [&str; 3] = ["Задача", "Состояние", "Коммиты
 /// В ячейке коммита бывает несколько хешей и прочерк.
 static COMMIT: Lazy<Regex> = Lazy::new(|| Regex::new(r"\b([0-9a-f]{7,40})\b").expect("образец коммита"));
 
-pub async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fail> {
+pub(crate) async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fail> {
     // ОБРАЗЕЦ ЗАДАЧИ — ИЗ РАСКЛАДКИ, а не свой. Здесь стоял `[MV]\d+-T…`, а
     // раскладка говорит `[MmVv]\d+-[Tt][\w-]+`: набор со строчными именами эта
     // копия не увидела бы, и доска состояний молча не собралась бы.
-    let образцы = {
+    let patterns = {
         let client = crate::db::conn(pool).await?;
         crate::scheme::id_pattern(&*client, project, "task").await?
     };
-    let task_id: Vec<Regex> = образцы
+    let task_id: Vec<Regex> = patterns
         .iter()
         .filter_map(|p| {
-            let ядро = p.trim_start_matches('^').trim_end_matches('$');
-            Regex::new(&format!(r"^\s*`?({ядро})`?\s*$")).ok()
+            let core = p.trim_start_matches('^').trim_end_matches('$');
+            Regex::new(&format!(r"^\s*`?({core})`?\s*$")).ok()
         })
         .collect();
     let blocks = cells(pool, project, KIND, NAME, false).await?;

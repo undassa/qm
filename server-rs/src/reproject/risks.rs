@@ -30,7 +30,7 @@ struct Risk {
     trigger: String,
     source: String,
     settled_by: String,
-    секция: Option<i32>,
+    section: Option<i32>,
 }
 
 /// «высокое / среднее» — влияние и вероятность одной ячейкой.
@@ -39,7 +39,7 @@ fn split_impact(value: &str) -> (String, String) {
     (parts.next().unwrap_or("").to_owned(), parts.next().unwrap_or("").to_owned())
 }
 
-pub async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fail> {
+pub(crate) async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fail> {
     let blocks = cells(pool, project, KIND, NAME, false).await?;
     let heads = headings(pool, project, KIND, NAME).await?;
     let mut risks: HashMap<String, Risk> = HashMap::new();
@@ -70,7 +70,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fai
                     number: m[2].parse().unwrap_or(0),
                     title: m[3].to_owned(),
                     state: "open",
-                    секция: ord_of(&heads, *block),
+                    section: ord_of(&heads, *block),
                     impact,
                     probability,
                     owner: field("Владелец"),
@@ -106,7 +106,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fai
                     number: m[2].parse().unwrap_or(0),
                     title: at(row, 1).trim().to_owned(),
                     state,
-                    секция: ord_of(&heads, *block),
+                    section: ord_of(&heads, *block),
                     impact: String::new(),
                     probability: String::new(),
                     owner: String::new(),
@@ -142,7 +142,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fai
                                        section_ord)
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
             &[&project, &r.id, &r.number, &r.title, &r.state, &r.impact, &r.probability,
-              &r.owner, &r.trigger, &r.source, &r.settled_by, &KIND, &NAME, &r.секция],
+              &r.owner, &r.trigger, &r.source, &r.settled_by, &KIND, &NAME, &r.section],
         )
         .await?;
     }

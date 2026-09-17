@@ -7,7 +7,7 @@
 
 use deadpool_postgres::Pool;
 
-pub async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fail> {
+pub(crate) async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let terms = crate::scheme::Terms::load_at(&*client, project).await?;
     let rows = client

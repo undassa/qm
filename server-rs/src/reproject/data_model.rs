@@ -37,7 +37,7 @@ fn header_is(head: &[String], wanted: &[&str]) -> bool {
     wanted.iter().enumerate().all(|(i, name)| at(head, i).trim() == *name)
 }
 
-pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize), crate::db::Fail> {
+pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize), crate::db::Fail> {
     let blocks = cells(pool, project, KIND, NAME, false).await?;
     let mut migrations: Vec<(String, String, Vec<String>)> = Vec::new();
     let mut order: Vec<String> = Vec::new();

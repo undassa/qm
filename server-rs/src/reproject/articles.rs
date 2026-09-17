@@ -25,13 +25,13 @@ static NOT_WORD: Lazy<Regex> = Lazy::new(|| Regex::new(r"[^\p{L}\p{N}\s-]").expe
 static SPACES: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+").expect("образец пробелов"));
 
 /// Якорь статьи совпадает с якорем раздела документа: ссылка ведёт в нужное место.
-pub fn anchor(number: i32, title: &str) -> String {
+pub(crate) fn anchor(number: i32, title: &str) -> String {
     let base = format!("article-{number}-{title}").to_lowercase();
     let clean = NOT_WORD.replace_all(&base, "");
     SPACES.replace_all(clean.trim(), "-").into_owned()
 }
 
-pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize), crate::db::Fail> {
+pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize), crate::db::Fail> {
     let mut client = crate::db::conn(pool).await?;
     let docs = client
         .query(

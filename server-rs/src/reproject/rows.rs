@@ -8,10 +8,10 @@ use deadpool_postgres::Pool;
 use std::collections::BTreeMap;
 
 /// Таблицы документа: блок → строка → колонки (значения ячеек).
-pub type Blocks = BTreeMap<i32, BTreeMap<i32, Vec<String>>>;
+pub(crate) type Blocks = BTreeMap<i32, BTreeMap<i32, Vec<String>>>;
 
 /// Ячейки одного документа. `raw` берётся, когда проекции нужна разметка ссылки.
-pub async fn cells(
+pub(crate) async fn cells(
     pool: &Pool,
     project: &str,
     kind: &str,
@@ -43,7 +43,7 @@ pub async fn cells(
 }
 
 /// Заголовки разделов документа с их порядковым номером блока.
-pub async fn headings(
+pub(crate) async fn headings(
     pool: &Pool,
     project: &str,
     kind: &str,
@@ -61,7 +61,7 @@ pub async fn headings(
 }
 
 /// Заголовок раздела, под которым стоит блок: ближайший заголовок выше него.
-pub fn title_of(headings: &[(i32, String)], block: i32) -> String {
+pub(crate) fn title_of(headings: &[(i32, String)], block: i32) -> String {
     let mut title = String::new();
     for (ord, t) in headings {
         if *ord > block {
@@ -79,7 +79,7 @@ pub fn title_of(headings: &[(i32, String)], block: i32) -> String {
 /// знала документ, но не место в нём. Пока места нет, собрать документ обратно
 /// из таблицы нельзя — неизвестен ни порядок, ни к какому разделу строка
 /// относится.
-pub fn ord_of(headings: &[(i32, String)], block: i32) -> Option<i32> {
+pub(crate) fn ord_of(headings: &[(i32, String)], block: i32) -> Option<i32> {
     let mut ord = None;
     for (o, _) in headings {
         if *o > block {
@@ -91,6 +91,6 @@ pub fn ord_of(headings: &[(i32, String)], block: i32) -> Option<i32> {
 }
 
 /// Значение ячейки строки, которой в таблице может не быть.
-pub fn at(row: &[String], col: usize) -> &str {
+pub(crate) fn at(row: &[String], col: usize) -> &str {
     row.get(col).map(String::as_str).unwrap_or("")
 }

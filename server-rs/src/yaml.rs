@@ -67,8 +67,8 @@ fn split_kv(body: &str) -> Option<(String, String)> {
             b[i + 1..].iter().collect::<String>().trim().to_owned(),
         ));
     }
-    if body.ends_with(':') {
-        return Some((body[..body.len() - 1].trim().to_owned(), String::new()));
+    if let Some(key) = body.strip_suffix(':') {
+        return Some((key.trim().to_owned(), String::new()));
     }
     None
 }
@@ -171,9 +171,8 @@ fn flow(s: &str) -> Value {
     val(&b, &mut i)
 }
 
-/// Строка структуры: отступ, тело, номер в исходнике.
+/// Строка структуры: отступ и тело.
 pub struct Line {
-    pub n: usize,
     pub indent: usize,
     pub body: String,
 }
@@ -181,7 +180,7 @@ pub struct Line {
 /// Строки СТРУКТУРЫ, а не «текст без комментариев». Блочный скаляр
 /// складывается в одну строку прямо здесь: иначе проза внутри `description`
 /// читалась бы как разметка, и якорь в описании ронял бы разбор целиком.
-pub fn structural_lines(text: &str) -> Vec<Line> {
+pub(crate) fn structural_lines(text: &str) -> Vec<Line> {
     let src: Vec<&str> = text.split('\n').collect();
     let block = regex::Regex::new(r":(\s+[|>][-+0-9]*)\s*$").expect("образец блочного скаляра");
     let mut out = Vec::new();
@@ -195,7 +194,6 @@ pub fn structural_lines(text: &str) -> Vec<Line> {
         let indent = line.len() - line.trim_start().len();
         let body = line.trim().to_owned();
         if block.is_match(&body) {
-            let at = i + 1;
             let mut buf: Vec<String> = Vec::new();
             let mut j = i + 1;
             while j < src.len()
@@ -208,10 +206,10 @@ pub fn structural_lines(text: &str) -> Vec<Line> {
             i = j;
             let folded = buf.join(" ").trim().to_owned();
             let quoted = Value::String(folded).to_string();
-            out.push(Line { n: at, indent, body: block.replace(&body, format!(": {quoted}")).into_owned() });
+            out.push(Line { indent, body: block.replace(&body, format!(": {quoted}")).into_owned() });
             continue;
         }
-        out.push(Line { n: i + 1, indent, body });
+        out.push(Line { indent, body });
         i += 1;
     }
     out
@@ -224,7 +222,7 @@ struct Frame {
 }
 
 /// Разбирает текст в дерево значений.
-pub fn parse(text: &str) -> Value {
+pub(crate) fn parse(text: &str) -> Value {
     let mut f: Vec<Frame> = structural_lines(text)
         .into_iter()
         .map(|l| {

@@ -43,50 +43,50 @@ static REQUIREMENT_BLOCK: Lazy<Regex> = Lazy::new(|| {
 /// Требование — то, чей блок `**FR-NN · …**` открыт выше; заголовок раздела
 /// блок закрывает. Абзац кончается пустой строкой, разделителем или заголовком:
 /// склейка через пустую строку и дала полю хвост «--- # Часть II».
-fn абзацы_проверки(kind: String, name: String, content: &str, маркер: &str) -> Vec<(String, String, Option<String>, String)> {
+fn paragraphs_checks(kind: String, name: String, content: &str, marker: &str) -> Vec<(String, String, Option<String>, String)> {
     let mut out = Vec::new();
-    let mut блок: Option<(String, bool)> = None;
-    let mut абзац: Option<(Option<String>, Vec<String>)> = None;
-    let конец = |line: &str| {
+    let mut block: Option<(String, bool)> = None;
+    let mut paragraph: Option<(Option<String>, Vec<String>)> = None;
+    let end = |line: &str| {
         let t = line.trim_start();
         t.is_empty() || t.starts_with('#') || t.starts_with("---") || t.starts_with('|') || REQUIREMENT_BLOCK.is_match(t)
     };
-    let закрыть_блок = |блок: Option<(String, bool)>, out: &mut Vec<(String, String, Option<String>, String)>| {
-        if let Some((id, false)) = блок {
+    let close_block = |block: Option<(String, bool)>, out: &mut Vec<(String, String, Option<String>, String)>| {
+        if let Some((id, false)) = block {
             out.push((kind.clone(), name.clone(), Some(id), String::new()));
         }
     };
     for line in content.lines() {
-        if абзац.is_some() && конец(line) {
-            let (req, lines) = абзац.take().expect("абзац открыт");
+        if paragraph.is_some() && end(line) {
+            let (req, lines) = paragraph.take().expect("абзац открыт");
             out.push((kind.clone(), name.clone(), req, lines.join("\n")));
         }
         let t = line.trim_start();
         if let Some(m) = REQUIREMENT_BLOCK.captures(t) {
-            закрыть_блок(блок.take(), &mut out);
-            блок = Some((m[1].to_owned(), false));
+            close_block(block.take(), &mut out);
+            block = Some((m[1].to_owned(), false));
         } else if t.starts_with('#') {
-            закрыть_блок(блок.take(), &mut out);
+            close_block(block.take(), &mut out);
         }
-        if let Some((_, lines)) = абзац.as_mut() {
+        if let Some((_, lines)) = paragraph.as_mut() {
             lines.push(line.trim().to_owned());
-        } else if let Some(at) = line.find(маркер) {
+        } else if let Some(at) = line.find(marker) {
             // Снимается только выделение САМОГО маркера — `*Проверяется:*`.
             // Все звёзды подряд срезали и начало жирного слова за ним:
             // «**компиляционный**» выходило «компиляционный**».
-            let после = &line[at + маркер.len()..];
-            let после = ["**", "__", "*", "_"].iter().find_map(|m| после.strip_prefix(m)).unwrap_or(после);
-            let хвост = после.trim().to_owned();
-            if let Some((_, был)) = блок.as_mut() {
-                *был = true;
+            let after = &line[at + marker.len()..];
+            let after = ["**", "__", "*", "_"].iter().find_map(|m| after.strip_prefix(m)).unwrap_or(after);
+            let tail = after.trim().to_owned();
+            if let Some((_, was)) = block.as_mut() {
+                *was = true;
             }
-            абзац = Some((блок.as_ref().map(|b| b.0.clone()), vec![хвост]));
+            paragraph = Some((block.as_ref().map(|b| b.0.clone()), vec![tail]));
         }
     }
-    if let Some((req, lines)) = абзац {
+    if let Some((req, lines)) = paragraph {
         out.push((kind.clone(), name.clone(), req, lines.join("\n")));
     }
-    закрыть_блок(блок, &mut out);
+    close_block(block, &mut out);
     out
 }
 
@@ -97,7 +97,7 @@ static NEED_REFERENCE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\bST-(\d+)\b").ex
 static PRIORITY: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\s*`?([ОЖП])`?\s*$").expect("образец приоритета"));
 struct Requirement {
     id: String,
-    секция: Option<i32>,
+    section: Option<i32>,
     kind: String,
     area: String,
     text: String,
@@ -110,7 +110,7 @@ struct Requirement {
 
 struct Check {
     id: String,
-    секция: Option<i32>,
+    section: Option<i32>,
     area: String,
     requirement: Option<String>,
     spec: String,
@@ -127,6 +127,9 @@ struct Check {
 const DECLARES_CHECKS: &str = "test-cases";
 const DECLARES_REQUIREMENTS: &str = "srs";
 
+/// Доказательства по абзацу: где абзац — и что в нём названо.
+type ProofBuckets = HashMap<(String, String, i32, i32), Vec<(String, String)>>;
+
 /// Объявляющий документ сильнее цитирующего — и только он перебивает уже взятое.
 fn declares_over(kind: &str, existing: Option<&String>, home: &str) -> bool {
     match existing {
@@ -135,7 +138,7 @@ fn declares_over(kind: &str, existing: Option<&String>, home: &str) -> bool {
     }
 }
 
-pub async fn project(
+pub(crate) async fn project(
     pool: &Pool,
     project: &str,
 ) -> Result<(usize, usize, usize, u64), crate::db::Fail> {
@@ -167,19 +170,19 @@ pub async fn project(
             &[&project],
         )
         .await?;
-    let mut секции: HashMap<(String, String), Vec<i32>> = HashMap::new();
+    let mut sections: HashMap<(String, String), Vec<i32>> = HashMap::new();
     for r in &sec {
-        секции.entry((r.get(0), r.get(1))).or_default().push(r.get(2));
+        sections.entry((r.get(0), r.get(1))).or_default().push(r.get(2));
     }
-    let секция_для = |k: &str, n: &str, block: i32| -> Option<i32> {
-        секции
+    let section_for = |k: &str, n: &str, block: i32| -> Option<i32> {
+        sections
             .get(&(k.to_owned(), n.to_owned()))
             .and_then(|v| v.iter().rev().find(|o| **o <= block).copied())
     };
 
     // Ячейки одной строки таблицы — вместе и в порядке появления.
     let mut order: Vec<(String, String, i32, i32)> = Vec::new();
-    let mut buckets: HashMap<(String, String, i32, i32), Vec<(String, String)>> = HashMap::new();
+    let mut buckets: ProofBuckets = HashMap::new();
     for r in &rows {
         let key = (r.get::<_, String>(0), r.get::<_, String>(1), r.get::<_, i32>(2), r.get::<_, i32>(3));
         let bucket = buckets.entry(key.clone()).or_insert_with(|| {
@@ -213,7 +216,7 @@ pub async fn project(
                 id.clone(),
                 Check { id, area: m[2].to_owned(), requirement, spec: value_at(2),
                         kind_of_document: doc_kind.clone(), name: doc_name.clone(),
-                        секция: секция_для(doc_kind, doc_name, key.2) },
+                        section: section_for(doc_kind, doc_name, key.2) },
             );
             continue;
         }
@@ -238,7 +241,7 @@ pub async fn project(
             id.clone(),
             Requirement {
                 id: id.clone(),
-                секция: секция_для(doc_kind, doc_name, key.2),
+                section: section_for(doc_kind, doc_name, key.2),
                 // У нефункционального области нет: `NFR-15` — номер, а не «область 15».
                 area: if is_fr { m[3].to_owned() } else { String::new() },
                 kind,
@@ -277,11 +280,11 @@ pub async fn project(
     //
     // Род связи — `cites`, и это всё, что разбор честно знает: зачем именно
     // требование сослалось, текст не говорит. Уточняется дверью.
-    let mut ссылки: Vec<(String, String)> = Vec::new();
+    let mut links: Vec<(String, String)> = Vec::new();
     for r in requirements.values() {
-        for имя in super::ids::plain(&r.text) {
-            if имя != r.id {
-                ссылки.push((r.id.clone(), имя));
+        for name_said in super::ids::plain(&r.text) {
+            if name_said != r.id {
+                links.push((r.id.clone(), name_said));
             }
         }
     }
@@ -290,11 +293,11 @@ pub async fn project(
         &[&project],
     )
     .await?;
-    for (откуда, куда) in &ссылки {
+    for (from_where, where_to) in &links {
         tx.execute(
             "INSERT INTO project_requirement_sources (project_id, requirement_id, kind, target, origin)
              VALUES ($1,$2,'requirement',$3,'projected') ON CONFLICT DO NOTHING",
-            &[&project, откуда, куда],
+            &[&project, from_where, where_to],
         )
         .await?;
     }
@@ -315,7 +318,7 @@ pub async fn project(
                priority = EXCLUDED.priority, measured_by = EXCLUDED.measured_by,
                section_ord = EXCLUDED.section_ord",
             &[&project, &r.id, &r.kind, &r.area, &r.text, &r.kind_of_document, &r.name,
-              &r.satisfied, &r.priority, &r.measured_by, &r.секция],
+              &r.satisfied, &r.priority, &r.measured_by, &r.section],
         )
         .await?;
     }
@@ -334,7 +337,7 @@ pub async fn project(
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
              ON CONFLICT (project_id, id) DO NOTHING",
             &[&project, &c.id, &c.area, &c.requirement, &c.spec, &c.kind_of_document, &c.name,
-              &c.секция],
+              &c.section],
         )
         .await?;
     }
@@ -349,38 +352,38 @@ pub async fn project(
     // Читается АБЗАЦ, а не строка с маркером: продолжение на следующей строке
     // («Плюс сценарий `TC-HARN-07`») терялось, и проверка, названная
     // документом, проверкой не становилась. Абзац кончается пустой строкой.
-    let маркеры = crate::scheme::Terms::load_at(&tx, project).await?;
-    let абзацы = match маркеры.one("marker.verified-by") {
-        Some(маркер) => {
-            let документы = tx
+    let markers = crate::scheme::Terms::load_at(&tx, project).await?;
+    let paragraphs = match markers.one("marker.verified-by") {
+        Some(marker) => {
+            let documents = tx
                 .query(
                     "SELECT entity_kind, entity_name, content FROM project_documents
                       WHERE project_id = $1 AND content LIKE '%' || $2 || '%'
                       ORDER BY entity_kind, entity_name",
-                    &[&project, &маркер],
+                    &[&project, &marker],
                 )
                 .await?;
-            документы
+            documents
                 .iter()
-                .flat_map(|r| абзацы_проверки(r.get(0), r.get(1), &r.get::<_, String>(2), маркер))
+                .flat_map(|r| paragraphs_checks(r.get(0), r.get(1), &r.get::<_, String>(2), marker))
                 .collect()
         }
         None => Vec::new(),
     };
-    let mut доказано: HashMap<&str, &str> = HashMap::new();
-    for (_, _, требование, текст) in &абзацы {
-        if let Some(id) = требование {
-            let было = доказано.entry(id.as_str()).or_insert("");
-            if было.is_empty() {
-                *было = текст.as_str();
+    let mut proven: HashMap<&str, &str> = HashMap::new();
+    for (_, _, requirement_id, text_of) in &paragraphs {
+        if let Some(id) = requirement_id {
+            let was = proven.entry(id.as_str()).or_insert("");
+            if was.is_empty() {
+                *was = text_of.as_str();
             }
         }
     }
-    for (id, текст) in &доказано {
+    for (id, text_of) in &proven {
         tx.execute(
             "UPDATE project_requirements SET measured_by = $3
               WHERE project_id = $1 AND id = $2 AND measured_by IS DISTINCT FROM $3",
-            &[&project, id, текст],
+            &[&project, id, text_of],
         )
         .await?;
     }
@@ -458,45 +461,45 @@ pub async fn project(
     //
     // Имя разбирается по образцу ВИДА: что перед нами — проверка, правило кода
     // или утверждение, — говорит объявленный образец, а не догадка по форме.
-    if маркеры.one("marker.verified-by").is_some() {
-        let образцы = tx
+    if markers.one("marker.verified-by").is_some() {
+        let patterns = tx
             .query(
                 "SELECT name, spec->>'id' FROM kind_layout
                   WHERE name IN ('check','lint-rule','assertion') AND spec->>'id' IS NOT NULL",
                 &[],
             )
             .await?;
-        let имя = regex::Regex::new(r"`([^`]{2,80})`").expect("образец имени в кавычках");
-        let mut найдено: Vec<(String, String, String, String)> = Vec::new();
-        let mut видели = std::collections::HashSet::new();
+        let name_said = regex::Regex::new(r"`([^`]{2,80})`").expect("образец имени в кавычках");
+        let mut found: Vec<(String, String, String, String)> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         // Абзац вне блока требования читается одной строкой маркера, как
         // прежде: целиком он тащил в правила кода слова историй и решений.
-        for (dk, dn, требование, абзац) in &абзацы {
-            let line = if требование.is_some() { абзац.as_str() } else { абзац.lines().next().unwrap_or("") };
-            for c in имя.captures_iter(line) {
+        for (dk, dn, requirement_id, paragraph) in &paragraphs {
+            let line = if requirement_id.is_some() { paragraph.as_str() } else { paragraph.lines().next().unwrap_or("") };
+            for c in name_said.captures_iter(line) {
                 let id = c[1].to_owned();
-                for обр in &образцы {
-                    let вид: String = обр.get(0);
-                    let pat: String = обр.get(1);
-                    let подходит: bool = tx.query_one("SELECT $1 ~ $2", &[&id, &pat]).await?.get(0);
-                    if подходит && видели.insert(format!("{вид}\u{1}{id}")) {
-                        найдено.push((вид, id.clone(), dk.clone(), dn.clone()));
+                for pattern in &patterns {
+                    let kind_name: String = pattern.get(0);
+                    let pat: String = pattern.get(1);
+                    let matches: bool = tx.query_one("SELECT $1 ~ $2", &[&id, &pat]).await?.get(0);
+                    if matches && seen.insert(format!("{kind_name}\u{1}{id}")) {
+                        found.push((kind_name, id.clone(), dk.clone(), dn.clone()));
                         break;
                     }
                 }
             }
         }
-        for (таблица, вид) in [("project_lint_rules", "lint-rule"), ("project_assertions", "assertion")] {
+        for (table, kind_name) in [("project_lint_rules", "lint-rule"), ("project_assertions", "assertion")] {
             tx.execute(
-                &format!("DELETE FROM {таблица} WHERE project_id = $1 AND origin = 'projected'"),
+                &format!("DELETE FROM {table} WHERE project_id = $1 AND origin = 'projected'"),
                 &[&project],
             )
             .await?;
-            for (в, id, dk, dn) in найдено.iter().filter(|x| x.0 == вид) {
-                let _ = в;
+            for (at, id, dk, dn) in found.iter().filter(|x| x.0 == kind_name) {
+                let _ = at;
                 tx.execute(
                     &format!(
-                        "INSERT INTO {таблица} (project_id, id, entity_kind, entity_name)
+                        "INSERT INTO {table} (project_id, id, entity_kind, entity_name)
                          VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING"
                     ),
                     &[&project, id, dk, dn],
@@ -504,8 +507,8 @@ pub async fn project(
                 .await?;
             }
         }
-        for (в, id, dk, dn) in найдено.iter().filter(|x| x.0 == "check") {
-            let _ = в;
+        for (at, id, dk, dn) in found.iter().filter(|x| x.0 == "check") {
+            let _ = at;
             let area = id.split('-').nth(1).unwrap_or("").to_owned();
             tx.execute(
                 "INSERT INTO project_checks (project_id, id, area, spec, entity_kind, entity_name)
@@ -568,7 +571,7 @@ pub async fn project(
     //
     // Одиночек два или ни одного — не трогаем: тогда выбрать вправду нечем, и
     // красное правило честнее тихой догадки.
-    let дом = tx
+    let home = tx
         .execute(
             "UPDATE project_checks c
                 SET entity_kind = d.kind, entity_name = d.name
@@ -662,7 +665,7 @@ pub async fn project(
     // ПЕРЕПИСАННЫЙ ИСТОЧНИК НАЗЫВАЕТСЯ ЧИСЛОМ. Проход молча правит, где написана
     // проверка; посчитать и выбросить значило бы прятать правку от того, кто её
     // потом ищет.
-    Ok((requirements.len(), checks.len(), needs.len(), дом))
+    Ok((requirements.len(), checks.len(), needs.len(), home))
 }
 
 /// ОТМЕТКА ИЗМЕНЕНИЯ. Отпечаток записи сверяется с прошлым: совпал — дата
@@ -680,7 +683,7 @@ pub async fn project(
 ///
 /// Одна дата на всех значит «правок мы не видели ни одной». Это правда о
 /// наборе, приехавшем переносом, и с неё каскад начинает считать честно.
-pub async fn stamp(pool: &Pool, project: &str) -> Result<u64, crate::db::Fail> {
+pub(crate) async fn stamp(pool: &Pool, project: &str) -> Result<u64, crate::db::Fail> {
     let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
     let now = crate::projector::now_ms();
@@ -688,7 +691,7 @@ pub async fn stamp(pool: &Pool, project: &str) -> Result<u64, crate::db::Fail> {
     tx.execute("UPDATE entity_stamp SET body_version = 2 WHERE project_id = $1 AND body_version < 2", &[&project])
         .await?;
     let changed = tx.execute(STAMP_CHANGED, &[&project, &now]).await?;
-    абзацы_с_какого_времени(&tx, project).await?;
+    paragraphs_with_which_time(&tx, project).await?;
     tx.execute(STAMP_FRESH, &[&project, &now]).await?;
     tx.commit().await?;
     Ok(changed)
@@ -704,59 +707,59 @@ pub async fn stamp(pool: &Pool, project: &str) -> Result<u64, crate::db::Fail> {
 /// Время берётся из истории ревизий: самая ранняя ревизия, начиная с которой
 /// абзац непрерывно такой, как сейчас. Отметка только опускается к нему — и
 /// один раз: шаг помечен версией тела 3.
-async fn абзацы_с_какого_времени(
+async fn paragraphs_with_which_time(
     tx: &deadpool_postgres::Transaction<'_>,
     project: &str,
 ) -> Result<(), crate::db::Fail> {
-    let ждут: i64 = tx
+    let waiting: i64 = tx
         .query_one(
             "SELECT count(*) FROM entity_stamp WHERE project_id = $1 AND kind = 'requirement' AND body_version < 3",
             &[&project],
         )
         .await?
         .get(0);
-    if ждут == 0 {
+    if waiting == 0 {
         return Ok(());
     }
-    if let Some(маркер) = crate::scheme::Terms::load_at(tx, project).await?.one("marker.verified-by") {
-        let ревизии = tx
+    if let Some(marker) = crate::scheme::Terms::load_at(tx, project).await?.one("marker.verified-by") {
+        let revisions = tx
             .query(
                 "SELECT entity_kind, entity_name, written_at, content FROM project_document_revisions
                   WHERE project_id = $1 AND content LIKE '%' || $2 || '%'
                   ORDER BY entity_kind, entity_name, written_at",
-                &[&project, &маркер],
+                &[&project, &marker],
             )
             .await?;
-        let mut документ: (String, String) = (String::new(), String::new());
-        let mut было: HashMap<String, (String, i64)> = HashMap::new();
-        let mut итог: HashMap<String, Vec<(String, i64)>> = HashMap::new();
-        let сдать = |было: &mut HashMap<String, (String, i64)>, итог: &mut HashMap<String, Vec<(String, i64)>>| {
-            for (id, v) in было.drain() {
-                итог.entry(id).or_default().push(v);
+        let mut document: (String, String) = (String::new(), String::new());
+        let mut was: HashMap<String, (String, i64)> = HashMap::new();
+        let mut outcome: HashMap<String, Vec<(String, i64)>> = HashMap::new();
+        let hand_over = |was: &mut HashMap<String, (String, i64)>, outcome: &mut HashMap<String, Vec<(String, i64)>>| {
+            for (id, v) in was.drain() {
+                outcome.entry(id).or_default().push(v);
             }
         };
-        for r in &ревизии {
+        for r in &revisions {
             let (kind, name, at, content): (String, String, i64, String) = (r.get(0), r.get(1), r.get(2), r.get(3));
-            if (kind.as_str(), name.as_str()) != (документ.0.as_str(), документ.1.as_str()) {
-                сдать(&mut было, &mut итог);
-                документ = (kind.clone(), name.clone());
+            if (kind.as_str(), name.as_str()) != (document.0.as_str(), document.1.as_str()) {
+                hand_over(&mut was, &mut outcome);
+                document = (kind.clone(), name.clone());
             }
-            let mut сейчас: HashMap<String, (String, i64)> = HashMap::new();
-            for (_, _, требование, текст) in абзацы_проверки(kind, name, &content, маркер) {
-                let Some(id) = требование else { continue };
-                if текст.is_empty() || сейчас.contains_key(&id) {
+            let mut now: HashMap<String, (String, i64)> = HashMap::new();
+            for (_, _, requirement_id, text_of) in paragraphs_checks(kind, name, &content, marker) {
+                let Some(id) = requirement_id else { continue };
+                if text_of.is_empty() || now.contains_key(&id) {
                     continue;
                 }
-                let начало = match было.get(&id) {
-                    Some((прежний, давно)) if *прежний == текст => *давно,
+                let start = match was.get(&id) {
+                    Some((previous, long_ago)) if *previous == text_of => *long_ago,
                     _ => at,
                 };
-                сейчас.insert(id, (текст, начало));
+                now.insert(id, (text_of, start));
             }
-            было = сейчас;
+            was = now;
         }
-        сдать(&mut было, &mut итог);
-        let поля = tx
+        hand_over(&mut was, &mut outcome);
+        let fields = tx
             .query(
                 "SELECT r.id, r.measured_by FROM project_requirements r
                    JOIN entity_stamp st ON st.project_id = r.project_id AND st.kind = 'requirement' AND st.id = r.id
@@ -764,15 +767,15 @@ async fn абзацы_с_какого_времени(
                 &[&project],
             )
             .await?;
-        for r in &поля {
-            let (id, поле): (String, String) = (r.get(0), r.get(1));
-            let Some(начало) = итог.get(&id).and_then(|v| v.iter().filter(|(t, _)| *t == поле).map(|(_, давно)| *давно).min()) else {
+        for r in &fields {
+            let (id, field): (String, String) = (r.get(0), r.get(1));
+            let Some(start) = outcome.get(&id).and_then(|v| v.iter().filter(|(t, _)| *t == field).map(|(_, long_ago)| *long_ago).min()) else {
                 continue;
             };
             tx.execute(
                 "UPDATE entity_stamp SET updated_at = $3
                   WHERE project_id = $1 AND kind = 'requirement' AND id = $2 AND updated_at > $3",
-                &[&project, &id, &начало],
+                &[&project, &id, &start],
             )
             .await?;
         }
@@ -828,15 +831,15 @@ ON CONFLICT (project_id, kind, id) DO NOTHING";
 
 #[cfg(test)]
 mod tests {
-    use super::абзацы_проверки;
+    use super::paragraphs_checks;
 
     #[test]
-    fn абзац_проверки_целиком_и_без_хвоста() {
+    fn paragraph_checks_whole_and_without_tail() {
         let doc = "**FR-14 · Скоуп.**\n*Проверяется:* **компиляционный** род — `mirror_no_budget`\n\n\
                    **FR-08 · Раскладка якорная.**\nПорядок наследуется.\n*Проверяется:* тест `fr_08_keep` — снимок двух\nальтернатив.\n\n---\n\n# Часть II\n\n\
                    **FR-UI-40 · Почему.**\nТекст.\n*Проверяется:* тест `ui_40` — одно действие.\nПлюс сценарий `TC-HARN-07` — форма.\n\n\
                    **FR-09 · Без проверки.**\nТекст.\n\n# Часть III\n*Проверяется:* гейт `x:y`";
-        let got = абзацы_проверки("srs".into(), "".into(), doc, "Проверяется:");
+        let got = paragraphs_checks("srs".into(), "".into(), doc, "Проверяется:");
         let text = |id: &str| got.iter().find(|a| a.2.as_deref() == Some(id)).map(|a| a.3.as_str());
         assert_eq!(text("FR-14"), Some("**компиляционный** род — `mirror_no_budget`"), "жирное слово после маркера цело");
         assert_eq!(text("FR-08"), Some("тест `fr_08_keep` — снимок двух\nальтернатив."));

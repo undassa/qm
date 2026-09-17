@@ -19,7 +19,7 @@ static TOTAL_ROW: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\s*(?i:всего|и�
 static AREA: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\s*([A-Z]{2,4})\b\s*(.*)$").expect("образец подсистемы"));
 static COUNT: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\s*(\d+)").expect("образец числа"));
 
-pub async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fail> {
+pub(crate) async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fail> {
     let blocks = cells(pool, project, KIND, NAME, false).await?;
     let mut claims: Vec<(String, String, i32, i32, Option<i32>, String)> = Vec::new();
 

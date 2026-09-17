@@ -14,10 +14,13 @@
 //! документа за чужой состав. Различать это по тексту в запросе нельзя: строка
 //! документа до запроса не доезжает.
 
+/// Строка упоминания имени: вид, имя, где сказано и чем помечено.
+type NamedIdRow = (String, String, String, bool, bool, bool, Option<i32>);
+
 use deadpool_postgres::Pool;
 use regex::Regex;
 
-pub async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fail> {
+pub(crate) async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let caveats: Vec<String> = client
         .query("SELECT value FROM scheme($1) WHERE role = 'word.caveat'", &[&project])
@@ -37,7 +40,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fai
         let low = text.to_lowercase();
         low_caveats.iter().any(|c| low.contains(c.as_str()))
     };
-    let mut rows: Vec<(String, String, String, bool, bool, bool, Option<i32>)> = Vec::new();
+    let mut rows: Vec<NamedIdRow> = Vec::new();
     let mut hidden: Vec<(String, String, String, String)> = Vec::new();
     let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut seen_hidden = std::collections::HashSet::new();
@@ -54,22 +57,22 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fai
         // `project_document_sections`. Без этого связь остаётся на уровне
         // документа: «ui-spec называет SCR-SHELL-01» при сорока килобайтах и
         // двадцати шести секциях.
-        let разбор = crate::parse::parse_document(&content);
+        let parsed = crate::parse::parse_document(&content);
         let mut section_caveat = false;
-        let mut секция: Option<i32> = None;
-        for блок in &разбор.blocks {
-            if блок.kind == "heading" {
-                секция = Some(блок.ord);
-                section_caveat = says_caveat(&блок.raw);
+        let mut section: Option<i32> = None;
+        for block in &parsed.blocks {
+            if block.kind == "heading" {
+                section = Some(block.ord);
+                section_caveat = says_caveat(&block.raw);
             }
-            for line in блок.raw.lines() {
+            for line in block.raw.lines() {
             let caveated = section_caveat || line.contains("~~") || says_caveat(line);
             // Голое число, оставшееся в строке-перечне: запись прячет имя
             // формой, которой раскрыватель не знает. Строка обязана СОДЕРЖАТЬ
             // хотя бы одно имя — иначе это не перечень, а проза с числом, и
             // «§8.1» или «п.3» стали бы находками.
-            let есть_имя = !super::ids::plain(line).is_empty();
-            for n in super::ids::hidden_numbers(line).into_iter().filter(|_| есть_имя) {
+            let exists_name = !super::ids::plain(line).is_empty();
+            for n in super::ids::hidden_numbers(line).into_iter().filter(|_| exists_name) {
                 let key = format!("{kind}\u{1}{name}\u{1}голое {n}");
                 if seen_hidden.insert(key) {
                     hidden.push((kind.clone(), name.clone(), n, line.trim().chars().take(90).collect::<String>()));
@@ -90,7 +93,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fai
                     Some(&i) => { if heads_row { rows[i].5 = true } }
                     None => {
                         seen.insert(key, rows.len());
-                        rows.push((kind.clone(), name.clone(), id, caveated, from_range, heads_row, секция));
+                        rows.push((kind.clone(), name.clone(), id, caveated, from_range, heads_row, section));
                     }
                 }
             }
@@ -115,7 +118,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fai
     //
     // Отбор идёт по ОБЪЯВЛЕННОЙ проекции, а не по имени вида: перечислить
     // здесь `reference` значило бы зашить слово, которым владеет проект.
-    let чужие: std::collections::HashSet<String> = client
+    let foreign: std::collections::HashSet<String> = client
         .query(
             "SELECT name FROM kind_layout WHERE spec->>'projection' = 'provenance'",
             &[],
@@ -125,7 +128,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fai
         .map(|r| r.get::<_, String>(0))
         .collect();
     for d in &docs {
-        if чужие.contains(&d.get::<_, String>(0)) {
+        if foreign.contains(&d.get::<_, String>(0)) {
             continue;
         }
         let kind: String = d.get(0);
@@ -209,14 +212,14 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fai
             "INSERT INTO project_named_id(project_id, entity_kind, entity_name, said_id, caveated, from_range, heads_row, section_ord) VALUES ",
         );
         let mut args: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = vec![&project];
-        for (i, (kind, name, id, caveated, from_range, heads_row, секция)) in chunk.iter().enumerate() {
+        for (i, (kind, name, id, caveated, from_range, heads_row, section)) in chunk.iter().enumerate() {
             if i > 0 {
                 sql.push(',');
             }
             let b = i * 7 + 2;
             sql.push_str(&format!("($1,${},${},${},${},${},${},${})", b, b + 1, b + 2, b + 3, b + 4, b + 5, b + 6));
             args.extend([kind as &(dyn tokio_postgres::types::ToSql + Sync), name, id, caveated,
-                         from_range, heads_row, секция]);
+                         from_range, heads_row, section]);
         }
         sql.push_str(" ON CONFLICT DO NOTHING");
         tx.execute(sql.as_str(), &args).await?;

@@ -38,22 +38,11 @@ jobs:
       - run: cargo test --release --locked -- --ignored
         env:
           MH_TEST_DB_URL: postgres://postgres@localhost:5432/postgres
-      # ХРАПОВИК, А НЕ `-D warnings`. Предупреждений в дереве 79, и запрет
-      # немедленно сделал бы работу вечно красной — проверка, к красноте которой
-      # привыкли, хуже отсутствующей. Но и `cargo clippy` без запрета выходит
-      # нулём на любом числе: это украшение. Поэтому линия: не расти.
-      - run: |
-          cargo clippy --release --locked --all-targets 2>&1 | tee /tmp/clippy.txt
-          now=$(grep -c '^warning' /tmp/clippy.txt || true)
-          was=$(cat ../.clippy-baseline)
-          echo "предупреждений $now, линия $was"
-          if [ "$now" -gt "$was" ]; then
-            echo "::error::предупреждений стало больше: было $was, стало $now"
-            exit 1
-          fi
-          if [ "$now" -lt "$was" ]; then
-            echo "::notice::линию можно опустить до $now — правьте .clippy-baseline"
-          fi
+      # ЗАПРЕТ, А НЕ ХРАПОВИК. Линия «не расти» — тот же долг: она разрешала
+      # семьдесят девять предупреждений и считала их по строкам вывода, а вывод
+      # в CI раскрашен, и `grep '^warning'` находил в нём НОЛЬ при семидесяти
+      # семи. Проверка, которая всегда зелена, — украшение.
+      - run: cargo clippy --release --locked --all-targets -- -D warnings
 
   web:
     runs-on: ubuntu-latest

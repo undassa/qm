@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 ///
 /// Адресуется ВИДОМ И ИМЕНЕМ, а не путём: путь остаётся полем происхождения и
 /// ключом быть перестал. Пустое имя законно — у одиночки его заменяет вид.
-pub async fn sections(
+pub(crate) async fn sections(
     pool: &Pool,
     project: &str,
     kind: &str,
@@ -69,7 +69,7 @@ pub async fn sections(
 }
 
 /// Поиск по содержимому. Отдаёт документ и строку, в которой нашлось.
-pub async fn search(
+pub(crate) async fn search(
     pool: &Pool,
     project: &str,
     query: &str,
@@ -128,7 +128,7 @@ pub async fn search(
 /// разделителя; читать иначе — значит читать не тот раздел, который потом
 /// запишется. Строчный разбор рядом с блочным уже успел разойтись: он вернул
 /// границу, при записи которой документ рос на 300 байт за круг.
-pub async fn section_body(
+pub(crate) async fn section_body(
     pool: &Pool,
     project: &str,
     kind: &str,

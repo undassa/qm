@@ -27,7 +27,7 @@ static QUESTION: Lazy<Regex> = Lazy::new(|| Regex::new(r"\bQ-\d+").expect("об�
 
 /// Лист записи дерева. `None` — строка записью не является: продолжение
 /// комментария, заголовок, проза.
-pub fn leaf_of(raw_body: &str) -> Option<String> {
+pub(crate) fn leaf_of(raw_body: &str) -> Option<String> {
     if !CONNECTOR.is_match(raw_body) {
         return None;
     }
@@ -52,11 +52,11 @@ fn flat_leaf(raw_body: &str) -> Option<String> {
 }
 
 /// Похоже ли на путь. Пустой лист путём считается: это уже не наша находка.
-pub fn looks_like_path(leaf: &str) -> bool {
+pub(crate) fn looks_like_path(leaf: &str) -> bool {
     leaf.is_empty() || (PATH_CHARS.is_match(leaf) && (leaf.ends_with('/') || TREE_EXT.is_match(leaf)))
 }
 
-pub struct Leaf {
+pub(crate) struct Leaf {
     pub dir: String,
     pub leaf: String,
     pub is_path: bool,
@@ -72,7 +72,7 @@ pub struct Leaf {
 }
 
 /// Разбирает блок задачи в перечень листьев.
-pub fn leaves_of(content: &str, section: &str) -> Vec<Leaf> {
+pub(crate) fn leaves_of(content: &str, section: &str) -> Vec<Leaf> {
     // Имя раздела приходит из словаря схемы: зашитое, оно сделало бы разбор
     // знающим один набор, а другой отдал бы пустоту вместо отказа.
     if section.is_empty() {
@@ -238,7 +238,7 @@ fn within(path: &str, dir: &str) -> bool {
 
 /// Полный путь листа, приведённый: каталог записи и сам лист. Каталог
 /// оставляет косую черту в конце — по ней видно, что лист назван каталогом.
-pub fn full_path(dir: &str, leaf: &str) -> String {
+pub(crate) fn full_path(dir: &str, leaf: &str) -> String {
     let tail = if leaf.ends_with('/') || (leaf.is_empty() && dir.ends_with('/')) { "/" } else { "" };
     format!("{}{tail}", normalize(&format!("{dir}/{leaf}")))
 }

@@ -25,7 +25,7 @@ const TICK: std::time::Duration = std::time::Duration::from_secs(2);
 const FORGET_EVERY: u32 = 900;
 /// Сколько живёт запись о натуге: месяц. Сравнивают её с соседними днями, а не
 /// с прошлым годом.
-const СЛЕД_ЖИВЁТ_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+const TRACE_LIVES_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 const RETRY_MS: i64 = 60_000;
 const TRYON_ABANDONED_MS: i64 = 600_000;
 
@@ -41,7 +41,7 @@ const TRYON_ABANDONED_MS: i64 = 600_000;
 /// оставить остальные с прежним числом пунктов — и разница прочитается как
 /// разница проектов, а не как непосчитанное. Так и вышло: у одного набора
 /// стояло шестьдесят три пункта, у другого сорок, и выглядело это отставанием.
-pub async fn touch_all(pool: &Pool, reason: &str) -> Result<(), crate::db::Fail> {
+pub(crate) async fn touch_all(pool: &Pool, reason: &str) -> Result<(), crate::db::Fail> {
     let client = match crate::db::conn(pool).await {
         Ok(client) => client,
         Err(e) => {
@@ -65,12 +65,12 @@ pub async fn touch_all(pool: &Pool, reason: &str) -> Result<(), crate::db::Fail>
         }
     }
     if !lost.is_empty() {
-        let имена = lost.iter().map(|(_, id)| id.as_str()).collect::<Vec<_>>().join(", ");
-        let первый = lost.into_iter().next().map(|(e, _)| e).expect("список не пуст");
+        let names = lost.iter().map(|(_, id)| id.as_str()).collect::<Vec<_>>().join(", ");
+        let first = lost.into_iter().next().map(|(e, _)| e).expect("список не пуст");
         // Причина берётся ПЕРВАЯ НАСТОЯЩАЯ, а не назначается занятостью: база,
         // не принявшая соединение, и перегрузка лечатся по-разному.
-        let why = format!("отметка «пересчитать» не поставлена наборам {имена}: {}", первый.says());
-        return Err(match первый {
+        let why = format!("отметка «пересчитать» не поставлена наборам {names}: {}", first.says());
+        return Err(match first {
             crate::db::Fail::Busy(_) => crate::db::Fail::Busy(why),
             _ => crate::db::Fail::Down(why),
         });
@@ -83,7 +83,7 @@ pub async fn touch_all(pool: &Pool, reason: &str) -> Result<(), crate::db::Fail>
 /// Отказ ВОЗВРАЩАЕТСЯ, а не только пишется в журнал: правка уже записана, и
 /// потерянная отметка значит, что гейт будет отдавать прежний замер, пока
 /// кто-нибудь не тронет набор снова. Сказать об этом обязан тот, кто правил.
-pub async fn touch(pool: &Pool, project: &str, reason: &str) -> Result<(), crate::db::Fail> {
+pub(crate) async fn touch(pool: &Pool, project: &str, reason: &str) -> Result<(), crate::db::Fail> {
     let client = match crate::db::conn(pool).await {
         Ok(client) => client,
         Err(e) => {
@@ -101,7 +101,7 @@ pub async fn touch(pool: &Pool, project: &str, reason: &str) -> Result<(), crate
     Ok(())
 }
 
-pub async fn mark(
+pub(crate) async fn mark(
     client: &impl deadpool_postgres::GenericClient,
     project: &str,
     reason: &str,
@@ -130,7 +130,7 @@ pub fn spawn(pool: Pool) {
             }
             till_forget -= 1;
             tokio::time::sleep(TICK).await;
-            запомнить_натугу(&pool).await;
+            remember_strain(&pool).await;
             if let Err(e) = crate::db::counting(round(&pool)).await {
                 // Пересчёт, упавший молча, — это доска, застывшая без объяснения.
                 tracing::warn!("пересчёт гейтов не прошёл: {}", e.says());
@@ -143,7 +143,7 @@ pub fn spawn(pool: Pool) {
 ///
 /// Пишется только когда есть что писать, и своим соединением — если его нет,
 /// счёт остаётся в памяти до следующего круга, а не теряется.
-async fn запомнить_натугу(pool: &Pool) {
+async fn remember_strain(pool: &Pool) {
     let (busy, nested) = crate::db::strain();
     if busy == 0 && nested == 0 {
         return;
@@ -154,11 +154,11 @@ async fn запомнить_натугу(pool: &Pool) {
         return;
     };
     tracing::warn!("натуга: отказов «занято» {busy}, вложенных взятий соединения {nested}");
-    let сейчас = crate::projector::now_ms();
+    let now = crate::projector::now_ms();
     if let Err(e) = client
         .execute(
             "INSERT INTO server_strain (at, busy, nested) VALUES ($1,$2,$3)",
-            &[&сейчас, &(busy as i64), &(nested as i64)],
+            &[&now, &(busy as i64), &(nested as i64)],
         )
         .await
     {
@@ -172,7 +172,7 @@ async fn запомнить_натугу(pool: &Pool) {
     // След живёт месяц: дверь читает последние полсотни строк, а таблица без
     // срока — это та же куча, которую однажды придётся разгребать руками.
     if let Err(e) = client
-        .execute("DELETE FROM server_strain WHERE at < $1", &[&(сейчас - СЛЕД_ЖИВЁТ_MS)])
+        .execute("DELETE FROM server_strain WHERE at < $1", &[&(now - TRACE_LIVES_MS)])
         .await
     {
         tracing::warn!("старый след перегрузки не убран: {}", e.says());
@@ -249,15 +249,15 @@ async fn round(pool: &Pool) -> Result<(), crate::db::Fail> {
         // круг будет сделан заново на следующем тике — и так под нагрузкой
         // бесконечно, потому что именно нагрузка и мешает его записать.
         let mut client = None;
-        for попытка in 0..3 {
+        for attempt in 0..3 {
             match crate::db::conn(pool).await {
                 Ok(c) => {
                     client = Some(c);
                     break;
                 }
                 Err(e) => {
-                    tracing::warn!("итог пересчёта набора {project} не записан ({попытка}): {}", e.says());
-                    if попытка < 2 {
+                    tracing::warn!("итог пересчёта набора {project} не записан ({attempt}): {}", e.says());
+                    if attempt < 2 {
                         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     }
                 }

@@ -13,7 +13,7 @@
 //! не пропускается, а НАЗЫВАЕТСЯ.
 
 /// Перечисление домена: имя и хранимые значения в змеином регистре.
-pub struct Enum {
+pub(crate) struct Enum {
     pub name: String,
     pub file: String,
     /// Значения, которые доходят до базы. Ветка под `#[serde(other)]` сюда не
@@ -27,7 +27,7 @@ pub struct Enum {
 }
 
 /// Множество `CHECK (col IN (…))` схемы.
-pub struct CheckSet {
+pub(crate) struct CheckSet {
     pub at: String,
     pub values: Vec<String>,
     pub file: String,
@@ -50,7 +50,7 @@ fn snake(s: &str) -> String {
     out
 }
 
-pub fn mark<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+pub(crate) fn mark<'a>(text: &'a str, key: &str) -> Option<&'a str> {
     let head = format!("x-{key}:");
     text.lines()
         .filter_map(|l| l.trim_start().trim_start_matches('/').trim_start().strip_prefix(head.as_str()))
@@ -76,7 +76,7 @@ fn up_only(text: &str) -> String {
         .join("\n")
 }
 
-pub fn migration_up(name: &str) -> bool {
+pub(crate) fn migration_up(name: &str) -> bool {
     name.ends_with(".sql") && !name.ends_with(".down.sql") && name.rsplit('/').next() != Some("down.sql")
 }
 
@@ -119,17 +119,20 @@ fn uncommented(text: &str) -> String {
 }
 
 /// Перечисления домена из текста одного файла.
-pub fn enums_of(text: &str, file: &str) -> Vec<Enum> {
+pub(crate) fn enums_of(text: &str, file: &str) -> Vec<Enum> {
     let lines: Vec<&str> = text.split('\n').collect();
     let mut out = Vec::new();
     let mut i = 0usize;
     while i < lines.len() {
         let t = lines[i].trim();
-        if !(t.starts_with("pub enum ") && t.ends_with('{')) {
+        // Видимость снимается, а не перечисляется: `pub(crate) enum` — тот же
+        // перечень, и пропущенный, он молча выпадает из сверки с множеством.
+        let head = crate::client::without_visibility(t);
+        if !(head.starts_with("enum ") && t.ends_with('{')) {
             i += 1;
             continue;
         }
-        let name = t["pub enum ".len()..].trim_end_matches('{').trim().to_owned();
+        let name = head["enum ".len()..].trim_end_matches('{').trim().to_owned();
         // Атрибуты стоят НАД объявлением: `#[derive(...)]`, `#[serde(tag = ...)]`.
         let mut attrs = String::new();
         let mut a = i;
@@ -213,7 +216,7 @@ pub fn enums_of(text: &str, file: &str) -> Vec<Enum> {
 
 /// Множества `CHECK` из текста одной миграции. Комментарии снимаются: `--` и
 /// `/* */` вне строки в кавычках съели бы половину определения.
-pub fn checks_of(text: &str, file: &str) -> Vec<CheckSet> {
+pub(crate) fn checks_of(text: &str, file: &str) -> Vec<CheckSet> {
     let no_comments = uncommented(text);
     let table = regex::Regex::new(r"(?i)CREATE TABLE (?:IF NOT EXISTS )?([a-z][a-z0-9_]*)\s*\(")
         .expect("образец таблицы");
@@ -259,7 +262,7 @@ pub fn checks_of(text: &str, file: &str) -> Vec<CheckSet> {
 /// Пара «перечисление ↔ множество». Совпадение считается по пересечению:
 /// два общих значения — уже повод, а большинство с любой стороны — уже пара.
 /// Порог не «похоже на глаз»: он назван числом и проверяем.
-pub struct Pair {
+pub(crate) struct Pair {
     pub name: String,
     pub detail: String,
 }
@@ -270,7 +273,7 @@ pub struct Pair {
 /// пересекающееся со словарём по значениям, и есть этот словарь. Вынесено в одно
 /// место, чтобы два правила одного датчика не расходились в том, что считают
 /// источником, — а они расходились, и цена была восемь исключений.
-pub fn covered_by_contract(s: &CheckSet, contract: &[(String, Vec<String>)]) -> Option<String> {
+pub(crate) fn covered_by_contract(s: &CheckSet, contract: &[(String, Vec<String>)]) -> Option<String> {
     for (name, vals) in contract {
         let common = vals.iter().filter(|v| s.values.contains(v)).count();
         if common >= 2 || (common == 1 && s.values.len() == 1) {
@@ -280,7 +283,7 @@ pub fn covered_by_contract(s: &CheckSet, contract: &[(String, Vec<String>)]) -> 
     None
 }
 
-pub fn pair(
+pub(crate) fn pair(
     enums: &[Enum],
     checks: &[CheckSet],
     contract: &[(String, Vec<String>)],
@@ -306,7 +309,7 @@ pub fn pair(
             if i.len() < 2 {
                 continue;
             }
-            let half = (e.stored.len().max(s.values.len()) + 1) / 2;
+            let half = e.stored.len().max(s.values.len()).div_ceil(2);
             if i.len() == e.stored.len() || i.len() == s.values.len() || i.len() >= half {
                 cand.push(Cand { e, s, n: i.len() });
             }
@@ -421,10 +424,10 @@ pub fn pair(
 }
 
 #[cfg(test)]
-mod источник {
+mod source {
     use super::{covered_by_contract, CheckSet};
 
-    fn множество(values: &[&str]) -> CheckSet {
+    fn set_of(values: &[&str]) -> CheckSet {
         CheckSet {
             at: "signal_sources.kind".into(),
             values: values.iter().map(|v| (*v).to_owned()).collect(),
@@ -433,25 +436,25 @@ mod источник {
     }
 
     #[test]
-    fn словарь_контракта_закрывает_множество() {
+    fn glossary_contract_closes_set_of() {
         let c = vec![("Source.kind".to_owned(),
                       vec!["push".to_owned(), "pull".to_owned(), "manual".to_owned()])];
-        assert_eq!(covered_by_contract(&множество(&["push", "pull", "manual"]), &c).as_deref(),
+        assert_eq!(covered_by_contract(&set_of(&["push", "pull", "manual"]), &c).as_deref(),
                    Some("Source.kind"));
     }
 
     #[test]
-    fn чужой_словарь_не_закрывает() {
+    fn foreign_glossary_not_closes() {
         let c = vec![("Role.kind".to_owned(), vec!["owner".to_owned(), "member".to_owned()])];
-        assert!(covered_by_contract(&множество(&["push", "pull", "manual"]), &c).is_none());
+        assert!(covered_by_contract(&set_of(&["push", "pull", "manual"]), &c).is_none());
     }
 
     #[test]
-    fn одно_значение_совпадает_только_с_одиночным_множеством() {
+    fn one_shared_value_is_a_coincidence_not_a_glossary() {
         let c = vec![("Source.kind".to_owned(), vec!["push".to_owned(), "x".to_owned()])];
         // Одно общее значение из трёх — совпадение, а не словарь.
-        assert!(covered_by_contract(&множество(&["push", "pull", "manual"]), &c).is_none());
-        assert!(covered_by_contract(&множество(&["push"]), &c).is_some());
+        assert!(covered_by_contract(&set_of(&["push", "pull", "manual"]), &c).is_none());
+        assert!(covered_by_contract(&set_of(&["push"]), &c).is_some());
     }
 }
 
@@ -526,7 +529,7 @@ CREATE TABLE IF NOT EXISTS escalation_executions (
 use serde_json::Value;
 
 /// Колонка таблицы: имя и то, что о ней сказано определением.
-pub struct Column {
+pub(crate) struct Column {
     pub name: String,
     pub ty: String,
     pub not_null: bool,
@@ -538,14 +541,14 @@ pub struct Column {
     pub source: Option<String>,
 }
 
-pub struct Table {
+pub(crate) struct Table {
     pub name: String,
     pub cols: Vec<Column>,
     pub source: Option<String>,
 }
 
 /// Поле схемы контракта: где стоит, как зовётся, чем помечено.
-pub struct Field {
+pub(crate) struct Field {
     /// Точечный адрес: `PolicyTestRun.window.from`.
     pub at: String,
     pub schema: String,
@@ -600,7 +603,7 @@ fn tables_of(no_comments: &str) -> Vec<(usize, Table)> {
     .expect("образец колонки");
     let b: Vec<char> = no_comments.chars().collect();
     let mut out = Vec::new();
-    for m in table.captures_iter(&no_comments) {
+    for m in table.captures_iter(no_comments) {
         let whole = m.get(0).expect("совпадение целиком");
         let start = no_comments[..whole.end()].chars().count();
         let mut i = start;
@@ -704,7 +707,7 @@ fn ddl_of(text: &str) -> Vec<Ddl> {
 ///
 /// Тексты берутся В ПОРЯДКЕ миграций — иначе `ALTER` мог бы прийти прежде
 /// таблицы, которую правит.
-pub fn schema_of(texts: &[String]) -> Vec<Table> {
+pub(crate) fn schema_of(texts: &[String]) -> Vec<Table> {
     let mut out: Vec<Table> = Vec::new();
     for step in texts.iter().flat_map(|text| ddl_of(text)) {
         match step {
@@ -837,13 +840,13 @@ fn alters_of(no_comments: &str) -> Vec<(usize, Ddl)> {
 }
 
 #[cfg(test)]
-mod правки {
+mod edits {
     use super::schema_of;
 
     const CREATE: &str = "CREATE TABLE signals (id text NOT NULL, at timestamptz);";
 
     #[test]
-    fn колонка_приехавшая_alter_ом_существует() {
+    fn a_column_added_by_alter_exists() {
         let t = schema_of(&[CREATE.into(),
                             "ALTER TABLE signals ADD COLUMN service_id text NOT NULL;".into()]);
         let cols: Vec<&str> = t[0].cols.iter().map(|c| c.name.as_str()).collect();
@@ -852,7 +855,7 @@ mod правки {
     }
 
     #[test]
-    fn if_not_exists_и_без_слова_column() {
+    fn a_drop_without_the_word_column_is_still_a_drop() {
         let t = schema_of(&[CREATE.into(),
                             "ALTER TABLE IF EXISTS signals ADD IF NOT EXISTS note text;".into()]);
         assert!(t[0].cols.iter().any(|c| c.name == "note"), "{:?}",
@@ -860,13 +863,13 @@ mod правки {
     }
 
     #[test]
-    fn снятая_колонка_уходит() {
+    fn dropped_column_leaves() {
         let t = schema_of(&[CREATE.into(), "ALTER TABLE signals DROP COLUMN at;".into()]);
         assert!(!t[0].cols.iter().any(|c| c.name == "at"), "снятая колонка осталась");
     }
 
     #[test]
-    fn несколько_действий_одной_командой() {
+    fn several_actions_one_command() {
         let t = schema_of(&[CREATE.into(),
             "ALTER TABLE signals ADD COLUMN a text DEFAULT 'x', ADD COLUMN b integer, DROP COLUMN at;".into()]);
         let cols: Vec<&str> = t[0].cols.iter().map(|c| c.name.as_str()).collect();
@@ -874,14 +877,14 @@ mod правки {
     }
 
     #[test]
-    fn ограничение_снятое_alter_ом_колонку_не_трогает() {
+    fn constraint_removed_alter_alter_column_not_touches() {
         let t = schema_of(&[CREATE.into(),
                             "ALTER TABLE signals DROP CONSTRAINT signals_at_check;".into()]);
         assert!(t[0].cols.iter().any(|c| c.name == "at"), "ограничение съело колонку");
     }
 
     #[test]
-    fn обязательность_и_умолчание_правятся_alter_ом() {
+    fn requiredness_and_default_edited_by_alter() {
         let create = "CREATE TABLE signals (id text NOT NULL, team_id text, tier text NOT NULL DEFAULT 'free');";
         let col = |alter: &str, name: &str| {
             let t = schema_of(&[create.into(), alter.into()]);
@@ -894,12 +897,12 @@ mod правки {
     }
 
     #[test]
-    fn раздел_down_не_читается() {
+    fn section_down_not_read() {
         for (up, down) in [("-- +goose Up", "-- +goose Down"), ("-- migrate:up", "-- migrate:down"),
                            ("--+goose up", "-- +goose    Down"), ("-- migrate:up", "-- migrate:down transaction:false"),
                            ("-- +migrate Up", "-- +migrate Down notransaction")] {
             let text = format!("{up}\nCREATE TABLE api_tokens (id text PRIMARY KEY, owner_id text NOT NULL CHECK (owner_id IN ('a')));\n{down}\nDROP TABLE api_tokens;\nCREATE TABLE api_tokens (id text PRIMARY KEY, owner_id text CHECK (owner_id IN ('b')));\n");
-            let t = schema_of(&[text.clone()]);
+            let t = schema_of(std::slice::from_ref(&text));
             assert!(t.iter().any(|x| x.name == "api_tokens" && x.cols.iter().any(|c| c.name == "owner_id" && c.not_null)), "{down}");
             let sets: Vec<Vec<String>> = super::checks_of(&text, "0001.sql").into_iter().map(|c| c.values).collect();
             assert_eq!(sets, vec![vec!["a".to_owned()]], "{down}");
@@ -915,7 +918,7 @@ mod правки {
     }
 
     #[test]
-    fn правка_неизвестной_таблицы_ничего_не_заводит() {
+    fn an_edit_of_an_unknown_table_creates_nothing() {
         let t = schema_of(&[CREATE.into(), "ALTER TABLE чужая ADD COLUMN x text;".into()]);
         assert_eq!(t.len(), 1, "завелась таблица, которой не создавали");
     }
@@ -932,7 +935,7 @@ mod правки {
 /// Дочерняя — та, чьё имя начинается с ОСНОВЫ отрезка и подчёркивания:
 /// `postmortems` → `postmortem_actions`, `postmortem_blocks`. Подчёркивание
 /// обязательно, иначе `posts` затянул бы `postmortems`.
-pub fn segment_owns(segment: &str, table: &str) -> bool {
+pub(crate) fn segment_owns(segment: &str, table: &str) -> bool {
     if segment == table {
         return true;
     }
@@ -958,40 +961,40 @@ pub fn segment_owns(segment: &str, table: &str) -> bool {
 }
 
 #[cfg(test)]
-mod отрезок {
+mod segment {
     use super::segment_owns;
 
     #[test]
-    fn своя_таблица() {
+    fn own_table() {
         assert!(segment_owns("postmortems", "postmortems"));
     }
 
     #[test]
-    fn дочерняя_коллекция_получает_родительский_ключ() {
+    fn child_collection_gets_parent_key() {
         assert!(segment_owns("postmortems", "postmortem_actions"));
         assert!(segment_owns("postmortems", "postmortem_blocks"));
     }
 
     #[test]
-    fn чужая_таблица_с_общей_приставкой_не_получает() {
+    fn foreign_table_with_shared_prefix_not_gets() {
         // `posts` и `postmortems` — разные вещи, и подчёркивание их разводит.
         assert!(!segment_owns("posts", "postmortems"));
     }
 
     #[test]
-    fn соседняя_таблица_не_получает() {
+    fn neighbour_table_not_gets() {
         assert!(!segment_owns("postmortems", "monitors"));
     }
 
     #[test]
-    fn множественное_на_ies_даёт_основу_на_y() {
+    fn plural_on_ies_gives_base_on_y() {
         // `/policies/{policy_id}/versions` — ключ нужен `policy_versions`.
         assert!(segment_owns("policies", "policy_versions"));
         assert!(segment_owns("policies", "policy_test_runs"));
     }
 
     #[test]
-    fn короткая_основа_не_раздаёт() {
+    fn short_base_not_hands_out() {
         assert!(!segment_owns("as", "a_b"));
     }
 }
@@ -1002,7 +1005,7 @@ fn snake_name(s: &str) -> String {
 
 /// Какой таблице отвечает схема контракта: имя в змеином регистре, оно же во
 /// множественном числе. Пара, которую так не угадать, называется явно.
-pub fn schema_table(schemas: &[String], tables: &[Table], forced: &[(&str, &str)]) -> Vec<(String, String)> {
+pub(crate) fn schema_table(schemas: &[String], tables: &[Table], forced: &[(&str, &str)]) -> Vec<(String, String)> {
     let known: Vec<&str> = tables.iter().map(|t| t.name.as_str()).collect();
     let mut out = Vec::new();
     for name in schemas {
@@ -1028,7 +1031,7 @@ pub fn schema_table(schemas: &[String], tables: &[Table], forced: &[(&str, &str)
 }
 
 /// Поля схем контракта вместе с пометками и обязательностью.
-pub fn contract_fields(doc: &Value) -> Vec<Field> {
+pub(crate) fn contract_fields(doc: &Value) -> Vec<Field> {
     let mut out = Vec::new();
     let Some(schemas) = doc.get("components").and_then(|c| c.get("schemas")).and_then(|s| s.as_object())
     else {
@@ -1099,7 +1102,7 @@ pub fn contract_fields(doc: &Value) -> Vec<Field> {
 }
 
 /// Имена всех свойств и параметров контракта: вход, откуда бы он ни пришёл.
-pub fn contract_names(doc: &Value) -> Vec<String> {
+pub(crate) fn contract_names(doc: &Value) -> Vec<String> {
     let mut out = Vec::new();
     fn walk(node: &Value, out: &mut Vec<String>) {
         match node {
@@ -1126,7 +1129,7 @@ pub fn contract_names(doc: &Value) -> Vec<String> {
 
 /// Три сверки контракта со схемой. Возвращает те же пары «имя · пояснение»,
 /// что и остальные датчики.
-pub fn contract_vs_schema(
+pub(crate) fn contract_vs_schema(
     doc: &Value,
     tables: &[Table],
     forced: &[(&str, &str)],
@@ -1405,7 +1408,7 @@ fn braces(path: &str) -> impl Iterator<Item = &str> {
 /// `# ── срез статуса (FR-STP-01…14) ──` стоит ПОСЛЕ последней операции блока,
 /// и без этого правила разметка соседнего среза приписывалась предыдущей
 /// операции: `DELETE /devices/{deviceId}` оказывался операцией статус-страницы.
-pub fn requirement_ops(text: &str) -> Vec<Pair> {
+pub(crate) fn requirement_ops(text: &str) -> Vec<Pair> {
     let Some(after) = text.split("\npaths:").nth(1) else { return Vec::new() };
     let block = after.split("\ncomponents:").next().unwrap_or("");
     let path_re = regex::Regex::new(r"^ {2}(/\S+):").expect("образец пути");
@@ -1430,7 +1433,7 @@ pub fn requirement_ops(text: &str) -> Vec<Pair> {
         }
         // Перечень раскрывается тем же раскрывателем, что и везде: `FR-STP-01…14`
         // в описании операции значит четырнадцать требований, а не одно.
-        for name in crate::ids::expand(line) {
+        for name in crate::reproject::ids::expand(line) {
             if !name.starts_with("FR-") {
                 continue;
             }
@@ -1448,7 +1451,7 @@ pub fn requirement_ops(text: &str) -> Vec<Pair> {
 /// Шапка контракта называет требования прозой описания: перечисляет, что он
 /// покрывает. Считать это «названо телом» значит считать оглавление за текст —
 /// разница в сорок четыре требования из двухсот семидесяти двух.
-pub fn requirements_in_body(text: &str) -> Vec<Pair> {
+pub(crate) fn requirements_in_body(text: &str) -> Vec<Pair> {
     let body = match text.find("\ninfo:") {
         Some(i) => &text[i..],
         None => text,
@@ -1466,7 +1469,7 @@ pub fn requirements_in_body(text: &str) -> Vec<Pair> {
 }
 
 /// Пометки полей контракта: чем поле объявлено выводимым и записано ли правило.
-pub fn contract_marks(doc: &Value) -> Vec<Pair> {
+pub(crate) fn contract_marks(doc: &Value) -> Vec<Pair> {
     let mut out = Vec::new();
     let Some(schemas) = doc.get("components").and_then(|c| c.get("schemas")).and_then(|s| s.as_object())
     else {
@@ -1515,7 +1518,7 @@ pub fn contract_marks(doc: &Value) -> Vec<Pair> {
 }
 
 /// Множества `enum` контракта с их адресом.
-pub fn contract_enums(doc: &Value) -> Vec<(String, Vec<String>)> {
+pub(crate) fn contract_enums(doc: &Value) -> Vec<(String, Vec<String>)> {
     let mut out = Vec::new();
     fn walk(node: &Value, at: &str, out: &mut Vec<(String, Vec<String>)>) {
         match node {
@@ -1549,7 +1552,7 @@ pub fn contract_enums(doc: &Value) -> Vec<(String, Vec<String>)> {
 
 /// Значение множества `CHECK`, у которого нет пути внутрь: ни ветки домена, ни
 /// значения словаря контракта. Такое значение хранится, а положить его нечем.
-pub fn check_values_without_path(
+pub(crate) fn check_values_without_path(
     enums: &[Enum],
     checks: &[CheckSet],
     contract: &[(String, Vec<String>)],
@@ -1602,7 +1605,7 @@ pub fn check_values_without_path(
 /// Вход таблицы: схема ТЕЛА ЗАПРОСА у операции, чей ответ 201 называет саму
 /// вещь. Таблицу называет ответ, а вход — запрос: искать таблицу по имени
 /// входной схемы бесполезно, `MonitorInput` таблицей не зовётся.
-pub fn inputs_of_table(doc: &Value) -> Vec<(String, String, String)> {
+pub(crate) fn inputs_of_table(doc: &Value) -> Vec<(String, String, String)> {
     let mut out: Vec<(String, String, String)> = Vec::new();
     let Some(paths) = doc.get("paths").and_then(|p| p.as_object()) else { return out };
     fn refs(node: &Value, out: &mut Vec<String>) {
@@ -1669,7 +1672,7 @@ pub fn inputs_of_table(doc: &Value) -> Vec<(String, String, String)> {
 ///
 /// Шапка контракта называет их прозой, и правят её реже, чем сам контракт.
 /// Число в шапке читают первым, и разошедшееся врёт убедительнее всего.
-pub fn contract_sizes(doc: &Value) -> Vec<(String, usize)> {
+pub(crate) fn contract_sizes(doc: &Value) -> Vec<(String, usize)> {
     const METHODS: [&str; 7] = ["get", "post", "put", "patch", "delete", "head", "options"];
     let paths = doc.get("paths").and_then(|p| p.as_object());
     let n_paths = paths.map(|p| p.len()).unwrap_or(0);
@@ -1701,7 +1704,7 @@ pub fn contract_sizes(doc: &Value) -> Vec<(String, usize)> {
 /// Граница — это имена, стоящие в шапке и НЕ стоящие в теле: шапка перечисляет
 /// то, чему в контракте места не нашлось. Считать её отдельным перечнем нельзя,
 /// иначе она разойдётся с телом при первом же переносе имени.
-pub fn contract_requirement_split(text: &str) -> (usize, usize) {
+pub(crate) fn contract_requirement_split(text: &str) -> (usize, usize) {
     let Ok(re) = regex::Regex::new(r"FR-[A-Z]+-[0-9]+") else { return (0, 0) };
     let cut = match text.find("\ninfo:") {
         Some(i) => i,
@@ -1717,7 +1720,7 @@ pub fn contract_requirement_split(text: &str) -> (usize, usize) {
 /// Сверять его с набором требований в коде было бы пересказом базы: число
 /// требований живёт в базе, и связь с ним — соединение по колонке, а не
 /// вторая копия счёта здесь.
-pub fn contract_head_total(text: &str) -> Vec<Pair> {
+pub(crate) fn contract_head_total(text: &str) -> Vec<Pair> {
     let mut out = Vec::new();
     let Some(cut) = text.find("\ninfo:") else { return out };
     let head = unquote(&text[..cut]);
@@ -1780,7 +1783,7 @@ fn free_number(text: &str, at: usize) -> bool {
 /// Правило спрашивает КАЖДОЕ вхождение имени величины, а не первую строку
 /// заданной формы: та же величина, сказанная в абзаце другими словами, иначе
 /// не читается никем — и это доказано делом, а не опасением.
-pub fn contract_head_echo(text: &str, in_body: usize, border: usize, sizes: &[(String, usize)]) -> Vec<Pair> {
+pub(crate) fn contract_head_echo(text: &str, in_body: usize, border: usize, sizes: &[(String, usize)]) -> Vec<Pair> {
     let mut out = Vec::new();
     let Some(cut) = text.find("\ninfo:") else {
         out.push(Pair {
@@ -1883,7 +1886,7 @@ pub fn contract_head_echo(text: &str, in_body: usize, border: usize, sizes: &[(S
     out
 }
 
-pub fn contract_head(text: &str, doc: &Value) -> Vec<Pair> {
+pub(crate) fn contract_head(text: &str, doc: &Value) -> Vec<Pair> {
     let sizes = contract_sizes(doc);
     let mut out = Vec::new();
     for (what, n) in &sizes {
@@ -1924,7 +1927,7 @@ pub fn contract_head(text: &str, doc: &Value) -> Vec<Pair> {
 /// ноль — правило зелено ровно потому, что ему нечего сказать. Поэтому
 /// сверяется то, НА ЧЁМ СТОЯТ ПРАВИЛА: число схем, число таблиц, число
 /// перечислений — каждое двумя способами.
-pub fn corpus_reach(
+pub(crate) fn corpus_reach(
     contract_text: &str,
     doc: &Value,
     enums: &[Enum],
@@ -1980,7 +1983,7 @@ pub fn corpus_reach(
 }
 
 #[cfg(test)]
-mod метки {
+mod marks {
     use super::*;
     use serde_json::json;
 
@@ -2013,7 +2016,7 @@ COMMENT ON COLUMN absences.starts_at IS 'x-source: ';
 COMMENT ON TABLE tenants IS 'x-source: импорт конфигурации';
 ";
 
-    fn контракт() -> Value {
+    fn contract() -> Value {
         let body = |s: &str| {
             json!({ "content": { "application/json": { "schema": { "$ref": format!("#/components/schemas/{s}") } } } })
         };
@@ -2038,16 +2041,16 @@ COMMENT ON TABLE tenants IS 'x-source: импорт конфигурации';
         })
     }
 
-    fn сверка(sql: &str) -> Vec<Pair> {
-        contract_vs_schema(&контракт(), &schema_of(&[sql.into(), MARKS.into()]), &[("Handoff", "handovers")])
+    fn compare(sql: &str) -> Vec<Pair> {
+        contract_vs_schema(&contract(), &schema_of(&[sql.into(), MARKS.into()]), &[("Handoff", "handovers")])
     }
 
-    fn пояснение<'a>(p: &'a [Pair], name: &str) -> Option<&'a str> {
+    fn note<'a>(p: &'a [Pair], name: &str) -> Option<&'a str> {
         p.iter().find(|x| x.name == name).map(|x| x.detail.as_str())
     }
 
     #[test]
-    fn комментарий_и_табличный_внешний_ключ_доходят_до_схемы() {
+    fn comment_and_table_foreign_key_reach_before_schema() {
         let t = schema_of(&[SQL.into(), MARKS.into()]);
         let col = |table: &str, name: &str| {
             t.iter().find(|x| x.name == table).and_then(|x| x.cols.iter().find(|c| c.name == name)).expect("колонка")
@@ -2062,59 +2065,59 @@ COMMENT ON TABLE tenants IS 'x-source: импорт конфигурации';
     }
 
     #[test]
-    fn поле_несёт_x_stored_in_обрезанным() {
-        let f = contract_fields(&контракт());
+    fn a_field_carries_x_stored_in_truncated() {
+        let f = contract_fields(&contract());
         let at = |a: &str| f.iter().find(|x| x.at == a).and_then(|x| x.stored_in.as_deref());
         assert_eq!(at("AbsenceInput.from"), Some("absences.starts_at"));
         assert_eq!(at("Tenant.name"), None);
     }
 
     #[test]
-    fn создание_без_тела_тоже_вход_и_несёт_путь() {
-        let i = inputs_of_table(&контракт());
+    fn creation_without_body_too_input_and_carries_path() {
+        let i = inputs_of_table(&contract());
         assert!(i.contains(&("GapDismissal".into(), String::new(), "/gaps/{gap_key}/dismiss".into())), "{i:?}");
         assert!(i.contains(&("Absence".into(), "AbsenceInput".into(), "/absences".into())), "{i:?}");
     }
 
     #[test]
-    fn x_source_помечает_колонку_и_таблицу() {
-        let p = сверка(SQL);
-        assert_eq!(пояснение(&p, "absences.synced_at"), Some("помечено x-source: синхронизация календаря"));
-        assert_eq!(пояснение(&p, "absences.source · обязательна"),
+    fn x_source_marks_both_a_column_and_a_table() {
+        let p = compare(SQL);
+        assert_eq!(note(&p, "absences.synced_at"), Some("помечено x-source: синхронизация календаря"));
+        assert_eq!(note(&p, "absences.source · обязательна"),
                    Some("помечено x-source: POST /absences пишет 'manual'"));
-        assert_eq!(пояснение(&p, "tenants · без записи"), Some("помечено x-source: импорт конфигурации"));
-        assert!(пояснение(&p, "monitors · без записи").is_some_and(|d| d.starts_with("таблица есть")));
+        assert_eq!(note(&p, "tenants · без записи"), Some("помечено x-source: импорт конфигурации"));
+        assert!(note(&p, "monitors · без записи").is_some_and(|d| d.starts_with("таблица есть")));
     }
 
     #[test]
-    fn x_stored_in_переводит_сверку_на_названную_колонку() {
-        let p = сверка(SQL);
-        assert_eq!(пояснение(&p, "Absence.from"), Some("помечено x-stored-in: absences.starts_at"));
-        assert_eq!(пояснение(&p, "absences.starts_at"), None, "колонка не засчитана семье");
-        assert_eq!(пояснение(&p, "absences.starts_at · обязательна"), None, "колонка не засчитана входу");
+    fn x_stored_in_moves_the_comparison_to_the_named_column() {
+        let p = compare(SQL);
+        assert_eq!(note(&p, "Absence.from"), Some("помечено x-stored-in: absences.starts_at"));
+        assert_eq!(note(&p, "absences.starts_at"), None, "колонка не засчитана семье");
+        assert_eq!(note(&p, "absences.starts_at · обязательна"), None, "колонка не засчитана входу");
     }
 
     #[test]
-    fn битая_цель_оставляет_находку() {
-        let p = сверка(SQL);
-        assert!(пояснение(&p, "GapDismissal.at").is_some_and(|d| d.starts_with(
+    fn broken_goal_leaves_finding() {
+        let p = compare(SQL);
+        assert!(note(&p, "GapDismissal.at").is_some_and(|d| d.starts_with(
             "поле контракта без колонки: x-stored-in называет gap_dismissals.dismissed_at")));
     }
 
     #[test]
-    fn параметр_пути_и_201_без_тела_засчитаны() {
-        let p = сверка(SQL);
-        assert_eq!(пояснение(&p, "gap_dismissals.gap_key"), None);
-        assert_eq!(пояснение(&p, "gap_dismissals.gap_key · обязательна"), None);
-        assert_eq!(пояснение(&p, "gap_dismissals · без записи"), None);
+    fn parameter_path_and_201_without_body_counted() {
+        let p = compare(SQL);
+        assert_eq!(note(&p, "gap_dismissals.gap_key"), None);
+        assert_eq!(note(&p, "gap_dismissals.gap_key · обязательна"), None);
+        assert_eq!(note(&p, "gap_dismissals · без записи"), None);
     }
 
     #[test]
-    fn внешний_ключ_к_отрезку_пути_засчитан_только_единственный() {
-        assert_eq!(пояснение(&сверка(SQL), "handovers.from_shift_id · обязательна"), None);
-        let два = сверка(&SQL.replace("to_shift_id text,", "to_shift_id text NOT NULL,"));
-        assert!(пояснение(&два, "handovers.from_shift_id · обязательна").is_some());
-        assert!(пояснение(&два, "handovers.to_shift_id · обязательна").is_some());
+    fn foreign_key_to_segment_path_counted_only_only() {
+        assert_eq!(note(&compare(SQL), "handovers.from_shift_id · обязательна"), None);
+        let two = compare(&SQL.replace("to_shift_id text,", "to_shift_id text NOT NULL,"));
+        assert!(note(&two, "handovers.from_shift_id · обязательна").is_some());
+        assert!(note(&two, "handovers.to_shift_id · обязательна").is_some());
     }
 
     const RS: &str = r#"
@@ -2155,7 +2158,7 @@ CREATE TABLE config_repos (id text PRIMARY KEY, sync_state text NOT NULL CHECK (
 ";
 
     #[test]
-    fn метка_над_перечислением_и_над_веткой() {
+    fn mark_above_enum_and_above_branch() {
         let e = enums_of(RS, "x.rs");
         assert_eq!(e[0].mark, Some(("x-derived".to_owned(), "из last_seen_at".to_owned())));
         assert_eq!(e[1].mark, Some(("x-stored-in".to_owned(), "monitors.condition".to_owned())));
@@ -2164,22 +2167,22 @@ CREATE TABLE config_repos (id text PRIMARY KEY, sync_state text NOT NULL CHECK (
     }
 
     #[test]
-    fn пара_и_непарное_читают_метки() {
+    fn pair_and_unpaired_read_marks() {
         let p = pair(&enums_of(RS, "x.rs"), &checks_of(CHECKS, "0001.sql"), &[], &[], &schema_of(&[CHECKS.into()]));
-        assert_eq!(пояснение(&p, "AgentState"), Some("помечено x-derived: из last_seen_at"));
-        assert_eq!(пояснение(&p, "Operator"), Some("помечено x-stored-in: monitors.condition"));
-        assert!(пояснение(&p, "Combinator").is_some_and(|d| d.starts_with("перечисление без множества CHECK")
+        assert_eq!(note(&p, "AgentState"), Some("помечено x-derived: из last_seen_at"));
+        assert_eq!(note(&p, "Operator"), Some("помечено x-stored-in: monitors.condition"));
+        assert!(note(&p, "Combinator").is_some_and(|d| d.starts_with("перечисление без множества CHECK")
             && d.ends_with("x-stored-in называет monitors.name — jsonb-колонки нет")));
-        assert_eq!(пояснение(&p, "SyncState ↔ config_repos.sync_state"),
+        assert_eq!(note(&p, "SyncState ↔ config_repos.sync_state"),
                    Some("сходятся, значений 2; вне хранения (x-derived): not_versioned"));
     }
 
-    fn ссылка(schema: &str) -> Value {
+    fn link(schema: &str) -> Value {
         json!({ "content": { "application/json": { "schema": { "$ref": format!("#/components/schemas/{schema}") } } } })
     }
 
     #[test]
-    fn создание_чужой_вещи_таблицу_не_пишет_и_путём_не_входит() {
+    fn creation_foreign_thing_table_not_writes_and_path_not_enters() {
         let sql = "
 CREATE TABLE monitors (id text PRIMARY KEY, account_id text NOT NULL, name text NOT NULL, team_id text NOT NULL);
 CREATE TABLE teams (id text PRIMARY KEY, name text NOT NULL);
@@ -2187,9 +2190,9 @@ CREATE TABLE webhooks (id text PRIMARY KEY, account_id text NOT NULL, user_id te
 ";
         let doc = json!({
             "paths": {
-                "/monitors": { "post": { "requestBody": ссылка("MonitorInput"), "responses": { "201": ссылка("Monitor") } } },
-                "/teams/{team_id}/monitors/test-run": { "post": { "responses": { "201": ссылка("MonitorTestRun") } } },
-                "/users/{user_id}/webhook-test": { "post": { "responses": { "201": ссылка("WebhookTestResult") } } }
+                "/monitors": { "post": { "requestBody": link("MonitorInput"), "responses": { "201": link("Monitor") } } },
+                "/teams/{team_id}/monitors/test-run": { "post": { "responses": { "201": link("MonitorTestRun") } } },
+                "/users/{user_id}/webhook-test": { "post": { "responses": { "201": link("WebhookTestResult") } } }
             },
             "components": { "schemas": {
                 "Monitor": { "properties": { "name": { "type": "string" } } },
@@ -2201,13 +2204,13 @@ CREATE TABLE webhooks (id text PRIMARY KEY, account_id text NOT NULL, user_id te
             } }
         });
         let p = contract_vs_schema(&doc, &schema_of(&[sql.into()]), &[]);
-        assert!(пояснение(&p, "monitors.team_id").is_some_and(|d| d.starts_with("колонка без входа")), "параметр чужого пути");
-        assert!(пояснение(&p, "monitors.team_id · обязательна").is_some(), "путь чужого создания");
-        assert!(пояснение(&p, "webhooks · без записи").is_some_and(|d| d.starts_with("таблица есть")), "201 чужой вещи без тела");
+        assert!(note(&p, "monitors.team_id").is_some_and(|d| d.starts_with("колонка без входа")), "параметр чужого пути");
+        assert!(note(&p, "monitors.team_id · обязательна").is_some(), "путь чужого создания");
+        assert!(note(&p, "webhooks · без записи").is_some_and(|d| d.starts_with("таблица есть")), "201 чужой вещи без тела");
     }
 
     #[test]
-    fn внешний_ключ_к_родителю_не_засчитан_когда_скобка_родителя_своя_колонка() {
+    fn foreign_key_to_parent_not_counted_when_brace_parent_own_column() {
         let sql = "
 CREATE TABLE accounts (id text PRIMARY KEY);
 CREATE TABLE services (id text PRIMARY KEY, account_id text NOT NULL);
@@ -2221,7 +2224,7 @@ CREATE TABLE billing_profiles (
 ";
         let doc = json!({
             "paths": { "/accounts/{account_id}/billing-profiles": {
-                "post": { "requestBody": ссылка("BillingProfileInput"), "responses": { "201": ссылка("BillingProfile") } }
+                "post": { "requestBody": link("BillingProfileInput"), "responses": { "201": link("BillingProfile") } }
             } },
             "components": { "schemas": {
                 "BillingProfile": { "properties": {
@@ -2231,18 +2234,18 @@ CREATE TABLE billing_profiles (
             } }
         });
         let p = contract_vs_schema(&doc, &schema_of(&[sql.into()]), &[]);
-        assert!(пояснение(&p, "billing_profiles.payer_account_id · обязательна").is_some(), "скобка родителя названа своей колонкой");
-        assert!(пояснение(&p, "billing_profiles.service_id · обязательна").is_some(), "таблицы ключа нет в пути");
+        assert!(note(&p, "billing_profiles.payer_account_id · обязательна").is_some(), "скобка родителя названа своей колонкой");
+        assert!(note(&p, "billing_profiles.service_id · обязательна").is_some(), "таблицы ключа нет в пути");
         let camel = serde_json::to_string(&doc).expect("контракт").replace("{account_id}", "{accountId}");
         let p = contract_vs_schema(&serde_json::from_str(&camel).expect("контракт"), &schema_of(&[sql.into()]), &[]);
-        assert!(пояснение(&p, "billing_profiles.payer_account_id · обязательна").is_some(), "второй ключ к родителю при скобке не колонкой");
+        assert!(note(&p, "billing_profiles.payer_account_id · обязательна").is_some(), "второй ключ к родителю при скобке не колонкой");
         let runs = "
 CREATE TABLE monitors (id text PRIMARY KEY, name text NOT NULL);
 CREATE TABLE monitor_runs (id text PRIMARY KEY, monitor_id text NOT NULL REFERENCES monitors(id), note text);
 ";
         let doc = json!({
             "paths": { "/monitors/{id}/runs": {
-                "post": { "requestBody": ссылка("MonitorRunInput"), "responses": { "201": ссылка("MonitorRun") } }
+                "post": { "requestBody": link("MonitorRunInput"), "responses": { "201": link("MonitorRun") } }
             } },
             "components": { "schemas": {
                 "MonitorRun": { "properties": { "note": { "type": "string" } } },
@@ -2250,11 +2253,11 @@ CREATE TABLE monitor_runs (id text PRIMARY KEY, monitor_id text NOT NULL REFEREN
             } }
         });
         let p = contract_vs_schema(&doc, &schema_of(&[runs.into()]), &[]);
-        assert_eq!(пояснение(&p, "monitor_runs.monitor_id · обязательна"), None, "скобка {{id}} — первичный ключ, а не колонка-ключ");
+        assert_eq!(note(&p, "monitor_runs.monitor_id · обязательна"), None, "скобка {{id}} — первичный ключ, а не колонка-ключ");
     }
 
     #[test]
-    fn вход_даёт_только_скобка_сразу_за_отрезком_таблицы() {
+    fn input_gives_only_brace_immediately_behind_segment_table() {
         let sql = "
 CREATE TABLE changes (id text PRIMARY KEY, environment_id text NOT NULL);
 CREATE TABLE teams (id text PRIMARY KEY, name text NOT NULL);
@@ -2262,7 +2265,7 @@ CREATE TABLE monitors (id text PRIMARY KEY, name text NOT NULL, team_id text NOT
 CREATE TABLE postmortems (id text PRIMARY KEY, title text NOT NULL);
 CREATE TABLE postmortem_actions (id text PRIMARY KEY, postmortem_id text NOT NULL, note text NOT NULL);
 ";
-        let get = |schema: &str, params: Value| json!({ "get": { "parameters": params, "responses": { "200": ссылка(schema) } } });
+        let get = |schema: &str, params: Value| json!({ "get": { "parameters": params, "responses": { "200": link(schema) } } });
         let doc = json!({
             "paths": {
                 "/changes": get("Change", json!([{ "name": "environment_id", "in": "query" }])),
@@ -2276,20 +2279,20 @@ CREATE TABLE postmortem_actions (id text PRIMARY KEY, postmortem_id text NOT NUL
             } }
         });
         let p = contract_vs_schema(&doc, &schema_of(&[sql.into()]), &[]);
-        assert!(пояснение(&p, "changes.environment_id").is_some_and(|d| d.starts_with("колонка без входа")), "параметр запроса");
-        assert!(пояснение(&p, "monitors.team_id").is_some_and(|d| d.starts_with("колонка без входа")), "скобка чужого отрезка");
-        assert_eq!(пояснение(&p, "postmortem_actions.postmortem_id"), None, "скобка родителя дочерней таблице");
+        assert!(note(&p, "changes.environment_id").is_some_and(|d| d.starts_with("колонка без входа")), "параметр запроса");
+        assert!(note(&p, "monitors.team_id").is_some_and(|d| d.starts_with("колонка без входа")), "скобка чужого отрезка");
+        assert_eq!(note(&p, "postmortem_actions.postmortem_id"), None, "скобка родителя дочерней таблице");
     }
 
     #[test]
-    fn множественное_от_y_бывает_и_на_s() {
+    fn plural_from_y_happens_and_on_s() {
         let t = schema_of(&["CREATE TABLE api_keys (id text PRIMARY KEY);\nCREATE TABLE policies (id text PRIMARY KEY);".into()]);
         assert_eq!(schema_table(&["ApiKey".into(), "Policy".into()], &t, &[]),
                    vec![("ApiKey".to_owned(), "api_keys".to_owned()), ("Policy".to_owned(), "policies".to_owned())]);
     }
 
     #[test]
-    fn метка_колонки_и_таблицы_живёт_до_снятия() {
+    fn mark_columns_and_table_lives_before_removal() {
         let base = "CREATE TABLE sessions (id text PRIMARY KEY, jti text NOT NULL, state jsonb NOT NULL);";
         let marked = "COMMENT ON TABLE sessions IS 'x-source: подписант';\nCOMMENT ON COLUMN sessions.jti IS 'x-source: подписант';";
         let source = |texts: &[&str]| {
@@ -2311,7 +2314,7 @@ CREATE TABLE postmortem_actions (id text PRIMARY KEY, postmortem_id text NOT NUL
     }
 
     #[test]
-    fn смена_типа_уводит_колонку_из_jsonb() {
+    fn change_type_moves_out_column_from_jsonb() {
         let rs = "/// x-stored-in: sessions.state\n#[derive(Debug)]\npub enum Kind {\n    A,\n    B,\n}\n";
         let create = "CREATE TABLE sessions (id text PRIMARY KEY, state jsonb NOT NULL);";
         let kind = |texts: &[&str]| {
@@ -2326,7 +2329,7 @@ CREATE TABLE postmortem_actions (id text PRIMARY KEY, postmortem_id text NOT NUL
     }
 
     #[test]
-    fn упоминание_метки_в_прозе_меткой_не_становится() {
+    fn mention_marks_at_prose_mark_not_becomes() {
         let rs = "
 /// Состояние. В отличие от поля контракта с `x-derived: …`, хранится в jobs.state.
 #[derive(Debug)]
@@ -2351,13 +2354,13 @@ pub enum Other {
     }
 
     #[test]
-    fn x_stored_in_засчитывается_только_схеме_своей_таблицы() {
+    fn x_stored_in_counts_only_in_the_schema_of_its_own_table() {
         let sql = "
 CREATE TABLE monitors (id text PRIMARY KEY, account_id text NOT NULL, name text NOT NULL, secret_hash text);
 CREATE TABLE accounts (id text PRIMARY KEY, slug text NOT NULL);
 ";
         let doc = json!({
-            "paths": { "/monitors": { "post": { "requestBody": ссылка("MonitorInput"), "responses": { "201": ссылка("Monitor") } } } },
+            "paths": { "/monitors": { "post": { "requestBody": link("MonitorInput"), "responses": { "201": link("Monitor") } } } },
             "components": { "schemas": {
                 "Monitor": { "properties": { "name": { "type": "string" },
                                              "runbook": { "type": "string", "x-stored-in": "accounts.slug" } } },
@@ -2366,20 +2369,20 @@ CREATE TABLE accounts (id text PRIMARY KEY, slug text NOT NULL);
             } }
         });
         let p = contract_vs_schema(&doc, &schema_of(&[sql.into()]), &[]);
-        assert!(пояснение(&p, "Monitor.runbook").is_some_and(|d| d.starts_with("поле контракта без колонки")), "чужая таблица");
-        assert!(пояснение(&p, "monitors.secret_hash").is_some_and(|d| d.starts_with("колонка без входа")), "схема без таблицы");
-        assert_eq!(пояснение(&сверка(SQL), "AbsenceInput.from"), Some("помечено x-stored-in: absences.starts_at"));
+        assert!(note(&p, "Monitor.runbook").is_some_and(|d| d.starts_with("поле контракта без колонки")), "чужая таблица");
+        assert!(note(&p, "monitors.secret_hash").is_some_and(|d| d.starts_with("колонка без входа")), "схема без таблицы");
+        assert_eq!(note(&compare(SQL), "AbsenceInput.from"), Some("помечено x-stored-in: absences.starts_at"));
     }
 
     #[test]
-    fn ветка_вне_хранения_не_уводит_перечисление_из_правил() {
+    fn branch_outside_storage_not_moves_out_enum_from_rules() {
         let rs = "#[derive(Debug)]\npub enum Plan {\n    Free,\n    /// x-derived: считается\n    Paid,\n}\n";
-        assert_eq!(пояснение(&pair(&enums_of(rs, "p.rs"), &[], &[], &[], &[]), "Plan"),
+        assert_eq!(note(&pair(&enums_of(rs, "p.rs"), &[], &[], &[], &[]), "Plan"),
                    Some("перечисление без множества CHECK (p.rs), значений 1; вне хранения (x-derived): paid"));
     }
 
     #[test]
-    fn внешний_ключ_со_схемой_и_именованным_ограничением() {
+    fn foreign_key_with_schema_and_named_constraint() {
         let sql = "
 CREATE TABLE swaps (
   id text PRIMARY KEY,

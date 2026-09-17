@@ -28,7 +28,7 @@ const LEFT_OPEN: &str = "Оставлено открытым";
 ///
 /// Отбор идёт ВИДОМ, а не корнем пути: корень был способом сказать «эти
 /// документы», а вид говорит это прямо и записан у каждого.
-pub async fn section_titles(
+pub(crate) async fn section_titles(
     pool: &Pool,
     project: &str,
     kinds: &[&str],
@@ -51,7 +51,7 @@ pub async fn section_titles(
 }
 
 /// Сущности названных видов, в порядке имени.
-pub async fn named_of_kinds(
+pub(crate) async fn named_of_kinds(
     pool: &Pool,
     project: &str,
     kinds: &[&str],
@@ -71,15 +71,18 @@ pub async fn named_of_kinds(
 
 /// Оговорка об удалении: имя в такой строке названо, чтобы сказать, что его
 /// больше нет.
-pub fn gone(line: &str) -> bool {
+pub(crate) fn gone(line: &str) -> bool {
     GONE.is_match(line)
 }
+
+/// Строка прогона: имя, этап, задача, заголовок и признаки записи.
+type RunRow = (String, String, String, String, String, String, bool, bool, i32, bool);
 
 static GONE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)удал|отмен|снят|прежн|историч|устар|не существ").expect("образец оговорки")
 });
 
-pub async fn project(
+pub(crate) async fn project(
     pool: &Pool,
     project: &str,
 ) -> Result<(usize, usize, usize), crate::db::Fail> {
@@ -173,7 +176,7 @@ pub async fn project(
         }
     }
 
-    let mut runs: Vec<(String, String, String, String, String, String, bool, bool, i32, bool)> = Vec::new();
+    let mut runs: Vec<RunRow> = Vec::new();
     for e in &named {
         if e.0 != "run" {
             continue;

@@ -11,7 +11,7 @@
 
 use deadpool_postgres::Pool;
 
-pub async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fail> {
+pub(crate) async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let terms = crate::scheme::Terms::load_at(&*client, project).await?;
     let surface_marker = terms.one("marker.surface-list").unwrap_or("").to_owned();
@@ -206,7 +206,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fai
 ///
 /// Якоря снимаются: имя стоит ВНУТРИ строки, а `^…$` из объявления имени
 /// относятся к имени целиком, и оставленные они не совпадут никогда.
-pub fn holder_pattern(id_re: &str) -> String {
+pub(crate) fn holder_pattern(id_re: &str) -> String {
     format!(
         r"^\s*[-*]\s+.?({}).?\s*[—–-]\s*(.+)$",
         id_re.trim_start_matches('^').trim_end_matches('$')
@@ -214,33 +214,33 @@ pub fn holder_pattern(id_re: &str) -> String {
 }
 
 #[cfg(test)]
-mod держатель {
+mod holder {
     use super::holder_pattern;
 
-    fn ловит(id_re: &str, line: &str) -> bool {
+    fn catches(id_re: &str, line: &str) -> bool {
         regex::Regex::new(&holder_pattern(id_re))
             .expect("образец")
             .is_match(line)
     }
 
-    const БЕЗ_БУКВ: &str = "- `FR-01` — инвариант держится `crates/core/src/rule.rs`";
-    const С_БУКВАМИ: &str = "- `FR-SIT-04` — инвариант держится `crates/core/src/rule.rs`";
+    const WITHOUT_LETTERS: &str = "- `FR-01` — инвариант держится `crates/core/src/rule.rs`";
+    const WITH_WITH_LETTERS: &str = "- `FR-SIT-04` — инвариант держится `crates/core/src/rule.rs`";
 
     #[test]
-    fn зашитый_образец_не_видел_имён_без_буквенного_участка() {
-        assert!(!ловит("FR-[A-Z]+-[0-9]+", БЕЗ_БУКВ), "прежний образец совпал, а не должен был");
-        assert!(ловит("FR-[A-Z]+-[0-9]+", С_БУКВАМИ));
+    fn hardcoded_pattern_not_saw_names_without_letter_part() {
+        assert!(!catches("FR-[A-Z]+-[0-9]+", WITHOUT_LETTERS), "прежний образец совпал, а не должен был");
+        assert!(catches("FR-[A-Z]+-[0-9]+", WITH_WITH_LETTERS));
     }
 
     #[test]
-    fn объявленный_образец_видит_своё_имя() {
-        assert!(ловит("FR-[0-9]+", БЕЗ_БУКВ), "объявленный образец не поймал строку набора");
+    fn declared_pattern_sees_own_name() {
+        assert!(catches("FR-[0-9]+", WITHOUT_LETTERS), "объявленный образец не поймал строку набора");
     }
 
     #[test]
-    fn якоря_объявления_снимаются() {
+    fn anchor_declaration_cleared() {
         // `id.requirement` объявляется как образец ИМЕНИ — `^FR-[0-9]+$`.
         // Оставленные якоря не совпали бы ни с одной строкой перечня.
-        assert!(ловит("^FR-[0-9]+$", БЕЗ_БУКВ));
+        assert!(catches("^FR-[0-9]+$", WITHOUT_LETTERS));
     }
 }

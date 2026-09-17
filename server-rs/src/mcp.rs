@@ -45,8 +45,8 @@ fn refusal(m: Miss) -> Value {
         Miss::Unprojected(k) => {
             format!("вид {k} в базу не спроецирован: ответ неизвестен, а не пуст — спрашивать нечего, а не ничего нет")
         }
-        Miss::Busy(почему) => format!("{почему}. Работа не сделана: повторите этот же вызов"),
-        Miss::Refused(почему) => почему,
+        Miss::Busy(why) => format!("{why}. Работа не сделана: повторите этот же вызов"),
+        Miss::Refused(why) => why,
         Miss::Db(e) => format!("база не ответила: {e:#}"),
     };
     // Занятость помечается ПОЛЕМ, а не словами: по словам её не отличить от
@@ -70,10 +70,10 @@ fn written_unprojected(done: &str, m: Miss) -> Value {
         Miss::Db(e) | Miss::Refused(e) | Miss::Busy(e) => e,
         other => return refusal(other),
     };
-    let сказано = format!(
+    let said = format!(
         "{done}, но проекции не собраны: {why}. Пока `reproject` не пройдёт, гейт и план судят по прежним"
     );
-    refusal(if busy { Miss::Busy(сказано) } else { Miss::Refused(сказано) })
+    refusal(if busy { Miss::Busy(said) } else { Miss::Refused(said) })
 }
 
 /// Число, пришедшее СТРОКОЙ, — то же число.
@@ -104,10 +104,10 @@ fn rows(args: &Value, key: &str) -> Vec<Value> {
 }
 
 fn list(args: &Value, key: &str) -> Vec<String> {
-    let свой;
+    let own;
     let v = match args.get(key) {
         Some(Value::String(t)) => match serde_json::from_str::<Value>(t) {
-            Ok(p) if p.is_array() => { свой = p; &свой }
+            Ok(p) if p.is_array() => { own = p; &own }
             // Одиночное имя без скобок — список из одного.
             _ => return if t.trim().is_empty() { Vec::new() } else { vec![t.clone()] },
         },
@@ -252,7 +252,7 @@ impl Mcp {
         tools.push(json!({ "name": "step-method-set", "description": "объявить способ проверки ступени лестницы; переживает пересборку и выкатку",
             "inputSchema": { "type": "object", "properties": { "set": s("набор лестницы; по умолчанию godzy"), "process": s("процесс, по умолчанию godzy"),
                 "ord": json!({"type":"integer"}), "methodKind": s("query · command"), "method": s("запрос либо команда"),
-                "run": s("команда, которой видна единица работы ступени; `{имя}` — первое слово находки"),
+                "run": s(&crate::projector::step_run_hint()),
                 "unit": s("вид единицы работы: document · link · version · question · gate · sensor · milestone · task. Ступень `task` — та, с которой лестница выдаёт задачи: до неё `next-task` отказывает"),
                 "subject": s("запрос ПРЕДМЕТА ступени: пусто в ответе — «нечем мерить», а не «пройдено»"),
                 "subjectWhy": s("чем объяснить пустой предмет"),
@@ -830,7 +830,7 @@ impl Mcp {
                 // оболочку снимают все — и `mh call`, и веб, и сам протокол, —
                 // и поле снаружи не доходило ни до кого.
                 let mut out = out;
-                let сказано = format!(
+                let said = format!(
                     "записано, но отметка «пересчитать» не поставлена: {}. \
                      Правку повторять не надо — позовите `reproject` и `gate-measure`",
                     e.says()
@@ -838,10 +838,10 @@ impl Mcp {
                 let text = out["content"][0]["text"].as_str().unwrap_or("").to_owned();
                 let inner = match serde_json::from_str::<Value>(&text) {
                     Ok(Value::Object(mut map)) => {
-                        map.insert("измерение".to_owned(), json!(сказано));
+                        map.insert("измерение".to_owned(), json!(said));
                         Value::Object(map)
                     }
-                    _ => json!({ "ответ": text, "измерение": сказано }),
+                    _ => json!({ "ответ": text, "измерение": said }),
                 };
                 out["content"][0]["text"] = json!(serde_json::to_string_pretty(&inner).unwrap_or(text));
                 return out;
@@ -932,10 +932,10 @@ impl Mcp {
 
         match name {
             "kinds" => {
-                let реестр = match self.живой_реестр().await { Ok(k) => k, Err(e) => return refusal(e) };
+                let registry = match self.live_registry().await { Ok(k) => k, Err(e) => return refusal(e) };
                 let mut out = Vec::new();
-                for (kind, k) in &реестр.0 {
-                    let count = match entities::ids(&self.pool, &реестр, p, kind).await {
+                for (kind, k) in &registry.0 {
+                    let count = match entities::ids(&self.pool, &registry, p, kind).await {
                         Ok(l) => json!(l.len()),
                         Err(Miss::Unprojected(_)) => Value::Null,
                         Err(e) => return refusal(e),
@@ -1016,7 +1016,7 @@ impl Mcp {
                     .duration_since(std::time::SystemTime::UNIX_EPOCH)
                     .map(|d| d.as_millis() as i64)
                     .unwrap_or(0);
-                let states: Vec<(String, String, String, i64)> = Some(rows(&args, "states"))
+                let states: Vec<(String, String, String, i64)> = Some(rows(args, "states"))
                     .map(|list| {
                         list.iter()
                             .filter_map(|it| {
@@ -1145,9 +1145,7 @@ impl Mcp {
                 let blame = args.get("blame").and_then(|v| v.as_str()).unwrap_or("");
                 let fixed = args.get("fixedBy").and_then(|v| v.as_str()).unwrap_or("");
                 let why = args.get("why").and_then(|v| v.as_str()).unwrap_or("");
-                match crate::projector::set_blame(&self.pool, p, rule, entity, blame, fixed, why,
-                                                  &self.author,
-                                                  args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
+                match crate::projector::set_blame(&self.pool, p, crate::projector::Blame { rule, entity_id: entity, blame, fixed_by: fixed, why, decided_by: &self.author }, args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),
                 }
@@ -1186,7 +1184,7 @@ impl Mcp {
                 }
             }
             "kind-projection" => {
-                let holds = list(&args, "holds");
+                let holds = list(args, "holds");
                 match crate::projector::set_kind_projection(&self.pool, kind_arg,
                         args.get("projection").and_then(|v| v.as_str()).unwrap_or(""), &holds).await {
                     Ok(v) => ok(v),
@@ -1312,7 +1310,7 @@ impl Mcp {
             "impact" => {
                 match crate::projector::impact(&self.pool, p, kind_arg,
                         args.get("id").and_then(|v| v.as_str()).or(id).unwrap_or(""),
-                        num(&args, "depth").unwrap_or(3) as i32).await {
+                        num(args, "depth").unwrap_or(3) as i32).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),
                 }
@@ -1321,7 +1319,7 @@ impl Mcp {
                 let name = args.get("name").and_then(|v| v.as_str())
                     .or(id).unwrap_or("");
                 match crate::projector::tree(&self.pool, p, kind_arg, name,
-                        num(&args, "depth").unwrap_or(2) as i32).await {
+                        num(args, "depth").unwrap_or(2) as i32).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),
                 }
@@ -1369,9 +1367,7 @@ impl Mcp {
             },
             "derived-copy-set" => {
                 let g = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("");
-                match crate::projector::set_derived_copy(&self.pool, p, g("name"), g("source"),
-                        g("copy"), g("compare"), g("pattern"), g("sourcePattern"), g("why"), &self.author,
-                        args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
+                match crate::projector::set_derived_copy(&self.pool, p, crate::projector::DerivedCopy { name: g("name"), source: g("source"), copy: g("copy"), compare: g("compare"), pattern: g("pattern"), source_pattern: g("sourcePattern"), why: g("why"), decided_by: &self.author }, args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),
                 }
@@ -1424,7 +1420,7 @@ impl Mcp {
                         })));
                     }
                 }
-                hits.sort_by(|a, b| b.0.cmp(&a.0));
+                hits.sort_by_key(|h| std::cmp::Reverse(h.0));
                 let total = hits.len();
                 ok(json!({
                     "asked": q,
@@ -1521,7 +1517,7 @@ impl Mcp {
             },
             "code-facts-push" => {
                 let fact_kind = args.get("kind").and_then(|v| v.as_str()).unwrap_or("").to_owned();
-                let list: Vec<(String, String)> = Some(rows(&args, "facts"))
+                let list: Vec<(String, String)> = Some(rows(args, "facts"))
                     .map(|l| l.iter().filter_map(|it| Some((
                         it.get("name")?.as_str()?.to_owned(),
                         it.get("detail").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
@@ -1572,7 +1568,7 @@ impl Mcp {
             }
             "skills-push" => {
                 let set_name = args.get("set").and_then(|v| v.as_str()).unwrap_or("godzy").to_owned();
-                let list: Vec<(String, String, String)> = Some(rows(&args, "skills"))
+                let list: Vec<(String, String, String)> = Some(rows(args, "skills"))
                     .map(|l| l.iter().filter_map(|it| Some((
                         it.get("name")?.as_str()?.to_owned(),
                         it.get("description").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
@@ -1619,7 +1615,7 @@ impl Mcp {
                         "body": r.get::<_, String>(6) })).collect::<Vec<_>>() }))
             }
             "preflight-push" => {
-                let list: Vec<(String, i64, i64, String, i32, String)> = Some(rows(&args, "verdicts"))
+                let list: Vec<(String, i64, i64, String, i32, String)> = Some(rows(args, "verdicts"))
                     .map(|l| l.iter().filter_map(|it| Some((
                         it.get("task")?.as_str()?.to_owned(),
                         num(it, "at").unwrap_or(0),
@@ -1651,7 +1647,7 @@ impl Mcp {
             "worktree-push" => {
                 // Пустая подача здесь ЗАКОННА: ни одного открытого дерева — это
                 // ответ, а не молчание. Поэтому отдельного отказа нет.
-                let list: Vec<(String, String, i64)> = Some(rows(&args, "open"))
+                let list: Vec<(String, String, i64)> = Some(rows(args, "open"))
                     .map(|l| l.iter().filter_map(|it| Some((
                         it.get("task")?.as_str()?.to_owned(),
                         it.get("branch").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
@@ -1713,12 +1709,20 @@ impl Mcp {
                 let mk = args.get("methodKind").and_then(|v| v.as_str()).unwrap_or("unknown");
                 let method = args.get("method").and_then(|v| v.as_str()).unwrap_or("");
                 let drop = args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false);
-                match crate::projector::set_step_method(&self.pool, set_name, process, ord, mk, method,
-                                                  args.get("run").and_then(|v| v.as_str()),
-                                                  args.get("unit").and_then(|v| v.as_str()),
-                                                  args.get("subject").and_then(|v| v.as_str()),
-                                                  args.get("subjectWhy").and_then(|v| v.as_str()),
-                                                        &self.author, drop).await {
+                match crate::projector::set_step_method(
+                    &self.pool,
+                    crate::projector::StepMethod {
+                        set_name, process, ord, method_kind: mk, method,
+                        run: args.get("run").and_then(|v| v.as_str()),
+                        unit: args.get("unit").and_then(|v| v.as_str()),
+                        subject: args.get("subject").and_then(|v| v.as_str()),
+                        subject_why: args.get("subjectWhy").and_then(|v| v.as_str()),
+                        declared_by: &self.author,
+                        drop,
+                    },
+                )
+                .await
+                {
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),
                 }
@@ -1760,9 +1764,7 @@ impl Mcp {
             }
             "run-record-add" => {
                 let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
-                match crate::projector::declare_run_record(&self.pool, p, &g("id"), &g("task"),
-                        &g("milestone"), &g("title"), &g("commits"), &g("dates"), &g("review"),
-                        &g("appeared"), &g("leftOpen"), args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
+                match crate::projector::declare_run_record(&self.pool, p, crate::projector::RunRecord { id: &g("id"), task: &g("task"), milestone: &g("milestone"), title: &g("title"), commits: &g("commits"), dates: &g("dates"), review: &g("review"), appeared: &g("appeared"), left_open: &g("leftOpen") }, args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),
                 }
@@ -1778,8 +1780,7 @@ impl Mcp {
             "frame-rule-add" => {
                 let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
                 let number = num(args, "number").unwrap_or(0) as i32;
-                match crate::projector::declare_frame_rule(&self.pool, p, &g("kind"), number,
-                        &g("title"), &g("body"), &g("heldBy"), args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
+                match crate::projector::declare_frame_rule(&self.pool, p, crate::projector::FrameRule { kind: &g("kind"), number, title: &g("title"), body: &g("body"), held_by: &g("heldBy") }, args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),
                 }
@@ -1787,24 +1788,21 @@ impl Mcp {
             "process-row-add" => {
                 let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
                 let ord = num(args, "ord").unwrap_or(0) as i32;
-                match crate::projector::declare_process_row(&self.pool, p, &g("kind"), &g("a"),
-                        &g("b"), &g("c"), &g("d"), ord, args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
+                match crate::projector::declare_process_row(&self.pool, p, crate::projector::ProcessRow { kind: &g("kind"), a: &g("a"), b: &g("b"), c: &g("c"), d: &g("d"), ord }, args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),
                 }
             }
             "milestone-detail-add" => {
                 let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
-                match crate::projector::declare_milestone_detail(&self.pool, p, &g("milestone"),
-                        &g("what"), &g("blockedBy"), &g("requirement"), &g("gate"), &g("closed"), args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
+                match crate::projector::declare_milestone_detail(&self.pool, p, crate::projector::MilestoneDetail { milestone: &g("milestone"), what: &g("what"), blocked_by: &g("blockedBy"), requirement: &g("requirement"), gate: &g("gate"), closed: &g("closed") }, args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),
                 }
             }
             "screen-detail-add" => {
                 let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
-                match crate::projector::declare_screen_detail(&self.pool, p, &g("screen"), &g("purpose"),
-                        &g("opensWhen"), &g("emptyAndBroken"), &g("requirement"), args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
+                match crate::projector::declare_screen_detail(&self.pool, p, crate::projector::ScreenDetail { screen: &g("screen"), purpose: &g("purpose"), opens_when: &g("opensWhen"), empty_and_broken: &g("emptyAndBroken"), requirement: &g("requirement") }, args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),
                 }
@@ -1845,8 +1843,7 @@ impl Mcp {
             "acceptance-add" => {
                 let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
                 let number = num(args, "number").unwrap_or(0) as i32;
-                match crate::projector::declare_acceptance(&self.pool, p, &g("id"), &g("story"), number,
-                        &g("title"), &g("preconditions"), &g("steps"), &g("observed"), &g("failsWhen"), args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
+                match crate::projector::declare_acceptance(&self.pool, p, crate::projector::Acceptance { id: &g("id"), story: &g("story"), number, title: &g("title"), preconditions: &g("preconditions"), steps: &g("steps"), observed: &g("observed"), fails_when: &g("failsWhen") }, args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),
                 }
@@ -1854,8 +1851,7 @@ impl Mcp {
             "goal-add" => {
                 let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
                 let number = num(args, "number").unwrap_or(0) as i32;
-                match crate::projector::declare_goal(&self.pool, p, &g("id"), number, &g("level"),
-                        &g("title"), &g("measuredBy"), &g("checkedWhen"), &g("failsWhen"), &g("stateNow"), args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
+                match crate::projector::declare_goal(&self.pool, p, crate::projector::Goal { id: &g("id"), number, level: &g("level"), title: &g("title"), measured_by: &g("measuredBy"), checked_when: &g("checkedWhen"), fails_when: &g("failsWhen"), state_now: &g("stateNow") }, args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),
                 }
@@ -1877,8 +1873,7 @@ impl Mcp {
             "risk-add" => {
                 let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
                 let number = num(args, "number").unwrap_or(0) as i32;
-                match crate::projector::declare_risk(&self.pool, p, &g("id"), number, &g("title"),
-                        &g("state"), &g("mitigation"), &g("trigger"), &g("owner"), &g("source"), args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
+                match crate::projector::declare_risk(&self.pool, p, crate::projector::Risk { id: &g("id"), number, title: &g("title"), state: &g("state"), mitigation: &g("mitigation"), trigger: &g("trigger"), owner: &g("owner"), source: &g("source") }, args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),
                 }
@@ -1886,10 +1881,7 @@ impl Mcp {
             "question-add" => {
                 let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
                 let number = num(args, "number").unwrap_or(0) as i32;
-                match crate::projector::declare_question(&self.pool, p, &g("id"), number, &g("title"),
-                        &g("state"), &g("answer"), &g("closedBy"),
-                        args.get("owner").map(|v| v == "true" || v == true).unwrap_or(false),
-                        args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
+                match crate::projector::declare_question(&self.pool, p, crate::projector::Question { id: &g("id"), number, title: &g("title"), state: &g("state"), answer: &g("answer"), closed_by: &g("closedBy"), owner: args.get("owner").map(|v| v == "true" || v == true).unwrap_or(false) }, args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),
                 }
@@ -1925,9 +1917,7 @@ impl Mcp {
                     "version-add" => crate::projector::declare_version(&self.pool, p, &g("id"), args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await,
                     "milestone-add" => crate::projector::declare_milestone(&self.pool, p, &g("id"),
                                           &g("version"), ord, &g("title"), args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await,
-                    _ => crate::projector::declare_task(&self.pool, p, &g("id"), &g("milestone"), ord,
-                             &g("title"), &g("kind"), &g("state"), &g("size"),
-                             args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await,
+                    _ => crate::projector::declare_task(&self.pool, p, crate::projector::Task { id: &g("id"), milestone: &g("milestone"), ord, title: &g("title"), kind: &g("kind"), state: &g("state"), size: &g("size") }, args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await,
                 };
                 match done {
                     Ok(v) => ok(v),
@@ -1937,9 +1927,7 @@ impl Mcp {
             "decision-add" => {
                 let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
                 let number = num(args, "number").unwrap_or(0) as i32;
-                match crate::projector::declare_decision(&self.pool, p, &g("id"), number, &g("title"),
-                        &g("status"), &g("statusText"), &g("date"), &g("deciders"),
-                        &g("context"), &g("decision"), &g("consequences"), args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
+                match crate::projector::declare_decision(&self.pool, p, crate::projector::Decision { id: &g("id"), number, title: &g("title"), status: &g("status"), status_text: &g("statusText"), date: &g("date"), deciders: &g("deciders"), context: &g("context"), decision: &g("decision"), consequences: &g("consequences") }, args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),
                 }
@@ -1976,8 +1964,7 @@ impl Mcp {
                 let priority = args.get("priority").and_then(|v| v.as_str()).unwrap_or("");
                 let title = args.get("title").and_then(|v| v.as_str()).unwrap_or("");
                 let measured = args.get("measuredBy").and_then(|v| v.as_str()).unwrap_or("");
-                match crate::projector::declare_requirement(&self.pool, p, id, kind, area, title,
-                                                             text, measured, priority, args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
+                match crate::projector::declare_requirement(&self.pool, p, crate::projector::Requirement { id, kind, area, title, text, measured_by: measured, priority }, args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),
                 }
@@ -2009,43 +1996,35 @@ impl Mcp {
             }
             "freeze-row-add" => {
                 let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
-                match crate::projector::declare_freeze_row(&self.pool, p, &g("version"), &g("kind"),
-                        &g("name"), &g("hash"), &self.author, args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
+                match crate::projector::declare_freeze_row(&self.pool, p, crate::projector::FreezeRow { version: &g("version"), kind: &g("kind"), name: &g("name"), hash: &g("hash") }, &self.author, args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),
                 }
             }
             "postmortem-add" => {
                 let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
-                match crate::projector::declare_postmortem(&self.pool, p, &g("id"), &g("title"),
-                        &g("summary"), &g("timeline"), &g("rootCause"), &g("lesson"), args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
+                match crate::projector::declare_postmortem(&self.pool, p, crate::projector::Postmortem { id: &g("id"), title: &g("title"), summary: &g("summary"), timeline: &g("timeline"), root_cause: &g("rootCause"), lesson: &g("lesson") }, args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),
                 }
             }
             "token-add" => {
                 let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
-                match crate::projector::declare_token(&self.pool, p, &g("name"), &g("dark"),
-                        &g("light"), &g("purpose"), &g("section"), args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
+                match crate::projector::declare_token(&self.pool, p, crate::projector::Token { name: &g("name"), dark: &g("dark"), light: &g("light"), purpose: &g("purpose"), section: &g("section") }, args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),
                 }
             }
             "reference-source-add" => {
                 let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
-                match crate::projector::declare_reference_source(&self.pool, p, &g("name"), &g("source"),
-                        &g("note"), &g("taken"), &g("sha"), &g("refType"), &g("fromProject"),
-                        &g("repo"), &g("written"), &g("updated"), &g("status"), &g("tags"),
-                        &g("role"), args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
+                match crate::projector::declare_reference_source(&self.pool, p, crate::projector::ReferenceSource { name: &g("name"), source: &g("source"), note: &g("note"), taken: &g("taken"), sha: &g("sha"), ref_type: &g("refType"), from_project: &g("fromProject"), repo: &g("repo"), written: &g("written"), updated: &g("updated"), status: &g("status"), tags: &g("tags"), role: &g("role") }, args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),
                 }
             }
             "algorithm-add" => {
                 let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
-                match crate::projector::declare_algorithm(&self.pool, p, &g("id"), &g("story"),
-                        &g("title"), &g("preconditions"), &g("flow"), &g("failure"),
-                        &g("notCovered"), &g("linkKind"), &g("linkTarget"), args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
+                match crate::projector::declare_algorithm(&self.pool, p, crate::projector::Algorithm { id: &g("id"), story: &g("story"), title: &g("title"), preconditions: &g("preconditions"), flow: &g("flow"), failure: &g("failure"), not_covered: &g("notCovered"), link_kind: &g("linkKind"), link_target: &g("linkTarget") }, args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),
                 }
@@ -2068,18 +2047,14 @@ impl Mcp {
             }
             "sensor-spec-add" => {
                 let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
-                match crate::projector::declare_sensor_spec(&self.pool, p, &g("fact"), &g("reads"),
-                        &g("extract"), &g("note"), &g("how"), &g("skip"), &g("allow"),
-                                                          args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
+                match crate::projector::declare_sensor_spec(&self.pool, p, crate::projector::SensorSpec { fact: &g("fact"), reads: &g("reads"), extract: &g("extract"), note: &g("note"), how: &g("how"), skip: &g("skip"), allow: &g("allow") }, args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),
                 }
             }
             "guard-add" => {
                 let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
-                match crate::projector::declare_guard(&self.pool, p, &g("name"), &g("enforces"),
-                        &g("scope"), &g("refuses"), &g("actsOn"), &g("pathRe"), &g("contentRe"),
-                        &g("commandRe"), args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
+                match crate::projector::declare_guard(&self.pool, p, crate::projector::Guard { name: &g("name"), enforces: &g("enforces"), scope: &g("scope"), refuses: &g("refuses"), acts_on: &g("actsOn"), path_re: &g("pathRe"), content_re: &g("contentRe"), command_re: &g("commandRe") }, args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),
                 }
@@ -2169,8 +2144,7 @@ impl Mcp {
                 let owner_kind = args.get("ownerKind").and_then(|v| v.as_str()).unwrap_or("none");
                 let owner = args.get("owner").and_then(|v| v.as_str()).unwrap_or("");
                 let touches = args.get("touches").and_then(|v| v.as_str()).unwrap_or("");
-                match crate::projector::add_step(&self.pool, p, set_name, process, ord, question,
-                                                  owner_kind, owner, touches).await {
+                match crate::projector::add_step(&self.pool, p, crate::projector::Step { set_name, process, ord, question, owner_kind, owner, touches }).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),
                 }
@@ -2188,13 +2162,7 @@ impl Mcp {
                 if phase.is_empty() {
                     return refusal(Miss::Refused("фаза без имени не объявляется".into()));
                 }
-                match crate::projector::set_phase(&self.pool, phase,
-                        num(args, "ord").map(|n| n as i32),
-                        args.get("title").and_then(|v| v.as_str()),
-                        args.get("gate").and_then(|v| v.as_str()),
-                        args.get("planLevel").and_then(|v| v.as_str()),
-                        args.get("taskKind").and_then(|v| v.as_str()),
-                        args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
+                match crate::projector::set_phase(&self.pool, crate::projector::Phase { phase, ord: num(args, "ord").map(|n| n as i32), title: args.get("title").and_then(|v| v.as_str()), gate: args.get("gate").and_then(|v| v.as_str()), plan_level: args.get("planLevel").and_then(|v| v.as_str()), task_kind: args.get("taskKind").and_then(|v| v.as_str()) }, args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),
                 }
@@ -2518,10 +2486,7 @@ impl Mcp {
                 if name.is_empty() || body.is_empty() {
                     return refusal(Miss::Refused("субагент без имени или без тела не записывается".into()));
                 }
-                match crate::projector::set_agent(&self.pool, set, name,
-                        args.get("description").and_then(|v| v.as_str()), body,
-                        args.get("tools").and_then(|v| v.as_str()),
-                        args.get("model").and_then(|v| v.as_str()), &self.author, args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
+                match crate::projector::set_agent(&self.pool, crate::projector::Agent { set_name: set, name, description: args.get("description").and_then(|v| v.as_str()), body, tools: args.get("tools").and_then(|v| v.as_str()), model: args.get("model").and_then(|v| v.as_str()) }, &self.author, args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),
                 }
@@ -2541,8 +2506,7 @@ impl Mcp {
                 // своей двери у субагента (`agent-set`), которой прежде не было.
                 let allowed = args.get("allowedTools").and_then(|v| v.as_str());
                 let flag = args.get("disableModelInvocation").and_then(|v| v.as_bool());
-                match crate::projector::set_skill(&self.pool, set, name, description, body,
-                                                   allowed, flag, &self.author, args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
+                match crate::projector::set_skill(&self.pool, crate::projector::Skill { set_name: set, name, description, body, allowed_tools: allowed, disable_model_invocation: flag }, &self.author, args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),
                 }
@@ -2608,12 +2572,19 @@ impl Mcp {
                     return refusal(Miss::Refused(
                         "пункт гейта без фазы или без имени не заводится: `id` адресует пункт, `item` его объясняет".into()));
                 }
-                match crate::projector::set_gate_item(&self.pool, p, phase, id, item, gk, query, owner,
-                                                      probe, why,
-                                                      args.get("subject").and_then(|v| v.as_str()),
-                                                      args.get("subjectWhy").and_then(|v| v.as_str()),
-                                                      num(args, "since"),
-                                                      args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
+                match crate::projector::set_gate_item(
+                    &self.pool,
+                    p,
+                    crate::projector::GateItem {
+                        phase, id, title: item, kind: gk, query, owner, probe, why,
+                        subject: args.get("subject").and_then(|v| v.as_str()),
+                        subject_why: args.get("subjectWhy").and_then(|v| v.as_str()),
+                        since: num(args, "since"),
+                    },
+                    args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false),
+                )
+                .await
+                {
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),
                 }
@@ -2623,8 +2594,7 @@ impl Mcp {
                 let mk = args.get("methodKind").and_then(|v| v.as_str()).unwrap_or("unknown");
                 let method = args.get("method").and_then(|v| v.as_str()).unwrap_or("");
                 let drop = args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false);
-                match crate::projector::set_method(&self.pool, p, kind_arg, id.unwrap_or(""), ord, mk,
-                                                   method, &self.author, drop).await {
+                match crate::projector::set_method(&self.pool, p, crate::projector::Method { kind: kind_arg, id: id.unwrap_or(""), ord, method_kind: mk, method, declared_by: &self.author, drop }).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),
                 }
@@ -2719,11 +2689,7 @@ impl Mcp {
                     .duration_since(std::time::SystemTime::UNIX_EPOCH)
                     .map(|d| d.as_millis() as i64)
                     .unwrap_or(0);
-                match crate::store::create(
-                    &self.pool, &self.kinds, &self.project, kind_arg, id.unwrap_or(""),
-                    args.get("content").and_then(|v| v.as_str()).unwrap_or(""),
-                    &self.author, now,
-                )
+                match crate::store::create(&self.pool, &self.kinds, &self.project, crate::store::Document { kind: kind_arg, name: id.unwrap_or(""), content: args.get("content").and_then(|v| v.as_str()).unwrap_or("") }, &self.author, now)
                 .await
                 {
                     Ok(v) => ok(v),
@@ -2753,11 +2719,7 @@ impl Mcp {
                         .duration_since(std::time::SystemTime::UNIX_EPOCH)
                         .map(|d| d.as_millis() as i64)
                         .unwrap_or(0);
-                    match crate::store::create(
-                        &self.pool, &self.kinds, &self.project, kind_arg, id.unwrap_or(""),
-                        args.get("content").and_then(|v| v.as_str()).unwrap_or(""),
-                        &self.author, now,
-                    )
+                    match crate::store::create(&self.pool, &self.kinds, &self.project, crate::store::Document { kind: kind_arg, name: id.unwrap_or(""), content: args.get("content").and_then(|v| v.as_str()).unwrap_or("") }, &self.author, now)
                     .await
                     {
                         Ok(v) => ok(v),
@@ -2790,7 +2752,7 @@ impl Mcp {
     /// ручкой — запись прошла, ответ остался прежним, и отличить это от отказа
     /// было нечем. Разбор документов по-прежнему идёт по слепку: он меняет
     /// поведение проекции, и его смена — перезапуск.
-    async fn живой_реестр(&self) -> Result<crate::kinds::Kinds, Miss> {
+    async fn live_registry(&self) -> Result<crate::kinds::Kinds, Miss> {
         crate::kinds::Kinds::from_db(&self.pool).await
     }
 
@@ -3051,10 +3013,10 @@ impl Mcp {
             // Три состояния различаются и не смешиваются: положено и разложено;
             // положено и не разложено; не объявлено вовсе — дефект плана.
             _ => {
-                let реестр = match self.живой_реестр().await { Ok(k) => k, Err(e) => return Err(e) };
+                let registry = match self.live_registry().await { Ok(k) => k, Err(e) => return Err(e) };
                 let mut due = Vec::new();
                 let mut undeclared = Vec::new();
-                for (kind, k) in &реестр.0 {
+                for (kind, k) in &registry.0 {
                     match k.projection.as_deref() {
                         // «Много ли документов» спрашивалось через `at.is_none()` — «нет
                         // одного адреса». У семи одиночных видов адреса и так не
@@ -3133,17 +3095,8 @@ impl Mcp {
             .unwrap_or(0);
         let expected = num(args, "expectedRevision");
         let done = match name {
-            "put" => crate::store::put(
-                &self.pool, &self.project, &owner_kind, &owner_name,
-                args.get("content").and_then(|v| v.as_str()).unwrap_or(""),
-                &self.author, expected, now,
-            ).await,
-            "put-section" => crate::store::put_section(
-                &self.pool, &self.project, &owner_kind, &owner_name,
-                args.get("anchor").and_then(|v| v.as_str()).unwrap_or(""),
-                args.get("body").and_then(|v| v.as_str()).unwrap_or(""),
-                &self.author, expected, now,
-            ).await,
+            "put" => crate::store::put(&self.pool, &self.project, crate::store::Document { kind: &owner_kind, name: &owner_name, content: args.get("content").and_then(|v| v.as_str()).unwrap_or("") }, &self.author, expected, now).await,
+            "put-section" => crate::store::put_section(&self.pool, &self.project, crate::store::SectionEdit { kind: &owner_kind, name: &owner_name, anchor: args.get("anchor").and_then(|v| v.as_str()).unwrap_or(""), body: args.get("body").and_then(|v| v.as_str()).unwrap_or("") }, &self.author, expected, now).await,
             _ => crate::store::remove(&self.pool, &self.project, &owner_kind, &owner_name).await,
         };
         let mut v = match done {
@@ -3214,8 +3167,8 @@ mod refusal_tests {
     /// мёртвой, и перегрузка на копии снова читалась приговором набору.
     #[test]
     fn busyness_is_read_where_it_is_written() {
-        let занято: Miss = crate::db::Fail::Busy("занято".to_owned()).into();
-        assert!(crate::door::busy_said(&refusal(занято)), "дверь сказала «занято», а читатель не увидел");
+        let busy: Miss = crate::db::Fail::Busy("занято".to_owned()).into();
+        assert!(crate::door::busy_said(&refusal(busy)), "дверь сказала «занято», а читатель не увидел");
         assert!(!crate::door::busy_said(&refusal(Miss::Refused("довода нет".to_owned()))));
         assert!(!crate::door::busy_said(&serde_json::json!({ "content": [], "isError": false })));
     }
@@ -3225,23 +3178,23 @@ mod refusal_tests {
     /// дверь, которую советуют позвать, когда что-то не досчиталось.
     #[test]
     fn a_named_step_keeps_the_kind_of_refusal() {
-        let занято: Miss = crate::db::Fail::Busy("все соединения заняты".to_owned()).into();
-        let со_шагом = занято.step("сверка до пересборки");
-        assert!(matches!(со_шагом, Miss::Busy(_)), "шаг не превращает занятость в отказ базы");
-        let out = refusal(со_шагом);
+        let busy: Miss = crate::db::Fail::Busy("все соединения заняты".to_owned()).into();
+        let with_step = busy.step("сверка до пересборки");
+        assert!(matches!(with_step, Miss::Busy(_)), "шаг не превращает занятость в отказ базы");
+        let out = refusal(with_step);
         assert_eq!(out["_meta"]["busy"], serde_json::json!(true));
         assert!(out["content"][0]["text"].as_str().unwrap_or("").contains("сверка до пересборки"));
     }
 
     #[test]
     fn busyness_keeps_its_flag_through_a_door() {
-        let занято: Miss = crate::db::Fail::Busy("все соединения заняты".to_owned()).into();
-        let out = refusal(занято);
+        let busy: Miss = crate::db::Fail::Busy("все соединения заняты".to_owned()).into();
+        let out = refusal(busy);
         assert_eq!(out["_meta"]["busy"], serde_json::json!(true));
         assert_eq!(out["isError"], serde_json::json!(true));
-        let по_существу = refusal(Miss::Refused("довода нет".to_owned()));
-        assert_eq!(по_существу["_meta"]["busy"], serde_json::json!(false));
-        let база: Miss = crate::db::Fail::Down("база не принимает соединение".to_owned()).into();
-        assert_eq!(refusal(база)["_meta"]["busy"], serde_json::json!(false), "недоступная база — не занятость");
+        let by_merits = refusal(Miss::Refused("довода нет".to_owned()));
+        assert_eq!(by_merits["_meta"]["busy"], serde_json::json!(false));
+        let database: Miss = crate::db::Fail::Down("база не принимает соединение".to_owned()).into();
+        assert_eq!(refusal(database)["_meta"]["busy"], serde_json::json!(false), "недоступная база — не занятость");
     }
 }

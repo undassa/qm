@@ -29,7 +29,7 @@ static COMMIT: Lazy<Regex> = Lazy::new(|| Regex::new(r"\b([0-9a-f]{7,40})\b").ex
 static TEST_WORDS: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)^\s*(тест|тесты|проверк|test)").expect("образец вида"));
 
 /// Состояние и коммит из поля. Словарь один на план и на доску состояний.
-pub fn state_of(field: &str) -> (&'static str, Option<String>) {
+pub(crate) fn state_of(field: &str) -> (&'static str, Option<String>) {
     let head = field.split('·').next().unwrap_or("").trim().to_lowercase();
     let commit = COMMIT.captures(field).map(|m| m[1].to_owned());
     if head.starts_with("закрыт") || head.starts_with("closed") {
@@ -60,7 +60,7 @@ fn kind_of(field: &str, task: &str) -> &'static str {
 /// зависимостей стоят в обратных кавычках и образец их требует, а поверхность
 /// читает `value`, потому что персона и фаза — это текст, а не разметка. Донор
 /// делает ровно так, и порт обязан различать их так же.
-pub async fn fields(
+pub(crate) async fn fields(
     pool: &Pool,
     project: &str,
     raw: bool,
@@ -81,8 +81,14 @@ pub async fn fields(
     Ok(out)
 }
 
+/// Строка задачи плана: имя, этап, порядок, заголовок, вид, состояние.
+type PlanTaskRow = (String, String, i32, String, String, String, String, &'static str, &'static str, Option<String>);
+
+/// Строка листа дерева задачи: задача, порядок, каталог, лист, пометки и путь.
+type TreeLeafRow = (String, i32, String, String, bool, bool, String, String, String);
+
 /// Заголовок документа — первый его раздел; если разделов нет, донор берёт путь.
-pub async fn titles(pool: &Pool, project: &str) -> Result<HashMap<String, String>, crate::db::Fail> {
+pub(crate) async fn titles(pool: &Pool, project: &str) -> Result<HashMap<String, String>, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
@@ -95,7 +101,7 @@ pub async fn titles(pool: &Pool, project: &str) -> Result<HashMap<String, String
     Ok(rows.iter().map(|r| (r.get(0), r.get(1))).collect())
 }
 
-pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize, usize), crate::db::Fail> {
+pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize, usize), crate::db::Fail> {
     let named = super::runs::named_of_kinds(pool, project, &["version", "milestone", "task"]).await?;
     // Блок «Требования» этапа — свёрнутый `<details>`. Читается он целиком и
     // построчно, мимо строк с оговоркой об удалении: имя в такой строке
@@ -151,7 +157,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize,
             .await?;
         let mut out = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        for (role, род) in [
+        for (role, row_kind) in [
             ("marker.milestone-checks", "check"),
             ("marker.milestone-stories", "story"),
             ("marker.milestone-screens", "screen"),
@@ -167,8 +173,8 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize,
                         continue;
                     }
                     for name in super::ids::expand(line) {
-                        if seen.insert(format!("{milestone} {род} {name}")) {
-                            out.push((milestone.clone(), род.to_owned(), name));
+                        if seen.insert(format!("{milestone} {row_kind} {name}")) {
+                            out.push((milestone.clone(), row_kind.to_owned(), name));
                         }
                     }
                 }
@@ -199,7 +205,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize,
 
     let mut versions: Vec<(String, String, String)> = Vec::new();
     let mut milestones: Vec<(String, String, i32, String, String, String)> = Vec::new();
-    let mut tasks: Vec<(String, String, i32, String, String, String, String, &str, &str, Option<String>)> = Vec::new();
+    let mut tasks: Vec<PlanTaskRow> = Vec::new();
     let mut deps: Vec<(String, String)> = Vec::new();
 
     for e in &named {
@@ -306,7 +312,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize,
     //
     // На ответ это не влияет: `project_plan_tasks` эта транзакция трогает
     // ниже, так что читается ровно то же зафиксированное состояние.
-    let tree_leaves: Vec<(String, i32, String, String, bool, bool, String, String, String)> = {
+    let tree_leaves: Vec<TreeLeafRow> = {
         let rows = tx
             .query(
                 "SELECT t.id, d.content FROM project_plan_tasks t
@@ -343,11 +349,11 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize,
     }
     tx.execute("DELETE FROM project_milestone_links WHERE project_id = $1 AND origin = 'projected'",
                &[&project]).await?;
-    for (milestone, род, target) in &milestone_links {
+    for (milestone, row_kind, target) in &milestone_links {
         tx.execute(
             "INSERT INTO project_milestone_links(project_id, milestone_id, kind, target, origin)
              VALUES ($1,$2,$3,$4,'projected') ON CONFLICT DO NOTHING",
-            &[&project, milestone, род, target],
+            &[&project, milestone, row_kind, target],
         )
         .await?;
     }
