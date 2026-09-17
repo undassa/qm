@@ -18,9 +18,9 @@ const PAIRS: [(&str, &str, &str); 4] = [
     ("milestone.head.checks", "milestone.block.checks", "проверки"),
 ];
 
-pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
-    let terms = crate::scheme::Terms::load(pool, project).await?;
+pub async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
+    let terms = crate::scheme::Terms::load_at(&*client, project).await?;
     let docs = client
         .query(
             "SELECT entity_name, content FROM project_documents
@@ -70,7 +70,10 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
         }
     }
 
-    let mut client = pool.get().await.expect("пул отдал соединение");
+    // Читающее соединение отпущено: писать и читать одновременно здесь нечем,
+    // а два соединения на одну проекцию запирают пул на себе же.
+    drop(client);
+    let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
     tx.execute("DELETE FROM project_milestone_count WHERE project_id = $1", &[&project]).await?;
     for (m, what, said, listed) in &rows {

@@ -141,7 +141,11 @@ impl Door {
         // что она даёт. Тело подаётся через stdin — доводы бывают длиннее, чем
         // выдерживает список аргументов, и подача фактов на этом уже спотыкалась.
         let mut cmd = std::process::Command::new("curl");
+        // Код ответа — ПОСЛЕДНЕЙ строкой: без него «сервер занят» (503) и «дверь
+        // отказала» (502) приходили одинаковыми, и цикл повторов у агента не
+        // знал, ждать ему или чинить.
         cmd.arg("-sS")
+            .arg("-w").arg("\n%{http_code}")
             .arg("-H").arg(format!("X-Mh-Edge: {}", self.secret))
             .arg("-H").arg(format!("X-Mh-Principal: {}", self.principal));
         if let Some(a) = args {
@@ -177,6 +181,10 @@ impl Door {
         let envelope = self.body(&path, Some(args))?;
         let refused = envelope.get("isError").and_then(|e| e.as_bool()).unwrap_or(false)
             || envelope.get("error").is_some();
+        // Занятость доезжает до вызвавшего: она помечена и в конверте двери, и
+        // кодом ответа, но внутрь ответа не попадала — а смотрят именно внутрь.
+        let busy = crate::door::busy_said(&envelope)
+            || envelope.get("error").and_then(|e| e.as_str()) == Some("busy");
         let inner = envelope
             .get("content")
             .and_then(|c| c.as_array())
@@ -185,7 +193,16 @@ impl Door {
             .and_then(|t| t.as_str())
             .and_then(|t| serde_json::from_str::<Value>(t).ok()
                 .or_else(|| Some(json!({ "why": t }))));
-        Ok((inner.unwrap_or(envelope), refused))
+        let mut inner = inner.unwrap_or(envelope);
+        if busy {
+            match inner.as_object_mut() {
+                Some(map) => {
+                    map.insert("_meta".to_owned(), crate::door::mark_busy(true));
+                }
+                None => inner = json!({ "ответ": inner, "_meta": crate::door::mark_busy(true) }),
+            }
+        }
+        Ok((inner, refused))
     }
 
     /// Перечень ручек — у сервера, а не свой.
@@ -196,15 +213,35 @@ impl Door {
 }
 
 fn parse(bytes: &[u8]) -> Result<Value, String> {
-    let text = String::from_utf8_lossy(bytes);
+    let whole = String::from_utf8_lossy(bytes);
+    let (text, code) = match whole.rsplit_once('\n') {
+        Some((body, code)) if code.trim().len() == 3 && code.trim().chars().all(|c| c.is_ascii_digit()) => {
+            (body.to_owned(), code.trim().parse::<u16>().unwrap_or(0))
+        }
+        _ => (whole.to_string(), 0),
+    };
+    let text = std::borrow::Cow::from(text);
     if text.trim().is_empty() {
         // Пустой ответ — не пустой набор. Сервер мог не подняться, край мог не
         // пустить; назвать это «ничего не нашлось» значит соврать в ту сторону,
         // в которую врать нельзя.
         return Err("сервер ответил пустотой: он поднят и край пускает?".into());
     }
-    serde_json::from_str(&text).map_err(|e| format!("ответ не разбирается: {e}; было: {}",
-                                                    text.chars().take(200).collect::<String>()))
+    let mut v: Value = serde_json::from_str(&text).map_err(|e| format!("ответ не разбирается: {e}; было: {}",
+                                                    text.chars().take(200).collect::<String>()))?;
+    // Занятость помечается в самом ответе: её читает и `mh call` кодом выхода,
+    // и всякий, кто зовёт дверь из скрипта.
+    // Тело у 503 бывает и не предметом: край отвечает своей строкой, а
+    // `v["busy"] = …` по строке роняет клиента ровно в час перегрузки.
+    if code == 503 {
+        match v.as_object_mut() {
+            Some(map) => {
+                map.insert("_meta".to_owned(), crate::door::mark_busy(true));
+            }
+            None => v = json!({ "error": "busy", "message": v, "_meta": crate::door::mark_busy(true) }),
+        }
+    }
+    Ok(v)
 }
 
 /// Разбор доводов из командной строки: `k=v`, `k=@файл`, `k:=<json>`, `k:=@файл`.
@@ -1737,5 +1774,28 @@ mod install_tests {
         assert!(!installed_head("---\nname: godzy-gate\ndescription: Check a gate\n---\n", "godzy-gate"), "свой файл проекта без кавычек");
         assert!(!installed_head("---\nname: other\ndescription: \"x\"\n---\n", "godzy-gate"), "имя в шапке — другого скилла");
         assert!(!installed_head("# notes", "godzy-gate"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse;
+
+    /// Код ответа — часть смысла: «занято» и «дверь отказала» приходят разными
+    /// телами, и цикл повторов у агента по телу их не различал.
+    #[test]
+    fn busyness_is_marked_from_the_code() {
+        let занято = parse("{\"error\":\"busy\",\"message\":\"сервер занят\"}\n503".as_bytes()).expect("тело разобрано");
+        assert!(crate::door::busy_said(&занято));
+        let отказ = parse("{\"error\":\"upstream_error\"}\n502".as_bytes()).expect("тело разобрано");
+        assert!(!crate::door::busy_said(&отказ), "отказ по существу занятостью не помечается");
+        // Край отвечает своей строкой, и она не предмет: пометка по такому
+        // телу роняла клиента ровно в час перегрузки.
+        let краем = parse("\"service unavailable\"\n503".as_bytes()).expect("тело разобрано");
+        assert!(crate::door::busy_said(&краем));
+        assert_eq!(краем["message"], serde_json::json!("service unavailable"));
+        let ответ = parse("{\"count\":3}\n200".as_bytes()).expect("тело разобрано");
+        assert_eq!(ответ["count"], serde_json::json!(3));
+        assert!(!crate::door::busy_said(&ответ));
     }
 }

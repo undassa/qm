@@ -59,7 +59,7 @@ pub async fn create(
     content: &str,
     author: &str,
     now_ms: i64,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::entities::Miss> {
     let Some(declared) = kinds.get(kind) else {
         return Ok(json!({ "status": "unknown_kind",
                           "why": format!("вид «{kind}» раскладкой не объявлен") }));
@@ -79,7 +79,7 @@ pub async fn create(
         if name.is_empty() {
             return Ok(json!({ "status": "nameless", "why": "документ без имени не заводится" }));
         }
-        if !crate::entities::matches_id(declared, name) {
+        if !crate::entities::matches_id_of(pool, project, kind, declared, name).await? {
             return Ok(json!({ "status": "bad_name",
                               "why": format!("имя «{name}» не подходит под образец вида «{kind}»") }));
         }
@@ -89,7 +89,7 @@ pub async fn create(
         return Ok(json!({ "status": "too_big", "bytes": bytes }));
     }
 
-    let mut client = pool.get().await.expect("пул отдал соединение");
+    let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
     let content_hash = hash_document(content);
     let bytes32 = bytes as i32;
@@ -169,7 +169,7 @@ pub async fn put(
     author: &str,
     expected_revision: Option<i64>,
     now_ms: i64,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if kind.is_empty() {
         return Ok(json!({ "status": "not_found",
                           "why": "вид документа не назван, а без вида адреса нет: `kind=` обязателен" }));
@@ -180,7 +180,7 @@ pub async fn put(
     }
     let content_hash = hash_document(content);
 
-    let mut client = pool.get().await.expect("пул отдал соединение");
+    let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
     // Строка берётся под замок до сверки правки: без него двое пишущих прочли бы
     // одну и ту же правку и второй затёр бы первого, не увидев конфликта.
@@ -266,8 +266,8 @@ pub async fn put_section(
     author: &str,
     expected_revision: Option<i64>,
     now_ms: i64,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
             "SELECT content FROM project_documents
@@ -305,7 +305,7 @@ pub async fn put_section(
 /// Донор чистил только документ: в базе от двух удалённых остались 132 блока,
 /// 739 ячеек и 242 ссылки. Ничего живого они не задевали лишь по случайности —
 /// осиротевшая ссылка на живой документ попала бы в обратные ссылки.
-pub async fn remove(pool: &Pool, project: &str, kind: &str, name: &str) -> Result<Value, tokio_postgres::Error> {
+pub async fn remove(pool: &Pool, project: &str, kind: &str, name: &str) -> Result<Value, crate::db::Fail> {
     // Безымянный документ не удаляется. Пустые вид и имя — не адрес одного
     // документа, а условие, под которое в песочных проектах подходят все сразу:
     // `p6` держит четыре таких, и одно удаление снесло бы четыре.
@@ -313,7 +313,7 @@ pub async fn remove(pool: &Pool, project: &str, kind: &str, name: &str) -> Resul
         return Ok(json!({ "status": "not_found",
                           "why": "вид документа не назван, а без вида адреса нет: `kind=` обязателен" }));
     }
-    let mut client = pool.get().await.expect("пул отдал соединение");
+    let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
     let gone = tx
         .execute(
@@ -343,8 +343,8 @@ pub async fn remove(pool: &Pool, project: &str, kind: &str, name: &str) -> Resul
 }
 
 /// Убрать разбор документов, которых больше нет.
-pub async fn sweep_orphans(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
-    let mut client = pool.get().await.expect("пул отдал соединение");
+pub async fn sweep_orphans(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+    let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
     let mut swept = serde_json::Map::new();
     for table in [
@@ -375,8 +375,8 @@ pub async fn sweep_orphans(pool: &Pool, project: &str) -> Result<Value, tokio_po
 /// `unchanged` и правильно делает. Но правило разбора меняется отдельно от
 /// текста — как сменилось, когда ссылки стали адресовать сущность, — и тогда
 /// набору нужен проход, который перечитает старый текст новым правилом.
-pub async fn reparse_all(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn reparse_all(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let docs = client
         .query(
             "SELECT entity_kind, entity_name, content FROM project_documents
@@ -388,7 +388,7 @@ pub async fn reparse_all(pool: &Pool, project: &str) -> Result<Value, tokio_post
     let mut done = 0usize;
     for d in &docs {
         let (kind, name, content): (String, String, String) = (d.get(0), d.get(1), d.get(2));
-        let mut c = pool.get().await.expect("пул отдал соединение");
+        let mut c = crate::db::conn(pool).await?;
         let tx = c.transaction().await?;
         write_structure(&tx, project, &kind, &name, &content).await?;
         tx.commit().await?;
@@ -414,7 +414,7 @@ async fn link_target(
     tx: &deadpool_postgres::Transaction<'_>,
     project: &str,
     target: &str,
-) -> Result<(String, String), tokio_postgres::Error> {
+) -> Result<(String, String), crate::db::Fail> {
     // Цель формы «путь к файлу» не разрешается больше НИКАК, и это следствие,
     // а не упущение: относительный путь разрешался относительно пути документа,
     // а пути у документа нет. Набор от таких целей очищен проходом
@@ -472,7 +472,7 @@ async fn write_structure(
     kind: &str,
     name: &str,
     content: &str,
-) -> Result<(), tokio_postgres::Error> {
+) -> Result<(), crate::db::Fail> {
     for table in [
         "project_document_blocks",
         "project_document_sections",

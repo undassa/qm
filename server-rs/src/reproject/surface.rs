@@ -45,13 +45,13 @@ fn declared_column(body: &str) -> String {
     out.join("\n")
 }
 
-pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize, usize), tokio_postgres::Error> {
+pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize, usize), crate::db::Fail> {
     const KINDS: [&str; 3] = ["story", "screen", "task"];
     let named = super::runs::named_of_kinds(pool, project, &KINDS).await?;
     // Область экрана — объявленная величина: её держит `screen_area`, и больше
     // никто. Прежде она бралась из каталога, в котором лежал файл.
     let areas: HashMap<String, String> = {
-        let client = pool.get().await.expect("пул отдал соединение");
+        let client = crate::db::conn(pool).await?;
         client
             .query(
                 "SELECT screen_id, area FROM screen_area WHERE project_id = $1",
@@ -66,7 +66,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize,
     // Номер экрана — то, чем экран назвал себя в заголовке: `# 34 · Память
     // агента`. По нему на экран и ссылаются.
     let by_number: HashMap<String, String> = {
-        let client = pool.get().await.expect("пул отдал соединение");
+        let client = crate::db::conn(pool).await?;
         client
             .query(
                 // Граница слова в Postgres пишется `\y`, а не `\b`: с `\b`
@@ -172,14 +172,13 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize,
         }
     }
 
-    let mut client = pool.get().await.expect("пул отдал соединение");
+    let mut client = crate::db::conn(pool).await?;
     // Имя поля — из словаря схемы: зашитое, оно знает один набор.
-    let terms = crate::scheme::Terms::load(pool, project).await?;
+    let terms = crate::scheme::Terms::load_at(&*client, project).await?;
     let screen_requirements: Vec<(String, String)> = if let Some(field) =
         terms.one("field.requirements").map(str::to_owned)
     {
-        let c2 = pool.get().await.expect("пул отдал соединение");
-        let rows = c2
+        let rows = client
             .query(
                 "SELECT f.entity_name, f.value, s.id FROM project_document_fields f
                    JOIN project_screens s ON s.project_id = f.project_id

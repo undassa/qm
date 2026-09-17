@@ -71,7 +71,7 @@ fn is_coverage(text: &str, at: usize, length: usize) -> bool {
     COVERAGE_BEFORE.is_match(&text[start..at]) || COVERAGE_AFTER.is_match(&text[at + length..])
 }
 
-pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize), tokio_postgres::Error> {
+pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize), crate::db::Fail> {
     let blocks = cells(pool, project, KIND, NAME, false).await?;
     let heads = headings(pool, project, KIND, NAME).await?;
     let mut entries: Vec<(String, String, String, String, &str, String, String)> = Vec::new();
@@ -134,7 +134,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize), tokio
         }
     }
 
-    let mut client = pool.get().await.expect("пул отдал соединение");
+    let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
     tx.execute("DELETE FROM project_document_plan_counts WHERE project_id = $1", &[&project]).await?;
     tx.execute("DELETE FROM project_document_plan WHERE project_id = $1", &[&project]).await?;

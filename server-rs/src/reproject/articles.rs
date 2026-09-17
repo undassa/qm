@@ -31,8 +31,8 @@ pub fn anchor(number: i32, title: &str) -> String {
     SPACES.replace_all(clean.trim(), "-").into_owned()
 }
 
-pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize), tokio_postgres::Error> {
-    let mut client = pool.get().await.expect("пул отдал соединение");
+pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize), crate::db::Fail> {
+    let mut client = crate::db::conn(pool).await?;
     let docs = client
         .query(
             "SELECT entity_kind, entity_name, content FROM project_documents

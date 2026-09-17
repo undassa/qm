@@ -37,7 +37,7 @@ fn header_is(head: &[String], wanted: &[&str]) -> bool {
     wanted.iter().enumerate().all(|(i, name)| at(head, i).trim() == *name)
 }
 
-pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize), tokio_postgres::Error> {
+pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize), crate::db::Fail> {
     let blocks = cells(pool, project, KIND, NAME, false).await?;
     let mut migrations: Vec<(String, String, Vec<String>)> = Vec::new();
     let mut order: Vec<String> = Vec::new();
@@ -127,7 +127,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize), tokio
     let mut all: Vec<&Table> = order.iter().filter_map(|n| tables.get(n)).collect();
     all.sort_by(|a, b| a.name.cmp(&b.name));
 
-    let mut client = pool.get().await.expect("пул отдал соединение");
+    let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
     tx.execute("DELETE FROM project_db_tables WHERE project_id = $1", &[&project]).await?;
     tx.execute("DELETE FROM project_db_migrations WHERE project_id = $1", &[&project]).await?;
@@ -158,8 +158,8 @@ async fn columns_from_code(
     pool: &Pool,
     project: &str,
     known: &HashSet<String>,
-) -> Result<HashMap<String, String>, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<HashMap<String, String>, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let blocks = client
         .query(
             "SELECT ord, kind, raw FROM project_document_blocks
@@ -167,6 +167,7 @@ async fn columns_from_code(
             &[&project, &KIND, &NAME],
         )
         .await?;
+    drop(client);
     let heads = headings(pool, project, KIND, NAME).await?;
     let mut out: HashMap<String, String> = HashMap::new();
 

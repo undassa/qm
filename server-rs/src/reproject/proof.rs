@@ -138,8 +138,8 @@ fn declares_over(kind: &str, existing: Option<&String>, home: &str) -> bool {
 pub async fn project(
     pool: &Pool,
     project: &str,
-) -> Result<(usize, usize, usize, u64), tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<(usize, usize, usize, u64), crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     // Порядок строк решает, какое из двух объявлений одного имени взято первым,
     // и потому назван: вид, имя, блок, строка, колонка. Прежде первым шёл путь;
     // порядок сменился вместе с ключом, и старшинство объявляющего документа над
@@ -267,7 +267,7 @@ pub async fn project(
     }
     drop(client);
 
-    let mut client = pool.get().await.expect("пул отдал соединение");
+    let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
     tx.execute("DELETE FROM project_checks WHERE project_id = $1 AND origin = 'projected'", &[&project]).await?;
     // ССЫЛКА ИЗ ТЕКСТА ТРЕБОВАНИЯ — отдельной строкой, а не растворённая в
@@ -349,7 +349,7 @@ pub async fn project(
     // Читается АБЗАЦ, а не строка с маркером: продолжение на следующей строке
     // («Плюс сценарий `TC-HARN-07`») терялось, и проверка, названная
     // документом, проверкой не становилась. Абзац кончается пустой строкой.
-    let маркеры = crate::scheme::Terms::load(pool, project).await?;
+    let маркеры = crate::scheme::Terms::load_at(&tx, project).await?;
     let абзацы = match маркеры.one("marker.verified-by") {
         Some(маркер) => {
             let документы = tx
@@ -680,15 +680,15 @@ pub async fn project(
 ///
 /// Одна дата на всех значит «правок мы не видели ни одной». Это правда о
 /// наборе, приехавшем переносом, и с неё каскад начинает считать честно.
-pub async fn stamp(pool: &Pool, project: &str) -> Result<u64, tokio_postgres::Error> {
-    let mut client = pool.get().await.expect("пул отдал соединение");
+pub async fn stamp(pool: &Pool, project: &str) -> Result<u64, crate::db::Fail> {
+    let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
     let now = crate::projector::now_ms();
     tx.execute(STAMP_MIGRATION, &[&project, &now]).await?;
     tx.execute("UPDATE entity_stamp SET body_version = 2 WHERE project_id = $1 AND body_version < 2", &[&project])
         .await?;
     let changed = tx.execute(STAMP_CHANGED, &[&project, &now]).await?;
-    абзацы_с_какого_времени(pool, &tx, project).await?;
+    абзацы_с_какого_времени(&tx, project).await?;
     tx.execute(STAMP_FRESH, &[&project, &now]).await?;
     tx.commit().await?;
     Ok(changed)
@@ -705,10 +705,9 @@ pub async fn stamp(pool: &Pool, project: &str) -> Result<u64, tokio_postgres::Er
 /// абзац непрерывно такой, как сейчас. Отметка только опускается к нему — и
 /// один раз: шаг помечен версией тела 3.
 async fn абзацы_с_какого_времени(
-    pool: &Pool,
     tx: &deadpool_postgres::Transaction<'_>,
     project: &str,
-) -> Result<(), tokio_postgres::Error> {
+) -> Result<(), crate::db::Fail> {
     let ждут: i64 = tx
         .query_one(
             "SELECT count(*) FROM entity_stamp WHERE project_id = $1 AND kind = 'requirement' AND body_version < 3",
@@ -719,7 +718,7 @@ async fn абзацы_с_какого_времени(
     if ждут == 0 {
         return Ok(());
     }
-    if let Some(маркер) = crate::scheme::Terms::load(pool, project).await?.one("marker.verified-by") {
+    if let Some(маркер) = crate::scheme::Terms::load_at(tx, project).await?.one("marker.verified-by") {
         let ревизии = tx
             .query(
                 "SELECT entity_kind, entity_name, written_at, content FROM project_document_revisions

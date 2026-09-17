@@ -37,8 +37,8 @@ pub async fn read(
     project: &str,
     kind: &str,
     name: &str,
-) -> Result<Option<Document>, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Option<Document>, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
             "SELECT bytes, revision, updated_at, updated_by, content

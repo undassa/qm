@@ -161,10 +161,10 @@ fn body_of(titles: &[String], bodies: &HashMap<String, String>, names: &[&str]) 
     String::new()
 }
 
-pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize), tokio_postgres::Error> {
+pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize), crate::db::Fail> {
     let named = super::runs::named_of_kinds(pool, project, &["decision"]).await?;
     let fields = {
-        let client = pool.get().await.expect("пул отдал соединение");
+        let client = crate::db::conn(pool).await?;
         let rows = client
             .query(
                 "SELECT entity_name, name, value FROM project_document_fields
@@ -182,7 +182,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize)
     // Заголовки и тела разделов: при одинаковых заголовках побеждает последний,
     // как у донора.
     let (titles, bodies) = {
-        let client = pool.get().await.expect("пул отдал соединение");
+        let client = crate::db::conn(pool).await?;
         let rows = client
             .query(
                 "SELECT s.entity_name, s.title,
@@ -216,7 +216,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize)
     // 103 решения набора tot выходили без даты и без ответственных при
     // написанных дате и ответственном.
     let head: std::collections::HashMap<String, (String, String)> = {
-        let client = pool.get().await.expect("пул отдал соединение");
+        let client = crate::db::conn(pool).await?;
         client
             .query(
                 "SELECT entity_name,
@@ -332,7 +332,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize)
         }
     }
 
-    let mut client = pool.get().await.expect("пул отдал соединение");
+    let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
     // Своё — стирается, объявленное — нет: дверь `decision-link-add` пишет
     // `origin='declared'`, и снос целиком стирал её запись каждой пересборкой.

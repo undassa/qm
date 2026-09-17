@@ -19,7 +19,7 @@ static TOTAL_ROW: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\s*(?i:всего|и�
 static AREA: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\s*([A-Z]{2,4})\b\s*(.*)$").expect("образец подсистемы"));
 static COUNT: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\s*(\d+)").expect("образец числа"));
 
-pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres::Error> {
+pub async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fail> {
     let blocks = cells(pool, project, KIND, NAME, false).await?;
     let mut claims: Vec<(String, String, i32, i32, Option<i32>, String)> = Vec::new();
 
@@ -46,7 +46,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
         }
     }
 
-    let mut client = pool.get().await.expect("пул отдал соединение");
+    let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
     tx.execute("DELETE FROM project_traceability_claims WHERE project_id = $1", &[&project]).await?;
     for (area, title, requirements, described, in_contract, in_code) in &claims {

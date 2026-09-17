@@ -32,8 +32,8 @@ pub async fn section_titles(
     pool: &Pool,
     project: &str,
     kinds: &[&str],
-) -> Result<HashMap<(String, String), Vec<String>>, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<HashMap<(String, String), Vec<String>>, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let list: Vec<String> = kinds.iter().map(|k| (*k).to_owned()).collect();
     let rows = client
         .query(
@@ -55,8 +55,8 @@ pub async fn named_of_kinds(
     pool: &Pool,
     project: &str,
     kinds: &[&str],
-) -> Result<Vec<(String, String)>, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Vec<(String, String)>, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let list: Vec<String> = kinds.iter().map(|k| (*k).to_owned()).collect();
     let rows = client
         .query(
@@ -82,12 +82,12 @@ static GONE: Lazy<Regex> = Lazy::new(|| {
 pub async fn project(
     pool: &Pool,
     project: &str,
-) -> Result<(usize, usize, usize), tokio_postgres::Error> {
+) -> Result<(usize, usize, usize), crate::db::Fail> {
     let named = named_of_kinds(pool, project, &["feature", "run"]).await?;
     let titles = section_titles(pool, project, &["feature", "run"]).await?;
     // Выпуск этапа объявлен самим выпуском: его документ перечисляет этапы.
     let milestone_version: std::collections::HashMap<String, String> = {
-        let client = pool.get().await.expect("пул отдал соединение");
+        let client = crate::db::conn(pool).await?;
         client
             .query(
                 "SELECT c.value, c.entity_name FROM project_document_cells c
@@ -135,7 +135,7 @@ pub async fn project(
     // отвечала «ни одно требование не названо», что неправда.
     let mut requirement_links: Vec<(String, String)> = Vec::new();
     {
-        let client = pool.get().await.expect("пул отдал соединение");
+        let client = crate::db::conn(pool).await?;
         // Читается ВЕСЬ текст документа фичи, а не поле «Требования»: фича
         // называет требование и прозой раздела, и таблицей, и подписью к
         // экрану. Одно поле дало бы «требование не описано» там, где оно
@@ -213,7 +213,7 @@ pub async fn project(
         ));
     }
 
-    let mut client = pool.get().await.expect("пул отдал соединение");
+    let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
     // Объявленное дверью `feature-story-add` переживает пересборку — но не саму
     // фичу. Фича выводится целиком и при исчезновении из документов уходит; её

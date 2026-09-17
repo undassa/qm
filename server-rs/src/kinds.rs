@@ -8,6 +8,7 @@
 //! документов опознаётся только адресом, вид «одиночка» иначе не найти. Наружу
 //! путь не выходит ни одним маршрутом и ни одним инструментом.
 
+use crate::db::Says;
 use std::collections::BTreeMap;
 
 use serde::Deserialize;
@@ -108,18 +109,15 @@ impl Kinds {
     }
 
     /// Раскладка из базы — обычный способ; файл остаётся способом её завести.
-    pub async fn from_db(pool: &deadpool_postgres::Pool) -> Result<Self, String> {
-        let client = pool.get().await.map_err(|e| format!("пул не отдал соединение: {e}"))?;
-        let rows = client
-            .query("SELECT name, spec FROM kind_layout", &[])
-            .await
-            .map_err(|e| format!("раскладка видов не читается из базы: {e}"))?;
+    pub async fn from_db(pool: &deadpool_postgres::Pool) -> Result<Self, crate::entities::Miss> {
+        let client = crate::db::conn(pool).await?;
+        let rows = client.query("SELECT name, spec FROM kind_layout", &[]).await?;
         let mut kinds = BTreeMap::new();
         for r in &rows {
             let name: String = r.get(0);
             let spec: serde_json::Value = r.get(1);
             let kind: Kind = serde_json::from_value(spec)
-                .map_err(|e| format!("вид {name} не разбирается: {e}"))?;
+                .map_err(|e| crate::entities::Miss::Refused(format!("вид {name} не разбирается: {e}")))?;
             kinds.insert(name, kind);
         }
         Ok(Kinds(kinds))
@@ -127,7 +125,7 @@ impl Kinds {
 
     /// Записать раскладку в базу: файл → таблица, один раз при переносе.
     pub async fn into_db(&self, pool: &deadpool_postgres::Pool, by: &str) -> Result<usize, String> {
-        let client = pool.get().await.map_err(|e| format!("пул не отдал соединение: {e}"))?;
+        let client = crate::db::conn(pool).await.map_err(|e| e.says())?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
         let mut n = 0;

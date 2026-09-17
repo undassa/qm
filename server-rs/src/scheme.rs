@@ -49,7 +49,7 @@ pub async fn id_pattern(
     client: &impl deadpool_postgres::GenericClient,
     project: &str,
     kind: &str,
-) -> Result<Vec<String>, tokio_postgres::Error> {
+) -> Result<Vec<String>, crate::db::Fail> {
     let своё = client
         .query(
             "SELECT value FROM scheme($1) WHERE role = 'id.' || $2 ORDER BY ord, value",
@@ -102,8 +102,18 @@ pub const ROLES: &[(&str, &str, &str)] = &[
 
 impl Terms {
     /// Словарь ЭТОГО набора: своё, если роль объявлена, иначе общее.
-    pub async fn load(pool: &Pool, project: &str) -> Result<Self, tokio_postgres::Error> {
-        let client = pool.get().await.expect("пул отдал соединение");
+    pub async fn load(pool: &Pool, project: &str) -> Result<Self, crate::db::Fail> {
+        let client = crate::db::conn(pool).await?;
+        Self::load_at(&*client, project).await
+    }
+
+    /// То же на ГОТОВОМ соединении: словарь читается тем же соединением, что
+    /// уже держит вызывающий. Второе соединение при открытой транзакции —
+    /// способ запереть пул на себе же.
+    pub async fn load_at(
+        client: &impl deadpool_postgres::GenericClient,
+        project: &str,
+    ) -> Result<Self, crate::db::Fail> {
         let rows = client
             .query("SELECT role, value FROM scheme($1) ORDER BY role, ord, value", &[&project])
             .await?;

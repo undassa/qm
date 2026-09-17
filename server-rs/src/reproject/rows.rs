@@ -17,8 +17,8 @@ pub async fn cells(
     kind: &str,
     name: &str,
     raw: bool,
-) -> Result<Blocks, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Blocks, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
             "SELECT block_ord, row_ord, col, value, raw FROM project_document_cells
@@ -48,8 +48,8 @@ pub async fn headings(
     project: &str,
     kind: &str,
     name: &str,
-) -> Result<Vec<(i32, String)>, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Vec<(i32, String)>, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
             "SELECT ord, title FROM project_document_sections

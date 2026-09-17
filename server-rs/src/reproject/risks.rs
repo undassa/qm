@@ -39,7 +39,7 @@ fn split_impact(value: &str) -> (String, String) {
     (parts.next().unwrap_or("").to_owned(), parts.next().unwrap_or("").to_owned())
 }
 
-pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres::Error> {
+pub async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fail> {
     let blocks = cells(pool, project, KIND, NAME, false).await?;
     let heads = headings(pool, project, KIND, NAME).await?;
     let mut risks: HashMap<String, Risk> = HashMap::new();
@@ -121,7 +121,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
     let mut all: Vec<&Risk> = order.iter().filter_map(|id| risks.get(id)).collect();
     all.sort_by_key(|r| r.number);
 
-    let mut client = pool.get().await.expect("пул отдал соединение");
+    let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
     tx.execute("DELETE FROM project_risks WHERE project_id = $1 AND origin = 'projected'", &[&project]).await?;
     // ОБЪЯВЛЕННОЕ ТЕМ ЖЕ ИМЕНЕМ ПОГЛОЩАЕТСЯ ДОКУМЕНТОМ. Чистка снимала только

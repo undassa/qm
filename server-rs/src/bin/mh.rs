@@ -19,6 +19,8 @@ mod ids;
 mod yaml;
 #[path = "../repo_corpus.rs"]
 mod repo_corpus;
+#[path = "../door.rs"]
+mod door;
 #[path = "../client.rs"]
 mod client;
 
@@ -36,7 +38,10 @@ fn main() {
              \x20 mh sense [что]                     снять факты с репозитория и подать серверу\n\n\
              Доводы: имя=значение · имя=@файл (строкой) · имя:=<json> · имя:=@файл (json)\n\
              Окружение: MH_URL (по умолчанию http://127.0.0.1:8096), MH_PROJECT,\n\
-             \x20           MH_PRINCIPAL, MH_EDGE_SECRET\n"
+             \x20           MH_PRINCIPAL, MH_EDGE_SECRET\n\n\
+             Коды выхода `mh call`: 0 — ответ, 1 — дверь отказала по существу,\n\
+             \x20 2 — не дозвонились или доводы кривые, 75 — сервер перегружен:\n\
+             \x20 работа не сделана, повторите тот же вызов через несколько секунд.\n"
         );
         std::process::exit(2);
     }
@@ -93,6 +98,12 @@ fn main() {
             match door.call(&name, &parsed) {
                 Ok((v, refused)) => {
                     println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+                    // Занятость — СВОЙ код выхода (75, «попробуйте позже»): по
+                    // общему коду отказа цикл повторов не отличал перегрузку от
+                    // вердикта двери и бил в сервер тем сильнее, чем ему хуже.
+                    if door::busy_said(&v) {
+                        std::process::exit(75);
+                    }
                     // Отказ — не успех. Оболочка обязана его различать: скрипт на
                     // `set -e` иначе пройдёт мимо и понесёт отказ дальше как ответ.
                     if refused {

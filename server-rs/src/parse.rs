@@ -5,6 +5,7 @@
 //! существующие 51043 блока и 26740 ячеек. Каждая тонкость здесь замерена на
 //! наборе донором, и переносится вместе с доводом, а не с одним поведением.
 
+use crate::db::Says;
 use once_cell::sync::Lazy;
 use regex::Regex;
 
@@ -496,7 +497,7 @@ pub fn render_document(blocks: &[Block]) -> String {
 /// Слабее этого проверять нельзя: таблицы уже наполнены его разбором, и порт,
 /// сошедшийся «в основном», сдвинул бы ячейки по номеру колонки — молча.
 pub async fn check_against_donor(pool: &deadpool_postgres::Pool, project: &str) -> Result<serde_json::Value, String> {
-    let client = pool.get().await.map_err(|e| e.to_string())?;
+    let client = crate::db::conn(pool).await.map_err(|e| e.says())?;
     let docs = client
         .query(
             "SELECT entity_kind, entity_name, content FROM project_documents

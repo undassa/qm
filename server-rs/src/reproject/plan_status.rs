@@ -17,13 +17,13 @@ const HEADER: [&str; 3] = ["Задача", "Состояние", "Коммиты
 /// В ячейке коммита бывает несколько хешей и прочерк.
 static COMMIT: Lazy<Regex> = Lazy::new(|| Regex::new(r"\b([0-9a-f]{7,40})\b").expect("образец коммита"));
 
-pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres::Error> {
+pub async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fail> {
     // ОБРАЗЕЦ ЗАДАЧИ — ИЗ РАСКЛАДКИ, а не свой. Здесь стоял `[MV]\d+-T…`, а
     // раскладка говорит `[MmVv]\d+-[Tt][\w-]+`: набор со строчными именами эта
     // копия не увидела бы, и доска состояний молча не собралась бы.
     let образцы = {
-        let client = pool.get().await.expect("пул отдал соединение");
-        crate::scheme::id_pattern(&client, project, "task").await?
+        let client = crate::db::conn(pool).await?;
+        crate::scheme::id_pattern(&*client, project, "task").await?
     };
     let task_id: Vec<Regex> = образцы
         .iter()
@@ -60,7 +60,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
         }
     }
 
-    let mut client = pool.get().await.expect("пул отдал соединение");
+    let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
     tx.execute("DELETE FROM project_plan_status WHERE project_id = $1", &[&project]).await?;
     for (task, milestone, state, commit) in &out {

@@ -52,15 +52,15 @@ fn checks_in(line: &str, res: &[Regex], caveats: &[String]) -> Vec<String> {
 pub const FACT_KINDS: [&str; 7] =
     ["code-file", "crate-manifest", "repo-file", "requirement-op", "test-fn", "tree-file", "written-tc"];
 
-pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres::Error> {
-    let mut connection = pool.get().await.expect("пул отдал соединение");
+pub async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fail> {
+    let mut connection = crate::db::conn(pool).await?;
     let tx = connection.transaction().await?;
     tx.execute("SELECT pg_advisory_xact_lock(hashtext('relations:' || $1))", &[&project]).await?;
     let client = &tx;
     // Слова схемы — из словаря, не из кода. Роль без слова НЕ подставляет
     // пустое: пустое совпало бы со всем подряд. Такая связь просто не
     // считается, и её отсутствие видно перечнем ниже.
-    let terms = crate::scheme::Terms::load(pool, project).await?;
+    let terms = crate::scheme::Terms::load_at(client, project).await?;
     let check_res = check_ids(&terms);
     let caveats: Vec<String> = terms.all("word.caveat").to_vec();
     let missing = terms.missing(&[

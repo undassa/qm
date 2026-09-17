@@ -15,8 +15,8 @@ pub async fn sections(
     project: &str,
     kind: &str,
     name: &str,
-) -> Result<Vec<Value>, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Vec<Value>, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     // У раздела два размера: со вложенными подразделами и без них. Оглавлению
     // нужен второй — иначе вес корневого заголовка равен всему документу, и
     // читателю он не говорит ничего. `own_last` обрывает раздел там, где
@@ -74,8 +74,8 @@ pub async fn search(
     project: &str,
     query: &str,
     limit: i64,
-) -> Result<Vec<Value>, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Vec<Value>, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
             // Порядок ответа — не мелочь. Ищущий «ADR-0138» ищет ДОКУМЕНТ с таким
@@ -134,8 +134,8 @@ pub async fn section_body(
     kind: &str,
     name: &str,
     anchor: &str,
-) -> Result<Option<String>, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Option<String>, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
             "SELECT coalesce((SELECT string_agg(b.raw, '' ORDER BY b.ord)

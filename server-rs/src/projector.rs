@@ -5,6 +5,7 @@
 //! таблицы, которых в доноре не заведено. Каждая — по правилу, названному вслух;
 //! правило, не записанное рядом, назавтра разойдётся с набором незаметно.
 
+use crate::db::Says;
 use crate::entities::Miss;
 use deadpool_postgres::Pool;
 use serde_json::{json, Value};
@@ -2785,6 +2786,16 @@ CREATE TABLE IF NOT EXISTS gate_dirty (
   reason text NOT NULL DEFAULT '',
   ran_at bigint,
   ran_ms integer);
+
+-- СЛЕД ПЕРЕГРУЗКИ ПЕРЕЖИВАЕТ ПЕРЕГРУЗКУ. Отказы «занято» и взятия второго
+-- соединения при живом первом жили счётчиком в памяти и строкой в журнале: от
+-- часа простоя 2026-09-17 не осталось ничего, что можно прочесть дверью и
+-- сравнить с другим днём. Сборщик кладёт сюда накопленное и обнуляет счёт.
+CREATE TABLE IF NOT EXISTS server_strain (
+  at bigint NOT NULL,
+  busy bigint NOT NULL DEFAULT 0,
+  nested bigint NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS server_strain_at ON server_strain (at DESC);
 "#;
 
 /// Переименование внутри колонок. Отдельной пачкой, а не в `DDL`: её же заводит
@@ -2884,14 +2895,14 @@ END $$ LANGUAGE plpgsql;
 ///
 /// Не при каждой пересборке: `CREATE TABLE IF NOT EXISTS` печатает NOTICE, а
 /// печатать что-либо в разговоре по stdio нельзя.
-pub async fn ensure(pool: &Pool) -> Result<(), tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn ensure(pool: &Pool) -> Result<(), crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     client.batch_execute(DDL).await?;
     client.batch_execute(RENAME_IN_COLUMNS).await?;
     // Представления заводятся после таблиц: они их читают.
     client.batch_execute(VIEWS).await?;
     // Своей пачкой — чтобы ожидание замка на снятии не держало за собой схему.
-    client.batch_execute(PHASE_VIEWS).await
+    Ok(client.batch_execute(PHASE_VIEWS).await?)
 }
 
 /// Проекции, которые обязаны быть готовы ДО донорской пересборки.
@@ -2899,8 +2910,8 @@ pub async fn ensure(pool: &Pool) -> Result<(), tokio_postgres::Error> {
 /// Донорские проекции читают `task_requirement`; посчитанная после них, она
 /// накормила бы их данными прошлого круга — расхождение на один шаг, невидимое
 /// глазом и оттого худшее.
-pub async fn rebuild_before(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
-    let mut client = pool.get().await.expect("пул отдал соединение");
+pub async fn rebuild_before(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+    let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
 
     tx.execute("DELETE FROM task_requirements_declared WHERE project_id = $1", &[&project]).await?;
@@ -2950,7 +2961,7 @@ pub async fn rebuild_before(pool: &Pool, project: &str) -> Result<Value, tokio_p
 pub async fn clear_redone(
     client: &impl deadpool_postgres::GenericClient,
     project: &str,
-) -> Result<(), tokio_postgres::Error> {
+) -> Result<(), crate::db::Fail> {
     client
         .execute(
             "DELETE FROM task_redo r
@@ -2972,7 +2983,7 @@ pub async fn clear_redone(
 pub async fn closings_to_judge(
     client: &impl deadpool_postgres::GenericClient,
     project: &str,
-) -> Result<Vec<(String, String)>, tokio_postgres::Error> {
+) -> Result<Vec<(String, String)>, crate::db::Fail> {
     let rows = client
         .query(
             "SELECT id, coalesce(closing_commit, '') FROM project_plan_tasks
@@ -2994,7 +3005,7 @@ pub async fn judge_closings(
     client: &impl deadpool_postgres::GenericClient,
     project: &str,
     pending: &[(String, String)],
-) -> Result<u64, tokio_postgres::Error> {
+) -> Result<u64, crate::db::Fail> {
     if pending.is_empty() {
         return Ok(0);
     }
@@ -3023,7 +3034,7 @@ pub async fn judge_closings(
              ON CONFLICT (project_id, task_id) DO NOTHING",
             &[&project, &tasks, &commits],
         )
-        .await
+        .await.map_err(Into::into)
 }
 
 /// Замер, вокруг которого судятся закрытия: взятые ДО него — по фазе, какой он
@@ -3036,14 +3047,14 @@ pub async fn judging_closings<T, F, Fut>(
     pool: &Pool,
     project: &str,
     measure: F,
-) -> Result<T, tokio_postgres::Error>
+) -> Result<T, crate::db::Fail>
 where
     F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = Result<T, tokio_postgres::Error>>,
+    Fut: std::future::Future<Output = Result<T, crate::db::Fail>>,
 {
-    let pending = closings_to_judge(&pool.get().await.expect("пул отдал соединение"), project).await?;
+    let pending = closings_to_judge(&*crate::db::conn(pool).await?, project).await?;
     let out = measure().await?;
-    judge_closings(&pool.get().await.expect("пул отдал соединение"), project, &pending).await?;
+    judge_closings(&*crate::db::conn(pool).await?, project, &pending).await?;
     Ok(out)
 }
 
@@ -3058,7 +3069,7 @@ pub fn closings_without_commit(states: &[(String, String, String, i64)]) -> Vec<
 }
 
 /// Пересобрать проекции этого сервера. Возвращает счёт по каждой.
-pub async fn rebuild(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
+pub async fn rebuild(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
     // Отладка: какой из запросов упал, видно по порядку в логе.
     // Пересборка идёт ОДНОЙ транзакцией.
     //
@@ -3066,7 +3077,7 @@ pub async fn rebuild(pool: &Pool, project: &str) -> Result<Value, tokio_postgres
     // между этими двумя шагами есть окно, в котором таблица пуста, — и читатель,
     // попавший в него, видит не «пересчитывается», а «ничего нет». Интерфейс на
     // этом уже показал 20 неизвестных вместо 1758 и выглядел правдой.
-    let mut client = pool.get().await.expect("пул отдал соединение");
+    let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
 
     // ── Событие сущности ─────────────────────────────────────────────────────
@@ -3578,6 +3589,9 @@ pub async fn rebuild(pool: &Pool, project: &str) -> Result<Value, tokio_postgres
         .await?;
 
     tx.commit().await?;
+    // Соединение отпускается ДО связей: они берут своё и свой замок, и два
+    // сразу на одну сборку — тот самый способ запереть пул, что чинится здесь.
+    drop(client);
     // Связи считаются ПОСЛЕДНИМИ и здесь, а не в пересборке: красные задачи
     // кладёт эта сборка, и до неё их в плане нет. Связь, посчитанная раньше,
     // легла бы на пустоту и показала бы ноль как «сошлось».
@@ -3613,8 +3627,8 @@ pub async fn rebuild(pool: &Pool, project: &str) -> Result<Value, tokio_postgres
 /// задач: раскрытое при записи протухнет, как только в этап добавят задачу, и
 /// задача прочтётся готовой, хотя ждёт новичка. Именно на этом `M8-T10` сегодня
 /// читается свободной: рёбер у неё ноль, а документ говорит «все задачи M8».
-pub async fn next_task(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn next_task(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
             "WITH open AS (
@@ -3678,7 +3692,7 @@ pub async fn next_task(pool: &Pool, project: &str) -> Result<Value, tokio_postgr
             )
             .await?;
         if let Some(первая) = долг.first() {
-            if let Some(держит) = лестница_держит(&client, project, первая.get(4)).await? {
+            if let Some(держит) = лестница_держит(&*client, project, первая.get(4)).await? {
                 return Ok(json!({ "task": null, "candidate": первая.get::<_, String>(0), "redo": true,
                                   "why": держит["why"], "ladder": держит }));
             }
@@ -3808,10 +3822,10 @@ pub async fn next_task(pool: &Pool, project: &str) -> Result<Value, tokio_postgr
             // Что делать фазой ниже, лестница знает и без нас — она это и
             // считает. Держать здесь второй ответ на тот же вопрос значило бы
             // завести два порядка работ, расходящихся молча.
-            "instead": шаг_вместо(&client, project).await?,
+            "instead": шаг_вместо(&*client, project).await?,
         }));
     }
-    if let Some(держит) = лестница_держит(&client, project, phase_ord).await? {
+    if let Some(держит) = лестница_держит(&*client, project, phase_ord).await? {
         return Ok(json!({ "task": null, "candidate": id, "why": держит["why"], "ladder": держит }));
     }
     // ДОЛГ ВИДЕН СРАЗУ, А НЕ В КОНЦЕ ОЧЕРЕДИ.
@@ -3856,8 +3870,8 @@ pub async fn next_task(pool: &Pool, project: &str) -> Result<Value, tokio_postgr
 }
 
 /// Почему задача не берётся: перечень того, чего она ждёт.
-pub async fn task_blockers(pool: &Pool, project: &str, task: &str) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn task_blockers(pool: &Pool, project: &str, task: &str) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     // ПУСТОЙ СПИСОК ВМЕСТО ОТВЕТА ВРЁТ. Ручку звали без задачи, и она отвечала
     // `{"task": "", "waitsForMilestones": [], "waitsForTasks": []}` — неотличимо
     // от «ничто не блокирует». Тот же приём, что у `kinds-due` («у
@@ -3965,8 +3979,8 @@ pub async fn task_blockers(pool: &Pool, project: &str, task: &str) -> Result<Val
 /// колонке `state` лежало заявление, написанное когда-то руками. Рядом они
 /// читались как два мнения, и «расхождением» звалось то, что было просто
 /// непересчитанной записью.
-pub async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
-    let mut conn = pool.get().await.expect("пул отдал соединение");
+pub async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+    let mut conn = crate::db::conn(pool).await?;
     // ВЕСЬ КРУГ — ОДНОЙ ТРАНЗАКЦИЕЙ, и это не про скорость.
     //
     // Строки писались по одной, и всякий, кто читал гейт в это время, складывал
@@ -4042,7 +4056,7 @@ pub async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, tokio_po
             // Запрос предмета, который не исполнился, — не «предмет пуст» и не
             // повод мерить: транзакция после ошибки прервана до точки возврата.
             Err(e) => json!({ "item": item, "kind": kind, "computed": "unknown",
-                              "why": format!("запрос предмета не исполнился: {}", db_says(&e)),
+                              "why": format!("запрос предмета не исполнился: {}", e.says()),
                               "means": r.get::<_, String>(4) }),
         };
         // Откат ВСЕГДА: замер обязан только читать, и терять ему нечего. Заодно
@@ -4112,7 +4126,7 @@ pub async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, tokio_po
                 if flat == "failed" {
                     failed -= 1;
                 }
-                unwritten.push(json!({ "phase": phase, "id": id, "why": db_says(&e) }));
+                unwritten.push(json!({ "phase": phase, "id": id, "why": e.says() }));
             }
         }
     }
@@ -4160,7 +4174,7 @@ async fn measure_item(
     kind: &str,
     query: Option<&str>,
     r: &tokio_postgres::Row,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     let item = item.to_owned();
     let kind = kind.to_owned();
         let why_col: String = r.try_get("why").unwrap_or_default();
@@ -4203,8 +4217,8 @@ async fn measure_item(
         Ok(entry)
 }
 
-pub async fn gate(pool: &Pool, project: &str, phase: Option<&str>) -> Result<Value, tokio_postgres::Error> {
-    let mut conn = pool.get().await.expect("пул отдал соединение");
+pub async fn gate(pool: &Pool, project: &str, phase: Option<&str>) -> Result<Value, crate::db::Fail> {
+    let mut conn = crate::db::conn(pool).await?;
     // ВЕРДИКТ И ЕГО ОСНОВАНИЕ ЧИТАЮТСЯ ОДНИМ СНИМКОМ. Числа гейта берутся у
     // `gate_state`, а пункты, из которых они сложены, — у `project_gates`; это
     // два запроса, и с тех пор как замер пишется одной транзакцией, они ложатся
@@ -4442,8 +4456,8 @@ pub async fn gate(pool: &Pool, project: &str, phase: Option<&str>) -> Result<Val
 /// Сверка заявленного числа с фактом — но сперва сказав, что именно считается.
 ///
 /// Без оговорки сверка кричит волком дважды и топит единственный настоящий крик.
-pub async fn claims(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn claims(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
             "SELECT c.name, c.subject, c.claimed, s.counts, s.note
@@ -4487,8 +4501,8 @@ pub async fn claims(pool: &Pool, project: &str) -> Result<Value, tokio_postgres:
 }
 
 /// Чек-лист сущности с честным `unknown` там, где способа нет.
-pub async fn readiness(pool: &Pool, project: &str, kind: &str, id: &str) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn readiness(pool: &Pool, project: &str, kind: &str, id: &str) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
             "SELECT ord, text, declared, method_kind, state FROM readiness_state
@@ -4521,8 +4535,8 @@ pub async fn readiness(pool: &Pool, project: &str, kind: &str, id: &str) -> Resu
 }
 
 /// Требования задачи — с объявленным отсутствием как ответом, а не пустотой.
-pub async fn requirements_of(pool: &Pool, project: &str, task: &str) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn requirements_of(pool: &Pool, project: &str, task: &str) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let declared = client
         .query(
             "SELECT has_own, note FROM task_requirements_declared WHERE project_id = $1 AND task_id = $2",
@@ -4558,8 +4572,8 @@ pub async fn requirements_of(pool: &Pool, project: &str, task: &str) -> Result<V
 }
 
 /// Задачи истории — через требования, с исключением как ответом.
-pub async fn tasks_of_story(pool: &Pool, project: &str, story: &str) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn tasks_of_story(pool: &Pool, project: &str, story: &str) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let known = client
         .query("SELECT id FROM project_stories WHERE project_id = $1 AND id = $2", &[&project, &story])
         .await?;
@@ -4589,8 +4603,8 @@ pub async fn tasks_of_story(pool: &Pool, project: &str, story: &str) -> Result<V
 }
 
 /// Очередь предполёта: чего ещё не смотрели или смотрели до правки.
-pub async fn preflight_queue(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn preflight_queue(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
             // Очередь — ВСЕ незакрытые задачи, а не только готовые к работе.
@@ -4658,14 +4672,14 @@ pub async fn push_task_state(
     project: &str,
     states: &[(String, String, String, i64)],
     seen_at: i64,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     let bare = closings_without_commit(states);
     if !bare.is_empty() {
         return Ok(json!({ "status": "closed_without_commit", "tasks": bare,
             "why": "закрытие приходит закрывающим трейлером и опознаётся его коммитом: без коммита \
                     нельзя отличить новое закрытие от прежнего. Ничего не записано" }));
     }
-    let mut client = pool.get().await.expect("пул отдал соединение");
+    let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
     // Подача полная, а не добавочная: задача, исчезнувшая из подачи, потеряла
     // трейлер, и держать её прежнее состояние значило бы помнить отменённое.
@@ -4731,8 +4745,8 @@ pub async fn push_task_state(
 /// верить, а сквозь неё проходит настоящее.
 ///
 /// Расхождение — это когда документ говорит ДРУГОЕ.
-pub async fn state_disagreements(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn state_disagreements(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
             "SELECT t.id, f.value, coalesce(s.state, 'not_started'), coalesce(s.closing_commit, '')
@@ -4797,8 +4811,8 @@ pub async fn set_method(
     method: &str,
     declared_by: &str,
     drop: bool,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     if drop {
         let n = client
             .execute(
@@ -4862,8 +4876,8 @@ pub async fn record_edit(
     revision: i64,
     actor: &str,
     event: &str,
-) -> Result<u64, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<u64, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     client
         .execute(
             "INSERT INTO entity_event (project_id, entity_kind, entity_id, ord, at, event, actor, source)
@@ -4872,7 +4886,7 @@ pub async fn record_edit(
                DO UPDATE SET event = EXCLUDED.event, actor = EXCLUDED.actor",
             &[&project, &kind, &id, &(revision as i32), &event, &actor],
         )
-        .await
+        .await.map_err(Into::into)
 }
 
 /// Приём наблюдений о репозитории. Подача полная в пределах вида факта.
@@ -4886,8 +4900,8 @@ pub async fn push_code_facts(
     kind: &str,
     facts: &[(String, String)],
     actor: &str,
-) -> Result<Value, tokio_postgres::Error> {
-    let mut client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
     let before = tx
         .query_one("SELECT count(*) FROM code_fact WHERE project_id = $1 AND kind = $2", &[&project, &kind])
@@ -4922,8 +4936,8 @@ pub async fn push_skills(
     skills: &[(String, String, String)],
     actor: &str,
     dry: bool,
-) -> Result<Value, tokio_postgres::Error> {
-    let mut client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
     let before = tx
         .query("SELECT name, content_hash FROM harness_skill WHERE set_name = $1", &[&set_name])
@@ -5005,8 +5019,8 @@ pub async fn push_task_plan(
     task: &str,
     body: &str,
     actor: &str,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     if body.trim().is_empty() {
         return Ok(json!({ "status": "empty",
                           "why": "план без текста — это отметка о том, что думали, а не то,                                   что придумали. Записывать нечего" }));
@@ -5057,8 +5071,8 @@ pub async fn push_preflight(
     // задачи. Полное стирание осталось — но его надо сказать вслух.
     replace_all: bool,
     actor: &str,
-) -> Result<Value, tokio_postgres::Error> {
-    let mut client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
     let before = tx
         .query_one("SELECT count(*) FROM preflight_verdict WHERE project_id = $1", &[&project])
@@ -5170,8 +5184,8 @@ pub async fn push_worktrees(
     project: &str,
     open: &[(String, String, i64)],
     actor: &str,
-) -> Result<Value, tokio_postgres::Error> {
-    let mut client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
     let before = tx
         .query_one("SELECT count(*) FROM task_worktree WHERE project_id = $1", &[&project])
@@ -5216,8 +5230,8 @@ pub async fn push_worktrees(
 ///   `byText` — вопрос, чьё ЗАКРЫТИЕ обосновано фразой «держатель написан»,
 ///     при том что ни одна названная в тексте задача не закрыта. Это чтение
 ///     текста, а не связь, и оно так и подписано: находка для человека.
-pub async fn question_holders(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn question_holders(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
 
     // 1. Объявленная связь — ПОЛЕ «Держатель» в шапке вопроса, и только оно.
     //    Проза не разбирается: держатель, добытый регуляркой из абзаца, — это
@@ -5344,7 +5358,7 @@ pub async fn question_holders(pool: &Pool, project: &str) -> Result<Value, tokio
 /// Вид, для которого сводка не написана, отвечает ОТКАЗОМ с именем вида, а не
 /// пустым перечнем: пустой список тут читался бы как «сущностей нет».
 pub async fn summary(pool: &Pool, project: &str, kind: &str) -> Result<Value, Miss> {
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
     let (sql, words, numbers) = match kind {
         "requirement" => (
             "SELECT r.id, r.text, r.kind, r.area, r.priority,
@@ -5510,7 +5524,16 @@ pub async fn summary(pool: &Pool, project: &str, kind: &str) -> Result<Value, Mi
 /// экраны». Разные предметы, один вопрос. Вид без описанных связей отвечает
 /// отказом, а не пустотой.
 pub async fn links_of(pool: &Pool, project: &str, kind: &str, id: &str) -> Result<Value, Miss> {
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
+    links_at(&*client, project, kind, id).await
+}
+
+pub async fn links_at(
+    client: &impl deadpool_postgres::GenericClient,
+    project: &str,
+    kind: &str,
+    id: &str,
+) -> Result<Value, Miss> {
     if id.is_empty() {
         return Err(Miss::NoEntity(kind.to_owned(), String::new()));
     }
@@ -5635,8 +5658,8 @@ pub async fn set_author(
     kind: &str,
     name: &str,
     author: &str, drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     // Снятие — очистка имени, а не удаление документа: автор — свойство
     // документа, и убрать его значит сказать «не назван», а не снести сам
     // документ вместе с текстом.
@@ -5663,8 +5686,8 @@ pub async fn set_author(
 }
 
 /// Кто за какими документами стоит.
-pub async fn authors(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn authors(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
             "SELECT coalesce(nullif(author, ''), '(не объявлен)'), count(*)::bigint,
@@ -5695,12 +5718,12 @@ pub async fn authors(pool: &Pool, project: &str) -> Result<Value, tokio_postgres
 ///
 /// Один вызов на запрос, и он же ведёт след: отдельный «журнал входов» рядом с
 /// проверкой разошёлся бы с ней в первый же отказ.
-pub async fn edge_admits(pool: &Pool, principal: &str) -> Result<bool, String> {
-    let client = pool.get().await.map_err(|e| format!("пул не отдал соединение: {e}"))?;
+pub async fn edge_admits(pool: &Pool, principal: &str) -> Result<bool, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let declared: i64 = client
         .query_one("SELECT count(*) FROM edge_principal", &[])
         .await
-        .map_err(|e| db_says(&e))?
+        ?
         .get(0);
     let allowed = if declared == 0 {
         true
@@ -5711,7 +5734,7 @@ pub async fn edge_admits(pool: &Pool, principal: &str) -> Result<bool, String> {
                 &[&principal],
             )
             .await
-            .map_err(|e| db_says(&e))?
+            ?
             .get::<_, i64>(0)
             > 0
     };
@@ -5736,8 +5759,8 @@ pub async fn allow_principal(
     note: Option<&str>,
     drop: bool,
     actor: &str,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     if drop {
         let gone = client
             .execute("DELETE FROM edge_principal WHERE principal = $1", &[&principal])
@@ -5757,8 +5780,8 @@ pub async fn allow_principal(
 }
 
 /// Кто объявлен допущенным и кто на самом деле ходит.
-pub async fn principals(pool: &Pool) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn principals(pool: &Pool) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let declared = client
         .query("SELECT principal, note FROM edge_principal ORDER BY principal", &[])
         .await?;
@@ -5801,8 +5824,8 @@ pub async fn freeze_version(
     project: &str,
     version: &str,
     actor: &str,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let already: i64 = client
         .query_one(
             "SELECT count(*) FROM version_freeze WHERE project_id = $1 AND version = $2",
@@ -5827,8 +5850,8 @@ pub async fn freeze_version(
 }
 
 /// Что выпуск сделал с набором: изменил, удалил, добавил.
-pub async fn version_delta(pool: &Pool, project: &str, version: &str) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn version_delta(pool: &Pool, project: &str, version: &str) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
             "SELECT coalesce(f.entity_kind, d.entity_kind), coalesce(f.entity_name, d.entity_name),
@@ -5889,11 +5912,11 @@ pub async fn set_agent(
     model: Option<&str>,
     actor: &str,
     drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if name.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "субагент без имени не объявляется" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
         // Снятие — той же ручкой, что и объявление. Без него объявленное
         // убирается только запросом мимо сервера, и сервер перестаёт быть
         // единственной дверью — а значит, снятое где-то останется.
@@ -5945,8 +5968,8 @@ pub async fn set_skill(
     disable_model_invocation: Option<bool>,
     actor: &str,
     drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
         // Снятие — той же ручкой, что и объявление. Без него объявленное
         // убирается только запросом мимо сервера, и сервер перестаёт быть
         // единственной дверью — а значит, снятое где-то останется.
@@ -6004,8 +6027,8 @@ pub async fn set_skill(
 /// Проверка машинная и потому годная: корни набора и `.md` рядом с ними — то,
 /// чего в теле скилла быть не должно. Своя машинерия харнеса (`.harness/`,
 /// `core/`) под правило не подпадает: это не набор.
-pub async fn skills_with_paths(pool: &Pool, set_name: &str) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn skills_with_paths(pool: &Pool, set_name: &str) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
             "SELECT s.name, count(*)::bigint, min(l.line)
@@ -6040,8 +6063,8 @@ pub async fn set_screen_area(
     screen: &str,
     area: &str,
     drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
         // Снятие — той же ручкой, что и объявление. Без него объявленное
         // убирается только запросом мимо сервера, и сервер перестаёт быть
         // единственной дверью — а значит, снятое где-то останется.
@@ -6084,10 +6107,10 @@ pub async fn set_screen_area(
 ///
 /// Гейт читает запросом; вычисление живёт на Rust. Мост между ними — строка в
 /// `generated_drift`: есть строка — файл отстал.
-pub async fn check_generated(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
+pub async fn check_generated(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
     let computed = order(pool, project).await?;
     let want = computed["content"].as_str().unwrap_or("");
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
     let have: Option<String> = client
         .query(
             "SELECT content FROM project_documents
@@ -6166,7 +6189,7 @@ async fn answer_of(
             out.sort();
             Ok(out)
         }
-        Err(e) => Err(db_says(&e)),
+        Err(e) => Err(e.says()),
     }
 }
 
@@ -6179,7 +6202,7 @@ async fn subject_planted(
         return Ok(());
     }
     match tx.query(subject, &[&project]).await {
-        Err(e) => Err(format!("запрос предмета не исполнился после подсадки: {}", db_says(&e))),
+        Err(e) => Err(format!("запрос предмета не исполнился после подсадки: {}", e.says())),
         Ok(rows) if rows.is_empty() => Err("предмет пуст после подсадки: сущности под нарушением проба \
                                             не завела, и замер пройдёт по отсутствию"
             .to_owned()),
@@ -6189,16 +6212,6 @@ async fn subject_planted(
 
 /// Ошибка базы словами, а не «db error».
 ///
-/// `Display` у ошибки tokio-postgres печатает ровно «db error» и прячет причину
-/// в поле, которое надо спросить. Самотест, отвечающий «проба не исполнилась:
-/// db error», не отличим от отсутствия ответа: чинить по такому нечего.
-pub fn db_says(e: &tokio_postgres::Error) -> String {
-    match e.as_db_error() {
-        Some(d) => format!("{}: {}", d.severity(), d.message()),
-        None => e.to_string(),
-    }
-}
-
 /// Снять ступень и сдвинуть номера следом идущих.
 ///
 /// Обратная сторона `add_step`, и с той же заботой: номер ступени — ссылка на
@@ -6211,8 +6224,8 @@ pub async fn remove_step(
     set_name: &str,
     process: &str,
     ord: i32,
-) -> Result<Value, tokio_postgres::Error> {
-    let mut client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
     let question: Option<String> = tx
         .query_opt(
@@ -6306,11 +6319,11 @@ pub async fn declare_run_record(
     pool: &Pool, project: &str, id: &str, task: &str, milestone: &str, title: &str,
     commits: &str, dates: &str, review: &str, appeared: &str, left_open: &str,
     drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if id.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "прогон без имени не объявляется" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
         // Снятие — той же ручкой, что и объявление. Без него объявленное
         // убирается только запросом мимо сервера, и сервер перестаёт быть
         // единственной дверью — а значит, снятое где-то останется.
@@ -6338,7 +6351,7 @@ pub async fn declare_run_record(
 pub async fn declare_decision_link(
     pool: &Pool, project: &str, decision: &str, kind: &str, target: &str,
     drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if decision.trim().is_empty() || target.trim().is_empty() {
         return Ok(json!({ "status": "empty", "why": "связь без решения или без цели не объявляется" }));
     }
@@ -6346,7 +6359,7 @@ pub async fn declare_decision_link(
         return Ok(json!({ "status": "bad_kind",
                           "why": "связь бывает: closes · supersedes · refines · touches · relates" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
         // Снятие — той же ручкой, что и объявление. Без него объявленное
         // убирается только запросом мимо сервера, и сервер перестаёт быть
         // единственной дверью — а значит, снятое где-то останется.
@@ -6367,11 +6380,11 @@ pub async fn declare_decision_link(
 pub async fn declare_frame_rule(
     pool: &Pool, project: &str, kind: &str, number: i32, title: &str, body: &str, held_by: &str,
     drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if title.trim().is_empty() {
         return Ok(json!({ "status": "empty", "why": "без формулировки не объявляется" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
         // Снятие — той же ручкой, что и объявление. Без него объявленное
         // убирается только запросом мимо сервера, и сервер перестаёт быть
         // единственной дверью — а значит, снятое где-то останется.
@@ -6411,8 +6424,8 @@ pub async fn declare_frame_rule(
 pub async fn declare_process_row(
     pool: &Pool, project: &str, kind: &str, a: &str, b: &str, c: &str, d: &str, ord: i32,
     drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     // Снятие — той же ручкой, что и объявление: строка, заведённая по ошибке
     // (шапка таблицы, прочитанная как данные), иначе снимается только руками в
     // обход сервера.
@@ -6454,11 +6467,11 @@ pub async fn declare_milestone_detail(
     pool: &Pool, project: &str, milestone: &str, what: &str, blocked_by: &str,
     requirement: &str, gate: &str, closed: &str,
     drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if milestone.trim().is_empty() {
         return Ok(json!({ "status": "empty", "why": "подробность без этапа не объявляется" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
         // Снятие — той же ручкой, что и объявление. Без него объявленное
         // убирается только запросом мимо сервера, и сервер перестаёт быть
         // единственной дверью — а значит, снятое где-то останется.
@@ -6513,11 +6526,11 @@ pub async fn declare_screen_detail(
     pool: &Pool, project: &str, screen: &str, purpose: &str, opens_when: &str,
     empty_and_broken: &str, requirement: &str,
     drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if screen.trim().is_empty() {
         return Ok(json!({ "status": "empty", "why": "подробность без экрана не объявляется" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
         // Снятие — той же ручкой, что и объявление. Без него объявленное
         // убирается только запросом мимо сервера, и сервер перестаёт быть
         // единственной дверью — а значит, снятое где-то останется.
@@ -6548,11 +6561,11 @@ pub async fn declare_screen_detail(
 pub async fn declare_story_detail(
     pool: &Pool, project: &str, story: &str, screen: &str, persona: &str,
     drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if story.trim().is_empty() {
         return Ok(json!({ "status": "empty", "why": "подробность без истории не объявляется" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
         // Снятие — той же ручкой, что и объявление. Без него объявленное
         // убирается только запросом мимо сервера, и сервер перестаёт быть
         // единственной дверью — а значит, снятое где-то останется.
@@ -6596,8 +6609,8 @@ pub async fn declare_story_detail(
 /// и читается она как знание.
 pub async fn declare_story_requirement(
     pool: &Pool, project: &str, story: &str, requirement: &str, drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     if story.trim().is_empty() || requirement.trim().is_empty() {
         return Ok(json!({ "status": "empty",
             "why": "связь объявляется двумя сторонами: история и требование" }));
@@ -6650,8 +6663,8 @@ pub async fn declare_story_requirement(
 /// из семнадцати. Там пункт красен по делу — и закрыть его было нечем.
 pub async fn declare_feature_story(
     pool: &Pool, project: &str, feature: &str, story: &str, drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     if feature.trim().is_empty() || story.trim().is_empty() {
         return Ok(json!({ "status": "empty",
             "why": "связь объявляется двумя сторонами: фича и история" }));
@@ -6699,11 +6712,11 @@ pub async fn declare_feature_story(
 pub async fn declare_feature_link(
     pool: &Pool, project: &str, feature: &str, requirement: &str, article: i32,
     drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if feature.trim().is_empty() {
         return Ok(json!({ "status": "empty", "why": "связь без фичи не объявляется" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
         // Снятие — той же ручкой, что и объявление. Без него объявленное
         // убирается только запросом мимо сервера, и сервер перестаёт быть
         // единственной дверью — а значит, снятое где-то останется.
@@ -6734,11 +6747,11 @@ pub async fn declare_acceptance(
     pool: &Pool, project: &str, id: &str, story: &str, number: i32, title: &str,
     preconditions: &str, steps: &str, observed: &str, fails_when: &str,
     drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if id.trim().is_empty() || title.trim().is_empty() {
         return Ok(json!({ "status": "empty", "why": "сценарий без имени или без названия не объявляется" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
         // Снятие — той же ручкой, что и объявление. Без него объявленное
         // убирается только запросом мимо сервера, и сервер перестаёт быть
         // единственной дверью — а значит, снятое где-то останется.
@@ -6768,13 +6781,13 @@ pub async fn declare_goal(
     pool: &Pool, project: &str, id: &str, number: i32, level: &str, title: &str,
     measured_by: &str, checked_when: &str, fails_when: &str, state_now: &str,
     drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if id.trim().is_empty() || title.trim().is_empty() {
         return Ok(json!({ "status": "empty", "why": "цель без имени или без формулировки не объявляется" }));
     }
     // Цель без способа измерить — намерение, и так и называется.
     let state = if measured_by.trim().is_empty() { "намерение" } else { "цель" };
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
         // Снятие — той же ручкой, что и объявление. Без него объявленное
         // убирается только запросом мимо сервера, и сервер перестаёт быть
         // единственной дверью — а значит, снятое где-то останется.
@@ -6801,12 +6814,12 @@ pub async fn declare_risk(
     pool: &Pool, project: &str, id: &str, number: i32, title: &str, state: &str,
     mitigation: &str, trigger: &str, owner: &str, source: &str,
     drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if id.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "риск без имени не объявляется" }));
     }
     let state = if matches!(state, "open" | "accepted" | "closed") { state } else { "open" };
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
         // Снятие — той же ручкой, что и объявление. Без него объявленное
         // убирается только запросом мимо сервера, и сервер перестаёт быть
         // единственной дверью — а значит, снятое где-то останется.
@@ -6832,7 +6845,7 @@ pub async fn declare_risk(
 pub async fn declare_question(
     pool: &Pool, project: &str, id: &str, number: i32, title: &str, state: &str,
     answer: &str, closed_by: &str, owner: bool, drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if id.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "вопрос без имени не объявляется" }));
     }
@@ -6840,7 +6853,7 @@ pub async fn declare_question(
     // номером, чужим именем), снимался только запросом в базу мимо сервера — и
     // так уже вышло дважды за один разбор.
     if drop_it {
-        let client = pool.get().await.expect("пул отдал соединение");
+        let client = crate::db::conn(pool).await?;
         let gone = client
             .execute("DELETE FROM project_questions WHERE project_id = $1 AND id = $2",
                      &[&project, &id])
@@ -6848,7 +6861,7 @@ pub async fn declare_question(
         return Ok(json!({ "status": if gone > 0 { "dropped" } else { "not_found" }, "id": id }));
     }
     let state = if matches!(state, "open" | "decided" | "closed") { state } else { "open" };
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
     // Колонки вопроса объявлены проекцией; здесь заполняются те, что есть у
     // объявленного: остальное остаётся пустым и видно как пустое.
     client.execute(
@@ -6877,7 +6890,7 @@ pub async fn declare_question(
         {
             Ok(_) => {}
             Err(e) => закрыт = json!({ "asked": closed_by, "written": false,
-                                       "why": db_says(&e) }),
+                                       "why": e.says() }),
         }
     }
     Ok(json!({ "status": "declared", "id": id, "state": state, "closedBy": закрыт }))
@@ -6885,14 +6898,14 @@ pub async fn declare_question(
 
 pub async fn declare_task_requirement(
     pool: &Pool, project: &str, task: &str, requirement: &str, drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if task.trim().is_empty() || requirement.trim().is_empty() {
         return Ok(json!({ "status": "empty", "why": "связь без задачи или без требования не объявляется" }));
     }
     // Снятие той же дверью: связь, оставшаяся без задачи, — сирота, и находит
     // её только тот, кто знал, что она была.
     if drop_it {
-        let client = pool.get().await.expect("пул отдал соединение");
+        let client = crate::db::conn(pool).await?;
         let gone = client
             .execute(
                 "DELETE FROM task_requirement WHERE project_id = $1 AND task_id = $2
@@ -6903,7 +6916,7 @@ pub async fn declare_task_requirement(
         return Ok(json!({ "status": if gone > 0 { "dropped" } else { "not_found" },
                           "task": task, "requirement": requirement }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
     client.execute(
         "INSERT INTO task_requirement (project_id, task_id, requirement_id, origin)
          VALUES ($1,$2,$3,'declared')
@@ -6913,11 +6926,11 @@ pub async fn declare_task_requirement(
 
 pub async fn declare_screen_reference(
     pool: &Pool, project: &str, source: &str, source_kind: &str, screen: &str, drop: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if source.trim().is_empty() || screen.trim().is_empty() {
         return Ok(json!({ "status": "empty", "why": "ссылка без источника или без экрана не объявляется" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
     if drop {
         let n = client.execute(
             "DELETE FROM project_screen_references WHERE project_id = $1 AND source = $2 AND screen_id = $3",
@@ -6948,11 +6961,11 @@ pub async fn declare_screen_reference(
 pub async fn declare_alternative(
     pool: &Pool, project: &str, decision: &str, ord: i32, title: &str, body: &str,
     drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if decision.trim().is_empty() || title.trim().is_empty() {
         return Ok(json!({ "status": "empty", "why": "вариант без решения или без названия не объявляется" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
         // Снятие — той же ручкой, что и объявление. Без него объявленное
         // убирается только запросом мимо сервера, и сервер перестаёт быть
         // единственной дверью — а значит, снятое где-то останется.
@@ -6975,11 +6988,11 @@ pub async fn declare_alternative(
 pub async fn declare_version(
     pool: &Pool, project: &str, id: &str,
     drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if id.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "выпуск без имени не объявляется" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
         // Снятие — той же ручкой, что и объявление. Без него объявленное
         // убирается только запросом мимо сервера, и сервер перестаёт быть
         // единственной дверью — а значит, снятое где-то останется.
@@ -7001,11 +7014,11 @@ pub async fn declare_version(
 pub async fn declare_milestone(
     pool: &Pool, project: &str, id: &str, version: &str, ord: i32, title: &str,
     drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if id.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "этап без имени не объявляется" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
         // Снятие — той же ручкой, что и объявление. Без него объявленное
         // убирается только запросом мимо сервера, и сервер перестаёт быть
         // единственной дверью — а значит, снятое где-то останется.
@@ -7029,14 +7042,14 @@ pub async fn declare_milestone(
 pub async fn declare_task(
     pool: &Pool, project: &str, id: &str, milestone: &str, ord: i32, title: &str,
     kind: &str, state: &str, size: &str, drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     // Снятие идёт той же дверью, и только объявленное: спроецированная задача
     // уходит со своим документом, а не отдельной рукой.
     if drop_it {
         if id.trim().is_empty() {
             return Ok(json!({ "status": "nameless", "why": "снимать задачу без имени нечего" }));
         }
-        let client = pool.get().await.expect("пул отдал соединение");
+        let client = crate::db::conn(pool).await?;
         let gone = client
             .execute(
                 "DELETE FROM project_plan_tasks WHERE project_id = $1 AND id = $2
@@ -7058,7 +7071,7 @@ pub async fn declare_task(
             "why": "взятие и закрытие задачи приходят закрывающим трейлером (`Task: <id> closed`) \
                     и подачей `task-state-push`, а не объявлением" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
     // Объявление поверх документа роняло пересборку всего набора: строка
     // красной задачи ложилась в план второй раз. Документ полнее объявления, и
     // пересборка всё равно перепишет строку по нему.
@@ -7091,11 +7104,11 @@ pub async fn declare_decision(
     status_text: &str, date: &str, deciders: &str, context: &str, decision: &str,
     consequences: &str,
     drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if id.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "решение без имени не объявляется" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
         // Снятие — той же ручкой, что и объявление. Без него объявленное
         // убирается только запросом мимо сервера, и сервер перестаёт быть
         // единственной дверью — а значит, снятое где-то останется.
@@ -7125,14 +7138,14 @@ pub async fn declare_decision(
 /// Объявить историю.
 pub async fn declare_story(
     pool: &Pool, project: &str, id: &str, title: &str, area: &str, drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if id.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "история без имени не объявляется" }));
     }
     // Снятие той же дверью: без него объявленное убирается только запросом
     // мимо сервера — второй дверью, о которой сервер не знает.
     if drop_it {
-        let client = pool.get().await.expect("пул отдал соединение");
+        let client = crate::db::conn(pool).await?;
         let gone = client
             .execute(
                 "DELETE FROM project_stories WHERE project_id = $1 AND id = $2 AND origin = 'declared'",
@@ -7141,7 +7154,7 @@ pub async fn declare_story(
             .await?;
         return Ok(json!({ "status": if gone > 0 { "dropped" } else { "not_found" }, "id": id }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
     client
         .execute(
             "INSERT INTO project_stories (project_id, id, title, entity_kind, entity_name, area,
@@ -7158,13 +7171,13 @@ pub async fn declare_story(
 /// Объявить экран.
 pub async fn declare_screen(
     pool: &Pool, project: &str, id: &str, title: &str, area: &str, drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if id.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "экран без имени не объявляется" }));
     }
     // Снятие той же дверью.
     if drop_it {
-        let client = pool.get().await.expect("пул отдал соединение");
+        let client = crate::db::conn(pool).await?;
         let gone = client
             .execute(
                 "DELETE FROM project_screens WHERE project_id = $1 AND id = $2 AND origin = 'declared'",
@@ -7173,7 +7186,7 @@ pub async fn declare_screen(
             .await?;
         return Ok(json!({ "status": if gone > 0 { "dropped" } else { "not_found" }, "id": id }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
     client
         .execute(
             "INSERT INTO project_screens (project_id, id, title, entity_kind, entity_name, area, origin)
@@ -7189,11 +7202,11 @@ pub async fn declare_screen(
 pub async fn declare_article(
     pool: &Pool, project: &str, number: i32, title: &str, body: &str, anchor: &str,
     drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if title.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "статья без заголовка не объявляется" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
         // Снятие — той же ручкой, что и объявление. Без него объявленное
         // убирается только запросом мимо сервера, и сервер перестаёт быть
         // единственной дверью — а значит, снятое где-то останется.
@@ -7244,7 +7257,7 @@ pub async fn declare_article(
 /// ждёт. Волна есть топологический слой, и без рёбер слой один.
 pub async fn declare_task_dep(
     pool: &Pool, project: &str, task: &str, depends_on: &str, drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if task.trim().is_empty() || depends_on.trim().is_empty() {
         return Ok(json!({ "status": "empty", "why": "зависимость без задачи или без цели не объявляется" }));
     }
@@ -7252,7 +7265,7 @@ pub async fn declare_task_dep(
     // запросом мимо сервера — второй дверью, о которой сервер не знает, и
     // разойдутся они молча.
     if drop_it {
-        let client = pool.get().await.expect("пул отдал соединение");
+        let client = crate::db::conn(pool).await?;
         let gone = client
             .execute(
                 "DELETE FROM project_plan_task_deps WHERE project_id = $1 AND task_id = $2
@@ -7266,7 +7279,7 @@ pub async fn declare_task_dep(
     if task == depends_on {
         return Ok(json!({ "status": "self", "why": "задача не зависит от себя" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
     // Обе стороны обязаны существовать: ребро в несуществующую задачу тихо
     // выпадает из порядка и делает волну шире, чем она есть.
     let known = client
@@ -7293,11 +7306,11 @@ pub async fn declare_task_dep(
 pub async fn declare_release_artifact(
     pool: &Pool, project: &str, name: &str, what: &str, installed_to: &str,
     drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if name.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "артефакт без имени не объявляется" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
         // Снятие — той же ручкой, что и объявление. Без него объявленное
         // убирается только запросом мимо сервера, и сервер перестаёт быть
         // единственной дверью — а значит, снятое где-то останется.
@@ -7320,11 +7333,11 @@ pub async fn declare_release_artifact(
 pub async fn declare_freeze_row(
     pool: &Pool, project: &str, version: &str, kind: &str, name: &str, hash: &str, actor: &str,
     drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if version.trim().is_empty() || kind.trim().is_empty() {
         return Ok(json!({ "status": "empty", "why": "строка слепка без выпуска или без вида не вносится" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
         // Снятие — той же ручкой, что и объявление. Без него объявленное
         // убирается только запросом мимо сервера, и сервер перестаёт быть
         // единственной дверью — а значит, снятое где-то останется.
@@ -7348,11 +7361,11 @@ pub async fn declare_postmortem(
     pool: &Pool, project: &str, id: &str, title: &str, summary: &str, timeline: &str,
     root_cause: &str, lesson: &str,
     drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if id.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "разбор без имени не объявляется" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
         // Снятие — той же ручкой, что и объявление. Без него объявленное
         // убирается только запросом мимо сервера, и сервер перестаёт быть
         // единственной дверью — а значит, снятое где-то останется.
@@ -7377,11 +7390,11 @@ pub async fn declare_postmortem(
 pub async fn declare_token(
     pool: &Pool, project: &str, name: &str, dark: &str, light: &str, purpose: &str, section: &str,
     drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if name.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "токен без имени не объявляется" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
         // Снятие — той же ручкой, что и объявление. Без него объявленное
         // убирается только запросом мимо сервера, и сервер перестаёт быть
         // единственной дверью — а значит, снятое где-то останется.
@@ -7409,11 +7422,11 @@ pub async fn declare_reference_source(
     sha: &str, ref_type: &str, from_project: &str, repo: &str,
     written: &str, updated: &str, status: &str, tags: &str, role: &str,
     drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if name.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "происхождение без документа не объявляется" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
         // Снятие — той же ручкой, что и объявление. Без него объявленное
         // убирается только запросом мимо сервера, и сервер перестаёт быть
         // единственной дверью — а значит, снятое где-то останется.
@@ -7444,11 +7457,11 @@ pub async fn declare_algorithm(
     pool: &Pool, project: &str, id: &str, story: &str, title: &str, preconditions: &str,
     flow: &str, failure: &str, not_covered: &str, link_kind: &str, link_target: &str,
     drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if id.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "алгоритм без имени не объявляется" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
         // Снятие — той же ручкой, что и объявление. Без него объявленное
         // убирается только запросом мимо сервера, и сервер перестаёт быть
         // единственной дверью — а значит, снятое где-то останется.
@@ -7485,11 +7498,11 @@ pub async fn declare_algorithm(
 pub async fn declare_stand_row(
     pool: &Pool, project: &str, section: &str, name: &str, value: &str,
     drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if name.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "строка стенда без имени не объявляется" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
         // Снятие — той же ручкой, что и объявление. Без него объявленное
         // убирается только запросом мимо сервера, и сервер перестаёт быть
         // единственной дверью — а значит, снятое где-то останется.
@@ -7512,11 +7525,11 @@ pub async fn declare_stand_row(
 pub async fn declare_sensor_spec(
     pool: &Pool, project: &str, fact: &str, reads: &str, extract: &str, note: &str, how: &str,
     skip: &str, allow: &str, drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if fact.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "датчик без имени факта не объявляется" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
     if drop_it {
         let gone = client.execute("DELETE FROM project_sensor_spec WHERE project_id = $1 AND fact = $2",
                                   &[&project, &fact]).await?;
@@ -7607,8 +7620,8 @@ pub async fn counts_sync(
     only_name: &str,
     apply: bool,
     author: &str,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     // Тот же образец и тот же счёт, что у пункта `kind-count-matches`: второй
     // источник правды разошёлся бы с первым.
     let rows = client
@@ -7718,8 +7731,8 @@ pub async fn counts_sync(
 /// фазы и лестница.
 pub async fn set_kind_required(
     pool: &Pool, kind: &str, required: bool, why: &str,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     if kind.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "вид без имени не объявляется" }));
     }
@@ -7758,8 +7771,8 @@ pub async fn set_kind_required(
 /// только подписанная; она читается как знание. Дверь отказывает.
 pub async fn set_kind_projection(
     pool: &Pool, kind: &str, projection: &str, holds: &[String],
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     if kind.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "вид без имени не объявляется" }));
     }
@@ -7889,8 +7902,8 @@ pub async fn set_kind_projection(
 /// `test-cases` через 19 проверок; второй — сорок документов.
 pub async fn tree(
     pool: &Pool, project: &str, kind: &str, name: &str, depth: i32,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     // Глубина ограничена: на четвёртом шаге обход накрывает почти весь набор, и
     // ответ «связано всё» не отвечает ни на один вопрос.
     let depth = depth.clamp(1, 4);
@@ -8007,8 +8020,8 @@ pub async fn tree(
 /// накрывает и детей, и по нему абзац ребёнка засчитался бы дважды.
 pub async fn document_coverage(
     pool: &Pool, project: &str, kind: &str, name: &str,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     if client
         .query_opt(
             "SELECT 1 FROM project_documents WHERE project_id = $1 AND entity_kind = $2 AND entity_name = $3",
@@ -8112,8 +8125,8 @@ pub async fn document_coverage(
 /// намерение, которое никогда не исполнится.
 pub async fn set_kind_reopens(
     pool: &Pool, kind: &str, reopens: bool, why: &str,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     if kind.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "вид без имени не объявляется" }));
     }
@@ -8195,7 +8208,7 @@ pub async fn set_kind_reopens(
 /// «column id does not exist» — `entity-rename` падала на всём виде.
 async fn своих_таблиц(
     client: &impl deadpool_postgres::GenericClient, kind: &str,
-) -> Result<Vec<String>, tokio_postgres::Error> {
+) -> Result<Vec<String>, crate::db::Fail> {
     Ok(client
         .query(
             "SELECT h.t
@@ -8232,8 +8245,8 @@ async fn своих_таблиц(
 /// ради того и делается, чтобы расхождение ушло.
 pub async fn rename_entity(
     pool: &Pool, project: &str, kind: &str, from: &str, to: &str, apply: bool, merge: bool,
-) -> Result<Value, tokio_postgres::Error> {
-    let mut client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
     tx.batch_execute("SET LOCAL lock_timeout = '2s'").await?;
     let mut report = renaming(&tx, project, kind, from, to, merge).await?;
@@ -8266,7 +8279,7 @@ pub async fn rename_entity(
 
 async fn renaming(
     tx: &impl deadpool_postgres::GenericClient, project: &str, kind: &str, from: &str, to: &str, merge: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if from.trim().is_empty() || to.trim().is_empty() {
         return Ok(json!({ "status": "empty", "why": "нужны оба имени: старое и новое" }));
     }
@@ -8440,7 +8453,7 @@ async fn renaming(
 
 async fn записей_под_именем(
     client: &impl deadpool_postgres::GenericClient, table: &str, project: &str, name: &str,
-) -> Result<i64, tokio_postgres::Error> {
+) -> Result<i64, crate::db::Fail> {
     Ok(client
         .query_one(&format!("SELECT count(*) FROM {table} WHERE project_id = $1 AND id = $2"), &[&project, &name])
         .await?
@@ -8450,7 +8463,7 @@ async fn записей_под_именем(
 /// Документ вида под этим именем — тоже запись: у `index` и `mockup` другой нет.
 async fn документов_вида(
     client: &impl deadpool_postgres::GenericClient, project: &str, kind: &str, name: &str,
-) -> Result<i64, tokio_postgres::Error> {
+) -> Result<i64, crate::db::Fail> {
     Ok(client
         .query_one(
             "SELECT count(*) FROM project_documents WHERE project_id = $1 AND entity_kind = $2 AND entity_name = $3",
@@ -8504,8 +8517,8 @@ fn replacement_of(name: &str) -> String {
 /// и вид останется пустым при живых сущностях.
 pub async fn add_kind(
     pool: &Pool, name: &str, shape: &str, id_pattern: &str, why: &str,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     if name.trim().is_empty() || why.trim().is_empty() {
         return Ok(json!({ "status": "empty",
             "why": "нужны имя вида и довод: вид без довода не оспорить" }));
@@ -8557,8 +8570,8 @@ pub async fn add_kind(
 /// ничего не доказано, — подписать намерение вместо факта.
 pub async fn set_kind_proves(
     pool: &Pool, project: &str, kind: &str, proves: bool, why: &str,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     if kind.trim().is_empty() || why.trim().is_empty() {
         return Ok(json!({ "status": "empty", "why": "нужны род и довод" }));
     }
@@ -8605,8 +8618,8 @@ pub async fn set_kind_proves(
 /// одно имя, не поймает ничего и промолчит об этом.
 pub async fn set_kind_id(
     pool: &Pool, project: &str, kind: &str, pattern: &str, why: &str,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     if kind.trim().is_empty() || pattern.trim().is_empty() || why.trim().is_empty() {
         return Ok(json!({ "status": "empty", "why": "нужны вид, образец и довод" }));
     }
@@ -8622,7 +8635,7 @@ pub async fn set_kind_id(
             "why": "образец не разбирается" }));
     }
     // Сверка на живых именах: таблицы берутся из объявления вида.
-    let свои = своих_таблиц(&client, kind).await?;
+    let свои = своих_таблиц(&*client, kind).await?;
     let mut подошло = 0i64;
     let mut всего = 0i64;
     for table in &свои {
@@ -8660,8 +8673,8 @@ pub async fn set_kind_id(
 /// Свёрнутые до родов, они умещаются в два десятка рёбер — и это карта того,
 /// как устроен проект: задача стоит на требовании, требование на потребности,
 /// этап на своих перечнях.
-pub async fn links_graph(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn links_graph(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let edges = client
         .query(
             "SELECT from_kind, to_kind, count(*)::bigint, count(DISTINCT from_id)::bigint
@@ -8724,8 +8737,8 @@ pub async fn links_graph(pool: &Pool, project: &str) -> Result<Value, tokio_post
 /// правки, а не от случившейся.
 pub async fn impact(
     pool: &Pool, project: &str, kind: &str, id: &str, depth: i32,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let depth = depth.clamp(1, 6);
     if client
         .query_opt(
@@ -8776,8 +8789,8 @@ pub async fn impact(
 /// собирались руками из разных ручек. Работа агентов не отдавалась вовсе:
 /// `project_task_runs` знает, кто над чем сидит, и дверей к нему не было ни
 /// одной.
-pub async fn console(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn console(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
 
     // Что идёт ПРЯМО СЕЙЧАС: прогон задачи с агентом и состоянием.
     let runs = client
@@ -8851,7 +8864,7 @@ pub async fn console(pool: &Pool, project: &str) -> Result<Value, tokio_postgres
 /// Заявка в очередь владельца: изменение харнеса либо подтверждение коммита.
 pub async fn add_ask(
     pool: &Pool, project: &str, kind: &str, title: &str, body: &str, run_id: &str, by: &str,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if !["request", "approval", "question"].contains(&kind) {
         return Ok(json!({ "status": "kind_unknown", "kind": kind,
             "why": "заявка бывает трёх родов: request — изменение харнеса, approval — подтверждение коммита \
@@ -8865,7 +8878,7 @@ pub async fn add_ask(
         return Ok(json!({ "status": "no_run",
             "why": "подтверждение и вопрос просит прогон: без его имени решение некуда вернуть" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
     let row = client
         .query_one(
             "INSERT INTO owner_ask (project_id, kind, title, body, asked_by, at, run_id)
@@ -8878,8 +8891,8 @@ pub async fn add_ask(
 
 /// Очередь: что ждёт решения. Решённое отдаётся по просьбе — им проверяют, что
 /// ответ доехал.
-pub async fn list_asks(pool: &Pool, project: &str, state: &str, limit: i64) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn list_asks(pool: &Pool, project: &str, state: &str, limit: i64) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
             "SELECT id, project_id, kind, title, body, asked_by, at, run_id, state, why,
@@ -8908,8 +8921,8 @@ pub async fn list_asks(pool: &Pool, project: &str, state: &str, limit: i64) -> R
 ///
 /// Запись заводится один раз на вопрос: ответ владельца не повторяет вопрос.
 /// Вопрос, закрытый в наборе или снятый с владельца, закрывает свою запись.
-pub async fn sync_owner_questions(pool: &Pool, project: &str) -> Result<u64, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn sync_owner_questions(pool: &Pool, project: &str) -> Result<u64, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let now = now_ms();
     let asked = client
         .execute(
@@ -8939,7 +8952,7 @@ pub async fn sync_owner_questions(pool: &Pool, project: &str) -> Result<u64, tok
 /// неотличима от списка «почему-то отклонено».
 pub async fn decide_ask(
     pool: &Pool, id: i64, state: &str, why: &str, by: &str,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     const СОСТОЯНИЯ: [&str; 6] = ["taken", "owner", "declined", "done", "approved", "rejected"];
     if !СОСТОЯНИЯ.contains(&state) {
         return Ok(json!({ "status": "state_unknown", "state": state,
@@ -8948,7 +8961,7 @@ pub async fn decide_ask(
     if why.trim().is_empty() {
         return Ok(json!({ "status": "no_why", "why": "решение без довода не читается и не спорится" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
     let n = client
         .execute(
             "UPDATE owner_ask SET state = $2, why = $3, decided_by = $4, decided_at = $5 WHERE id = $1",
@@ -8960,8 +8973,8 @@ pub async fn decide_ask(
 
 /// Решения владельца, которых прогон ещё не видел. Помечаются тем же вызовом:
 /// иначе прогон брался бы за одно и то же подтверждение каждый круг.
-pub async fn ask_inbox(pool: &Pool, project: &str, run: &str) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn ask_inbox(pool: &Pool, project: &str, run: &str) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
             "UPDATE owner_ask SET delivered_at = $3
@@ -8981,11 +8994,11 @@ pub async fn ask_inbox(pool: &Pool, project: &str, run: &str) -> Result<Value, t
 /// таблицы. Второй зов отдаёт тот, что уже идёт, а не заводит соперника.
 pub async fn start_run(
     pool: &Pool, project: &str, task: &str, agent: &str, note: &str,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if task.trim().is_empty() {
         return Ok(json!({ "status": "no_task", "why": "прогон заводится под задачу: без неё он ни о чём" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
     let живой = client
         .query_opt(
             "SELECT id, state, attempt FROM project_task_runs
@@ -9029,7 +9042,7 @@ pub async fn start_run(
 /// оставило бы задачу навсегда занятой.
 pub async fn set_run_state(
     pool: &Pool, project: &str, run: &str, state: &str, note: &str, session: &str, by: &str,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     const СОСТОЯНИЯ: [&str; 5] = ["running", "waiting", "done", "failed", "cancelled"];
     if !СОСТОЯНИЯ.contains(&state) {
         return Ok(json!({ "status": "state_unknown", "state": state,
@@ -9039,7 +9052,7 @@ pub async fn set_run_state(
         return Ok(json!({ "status": "no_note",
             "why": "остановка без причины не отличима от обрыва: скажите, на чём встали" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
     let Some(было) = client
         .query_opt("SELECT state FROM project_task_runs WHERE project_id = $1 AND id = $2", &[&project, &run])
         .await?
@@ -9070,11 +9083,11 @@ pub async fn set_run_state(
 /// Шаг прогона: что он сделал или на чём встал.
 pub async fn add_run_event(
     pool: &Pool, project: &str, run: &str, kind: &str, text: &str,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if run.trim().is_empty() || text.trim().is_empty() {
         return Ok(json!({ "status": "incomplete", "why": "событие называет прогон и то, что случилось" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
     client
         .execute(
             "INSERT INTO task_run_event (project_id, run_id, at, kind, text) VALUES ($1, $2, $3, $4, $5)",
@@ -9091,14 +9104,14 @@ pub async fn add_run_event(
 /// Слово человека прогону — и слово прогона в ответ.
 pub async fn say_to_run(
     pool: &Pool, project: &str, run: &str, side: &str, text: &str,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if !["owner", "agent"].contains(&side) {
         return Ok(json!({ "status": "side_unknown", "side": side, "why": "говорит либо owner, либо agent" }));
     }
     if run.trim().is_empty() || text.trim().is_empty() {
         return Ok(json!({ "status": "incomplete", "why": "сказанное принадлежит прогону и не бывает пустым" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
     client
         .execute(
             "INSERT INTO task_run_message (project_id, run_id, at, side, text, delivered_at)
@@ -9111,8 +9124,8 @@ pub async fn say_to_run(
 
 /// Что человек сказал прогону и он ещё не прочёл. Прочитанное помечается тем же
 /// вызовом: иначе агент отвечал бы на одно и то же каждый круг.
-pub async fn run_inbox(pool: &Pool, project: &str, run: &str) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn run_inbox(pool: &Pool, project: &str, run: &str) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
             "UPDATE task_run_message SET delivered_at = $3
@@ -9126,8 +9139,8 @@ pub async fn run_inbox(pool: &Pool, project: &str, run: &str) -> Result<Value, t
 }
 
 /// Завести беседу: место, где думают вслух над набором.
-pub async fn start_chat(pool: &Pool, project: &str, title: &str) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn start_chat(pool: &Pool, project: &str, title: &str) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let row = client
         .query_one(
             "INSERT INTO chat_thread (id, project_id, title, created_at, updated_at)
@@ -9142,14 +9155,14 @@ pub async fn start_chat(pool: &Pool, project: &str, title: &str) -> Result<Value
 /// отвечает.
 pub async fn say_in_chat(
     pool: &Pool, project: &str, thread: &str, side: &str, text: &str,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if !["owner", "agent"].contains(&side) {
         return Ok(json!({ "status": "side_unknown", "side": side, "why": "говорит либо owner, либо agent" }));
     }
     if thread.trim().is_empty() || text.trim().is_empty() {
         return Ok(json!({ "status": "incomplete", "why": "сказанное принадлежит беседе и не бывает пустым" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
     let n = client
         .execute(
             "INSERT INTO chat_message (project_id, thread_id, at, side, text, delivered_at)
@@ -9173,8 +9186,8 @@ pub async fn say_in_chat(
 /// начинался бы с чистого листа.
 pub async fn chat_inbox(
     pool: &Pool, project: &str, thread: &str, session: &str,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     if !session.trim().is_empty() {
         client
             .execute("UPDATE chat_thread SET session_id = $3, updated_at = $4 WHERE project_id = $1 AND id = $2",
@@ -9202,8 +9215,8 @@ pub async fn chat_inbox(
 /// Беседы набора, а с именем беседы — её строки.
 pub async fn read_chat(
     pool: &Pool, project: &str, thread: &str, limit: i64,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     if thread.trim().is_empty() {
         let rows = client
             .query(
@@ -9234,8 +9247,8 @@ pub async fn read_chat(
 }
 
 /// Прогоны с последними шагами: пульту нужен не список состояний, а рассказ.
-pub async fn list_runs(pool: &Pool, project: &str, limit: i64) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn list_runs(pool: &Pool, project: &str, limit: i64) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let runs = client
         .query(
             "SELECT r.id, r.task_id, coalesce(t.title, ''), r.state, r.attempt, r.note,
@@ -9288,8 +9301,8 @@ pub async fn list_runs(pool: &Pool, project: &str, limit: i64) -> Result<Value, 
 /// ОБЪЯВЛЯЕТСЯ с доводом, как проекция и переоткрытие.
 pub async fn set_kind_domain(
     pool: &Pool, kind: &str, domain: &str, why: &str,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     if kind.trim().is_empty() || domain.trim().is_empty() || why.trim().is_empty() {
         return Ok(json!({ "status": "empty", "why": "нужны вид, область и довод" }));
     }
@@ -9321,8 +9334,8 @@ pub async fn set_kind_domain(
                "means": "объявление ОБЩЕЕ: области одни для всех проектов" }))
 }
 
-pub async fn holders(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn holders(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
             "SELECT requirement_id, path FROM project_requirement_holder
@@ -9341,7 +9354,7 @@ pub async fn holders(pool: &Pool, project: &str) -> Result<Value, tokio_postgres
 pub async fn set_derived_copy(
     pool: &Pool, project: &str, name: &str, source: &str, copy: &str,
     compare: &str, pattern: &str, source_pattern: &str, why: &str, decided_by: &str, drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     let split = |v: &str| -> (String, String) {
         match v.split_once(':') {
             Some((k, n)) => (k.trim().to_owned(), n.trim().to_owned()),
@@ -9350,7 +9363,7 @@ pub async fn set_derived_copy(
     };
     let (sk, sn) = split(source);
     let (ck, cn) = split(copy);
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
     if drop_it {
         let gone = client
             .execute("DELETE FROM derived_copy WHERE project_id = $1 AND name = $2 AND copy_kind = $3 AND copy_name = $4",
@@ -9395,8 +9408,8 @@ pub async fn declared_unwritten(
     pool: &Pool,
     kinds: &crate::kinds::Kinds,
     project: &str,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let with_origin: std::collections::HashSet<String> = client
         .query(
             "SELECT table_name FROM information_schema.columns
@@ -9475,8 +9488,8 @@ pub async fn declared_unwritten(
 /// Разбивка идёт по ВИДУ ВЛАДЕЛЬЦА: пункт живёт строкой внутри задачи, вопроса
 /// или документа приёмки, и чинится он там же. «Тысяча шестьсот» не говорит, с
 /// чего начать; «тысяча пятьсот восемьдесят два у задач» — говорит.
-pub async fn readiness_gaps(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn readiness_gaps(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
             "SELECT owner_kind, count(*)::bigint,
@@ -9518,7 +9531,13 @@ pub async fn readiness_gaps(pool: &Pool, project: &str) -> Result<Value, tokio_p
 /// Пишется ВСЕГДА, а не только при удаче: молчание об упавшей пересборке
 /// неотличимо от её отсутствия, и гейт продолжает отдавать прежние числа.
 pub async fn note_reproject(pool: &Pool, project: &str, ok: bool, why: &str) {
-    let Ok(client) = pool.get().await else { return };
+    let client = match crate::db::conn(pool).await {
+        Ok(client) => client,
+        Err(e) => {
+            tracing::warn!("исход пересборки набора {project} не записан: {}", e.says());
+            return;
+        }
+    };
     let now = std::time::SystemTime::now()
         .duration_since(std::time::SystemTime::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -9548,8 +9567,8 @@ pub async fn last_reproject(
 
 
 /// Чем снимать факты: перечень объявленных датчиков для клиента.
-pub async fn sensor_specs(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn sensor_specs(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let rows = client
         .query("SELECT fact, reads, extract_re, note, how, skip_re, allow FROM project_sensor_spec
                  WHERE project_id = $1 ORDER BY fact", &[&project]).await?;
@@ -9564,11 +9583,11 @@ pub async fn sensor_specs(pool: &Pool, project: &str) -> Result<Value, tokio_pos
 pub async fn declare_project(
     pool: &Pool, id: &str, name: &str, repo: &str, actor: &str,
     drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if id.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "проект без имени не объявляется" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
         // Снятие — той же ручкой, что и объявление. Без него объявленное
         // убирается только запросом мимо сервера, и сервер перестаёт быть
         // единственной дверью — а значит, снятое где-то останется.
@@ -9592,8 +9611,8 @@ pub async fn declare_project(
 /// Отвечает БЕЗ знания проекта — в этом весь смысл: клиент, стоящий в дереве,
 /// спрашивает, кому оно принадлежит, вместо того чтобы читать ответ файлом,
 /// лежащим в том же дереве.
-pub async fn whose_repo(pool: &Pool, path: &str) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn whose_repo(pool: &Pool, path: &str) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let rows = client
         .query("SELECT id, name, repo FROM project WHERE repo <> '' ORDER BY length(repo) DESC", &[])
         .await?;
@@ -9612,8 +9631,8 @@ pub async fn whose_repo(pool: &Pool, path: &str) -> Result<Value, tokio_postgres
 
 /// Доноры проекта и сторожа — читаются вместе: чужое дерево и то, что не даёт
 /// его тронуть, отвечают на один вопрос — «что здесь не наше и чем это держится».
-pub async fn donors_and_guards(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn donors_and_guards(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let d = client
         .query("SELECT path, what, frozen_by FROM project_donor WHERE project_id = $1 ORDER BY path",
                &[&project]).await?;
@@ -9634,11 +9653,11 @@ pub async fn donors_and_guards(pool: &Pool, project: &str) -> Result<Value, toki
 /// Донорское дерево: чужая реализация, замороженная на запись.
 pub async fn declare_donor(
     pool: &Pool, project: &str, path: &str, what: &str, frozen_by: &str, drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if path.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "донор без пути не объявляется" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
     if drop_it {
         let gone = client.execute("DELETE FROM project_donor WHERE project_id = $1 AND path = $2",
                                   &[&project, &path]).await?;
@@ -9659,11 +9678,11 @@ pub async fn declare_donor(
 pub async fn declare_guard(
     pool: &Pool, project: &str, name: &str, enforces: &str, scope: &str, refuses: &str,
     acts_on: &str, path_re: &str, content_re: &str, command_re: &str, drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if name.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "сторож без имени не объявляется" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
     if drop_it {
         let gone = client.execute("DELETE FROM project_guard WHERE project_id = $1 AND name = $2",
                                   &[&project, &name]).await?;
@@ -9689,11 +9708,11 @@ pub async fn declare_guard(
 pub async fn declare_crate(
     pool: &Pool, project: &str, name: &str, does: &str, does_not: &str,
     drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if name.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "крейт без имени не объявляется" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
         // Снятие — той же ручкой, что и объявление. Без него объявленное
         // убирается только запросом мимо сервера, и сервер перестаёт быть
         // единственной дверью — а значит, снятое где-то останется.
@@ -9716,8 +9735,8 @@ pub async fn declare_crate(
 pub async fn declare_protocol_op(
     pool: &Pool, project: &str, op: &str, group: &str, events: &str, requirement: &str,
     drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
         // Снятие — той же ручкой, что и объявление. Без него объявленное
         // убирается только запросом мимо сервера, и сервер перестаёт быть
         // единственной дверью — а значит, снятое где-то останется.
@@ -9756,11 +9775,11 @@ pub async fn declare_protocol_op(
 pub async fn declare_article_gate(
     pool: &Pool, project: &str, article: i32, gate: &str, state: &str,
     drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if article <= 0 || gate.trim().is_empty() {
         return Ok(json!({ "status": "empty", "why": "связь без статьи или без гейта не объявляется" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
         // Снятие — той же ручкой, что и объявление. Без него объявленное
         // убирается только запросом мимо сервера, и сервер перестаёт быть
         // единственной дверью — а значит, снятое где-то останется.
@@ -9784,11 +9803,11 @@ pub async fn declare_article_gate(
 pub async fn declare_requirement_source(
     pool: &Pool, project: &str, id: &str, kind: &str, target: &str,
     drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if id.trim().is_empty() || target.trim().is_empty() {
         return Ok(json!({ "status": "empty", "why": "опора без требования или без цели не объявляется" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
         // Снятие — той же ручкой, что и объявление. Без него объявленное
         // убирается только запросом мимо сервера, и сервер перестаёт быть
         // единственной дверью — а значит, снятое где-то останется.
@@ -9809,7 +9828,7 @@ pub async fn declare_requirement_source(
 pub async fn declare_requirement_scope(
     pool: &Pool, project: &str, id: &str, out_of_version: &str, crosscutting: &str,
     drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if id.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "область без требования не объявляется" }));
     }
@@ -9817,7 +9836,7 @@ pub async fn declare_requirement_scope(
         return Ok(json!({ "status": "no_reason",
                           "why": "и «вне выпуска», и «сквозное» объявляются причиной, а не флагом" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
         // Снятие — очистка объявленного, а не удаление строки: строка тут
         // принадлежит не этому объявлению. Пустое значение и есть «не
         // объявлено», и читатель обязан звать это словом, а не пустотой.
@@ -9841,7 +9860,7 @@ pub async fn declare_requirement_scope(
 pub async fn declare_requirement(
     pool: &Pool, project: &str, id: &str, kind: &str, area: &str, title: &str, text: &str,
     measured_by: &str, priority: &str, drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     // Снятие идёт той же дверью. Без него объявленное требование убирается
     // только запросом мимо сервера — а это уже вторая дверь, о которой сервер
     // не знает, и разойдутся они молча.
@@ -9849,7 +9868,7 @@ pub async fn declare_requirement(
         if id.trim().is_empty() {
             return Ok(json!({ "status": "nameless", "why": "снимать требование без имени нечего" }));
         }
-        let client = pool.get().await.expect("пул отдал соединение");
+        let client = crate::db::conn(pool).await?;
         let gone = client
             .execute(
                 "DELETE FROM project_requirements WHERE project_id = $1 AND id = $2
@@ -9864,7 +9883,7 @@ pub async fn declare_requirement(
     if id.trim().is_empty() || (title.trim().is_empty() && text.trim().is_empty()) {
         return Ok(json!({ "status": "empty", "why": "требование без имени и без формулировки не объявляется" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
     // Способ доказательства, объявленный поверх абзаца «Проверяется», жил до
     // первой пересборки: дверь отвечала `hasCheck: true`, а следующая запись
     // любого документа молча возвращала поле к тексту документа.
@@ -9905,11 +9924,11 @@ pub async fn declare_requirement(
 /// Объявить термин словаря.
 pub async fn declare_term(
     pool: &Pool, project: &str, term: &str, meaning: &str, area: &str, drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if term.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "термин без имени не объявляется" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
     // Снятие — той же ручкой. Термин, оказавшийся лишним, иначе убирается
     // только запросом мимо сервера, и сервер перестаёт быть единственной дверью.
     if drop_it {
@@ -9938,8 +9957,8 @@ pub async fn retire_requirement(
     retired_by: &str,
     actor: &str,
     drop: bool,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     // Заслон стоит ПОСЛЕ снятия с учёта, а не до: пустое имя объявлять нельзя,
     // но однажды записанную с пустым именем строку убрать надо чем-то, и это
     // единственная дверь к ней.
@@ -9990,8 +10009,8 @@ pub async fn declare_sensor(
     stale_after_ms: Option<i64>,
     actor: &str,
     drop: bool,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     if drop {
         let n = client
             .execute("DELETE FROM sensor WHERE project_id = $1 AND fact = $2", &[&project, &fact])
@@ -10031,8 +10050,37 @@ pub async fn declare_sensor(
 }
 
 /// Объявленные датчики и когда каждый подавал в последний раз.
-pub async fn sensors(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+/// Натуга сервера: отказы «занято» и вложенные взятия соединения. След живёт
+/// месяц; старое убирает сборщик.
+///
+/// Счёт живёт в памяти минуту, а строки — в базе: перегрузку читают ПОСЛЕ неё,
+/// и журнал процесса для этого не годится — он переживает не всякий перезапуск
+/// и его нельзя спросить дверью.
+pub async fn strain(pool: &Pool) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
+    let rows = client
+        .query(
+            "SELECT at, busy, nested FROM server_strain ORDER BY at DESC LIMIT 50",
+            &[],
+        )
+        .await?;
+    let (busy, nested) = (
+        crate::db::BUSY.load(std::sync::atomic::Ordering::Relaxed),
+        crate::db::NESTED.load(std::sync::atomic::Ordering::Relaxed),
+    );
+    Ok(json!({
+        "сейчас": { "занято": busy, "вложенных": nested,
+                    "означает": "накоплено с прошлой записи; сборщик кладёт это строкой" },
+        "было": rows.iter().map(|r| json!({
+            "at": r.get::<_, i64>(0), "busy": r.get::<_, i64>(1), "nested": r.get::<_, i64>(2) }))
+            .collect::<Vec<_>>(),
+        "означает": "`busy` — отказов из-за перегрузки; `nested` — взятий второго соединения \
+                     при живом первом: это запирает пул на себе же и должно быть нулём"
+    }))
+}
+
+pub async fn sensors(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
             "SELECT s.fact, s.about, s.stale_after_ms, f.at, f.rows, f.actor,
@@ -10099,7 +10147,7 @@ pub async fn add_step(
     owner_kind: &str,
     owner: &str,
     touches: &str,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if !matches!(owner_kind, "skill" | "agent" | "none") {
         return Ok(json!({ "status": "bad_owner_kind", "why": "закрывает ступень скилл, субагент либо человек" }));
     }
@@ -10109,7 +10157,7 @@ pub async fn add_step(
     if question.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "ступень без условия не заводится" }));
     }
-    let mut client = pool.get().await.expect("пул отдал соединение");
+    let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
     let known: i64 = tx
         .query_one(
@@ -10170,11 +10218,11 @@ pub async fn set_version_state(
     state: &str,
     actor: &str,
     drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if state != "open" && state != "closed" {
         return Ok(json!({ "status": "bad_state", "why": "выпуск бывает открыт либо закрыт" }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
         // Снятие — той же ручкой, что и объявление. Без него объявленное
         // убирается только запросом мимо сервера, и сервер перестаёт быть
         // единственной дверью — а значит, снятое где-то останется.
@@ -10228,8 +10276,8 @@ pub async fn set_phase(
     plan_level: Option<&str>,
     task_kind: Option<&str>,
     drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     if drop_it {
         let gone = client.execute("DELETE FROM phase WHERE id = $1", &[&phase]).await?;
         return Ok(json!({ "status": if gone > 0 { "dropped" } else { "not_found" }, "phase": phase }));
@@ -10356,8 +10404,8 @@ pub async fn set_step_when(
     when_query: &str,
     when_why: &str,
     drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
         // Снятие — очистка объявленного, а не удаление строки: строка тут
         // принадлежит не этому объявлению. Пустое значение и есть «не
         // объявлено», и читатель обязан звать это словом, а не пустотой.
@@ -10389,8 +10437,8 @@ pub async fn set_step_probe(
     ord: i32,
     probe: &str,
     drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
         // Снятие — очистка объявленного, а не удаление строки: строка тут
         // принадлежит не этому объявлению. Пустое значение и есть «не
         // объявлено», и читатель обязан звать это словом, а не пустотой.
@@ -10431,8 +10479,8 @@ pub async fn step_selftest(
     set_name: &str,
     process: &str,
     under: &str,
-) -> Result<Value, tokio_postgres::Error> {
-    let mut client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let mut client = crate::db::conn(pool).await?;
     let steps = client
         .query(
             // НАБОР В ОТБОРЕ, и это не украшение: ключ лестницы — тройка
@@ -10469,7 +10517,7 @@ pub async fn step_selftest(
         let saw = match answer_of(&tx, &method, project, 0).await {
             Err(e) => Err(format!("запрос ступени не исполнился: {e}")),
             Ok(before) => match tx.execute(probe.as_str(), &[&project]).await {
-                Err(e) => Err(format!("проба не исполнилась: {}", db_says(&e))),
+                Err(e) => Err(format!("проба не исполнилась: {}", e.says())),
                 // ЧИСЛО СТРОК ДО ПОДСАДКИ — В ОТЧЁТ. Дважды за сессию самотест
                 // назвал сломанным пункт, который через минуту оказался цел, и
                 // отличить «проба неверна» от «подсаживать было не во что»
@@ -10521,8 +10569,8 @@ pub async fn set_step_question(
     ord: i32,
     question: &str,
     drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
         // Снятие — очистка объявленного, а не удаление строки: строка тут
         // принадлежит не этому объявлению. Пустое значение и есть «не
         // объявлено», и читатель обязан звать это словом, а не пустотой.
@@ -10568,8 +10616,8 @@ pub async fn set_step_method(
     subject_why: Option<&str>,
     declared_by: &str,
     drop: bool,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     if drop {
         let n = client
             .execute(
@@ -10648,7 +10696,7 @@ async fn force_gates(
     tx: &deadpool_postgres::Transaction<'_>,
     project: &str,
     under: &str,
-) -> Result<(), tokio_postgres::Error> {
+) -> Result<(), crate::db::Fail> {
     // ТРОГАЕТСЯ РОВНО ТО, ЧТО МЕНЯЕТ ВЕРДИКТ, а не весь замер.
     //
     // Первая редакция красила все строки проекта — сто тридцать одну, и делала
@@ -10714,8 +10762,8 @@ async fn force_gates(
     Ok(())
 }
 
-pub async fn gate_selftest(pool: &Pool, project: &str, under: &str) -> Result<Value, tokio_postgres::Error> {
-    let mut client = pool.get().await.expect("пул отдал соединение");
+pub async fn gate_selftest(pool: &Pool, project: &str, under: &str) -> Result<Value, crate::db::Fail> {
+    let mut client = crate::db::conn(pool).await?;
     // Замка проекта здесь нет по той же причине, что и у круга пересчёта, — см.
     // довод в `watch.rs`. Пока аренды со сроком нет, «сломан» у самотеста
     // означает либо настоящую беду пробы, либо то, что под ней шёл пересчёт;
@@ -10766,7 +10814,7 @@ pub async fn gate_selftest(pool: &Pool, project: &str, under: &str) -> Result<Va
         let saw = match answer_of(&tx, &sql, project, since).await {
             Err(e) => Err(format!("запрос пункта не исполнился: {e}")),
             Ok(before) => match tx.execute(probe.as_str(), &[&project]).await {
-                Err(e) => Err(format!("проба не исполнилась: {}", db_says(&e))),
+                Err(e) => Err(format!("проба не исполнилась: {}", e.says())),
                 // ЧИСЛО СТРОК ДО ПОДСАДКИ — В ОТЧЁТ. Дважды за сессию самотест
                 // назвал сломанным пункт, который через минуту оказался цел, и
                 // отличить «проба неверна» от «подсаживать было не во что»
@@ -10898,8 +10946,8 @@ pub async fn gate_selftest(pool: &Pool, project: &str, under: &str) -> Result<Va
 /// Волна здесь — топологический слой внутри этапа: задачи слоя не зависят друг
 /// от друга, и это всё, что она утверждает. Параллельного хода она не обещает —
 /// этап закрывается целиком.
-pub async fn order(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn order(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     // Задачи и их зависимости — из плана, а не из файлов: связь уже разобрана
     // при записи набора.
     let tasks = client
@@ -11077,8 +11125,8 @@ pub async fn retarget_links(
     pool: &Pool,
     project: &str,
     dry: bool,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let known = client
         .query(
             "SELECT DISTINCT entity_kind, entity_name, target_path, target_kind, target_name
@@ -11146,6 +11194,9 @@ pub async fn retarget_links(
         }
     }
 
+    // Соединение отпускается ПЕРЕД записью: каждая правка берёт своё, и держать
+    // при этом читающее значит брать два разом на каждый документ.
+    drop(client);
     let mut written = 0usize;
     let mut conflicts: Vec<String> = Vec::new();
     if !dry {
@@ -11172,8 +11223,8 @@ pub async fn rewrite_links(
     pool: &Pool,
     project: &str,
     dry: bool,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     // Имя → вид: только из предметных таблиц. Ничего не выводится из формы
     // имени — вид берётся оттуда, где сущность объявлена.
     let mut known: std::collections::HashMap<String, String> = Default::default();
@@ -11261,6 +11312,8 @@ pub async fn rewrite_links(
     // назван, а не переписан поверх чужой правки.
     let mut written = 0usize;
     let mut conflicts: Vec<String> = Vec::new();
+    // То же, что у `links-retarget`: читающее соединение до записи не нужно.
+    drop(client);
     if !dry {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::SystemTime::UNIX_EPOCH)
@@ -11320,8 +11373,8 @@ pub async fn set_gate_item(
     // судить всё, и это умолчание нового пункта.
     since: Option<i64>,
     drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
-    let mut client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let mut client = crate::db::conn(pool).await?;
     // Снятие пункта — той же ручкой. Без него пункт, оказавшийся неверным,
     // снимался бы только запросом в базу мимо сервера; замеры снятого пункта
     // уходят вместе с ним, иначе гейт продолжал бы считать его непройденным.
@@ -11439,7 +11492,7 @@ pub async fn set_gate_item(
                 "why": format!(
                     "запрос пункта не разбирается, и мерить им нельзя: {}. \
                      Пункт с таким запросом отвечает «мерить нечем» и молчит об этом.",
-                    db_says(&e)
+                    e.says()
                 ),
             }));
         }
@@ -11466,7 +11519,7 @@ pub async fn set_gate_item(
             Err(e) => Some(format!(
                 "проба не исполнилась, и уронить ею правило нельзя: {}. \
                  Проба — это ЗАПРОС, ПОДСАЖИВАЮЩИЙ нарушение, а не описание того, что надо сделать.",
-                db_says(e))),
+                e.says())),
             Ok(0) => Some(
                 "проба исполнилась и не подсадила ни строки: уронить ею правило нельзя".to_owned()),
             Ok(_) => None,
@@ -11539,7 +11592,7 @@ pub async fn readiness_computed(
     project: &str,
     kind: &str,
     id: &str,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if !READINESS_OWNERS.contains(&kind) {
         // Чтение документа не заменяет проекции его строк. Пустой список здесь
         // сказал бы «пунктов нет», тогда как их никто не считал.
@@ -11549,7 +11602,7 @@ pub async fn readiness_computed(
             "why": format!("о строках вида {kind} спросить нечем: пункты готовности у него не проецируются"),
         }));
     }
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
             "SELECT ord, text, declared, method_kind, method FROM readiness_item
@@ -11562,7 +11615,7 @@ pub async fn readiness_computed(
         let method_kind: String = r.get(3);
         let method: String = r.get(4);
         let declared: Option<bool> = r.get(2);
-        let v = execute_method(&client, project, &method_kind, &method).await;
+        let v = execute_method(&*client, project, &method_kind, &method).await;
         let computed = match v.state {
             "passed" => Some(true),
             "failed" => Some(false),
@@ -11618,8 +11671,8 @@ impl Verdict {
 /// неотличимо от зелёного. Узнать, чего не хватает, можно было только чтением
 /// исходника; один набор объявил так семь ролей за день, каждую — после того,
 /// как нашёл её в коде.
-pub async fn scheme_roles(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn scheme_roles(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let rows = client
         .query("SELECT role, value, coalesce(nullif(project_id,''),'') AS чей
                   FROM scheme_term ORDER BY role, ord, value", &[])
@@ -11691,7 +11744,7 @@ pub async fn scheme_roles(pool: &Pool, project: &str) -> Result<Value, tokio_pos
             continue;
         }
         let (mut подошло, mut всего) = (0i64, 0i64);
-        for table in своих_таблиц(&client, вид).await? {
+        for table in своих_таблиц(&*client, вид).await? {
             let r = client
                 .query_one(
                     &format!(
@@ -11862,8 +11915,8 @@ async fn compute_next_step(
     set_name: &str,
     process: &str,
     record: bool,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let steps = client
         .query(
             "SELECT ord, question, method_kind, method, when_query, when_why, owner_kind, owner,
@@ -11942,7 +11995,7 @@ async fn compute_next_step(
                 },
             }
         } else {
-            execute_method(&client, project, &method_kind, &method).await
+            execute_method(&*client, project, &method_kind, &method).await
         };
         journal.push((ord, verdict.state.to_owned(), verdict.detail.join(" · ")));
 
@@ -12095,7 +12148,7 @@ pub async fn measure_process(
     project: &str,
     set_name: &str,
     process: &str,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     let mut answer = compute_next_step(pool, project, set_name, process, true).await?;
     // КРАСНЫЙ ГЕЙТ ТЕКУЩЕЙ ФАЗЫ — вне очереди ступеней.
     //
@@ -12108,7 +12161,7 @@ pub async fn measure_process(
     // Здесь гейт называется НЕЗАВИСИМО от того, куда дошла лестница: работа в
     // нём есть уже сейчас, и ждать своей ступени ей незачем.
     {
-        let client = pool.get().await.expect("пул отдал соединение");
+        let client = crate::db::conn(pool).await?;
         let rows = client
             .query(
                 "SELECT ph.id, ph.title, ph.gate, g.id, g.item, g.violations
@@ -12251,7 +12304,7 @@ pub async fn measure_process(
     let unanswerable = answer["unanswerable"].as_array().map(|a| a.len()).unwrap_or(0) as i32;
     let open = answer["corpusPhaseOpen"].as_bool().unwrap_or(true);
     let now = now_ms();
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
     client
         .execute(
             "INSERT INTO process_position (project_id, process, at_ord, at_state, at_question,
@@ -12339,8 +12392,8 @@ pub async fn set_blame(
     why: &str,
     decided_by: &str,
     drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     if drop_it {
         let gone = client
             .execute(
@@ -12391,8 +12444,8 @@ pub async fn process_state(
     pool: &Pool,
     project: &str,
     process: &str,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
             "SELECT ord, question, method_kind, method, when_query, when_why,
@@ -12438,7 +12491,7 @@ pub async fn process_state(
         let verdict = if skipped || empty {
             None
         } else {
-            Some(execute_method_upto(&client, project, &method_kind, &method, 200, 0).await)
+            Some(execute_method_upto(&*client, project, &method_kind, &method, 200, 0).await)
         };
         out.push(json!({
             "ord": ord,
@@ -12488,7 +12541,7 @@ pub async fn process_state(
 async fn шаг_вместо(
     client: &impl deadpool_postgres::GenericClient,
     project: &str,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     let шаг = position(client, project, "godzy").await?;
     Ok(json!({
         "why": "фаза закрыта, но работа есть: её называет лестница — это работа фазы НИЖЕ, та самая, что откроет гейт",
@@ -12509,7 +12562,7 @@ async fn лестница_держит(
     client: &impl deadpool_postgres::GenericClient,
     project: &str,
     своя_фаза: Option<i32>,
-) -> Result<Option<Value>, tokio_postgres::Error> {
+) -> Result<Option<Value>, crate::db::Fail> {
     let задачная: Option<i32> = client
         .query_one(
             "SELECT min(ord) FROM harness_process_step
@@ -12593,9 +12646,9 @@ fn держащая_ступень(шаг: &Value, задачная: i64, кра
         })
 }
 
-pub async fn next_step(pool: &Pool, project: &str, process: &str) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
-    position(&client, project, process).await
+pub async fn next_step(pool: &Pool, project: &str, process: &str) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
+    position(&*client, project, process).await
 }
 
 /// Сохранённое положение лестницы — на уже взятом соединении.
@@ -12606,7 +12659,7 @@ async fn position(
     client: &impl deadpool_postgres::GenericClient,
     project: &str,
     process: &str,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     let row = client
         .query_opt(
             // Устарело то, что считали РАНЬШЕ последней правки, — кто бы ни
@@ -12633,8 +12686,8 @@ async fn position(
     Ok(answer)
 }
 
-pub async fn process_history(pool: &Pool, project: &str, process: &str) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn process_history(pool: &Pool, project: &str, process: &str) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
             "SELECT ord, count(DISTINCT state) AS states, count(*) AS runs,
@@ -12657,8 +12710,8 @@ pub async fn process_history(pool: &Pool, project: &str, process: &str) -> Resul
 }
 
 /// Плитки прогресса: три числа, никогда одно.
-pub async fn progress(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn progress(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
             "SELECT tile, done, open, unknown FROM corpus_progress
@@ -12696,8 +12749,8 @@ pub async fn progress(pool: &Pool, project: &str) -> Result<Value, tokio_postgre
 /// достигнутых. Разрыв в середине не проглатывается: задача, имплементированная
 /// без предполёта, — это работа, прошедшая мимо проверки, и её надо уметь
 /// найти, а не сгладить.
-pub async fn task_status(pool: &Pool, project: &str, task: Option<&str>) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn task_status(pool: &Pool, project: &str, task: Option<&str>) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let statuses = client
         .query(
             "SELECT ord, name, title, fact, terminal, source, why FROM kind_status WHERE kind = 'task' ORDER BY ord",
@@ -12782,7 +12835,7 @@ pub async fn task_status(pool: &Pool, project: &str, task: Option<&str>) -> Resu
 }
 
 /// Задачи, прошедшие мимо середины конвейера.
-pub async fn status_anomaly(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
+pub async fn status_anomaly(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
     let all = task_status(pool, project, None).await?;
     let list: Vec<Value> = all["tasks"]
         .as_array()
@@ -12792,8 +12845,8 @@ pub async fn status_anomaly(pool: &Pool, project: &str) -> Result<Value, tokio_p
 }
 
 /// Плитка конвейера: сколько задач на каждом статусе, и сколько неизвестно.
-pub async fn task_pipeline(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn task_pipeline(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let statuses = client
         .query("SELECT ord, name, title, fact, source FROM kind_status WHERE kind = 'task' ORDER BY ord", &[])
         .await?;
@@ -12848,8 +12901,8 @@ pub async fn task_pipeline(pool: &Pool, project: &str) -> Result<Value, tokio_po
 /// Зеркала (`kind = 'red'`) в доску не идут. Они не проходят те же ступени, и
 /// смешивать их с задачами разработки — это ровно та ошибка, из-за которой
 /// «222 задачи» много недель значили 139 задач и 83 их пары.
-pub async fn task_board(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn task_board(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let statuses = client
         .query("SELECT ord, name, title, fact, durable FROM kind_status WHERE kind = 'task' ORDER BY ord", &[])
         .await?;
@@ -12982,8 +13035,8 @@ pub async fn task_board(pool: &Pool, project: &str) -> Result<Value, tokio_postg
 ///
 /// Зависимость от **этапа** раскрывается в рёбра только при счёте — в базе она
 /// остаётся связью с этапом, иначе протухнет, когда в этап добавят задачу.
-pub async fn waves(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn waves(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let tasks = client
         .query(
             "SELECT t.id, t.milestone_id, t.title, t.kind, t.state, t.ord,
@@ -13093,15 +13146,17 @@ pub async fn waves(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::
 /// входил. Теперь фаза знает все три свои части, и **ни одна не складывается с
 /// другой**: документы считаются по плану, гейт вычисляется своими запросами,
 /// задачи — по состоянию из истории.
-async fn compute_phases(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+async fn compute_phases(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+    // Гейт считается ДО того, как это соединение взято: он берёт своё, и два
+    // сразу на один ответ — способ запереть пул на себе же.
+    let gates = gate(pool, project, None).await?;
+    let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
             "SELECT id, ord, title, gate, plan_level, task_kind FROM phase ORDER BY ord",
             &[],
         )
         .await?;
-    let gates = gate(pool, project, None).await?;
     let mut out = Vec::new();
     for r in &rows {
         let id: String = r.get(0);
@@ -13177,12 +13232,12 @@ async fn compute_phases(pool: &Pool, project: &str) -> Result<Value, tokio_postg
 /// Считается после гейтов: состояние гейта фазы берётся у них. Пустое число
 /// документов или задач значит «фаза их не объявляет», и оно остаётся пустым:
 /// ноль сказал бы «объявила, и нет ни одной».
-pub async fn measure_phases(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
+pub async fn measure_phases(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
     let computed = compute_phases(pool, project).await?;
     let empty = Vec::new();
     let list = computed["phases"].as_array().unwrap_or(&empty);
     let now = now_ms();
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
     client
         .execute("DELETE FROM phase_state WHERE project_id = $1", &[&project])
         .await?;
@@ -13213,8 +13268,8 @@ pub async fn measure_phases(pool: &Pool, project: &str) -> Result<Value, tokio_p
 }
 
 /// Фазы — из сохранённого.
-pub async fn phases(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn phases(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
             "SELECT phase, title, gate, gate_state, documents_present, documents_absent,
@@ -13261,8 +13316,8 @@ pub async fn phases(pool: &Pool, project: &str) -> Result<Value, tokio_postgres:
     Ok(json!({ "phases": out, "checkedAt": rows[0].get::<_, Option<i64>>(10), "stale": stale }))
 }
 
-pub async fn coverage(pool: &Pool, kinds: &crate::kinds::Kinds, project: &str) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn coverage(pool: &Pool, kinds: &crate::kinds::Kinds, project: &str) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
             "SELECT entity_kind, count(*) FROM project_documents
@@ -13308,8 +13363,8 @@ pub async fn history(
     kind: &str,
     name: &str,
     limit: i64,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
             "SELECT revision, bytes, content_hash, written_at, written_by, count(*) OVER ()
@@ -13341,12 +13396,12 @@ pub async fn confirm_entity(
     id: &str,
     why: &str,
     by: &str,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     if why.trim().is_empty() {
         return Ok(json!({ "status": "no_why",
             "why": "подтверждение без довода — отметка, а не ревью: скажите, что перечитано и почему закрытие в силе" }));
     }
-    let mut client = pool.get().await.expect("пул отдал соединение");
+    let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
     tx.query(
         "SELECT 1 FROM entity_stamp WHERE project_id = $1 AND kind = $2 AND id = $3 FOR UPDATE",
@@ -13390,8 +13445,8 @@ pub async fn declare_retired_term(
     retired_by: &str,
     declared_in: &str,
     drop_it: bool,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let term = term.trim();
     if term.is_empty() {
         return Ok(json!({ "status": "nameless", "why": "снимается слово, а оно не названо" }));
@@ -13424,8 +13479,8 @@ pub async fn at_revision(
     kind: &str,
     name: &str,
     revision: i64,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
             "SELECT content, bytes, written_at, written_by FROM project_document_revisions
@@ -13460,8 +13515,8 @@ pub async fn blocks(
     entity_name: &str,
     anchor: Option<&str>,
     own: bool,
-) -> Result<Value, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
 
     // Раздел ограничивает выборку своими блоками; без него — весь документ.
     // `own` обрывает раздел на первом вложенном заголовке: оглавление грузит
@@ -13564,7 +13619,7 @@ pub async fn what_if(
     author: &str,
     tool: &str,
     args: &Value,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     static НОМЕР: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let копия = format!(
         "примерка·{project}·{}·{}-{}",
@@ -13580,16 +13635,16 @@ pub async fn what_if(
     match убрано {
         Ok(n) => ответ["снято строк копии"] = json!(n),
         Err(e) => {
-            tracing::warn!("примерка не убралась за собой: копия {копия}, {}", db_says(&e));
+            tracing::warn!("примерка не убралась за собой: копия {копия}, {}", e.says());
             ответ["копия осталась"] = json!(копия);
-            ответ["почему осталась"] = json!(db_says(&e));
+            ответ["почему осталась"] = json!(e.says());
         }
     }
     Ok(ответ)
 }
 
-async fn забыть(pool: &Pool, копия: &str) -> Result<i64, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+async fn забыть(pool: &Pool, копия: &str) -> Result<i64, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     Ok(client.query_one("SELECT project_forget($1)", &[&копия]).await?.get(0))
 }
 
@@ -13601,10 +13656,10 @@ async fn примерить(
     author: &str,
     tool: &str,
     args: &Value,
-) -> Result<Value, tokio_postgres::Error> {
+) -> Result<Value, crate::db::Fail> {
     let начало = std::time::Instant::now();
     let строк: i64 = {
-        let client = pool.get().await.expect("пул отдал соединение");
+        let client = crate::db::conn(pool).await?;
         client.query_one("SELECT project_copy($1, $2)", &[&project, &копия]).await?.get(0)
     };
     // ОТМЕТКА «НАДО ПЕРЕСЧИТАТЬ» КОПИИ НЕ НАСЛЕДУЕТСЯ.
@@ -13616,7 +13671,7 @@ async fn примерить(
     // не научили брать только настоящие наборы. Учить его было правильно; не
     // оставлять ему повода — дешевле, и одно другому не мешает.
     {
-        let client = pool.get().await.expect("пул отдал соединение");
+        let client = crate::db::conn(pool).await?;
         client.execute("DELETE FROM gate_dirty WHERE project_id = $1", &[&копия]).await?;
     }
     crate::watch::recount(pool, копия).await?;
@@ -13633,6 +13688,16 @@ async fn примерить(
         author: author.to_owned(),
     };
     let ответ_двери = Box::pin(дверь.call(tool, args)).await;
+    // ЗАНЯТОСТЬ — НЕ ПРИГОВОР КОПИИ. Отказ по существу на копии значит, что
+    // и на подлиннике будет отказ; перегрузка не значит ничего, а примерка —
+    // самый тяжёлый ход и первым упирается в потолок.
+    if crate::door::busy_said(&ответ_двери) {
+        let сказано = ответ_двери["content"][0]["text"].as_str().unwrap_or("").to_owned();
+        забыть(pool, копия).await.ok();
+        return Err(crate::db::Fail::Busy(format!(
+            "примерка не сделана: {сказано}. Копия убрана, набор не тронут"
+        )));
+    }
     let отказ = ответ_двери.get("isError").and_then(Value::as_bool).unwrap_or(false);
     // Дверь отвечает подробно, и подробность её — о копии: счёт проекций копии
     // никому не нужен, а читать примерку мешает. Берётся слово исхода, а при
@@ -13711,9 +13776,9 @@ async fn примерить(
 async fn снимок_гейта(
     pool: &Pool,
     project: &str,
-) -> Result<std::collections::HashMap<(String, String), (String, String, String)>, tokio_postgres::Error>
+) -> Result<std::collections::HashMap<(String, String), (String, String, String)>, crate::db::Fail>
 {
-    let client = pool.get().await.expect("пул отдал соединение");
+    let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
             // Имена находок приезжают вместе со счётом: «покраснел пункт, находок

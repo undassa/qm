@@ -14,12 +14,18 @@
 //! прошлый результат со своим временем: устаревшее, названное устаревшим, лучше
 //! свежего наполовину.
 
+use crate::db::Says;
 use deadpool_postgres::Pool;
 
 /// Как часто заглядывать в отметку. Две секунды — это задержка между правкой и
 /// пересчётом; пара `reproject`+`rebuild` занимает около секунды, так что чаще
 /// смотреть незачем, а реже — заметно человеку.
 const TICK: std::time::Duration = std::time::Duration::from_secs(2);
+/// Через сколько кругов сборщик снова убирает брошенные копии примерок.
+const FORGET_EVERY: u32 = 900;
+/// Сколько живёт запись о натуге: месяц. Сравнивают её с соседними днями, а не
+/// с прошлым годом.
+const СЛЕД_ЖИВЁТ_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 const RETRY_MS: i64 = 60_000;
 const TRYON_ABANDONED_MS: i64 = 600_000;
 
@@ -35,65 +41,151 @@ const TRYON_ABANDONED_MS: i64 = 600_000;
 /// оставить остальные с прежним числом пунктов — и разница прочитается как
 /// разница проектов, а не как непосчитанное. Так и вышло: у одного набора
 /// стояло шестьдесят три пункта, у другого сорок, и выглядело это отставанием.
-pub async fn touch_all(pool: &Pool, reason: &str) {
-    let Ok(client) = pool.get().await else { return };
-    let Ok(rows) = client.query("SELECT id FROM projects", &[]).await else { return };
-    drop(client);
-    for r in &rows {
-        let id: String = r.get(0);
-        touch(pool, &id, reason).await;
-    }
-}
-
-pub async fn touch(pool: &Pool, project: &str, reason: &str) {
-    let client = match pool.get().await {
+pub async fn touch_all(pool: &Pool, reason: &str) -> Result<(), crate::db::Fail> {
+    let client = match crate::db::conn(pool).await {
         Ok(client) => client,
         Err(e) => {
-            tracing::warn!("отметка «пересчитать» набора {project} потеряна, пул не отдал соединение: {e}");
-            return;
+            tracing::warn!("отметка всем наборам не поставлена ({reason}): {}", e.says());
+            return Err(e);
+        }
+    };
+    let rows = match client.query("SELECT id FROM projects", &[]).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!("отметка всем наборам не поставлена ({reason}): {}", e.says());
+            return Err(crate::db::Fail::Db(e));
+        }
+    };
+    drop(client);
+    let mut lost: Vec<(crate::db::Fail, String)> = Vec::new();
+    for r in &rows {
+        let id: String = r.get(0);
+        if let Err(e) = touch(pool, &id, reason).await {
+            lost.push((e, id));
+        }
+    }
+    if !lost.is_empty() {
+        let имена = lost.iter().map(|(_, id)| id.as_str()).collect::<Vec<_>>().join(", ");
+        let первый = lost.into_iter().next().map(|(e, _)| e).expect("список не пуст");
+        // Причина берётся ПЕРВАЯ НАСТОЯЩАЯ, а не назначается занятостью: база,
+        // не принявшая соединение, и перегрузка лечатся по-разному.
+        let why = format!("отметка «пересчитать» не поставлена наборам {имена}: {}", первый.says());
+        return Err(match первый {
+            crate::db::Fail::Busy(_) => crate::db::Fail::Busy(why),
+            _ => crate::db::Fail::Down(why),
+        });
+    }
+    Ok(())
+}
+
+/// Отметка «пересчитать» для набора.
+///
+/// Отказ ВОЗВРАЩАЕТСЯ, а не только пишется в журнал: правка уже записана, и
+/// потерянная отметка значит, что гейт будет отдавать прежний замер, пока
+/// кто-нибудь не тронет набор снова. Сказать об этом обязан тот, кто правил.
+pub async fn touch(pool: &Pool, project: &str, reason: &str) -> Result<(), crate::db::Fail> {
+    let client = match crate::db::conn(pool).await {
+        Ok(client) => client,
+        Err(e) => {
+            tracing::warn!("отметка «пересчитать» набора {project} потеряна: {}", e.says());
+            return Err(e);
         }
     };
     // Ошибка здесь не роняет правку намеренно: пометка — не часть правки. Уронить
     // записанный документ из-за неудавшейся отметки значило бы обменять
     // сохранённое на своевременность пересчёта.
-    if let Err(e) = mark(&client, project, reason).await {
-        tracing::warn!("отметка «пересчитать» набора {project} потеряна: {e}");
+    if let Err(e) = mark(&*client, project, reason).await {
+        tracing::warn!("отметка «пересчитать» набора {project} потеряна: {}", e.says());
+        return Err(e);
     }
+    Ok(())
 }
 
 pub async fn mark(
     client: &impl deadpool_postgres::GenericClient,
     project: &str,
     reason: &str,
-) -> Result<u64, tokio_postgres::Error> {
+) -> Result<u64, crate::db::Fail> {
     client
         .execute(
             "INSERT INTO gate_dirty(project_id, dirty_at, reason) VALUES ($1,$2,$3)
              ON CONFLICT (project_id) DO UPDATE SET dirty_at = $2, reason = $3",
             &[&project, &crate::projector::now_ms(), &reason],
         )
-        .await
+        .await.map_err(Into::into)
 }
 
 /// Работник: смотрит отметку и, если набор менялся, пересчитывает.
 pub fn spawn(pool: Pool) {
     tokio::spawn(async move {
-        forget_abandoned_tryons(&pool).await;
-        touch_all(&pool, "запуск").await;
+        // Уборка брошенных копий — КРУГАМИ, а не однажды при запуске: занятый
+        // в момент старта пул отменял её на всю жизнь процесса, и копии
+        // примерок оставались до следующего перезапуска.
+        let mut till_forget = 0u32;
+        let _ = touch_all(&pool, "запуск").await;
         loop {
+            if till_forget == 0 {
+                crate::db::counting(forget_abandoned_tryons(&pool)).await;
+                till_forget = FORGET_EVERY;
+            }
+            till_forget -= 1;
             tokio::time::sleep(TICK).await;
-            if let Err(e) = round(&pool).await {
+            запомнить_натугу(&pool).await;
+            if let Err(e) = crate::db::counting(round(&pool)).await {
                 // Пересчёт, упавший молча, — это доска, застывшая без объяснения.
-                tracing::warn!("пересчёт гейтов не прошёл: {e}");
+                tracing::warn!("пересчёт гейтов не прошёл: {}", e.says());
             }
         }
     });
 }
 
-async fn round(pool: &Pool) -> Result<(), tokio_postgres::Error> {
-    let Ok(client) = pool.get().await else {
-        tracing::warn!("пул не отдал сборщику соединение");
-        return Ok(());
+/// Положить накопленную натугу в базу: отказы «занято» и вложенные взятия.
+///
+/// Пишется только когда есть что писать, и своим соединением — если его нет,
+/// счёт остаётся в памяти до следующего круга, а не теряется.
+async fn запомнить_натугу(pool: &Pool) {
+    let (busy, nested) = crate::db::strain();
+    if busy == 0 && nested == 0 {
+        return;
+    }
+    let Ok(client) = crate::db::conn(pool).await else {
+        crate::db::BUSY.fetch_add(busy, std::sync::atomic::Ordering::Relaxed);
+        crate::db::NESTED.fetch_add(nested, std::sync::atomic::Ordering::Relaxed);
+        return;
+    };
+    tracing::warn!("натуга: отказов «занято» {busy}, вложенных взятий соединения {nested}");
+    let сейчас = crate::projector::now_ms();
+    if let Err(e) = client
+        .execute(
+            "INSERT INTO server_strain (at, busy, nested) VALUES ($1,$2,$3)",
+            &[&сейчас, &(busy as i64), &(nested as i64)],
+        )
+        .await
+    {
+        // Счёт возвращается в память: потерянный вместе с неудавшейся записью,
+        // он делает перегрузку невидимой ровно там, где она случилась.
+        tracing::warn!("след перегрузки не записан: {}", e.says());
+        crate::db::BUSY.fetch_add(busy, std::sync::atomic::Ordering::Relaxed);
+        crate::db::NESTED.fetch_add(nested, std::sync::atomic::Ordering::Relaxed);
+        return;
+    }
+    // След живёт месяц: дверь читает последние полсотни строк, а таблица без
+    // срока — это та же куча, которую однажды придётся разгребать руками.
+    if let Err(e) = client
+        .execute("DELETE FROM server_strain WHERE at < $1", &[&(сейчас - СЛЕД_ЖИВЁТ_MS)])
+        .await
+    {
+        tracing::warn!("старый след перегрузки не убран: {}", e.says());
+    }
+}
+
+async fn round(pool: &Pool) -> Result<(), crate::db::Fail> {
+    let client = match crate::db::conn(pool).await {
+        Ok(client) => client,
+        Err(e) => {
+            tracing::warn!("сборщик без соединения: {}", e.says());
+            return Ok(());
+        }
     };
     let due = client
         .query(
@@ -144,17 +236,35 @@ async fn round(pool: &Pool) -> Result<(), tokio_postgres::Error> {
         // гонка остаётся — названной, а не прикрытой.
         let measured = {
             let (pool, project) = (pool.clone(), project.clone());
-            match tokio::spawn(async move { recount(&pool, &project).await }).await {
+            match tokio::spawn(async move { crate::db::counting(recount(&pool, &project)).await }).await {
                 Ok(Ok(out)) => Ok(out),
-                Ok(Err(e)) => Err(crate::projector::db_says(&e)),
+                Ok(Err(e)) => Err(e.says()),
                 Err(e) => Err(format!("пересчёт упал: {e}")),
             }
         };
         let spent = began.elapsed().as_millis() as i32;
         let retry_at = measured.is_err().then(|| crate::projector::now_ms() + RETRY_MS);
         let failure = format!("срыв пересчёта: {}", measured.as_ref().err().map_or("", String::as_str));
-        let Ok(client) = pool.get().await else {
-            tracing::warn!("пул не отдал сборщику соединение: отметка набора {project} не записана");
+        // Итог пересчёта записывается с повтором: потерянный, он значит, что
+        // круг будет сделан заново на следующем тике — и так под нагрузкой
+        // бесконечно, потому что именно нагрузка и мешает его записать.
+        let mut client = None;
+        for попытка in 0..3 {
+            match crate::db::conn(pool).await {
+                Ok(c) => {
+                    client = Some(c);
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!("итог пересчёта набора {project} не записан ({попытка}): {}", e.says());
+                    if попытка < 2 {
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                }
+            }
+        }
+        let Some(client) = client else {
+            tracing::warn!("итог пересчёта набора {project} потерян: круг будет сделан заново");
             continue;
         };
         if let Err(e) = client
@@ -182,7 +292,13 @@ async fn round(pool: &Pool) -> Result<(), tokio_postgres::Error> {
 }
 
 async fn forget_abandoned_tryons(pool: &Pool) {
-    let Ok(client) = pool.get().await else { return };
+    let client = match crate::db::conn(pool).await {
+        Ok(client) => client,
+        Err(e) => {
+            tracing::warn!("брошенные копии примерки не убраны: {}", e.says());
+            return;
+        }
+    };
     let cutoff = crate::projector::now_ms() - TRYON_ABANDONED_MS;
     let rows = match client
         .query(
@@ -209,7 +325,7 @@ async fn forget_abandoned_tryons(pool: &Pool) {
     }
 }
 
-pub(crate) async fn recount(pool: &Pool, project: &str) -> Result<serde_json::Value, tokio_postgres::Error> {
+pub(crate) async fn recount(pool: &Pool, project: &str) -> Result<serde_json::Value, crate::db::Fail> {
     crate::reproject::reproject(pool, project).await?;
     crate::projector::rebuild_before(pool, project).await?;
     crate::projector::rebuild(pool, project).await?;
@@ -227,7 +343,7 @@ pub(crate) async fn recount(pool: &Pool, project: &str) -> Result<serde_json::Va
 ///
 /// Закрытия задач судятся вокруг замера гейтов: взятые до него — по фазе, какой
 /// он её оставил (`judging_closings`).
-pub(crate) async fn measure(pool: &Pool, project: &str) -> Result<serde_json::Value, tokio_postgres::Error> {
+pub(crate) async fn measure(pool: &Pool, project: &str) -> Result<serde_json::Value, crate::db::Fail> {
     let out = crate::projector::judging_closings(pool, project, || crate::projector::measure_gates(pool, project)).await?;
     crate::projector::measure_process(pool, project, "godzy", "godzy").await?;
     crate::projector::measure_phases(pool, project).await?;

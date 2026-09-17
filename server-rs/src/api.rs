@@ -4,6 +4,7 @@
 //! названо, кто и по какому правилу правит документ, запись завела бы второй
 //! источник истины рядом с git.
 
+use crate::db::Says;
 use std::{sync::Arc, time::SystemTime};
 
 use axum::{
@@ -39,6 +40,17 @@ pub struct Edge {
 #[derive(Clone)]
 pub struct App {
     pub pool: Pool,
+    /// Сколько запросов пускать в двери разом — на одно меньше, чем соединений
+    /// в пуле: последнее оставлено сборщику. Он не запрос, пропуска не берёт, и
+    /// без этого запаса шестнадцать запросов занимали пул целиком, а доска
+    /// переставала пересчитываться молча. Пропущенный запрос берёт соединение и не ждёт; лишний получает
+    /// отказ СРАЗУ, а не через ожидание. Иначе очередь ждущих съедает и время,
+    /// и работу: пересборка берёт соединения по одному сорок восемь раз подряд,
+    /// и отказ на тридцатом оставляет проекции пересобранными наполовину.
+    pub admit: Arc<tokio::sync::Semaphore>,
+    /// Сколько их всего: у семафора спрашивать нечего — он отвечает, сколько
+    /// СВОБОДНО, а в час отказа это всегда ноль.
+    pub admit_cap: usize,
     pub secret: Arc<Vec<u8>>,
     pub kinds: Arc<crate::kinds::Kinds>,
     /// Пусто — краю не верим вовсе, и остаётся только подписанная личность.
@@ -64,6 +76,9 @@ pub enum Failure {
     Unauthorized,
     Expired,
     Upstream(String),
+    /// Соединений с базой не осталось: сервер перегружен. Это не поломка, и
+    /// повторять просят числом, а не догадкой.
+    Busy(String),
 }
 
 impl IntoResponse for Failure {
@@ -101,7 +116,27 @@ impl IntoResponse for Failure {
             // интерфейс чинить не ту беду.
             Failure::Expired => (StatusCode::UNAUTHORIZED, "identity_expired", String::new()),
             Failure::Upstream(e) => (StatusCode::BAD_GATEWAY, "upstream_error", e),
+            Failure::Busy(e) => (StatusCode::SERVICE_UNAVAILABLE, "busy", e),
         };
+        // Занятость отвечает 503 и говорит, через сколько вернуться. Срок
+        // РАЗНЫЙ у разных отказанных: один на всех собирает их обратно в ту же
+        // секунду — и тот же затор повторяется ровно через три секунды.
+        if code == StatusCode::SERVICE_UNAVAILABLE {
+            // Срок у каждого отказанного СВОЙ: отказы идут очередью в один и тот
+            // же миг, и общее число собрало бы их обратно в одну секунду.
+            static СЛЕДУЮЩИЙ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let retry = 2 + (СЛЕДУЮЩИЙ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 4);
+            let mut body = json!({ "error": name, "retryAfter": retry });
+            if !note.is_empty() {
+                body["message"] = json!(note);
+            }
+            return (
+                code,
+                [(axum::http::header::RETRY_AFTER, retry.to_string())],
+                Json(body),
+            )
+                .into_response();
+        }
         let mut body = json!({ "error": name });
         if !note.is_empty() {
             body["message"] = json!(note);
@@ -116,15 +151,16 @@ impl From<Miss> for Failure {
             Miss::NoKind(k) => Failure::NoKind(k),
             Miss::NoEntity(k, id) => Failure::NoEntity(k, id),
             Miss::Unprojected(k) => Failure::Unprojected(k),
+            Miss::Busy(почему) => Failure::Busy(почему),
             Miss::Refused(почему) => Failure::Upstream(почему),
             Miss::Db(e) => Failure::Upstream(e),
         }
     }
 }
 
-impl From<tokio_postgres::Error> for Failure {
-    fn from(e: tokio_postgres::Error) -> Self {
-        Failure::Upstream(e.to_string())
+impl From<crate::db::Fail> for Failure {
+    fn from(e: crate::db::Fail) -> Self {
+        if e.busy() { Failure::Busy(e.says()) } else { Failure::Upstream(e.says()) }
     }
 }
 
@@ -186,7 +222,10 @@ async fn require_identity(State(app): State<App>, request: Request, next: Next) 
                         return next.run(request).await;
                     }
                     Ok(false) => return Failure::Unauthorized.into_response(),
-                    Err(e) => return Failure::Upstream(format!("вход не проверен: {e}")).into_response(),
+                    // Перегрузка на входе — та же перегрузка: ответить 502 значит
+                    // позвать чинить сервер, а не подождать.
+                    Err(e) if e.busy() => return Failure::Busy(e.says()).into_response(),
+                    Err(e) => return Failure::Upstream(format!("вход не проверен: {}", e.says())).into_response(),
                 }
             }
         }
@@ -563,14 +602,7 @@ async fn call_tool_body(
     // целиком, а GET — сам предмет: отказ двери лежал строкой внутри
     // `content[0].text`, и читающий видел поле `content`, а не `status`.
     // Запись отчиталась бы успехом на отказе — молчание вместо причины.
-    let out = mcp.call(&name, &args).await;
-    let text = out["content"][0]["text"].as_str().unwrap_or("").to_owned();
-    if out["isError"] == json!(true) {
-        return Err(Failure::Upstream(text));
-    }
-    Ok(Json(
-        serde_json::from_str::<Value>(&text).unwrap_or_else(|_| json!({ "text": text })),
-    ))
+    door_answer(mcp.call(&name, &args).await)
 }
 
 async fn call_tool(
@@ -605,12 +637,36 @@ async fn call_tool(
         author: author.map(|a| a.0 .0).unwrap_or_else(|| "интерфейс".into()),
     };
     let out = mcp.call(&name, &Value::Object(map)).await;
-    // Ответ инструмента — текст в оболочке MCP; наружу отдаётся сам предмет.
+    door_answer(out)
+}
+
+/// Ответ двери — ответом сети. Оболочка MCP снимается здесь, и здесь же
+/// решается код: занятость 503 со сроком, отказ по существу 502, ответ 200.
+/// Пока таких мест было два, они разошлись: `POST` различал занятость, а `GET`
+/// отвечал «ошибка на той стороне» и без срока возврата.
+fn door_answer(out: Value) -> Result<Json<Value>, Failure> {
     let text = out["content"][0]["text"].as_str().unwrap_or("").to_owned();
+    if crate::door::busy_said(&out) {
+        return Err(Failure::Busy(text));
+    }
     if out["isError"] == json!(true) {
         return Err(Failure::Upstream(text));
     }
-    Ok(Json(serde_json::from_str(&text).unwrap_or_else(|_| json!({ "text": text }))))
+    Ok(Json(serde_json::from_str::<Value>(&text).unwrap_or_else(|_| json!({ "text": text }))))
+}
+
+/// Пропускной порог: запрос либо входит, либо получает «занято» сразу.
+async fn admit(State(app): State<App>, request: Request, next: Next) -> Response {
+    let Ok(_permit) = app.admit.clone().try_acquire_owned() else {
+        crate::db::BUSY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        tracing::warn!("запрос не пущен: все {} пропусков заняты", app.admit_cap);
+        return Failure::Busy(
+            "сервер занят: столько запросов разом он не берёт, повторите через несколько секунд".to_owned(),
+        )
+        .into_response();
+    };
+    // Глубина соединений считается ЗДЕСЬ: у задачи запроса, а не глобально.
+    crate::db::counting(next.run(request)).await
 }
 
 pub fn routes(app: App) -> Router {
@@ -634,6 +690,7 @@ pub fn routes(app: App) -> Router {
         .route("/api/projects/:project/entity/backlinks", get(entity_backlinks))
         .route("/api/projects/:project/mockup/*name", get(mockup))
         .layer(middleware::from_fn_with_state(app.clone(), require_identity))
+        .layer(middleware::from_fn_with_state(app.clone(), admit))
         .layer(tower_http::catch_panic::CatchPanicLayer::custom(panic_response))
         .with_state(app)
 }
@@ -674,5 +731,61 @@ mod tests {
     #[test]
     fn пустое_значение_не_личность() {
         assert_eq!(token_of(Some("  "), Some("mh_identity=")), None);
+    }
+}
+
+#[cfg(test)]
+mod busy_tests {
+    use super::Failure;
+    use axum::response::IntoResponse;
+
+    #[test]
+    fn busyness_asks_to_come_back_and_says_when() {
+        let r = Failure::Busy("все соединения с базой заняты".to_owned()).into_response();
+        assert_eq!(r.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        let retry = r
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok())
+            .expect("занятость называет срок возврата");
+        assert!((2..=5).contains(&retry), "срок возврата вне разумного: {retry}");
+    }
+
+    /// Занятость доходит до двери инструментов: она приходит отказом `Miss`,
+    /// и по дороге теряла и код, и срок — оставаясь «ошибкой на той стороне».
+    #[test]
+    fn busyness_keeps_its_code_through_the_door() {
+        let m: crate::entities::Miss = crate::db::Fail::Busy("занято".to_owned()).into();
+        assert!(matches!(m, crate::entities::Miss::Busy(_)), "занятость — не отказ по существу");
+        let r = Failure::from(m).into_response();
+        assert_eq!(r.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert!(r.headers().contains_key(axum::http::header::RETRY_AFTER));
+    }
+
+    /// Ответ двери читается ОДНИМ местом: занятость доходит и по `GET`, и по
+    /// `POST`, и срок возврата стоит в обоих.
+    #[test]
+    fn a_busy_door_answers_the_same_both_ways() {
+        let занято = serde_json::json!({
+            "content": [{ "type": "text", "text": "сервер перегружен" }],
+            "isError": true, "_meta": { "busy": true } });
+        let r = super::door_answer(занято).expect_err("занятость — отказ").into_response();
+        assert_eq!(r.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert!(r.headers().contains_key(axum::http::header::RETRY_AFTER));
+        let отказ = serde_json::json!({
+            "content": [{ "type": "text", "text": "довода нет" }], "isError": true,
+            "_meta": { "busy": false } });
+        let r = super::door_answer(отказ).expect_err("отказ").into_response();
+        assert_eq!(r.status(), axum::http::StatusCode::BAD_GATEWAY);
+    }
+
+    /// Отказ по существу занятостью не притворяется: 503 говорит «повторите»,
+    /// и цикл повторов у агента ушёл бы в вечный круг.
+    #[test]
+    fn a_refusal_on_the_merits_is_not_busyness() {
+        let r = Failure::from(crate::entities::Miss::Refused("довода нет".to_owned())).into_response();
+        assert_eq!(r.status(), axum::http::StatusCode::BAD_GATEWAY);
+        assert!(!r.headers().contains_key(axum::http::header::RETRY_AFTER));
     }
 }

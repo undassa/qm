@@ -30,8 +30,8 @@ pub fn scope_of(project_id: &str) -> String {
     format!("group:web-project-{project_id}")
 }
 
-pub async fn list(pool: &Pool) -> Result<Vec<Context>, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn list(pool: &Pool) -> Result<Vec<Context>, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     // Архивированный проект в списке не показывается: он есть, но работой не является.
     //
     // Соединение внешнее, и это существенно: проект без единого документа —

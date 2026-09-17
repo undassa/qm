@@ -39,8 +39,8 @@ pub async fn section_bodies(
     project: &str,
     title: &str,
     kind: &str,
-) -> Result<HashMap<String, String>, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<HashMap<String, String>, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
             "SELECT DISTINCT ON (s.entity_name) s.entity_name,
@@ -57,7 +57,7 @@ pub async fn section_bodies(
     Ok(rows.iter().map(|r| (r.get(0), r.get(1))).collect())
 }
 
-pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize), tokio_postgres::Error> {
+pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize), crate::db::Fail> {
     let blocks = cells(pool, project, REGISTER_KIND, REGISTER_NAME, false).await?;
     let heads = headings(pool, project, REGISTER_KIND, REGISTER_NAME).await?;
 
@@ -103,7 +103,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize), tokio
         }
     }
 
-    let mut client = pool.get().await.expect("пул отдал соединение");
+    let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
     tx.execute("DELETE FROM project_need_stories WHERE project_id = $1", &[&project]).await?;
     tx.execute("DELETE FROM project_needs WHERE project_id = $1", &[&project]).await?;

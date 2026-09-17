@@ -7,9 +7,9 @@
 
 use deadpool_postgres::Pool;
 
-pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
-    let terms = crate::scheme::Terms::load(pool, project).await?;
+pub async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
+    let terms = crate::scheme::Terms::load_at(&*client, project).await?;
     let rows = client
         .query(
             "SELECT block_ord, row_ord, col, value FROM project_document_cells
@@ -49,7 +49,10 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
         said.push((block, subj.clone(), name.clone(), n, total));
     }
 
-    let mut client = pool.get().await.expect("пул отдал соединение");
+    // Читающее соединение отпущено: писать и читать одновременно здесь нечем,
+    // а два соединения на одну проекцию запирают пул на себе же.
+    drop(client);
+    let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
     tx.execute("DELETE FROM project_traceability_said WHERE project_id = $1", &[&project]).await?;
     for (block, subj, name, n, total) in &said {

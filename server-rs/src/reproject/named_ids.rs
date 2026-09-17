@@ -17,8 +17,8 @@
 use deadpool_postgres::Pool;
 use regex::Regex;
 
-pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let caveats: Vec<String> = client
         .query("SELECT value FROM scheme($1) WHERE role = 'word.caveat'", &[&project])
         .await?
@@ -156,7 +156,10 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
         }
     }
 
-    let mut client = pool.get().await.expect("пул отдал соединение");
+    // Читающее соединение отпущено: писать и читать одновременно здесь нечем,
+    // а два соединения на одну проекцию запирают пул на себе же.
+    drop(client);
+    let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
     // Вставка ПАЧКАМИ, а не по строке. Здесь тринадцать тысяч имён, и запрос на
     // каждое — тринадцать тысяч обращений к базе: сорок две секунды из сорока

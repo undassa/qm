@@ -64,8 +64,8 @@ pub async fn fields(
     pool: &Pool,
     project: &str,
     raw: bool,
-) -> Result<HashMap<String, HashMap<String, String>>, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+) -> Result<HashMap<String, HashMap<String, String>>, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let sql = if raw {
         "SELECT entity_kind || ' ' || entity_name, name, value_raw FROM project_document_fields
           WHERE project_id = $1 ORDER BY entity_kind, entity_name, section_ord, ord"
@@ -82,8 +82,8 @@ pub async fn fields(
 }
 
 /// Заголовок документа — первый его раздел; если разделов нет, донор берёт путь.
-pub async fn titles(pool: &Pool, project: &str) -> Result<HashMap<String, String>, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+pub async fn titles(pool: &Pool, project: &str) -> Result<HashMap<String, String>, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
             "SELECT DISTINCT ON (entity_kind, entity_name) entity_kind || ' ' || entity_name, title
@@ -95,14 +95,14 @@ pub async fn titles(pool: &Pool, project: &str) -> Result<HashMap<String, String
     Ok(rows.iter().map(|r| (r.get(0), r.get(1))).collect())
 }
 
-pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize, usize), tokio_postgres::Error> {
+pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize, usize), crate::db::Fail> {
     let named = super::runs::named_of_kinds(pool, project, &["version", "milestone", "task"]).await?;
     // Блок «Требования» этапа — свёрнутый `<details>`. Читается он целиком и
     // построчно, мимо строк с оговоркой об удалении: имя в такой строке
     // названо, чтобы сказать, что его больше нет.
     let terms = crate::scheme::Terms::load(pool, project).await?;
     let milestone_requirements: Vec<(String, String)> = {
-        let client = pool.get().await.expect("пул отдал соединение");
+        let client = crate::db::conn(pool).await?;
         let rows = client
             .query(
                 "SELECT entity_name, content FROM project_documents
@@ -141,7 +141,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize,
     // говорит маркер блока, а не форма имени — иначе пришлось бы зашить
     // `TC-`, `US-`, `SCR-` рядом с уже зашитым `FR-`.
     let milestone_links: Vec<(String, String, String)> = {
-        let client = pool.get().await.expect("пул отдал соединение");
+        let client = crate::db::conn(pool).await?;
         let rows = client
             .query(
                 "SELECT entity_name, content FROM project_documents
@@ -180,7 +180,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize,
     // перечисляет этапы таблицей, первой колонкой. Прежде это читалось из
     // каталога, в котором лежал файл.
     let milestone_version: HashMap<String, String> = {
-        let client = pool.get().await.expect("пул отдал соединение");
+        let client = crate::db::conn(pool).await?;
         client
             .query(
                 "SELECT c.value, c.entity_name FROM project_document_cells c
@@ -266,7 +266,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize,
     // выходил одним валом из семидесяти семи задач.
     let known: HashMap<String, String> =
         tasks.iter().map(|t| (t.0.to_lowercase(), t.0.clone())).collect();
-    let mut client = pool.get().await.expect("пул отдал соединение");
+    let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
     // Версия БЫЛА вершиной каскада, и удаление её уносило этапы, задачи и
     // зависимости — включая объявленные ручкой, которых ни один документ не

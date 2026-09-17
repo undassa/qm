@@ -61,7 +61,7 @@ pub fn title_without_name(title: &str, name: &str) -> String {
     }
 }
 
-pub async fn reproject(pool: &Pool, project: &str) -> Result<Value, tokio_postgres::Error> {
+pub async fn reproject(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
     let mut done = serde_json::Map::new();
     let (a, r) = articles::project(pool, project).await?;
     done.insert("project_articles".into(), json!(a));

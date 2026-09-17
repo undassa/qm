@@ -17,7 +17,7 @@ const HEADER: [&str; 3] = ["Термин", "Идентификатор", "Что
 static IDENTIFIER: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^\s*`?([A-Za-z][A-Za-z0-9_.-]*)`?\s*$").expect("образец имени"));
 
-pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres::Error> {
+pub async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fail> {
     let blocks = cells(pool, project, KIND, NAME, false).await?;
     let heads = headings(pool, project, KIND, NAME).await?;
 
@@ -50,7 +50,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
         }
     }
 
-    let mut client = pool.get().await.expect("пул отдал соединение");
+    let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
     tx.execute("DELETE FROM project_terms WHERE project_id = $1 AND origin = 'projected'", &[&project]).await?;
     // ОБЪЯВЛЕННОЕ ТЕМ ЖЕ ИМЕНЕМ ПОГЛОЩАЕТСЯ ДОКУМЕНТОМ. Чистка снимала только

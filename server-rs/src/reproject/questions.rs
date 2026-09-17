@@ -24,8 +24,8 @@ static ANSWER: Lazy<Regex> = Lazy::new(|| Regex::new(r"^Ответ(\s*[,:—-]|\
 ///
 /// Пусто — роль не объявлена, и состояние `owner` в этом наборе не возникает.
 /// Умолчания в коде здесь нет намеренно: слово принадлежит набору.
-async fn owner_sections(pool: &Pool, project: &str) -> Result<Vec<Regex>, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+async fn owner_sections(pool: &Pool, project: &str) -> Result<Vec<Regex>, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     Ok(client
         .query("SELECT value FROM scheme($1) WHERE role = 'section.owner-decides'", &[&project])
         .await?
@@ -52,8 +52,8 @@ fn state_of(field: &str) -> (&'static str, String) {
 }
 
 /// Поля документов: имя → значение (не сырое: у вопроса важен текст, не разметка).
-async fn fields(pool: &Pool, project: &str) -> Result<HashMap<String, HashMap<String, String>>, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
+async fn fields(pool: &Pool, project: &str) -> Result<HashMap<String, HashMap<String, String>>, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
             "SELECT entity_name, name, value FROM project_document_fields
@@ -69,7 +69,7 @@ async fn fields(pool: &Pool, project: &str) -> Result<HashMap<String, HashMap<St
     Ok(out)
 }
 
-pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres::Error> {
+pub async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fail> {
     // «Решение за владельцем» — ЧЕТВЁРТОЕ состояние ответа, и оно не выводится
     // из молчания. Вопрос, разобранный до конца и упирающийся в слово владельца,
     // и вопрос, которого никто не открывал, стояли одним `unsaid`: ступень
@@ -145,7 +145,7 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
     }
     out.sort_by_key(|q| q.1);
 
-    let mut client = pool.get().await.expect("пул отдал соединение");
+    let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
     tx.execute("DELETE FROM project_questions WHERE project_id = $1 AND origin = 'projected'", &[&project]).await?;
     // ОБЪЯВЛЕННОЕ ТЕМ ЖЕ ИМЕНЕМ ПОГЛОЩАЕТСЯ ДОКУМЕНТОМ. Чистка снимала только

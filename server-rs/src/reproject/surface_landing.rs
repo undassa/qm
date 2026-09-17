@@ -11,9 +11,9 @@
 
 use deadpool_postgres::Pool;
 
-pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres::Error> {
-    let client = pool.get().await.expect("пул отдал соединение");
-    let terms = crate::scheme::Terms::load(pool, project).await?;
+pub async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
+    let terms = crate::scheme::Terms::load_at(&*client, project).await?;
     let surface_marker = terms.one("marker.surface-list").unwrap_or("").to_owned();
     // Живые требования: имя, которого нет в перечне, поверхностью не считается.
     // Документ вправе поминать удалённое — считать это приземлением значит
@@ -166,7 +166,10 @@ pub async fn project(pool: &Pool, project: &str) -> Result<usize, tokio_postgres
         }
     }
 
-    let mut client = pool.get().await.expect("пул отдал соединение");
+    // Читающее соединение отпущено: писать и читать одновременно здесь нечем,
+    // а два соединения на одну проекцию запирают пул на себе же.
+    drop(client);
+    let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
     // Поверхность контракта HTTP приходит датчиком: она в репозитории, а не в
     // наборе, и удалять её здесь нечем.

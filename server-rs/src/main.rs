@@ -10,6 +10,7 @@ mod kinds;
 mod mcp;
 mod parse;
 mod db;
+mod door;
 mod documents;
 mod identity;
 mod projector;
@@ -19,6 +20,7 @@ mod projects;
 mod store;
 mod watch;
 
+use crate::db::Says;
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use tower_http::services::{ServeDir, ServeFile};
@@ -55,7 +57,11 @@ async fn main() {
     let port: u16 = std::env::var("MH_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8200);
     let web = PathBuf::from(std::env::var("MH_WEB_DIR").unwrap_or_else(|_| "../web/dist".into()));
 
-    let pool = match db::pool(&url, 8) {
+    // Сколько соединений держать — зависит от машины: на ней живут и донорские
+    // службы того же Postgres, и число агентов меняется. Умолчание рассчитано
+    // на `max_connections` по умолчанию (100) с запасом для соседей.
+    let size: usize = std::env::var("MH_DB_POOL").ok().and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(16);
+    let pool = match db::pool(&url, size) {
         Ok(pool) => pool,
         Err(why) => {
             eprintln!("mh-server: {why}");
@@ -105,6 +111,8 @@ async fn main() {
     };
 
     let app = api::App {
+        admit_cap: size.saturating_sub(1).max(1),
+        admit: Arc::new(tokio::sync::Semaphore::new(size.saturating_sub(1).max(1))),
         pool,
         secret: Arc::new(secret.into_bytes()),
         kinds: Arc::new(kinds),
@@ -152,13 +160,17 @@ async fn main() {
                 }
             },
         };
-        let out = mcp::Mcp {
-            pool: app.pool.clone(),
-            kinds: app.kinds.clone(),
-            project,
-            author: "cli".into(),
-        }
-        .call(&name, &args)
+        // Глубина соединений считается и здесь: подкоманда зовёт те же двери,
+        // а счёт живёт у задачи — без обёртки он видел бы ноль там, где двое.
+        let out = db::counting(
+            mcp::Mcp {
+                pool: app.pool.clone(),
+                kinds: app.kinds.clone(),
+                project,
+                author: "cli".into(),
+            }
+            .call(&name, &args),
+        )
         .await;
         println!("{}", out["content"][0]["text"].as_str().unwrap_or(""));
         if out["isError"] == serde_json::json!(true) {
@@ -180,14 +192,14 @@ async fn main() {
             eprintln!("mh-server rebuild: не задан MH_PROJECT — собирать нечего");
             std::process::exit(2);
         }
-        if let Err(e) = projector::rebuild_before(&app.pool, &project).await {
-            eprintln!("подготовка не прошла: {}", projector::db_says(&e));
+        if let Err(e) = db::counting(projector::rebuild_before(&app.pool, &project)).await {
+            eprintln!("подготовка не прошла: {}", e.says());
             std::process::exit(1);
         }
         match projector::rebuild(&app.pool, &project).await {
             Ok(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default()),
             Err(e) => {
-                eprintln!("сборка не прошла: {}", projector::db_says(&e));
+                eprintln!("сборка не прошла: {}", e.says());
                 std::process::exit(1);
             }
         }
@@ -204,7 +216,7 @@ async fn main() {
         }
         // Исход записывается и здесь: подкоманда — та же пересборка, и упавшая
         // она оставляет те же недособранные проекции.
-        match reproject::reproject(&app.pool, &project).await {
+        match db::counting(reproject::reproject(&app.pool, &project)).await {
             Ok(v) => {
                 projector::note_reproject(&app.pool, &project, true, "").await;
                 // ПАРА, А НЕ ПОЛОВИНА. Пересборка снимает из плана красные задачи
@@ -224,14 +236,14 @@ async fn main() {
                                     прогнан, всё прочитанное соврёт.",
                     })
                 } else {
-                    if let Err(e) = projector::rebuild_before(&app.pool, &project).await {
-                        eprintln!("подготовка сборки не прошла: {}", projector::db_says(&e));
+                    if let Err(e) = db::counting(projector::rebuild_before(&app.pool, &project)).await {
+                        eprintln!("подготовка сборки не прошла: {}", e.says());
                         std::process::exit(1);
                     }
                     match projector::rebuild(&app.pool, &project).await {
                         Ok(r) => r,
                         Err(e) => {
-                            eprintln!("сборка не прошла: {}", projector::db_says(&e));
+                            eprintln!("сборка не прошла: {}", e.says());
                             std::process::exit(1);
                         }
                     }
@@ -240,7 +252,7 @@ async fn main() {
                     &serde_json::json!({ "reproject": v, "rebuild": after })).unwrap_or_default());
             }
             Err(e) => {
-                let said = projector::db_says(&e);
+                let said = e.says();
                 projector::note_reproject(&app.pool, &project, false, &said).await;
                 eprintln!("пересборка не прошла: {said}");
                 std::process::exit(1);
