@@ -13,10 +13,13 @@ Two habits that keep task-focused changes from scarring the rest of the repo:
 - **Fixes should make the system simpler, not more complex.** Prefer removing or
   consolidating code over adding a new layer, flag, or special case. If a fix grows the
   system's surface area, look for the version that shrinks it.
-- **Never leave comments in the repo.** The standard is zero comments: no explanatory
-  comments or docblocks, TODO/FIXME notes, lint/type suppression directives, or commented-out
-  code. Express intent through names, structure, and tests; put rationale in commit messages or
-  PR descriptions. Interpreter shebangs are executable directives, not comments.
+- **A comment carries the reason, never the mechanics.** The harness keeps its rationale
+  inline: a comment names the mistake the code prevents and the evidence that was measured,
+  so the next reader cannot undo it by accident. Write that kind of comment, and keep it
+  true when you change the code around it — a stale reason is worse than none. What stays
+  banned: restating what the code already says, TODO/FIXME notes, commented-out code, and
+  lint or type suppression directives. Rationale that belongs to a change rather than to
+  the code goes in the commit message.
 - **Solve at the layer all paths flow through.** Before patching a call site, ask
   whether the fix belongs in the shared helper, the store interface, or the base
   module instead. Check for an existing helper before writing a new one-liner.
