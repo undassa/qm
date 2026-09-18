@@ -5975,17 +5975,25 @@ pub(crate) async fn question_holders(pool: &Pool, project: &str) -> Result<Value
         }
     }
 
-    let blind = client
+    // ЧИСЛО БЕЗ ЗНАМЕНАТЕЛЯ — НЕ ДИАГНОЗ. `unjudgeable: 105` читается как «сто
+    // пять недосмотров», и набор идёт заполнять поле по одному. А правда
+    // другая: поле не заведено НИ У ОДНОГО вопроса — держателя там пишут
+    // прозой, и дверь эту прозу не читает нарочно. Это одно решение набора, а
+    // не сто пять пропусков, и сказать надо именно так.
+    let blind_row = client
         .query_one(
-            "SELECT count(*) FROM project_questions q
-              WHERE q.project_id = $1 AND q.state <> 'open'
-                AND NOT EXISTS (SELECT 1 FROM project_document_fields f
-                                 WHERE f.project_id = q.project_id AND f.entity_kind = q.entity_kind AND f.entity_name = q.entity_name
-                                   AND f.name = 'Держатель' AND btrim(f.value) <> '')",
+            "SELECT count(*) FILTER (WHERE q.state <> 'open' AND NOT держит),
+                    count(*) FILTER (WHERE держит)
+               FROM (SELECT q.*, EXISTS (SELECT 1 FROM project_document_fields f
+                                          WHERE f.project_id = q.project_id AND f.entity_kind = q.entity_kind
+                                            AND f.entity_name = q.entity_name
+                                            AND f.name = 'Держатель' AND btrim(f.value) <> '') AS держит
+                       FROM project_questions q WHERE q.project_id = $1) q",
             &[&project],
         )
-        .await?
-        .get::<_, i64>(0);
+        .await?;
+    let blind: i64 = blind_row.get(0);
+    let with_holder: i64 = blind_row.get(1);
 
     Ok(json!({
         "declaredLinks": declared.len(),
@@ -5993,6 +6001,11 @@ pub(crate) async fn question_holders(pool: &Pool, project: &str) -> Result<Value
         "closedTooEarly": early.len(), "tooEarly": early,
         "waitingForHolder": waiting.len(), "waiting": waiting,
         "unjudgeable": blind,
+        "unjudgeableWhy": if with_holder == 0 && blind > 0 {
+            format!("поле «Держатель» не заведено НИ У ОДНОГО вопроса набора — значит держателя здесь пишут прозой,                      а дверь читает только поле. Это одно решение набора, а не {blind} пропусков")
+        } else {
+            String::new()
+        },
         "closedOnCreation": said.len(), "onCreation": said,
         "closedByRegistryRule": by_rule.len(), "byRule": by_rule,
         "why": "держатель берётся ТОЛЬКО из поля «Держатель»; проза не разбирается. `waitingForHolder` — решено и ждёт исполнения, это не находка. `closedOnCreation` — заведение задачи выдано за исполнение, дефект; `closedByRegistryRule` — закрытие по объявленному правилу реестра, законно",
@@ -9894,6 +9907,14 @@ pub(crate) async fn readiness_gaps(pool: &Pool, project: &str) -> Result<Value, 
         // Дверь названа здесь, а не в интерфейсе: чем закрывается пробел, знает
         // сервер. Интерфейс, знающий имя двери, — вторая запись о том же.
         "closedBy": "method-set",
+        // «1641 из 1641» — это не пробелы в работе, а незваная дверь, и числом
+        // это не отличить. Когда способа нет НИ У ОДНОГО пункта, ответ говорит
+        // прямо: `method-set` не звали ни разу.
+        "withoutMethodWhy": if bare == total && total > 0 {
+            "способ проверки не задан НИ У ОДНОГО пункта: `method-set` не звали ни разу — это не пробелы в работе, а незваная дверь".to_owned()
+        } else {
+            String::new()
+        },
     }))
 }
 
