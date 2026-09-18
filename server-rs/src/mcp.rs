@@ -913,7 +913,12 @@ impl Mcp {
                         "nameIs": k.name_is.clone().unwrap_or_default(),
                         "projection": k.projection.clone().unwrap_or_default(),
                         "domain": k.domain.clone().unwrap_or_default(),
-                        "holds": k.holds.clone().unwrap_or_default()
+                        "holds": k.holds.clone().unwrap_or_default(),
+                        // ОБЪЯВЛЕНИЕ ЦЕЛИКОМ, как оно лежит. Пересказ выше удобен
+                        // человеку, но пустая строка в нём и «не объявлено»
+                        // читаются одинаково: вернуть по нему объявление нельзя,
+                        // а объявление вида — часть прибора, и оно переезжает.
+                        "spec": serde_json::to_value(k).unwrap_or(Value::Null)
                     }));
                 }
                 ok(json!({ "kinds": out }))
