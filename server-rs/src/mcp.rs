@@ -2311,7 +2311,7 @@ impl Mcp {
                 let tables = client
                     .query(
                         "SELECT table_name FROM information_schema.columns
-                          WHERE column_name = 'project_id' AND table_schema = 'public'
+                          WHERE column_name = 'project_id' AND table_schema = current_schema()
                           GROUP BY table_name ORDER BY table_name",
                         &[],
                     )

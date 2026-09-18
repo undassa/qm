@@ -2256,7 +2256,7 @@ ALTER TABLE gate_item ADD COLUMN IF NOT EXISTS since bigint NOT NULL DEFAULT 0;
 ALTER TABLE task_state ADD COLUMN IF NOT EXISTS closed_at bigint NOT NULL DEFAULT 0;
 DO $$ BEGIN
   IF EXISTS (SELECT 1 FROM information_schema.columns
-              WHERE table_schema = 'public' AND table_name = 'task_state' AND column_name = 'judged_commit') THEN
+              WHERE table_schema = current_schema() AND table_name = 'task_state' AND column_name = 'judged_commit') THEN
     INSERT INTO task_closing_judged (project_id, task_id, closing_commit)
       SELECT project_id, task_id, judged_commit FROM task_state WHERE judged_commit IS NOT NULL
       ON CONFLICT DO NOTHING;
@@ -2327,7 +2327,7 @@ DECLARE t text; tail text; i int;
     ARRAY['project_document_links', 'block_ord, ord']];
 BEGIN
 IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = 'public' AND table_name = 'project_documents'
+                WHERE table_schema = current_schema() AND table_name = 'project_documents'
                   AND column_name = 'path') THEN
   RETURN;
 END IF;
@@ -2979,11 +2979,11 @@ BEGIN
       SELECT DISTINCT c.conrelid AS дитя, c.confrelid AS предок
         FROM pg_constraint c
        WHERE c.contype = 'f' AND c.conrelid <> c.confrelid
-         AND c.connamespace = 'public'::regnamespace
+         AND c.connamespace = current_schema()::regnamespace
     ), глубина AS (
       SELECT k.oid AS таблица, 0 AS уровень
         FROM pg_class k JOIN pg_namespace n ON n.oid = k.relnamespace
-       WHERE k.relkind = 'r' AND n.nspname = 'public'
+       WHERE k.relkind = 'r' AND n.nspname = current_schema()
       UNION ALL
       SELECT s.дитя, г.уровень + 1
         FROM глубина г JOIN ссылка s ON s.предок = г.таблица
@@ -3001,7 +3001,7 @@ BEGIN
         ON tb.table_schema = c.table_schema AND tb.table_name = c.table_name
        AND tb.table_type = 'BASE TABLE'
       LEFT JOIN порядок п ON п.имя = c.table_name
-     WHERE c.table_schema = 'public'
+     WHERE c.table_schema = current_schema()
        AND coalesce(c.column_default, '') NOT LIKE 'nextval%'
      GROUP BY c.table_name, п.уровень
     HAVING bool_or(c.column_name = 'project_id')
@@ -3039,7 +3039,7 @@ BEGIN
       JOIN information_schema.columns c
         ON c.table_schema = tb.table_schema AND c.table_name = tb.table_name
        AND c.column_name = 'project_id'
-     WHERE tb.table_schema = 'public' AND tb.table_type = 'BASE TABLE'
+     WHERE tb.table_schema = current_schema() AND tb.table_type = 'BASE TABLE'
   LOOP
     EXECUTE format('DELETE FROM %I WHERE project_id = $1', t.имя) USING чей;
     GET DIAGNOSTICS m = ROW_COUNT; n := n + m;
@@ -3421,7 +3421,7 @@ BEGIN
       JOIN information_schema.columns pid
         ON pid.table_schema = k.table_schema AND pid.table_name = k.table_name
        AND pid.column_name = 'project_id'
-     WHERE k.table_schema = 'public' AND k.data_type = 'text'
+     WHERE k.table_schema = current_schema() AND k.data_type = 'text'
        AND k.table_name LIKE 'project\_%'
        AND k.column_name <> 'project_id'
        -- Содержание документа правит сама дверь, и правит с ревизией; дважды
@@ -3445,7 +3445,7 @@ BEGIN
                  ON u.constraint_name = rc.constraint_name
                 AND u.constraint_schema = rc.constraint_schema
               WHERE rc.update_rule = 'CASCADE'
-                AND u.table_schema = 'public'
+                AND u.table_schema = current_schema()
                 AND u.table_name = k.table_name AND u.column_name = k.column_name)
      ORDER BY k.table_name, k.column_name
   LOOP
@@ -8533,7 +8533,7 @@ pub(crate) async fn set_kind_projection(
             if client
                 .query_opt(
                     "SELECT 1 FROM information_schema.columns
-                      WHERE table_schema = 'public' AND table_name = $1
+                      WHERE table_schema = current_schema() AND table_name = $1
                         AND column_name = 'entity_kind'",
                     &[table],
                 )
@@ -8568,7 +8568,7 @@ pub(crate) async fn set_kind_projection(
                     let exists: bool = client
                         .query_one(
                             "SELECT EXISTS (SELECT 1 FROM information_schema.columns
-                                             WHERE table_schema='public' AND table_name=$1
+                                             WHERE table_schema = current_schema() AND table_name=$1
                                                AND column_name='id')",
                             &[table],
                         )
@@ -8884,7 +8884,7 @@ pub(crate) async fn set_kind_reopens(
             let exists: bool = client
                 .query_one(
                     "SELECT EXISTS (SELECT 1 FROM information_schema.columns
-                                     WHERE table_schema = 'public' AND table_name = $1
+                                     WHERE table_schema = current_schema() AND table_name = $1
                                        AND column_name IN ('state','status','closed','satisfied'))",
                     &[table],
                 )
@@ -8942,9 +8942,9 @@ async fn own_tables(
                     ) WITH ORDINALITY AS h(t, n)
               WHERE k.name = $1
                 AND EXISTS (SELECT 1 FROM information_schema.columns c
-                             WHERE c.table_schema = 'public' AND c.table_name = h.t AND c.column_name = 'id')
+                             WHERE c.table_schema = current_schema() AND c.table_name = h.t AND c.column_name = 'id')
                 AND EXISTS (SELECT 1 FROM information_schema.columns c
-                             WHERE c.table_schema = 'public' AND c.table_name = h.t AND c.column_name = 'project_id')
+                             WHERE c.table_schema = current_schema() AND c.table_name = h.t AND c.column_name = 'project_id')
               ORDER BY h.n",
             &[&kind],
         )
