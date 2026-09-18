@@ -1241,7 +1241,7 @@ pub(crate) fn contract_vs_schema(
             if !bodies.contains(&f.schema) {
                 out.push(Pair {
                     name: f.at.clone(),
-                    detail: format!("поле контракта без колонки: помечено «только вход», а схему {}                                      контракт телом запроса не принимает", f.schema),
+                    detail: format!("поле контракта без колонки: помечено «только вход», а схему {} контракт телом запроса не принимает", f.schema),
                 });
             }
             continue;
@@ -1948,7 +1948,11 @@ pub(crate) fn contract_head_echo(text: &str, in_body: usize, border: usize, size
         for c in re.captures_iter(&head) {
             let got = format!("{} / {} / {}", &c[1], &c[2], &c[3]);
             if !allowed.contains(&got) {
-                say("тройка", &got, "тройки", allowed.join("  либо  "));
+                // Кавычки, а не двойной пробел: сами тройки несут « / », и разделитель
+                // из пробелов сливался бы с ними. Двойной пробел вдобавок
+                // неотличим от отступа, уехавшего в текст по недосмотру.
+                say("тройка", &got, "тройки",
+                    allowed.iter().map(|a| format!("«{a}»")).collect::<Vec<_>>().join(" либо "));
             }
         }
     }
