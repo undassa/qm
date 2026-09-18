@@ -412,3 +412,47 @@ mod declared {
         assert_eq!(super::file_of("direct-dep"), "direct-dep");
     }
 }
+
+/// Схема и прибор на ЧИСТОЙ базе — то, чего нельзя было проверить вовсе.
+///
+/// Двадцать семь таблиц сервер только правил, а заводил их когда-то донор: на
+/// пустой базе схема не вставала, и потому ни один тест её не поднимал. Этот
+/// поднимает — в своей схеме, чтобы не мешать соседям по базе, — и сразу
+/// раскладывает прибор. Раскладка на пустом месте объявляет ВСЕ сто шестьдесят
+/// пунктов, а значит готовит каждый их запрос и каждую пробу настоящей базой:
+/// правило, зовущее снятую колонку, дальше этого теста не уезжает.
+#[cfg(test)]
+mod fresh {
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn a_schema_and_the_instrument_rise_on_an_empty_database() {
+        let url = std::env::var("MH_TEST_DB_URL").expect("MH_TEST_DB_URL: адрес пустой базы");
+        // Своя схема, а не `public`: соседние тесты требуют, чтобы `public` была
+        // пуста, и заведённый ими набор считают чужим.
+        let apart = format!("{}{}", if url.contains('?') { '&' } else { '?' },
+                            "options=-c%20search_path%3Dfresh");
+        let pool = crate::db::pool(&format!("{url}{apart}"), 2).expect("пул тестовой базы");
+        {
+            let client = pool.get().await.expect("соединение с тестовой базой");
+            client
+                .batch_execute("DROP SCHEMA IF EXISTS fresh CASCADE; CREATE SCHEMA fresh;")
+                .await
+                .expect("своя схема заводится");
+        }
+        crate::projector::ensure(&pool).await.expect("схема встаёт на пустой базе");
+        let laid = super::apply(&pool).await.expect("прибор раскладывается");
+        assert_eq!(laid["пунктов"], serde_json::json!(160));
+        assert_eq!(laid["изменено"], laid["пунктов"], "на пустой базе объявляются все пункты");
+        let client = pool.get().await.expect("соединение");
+        let items: i64 = client
+            .query_one("SELECT count(*) FROM gate_item", &[])
+            .await
+            .expect("пункты на месте")
+            .get(0);
+        assert_eq!(items, 160);
+        client
+            .batch_execute("DROP SCHEMA IF EXISTS fresh CASCADE")
+            .await
+            .expect("схема снимается");
+    }
+}

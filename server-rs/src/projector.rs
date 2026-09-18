@@ -190,6 +190,234 @@ CREATE VIEW task_phase AS
 "#;
 
 const DDL: &str = r#"
+-- ─── Таблицы, которых сервер не заводил ──────────────────────────────────────
+--
+-- ДВАДЦАТЬ СЕМЬ ТАБЛИЦ СЕРВЕР ТОЛЬКО ПРАВИЛ, а заводил их когда-то донор —
+-- среди них `project_documents`, `project_gates`, `project_plan_tasks`. Жили
+-- они с тех пор и существовали лишь потому, что однажды их кто-то создал.
+-- Значит, нового экземпляра харнеса не существовало: на чистой базе первый же
+-- `ALTER` несуществующей таблицы ронял всю схему, и проверить её было негде —
+-- ни в CI, ни на стенде. Класс ошибок «запрос зовёт снятую колонку» ловился
+-- поэтому только наборами и только на живом.
+--
+-- Определения взяты у донора (`legacy-qm/src/projects/*.ts`) КАК ЕСТЬ, вместе с
+-- колонкой `path` и старыми ограничениями. Это не небрежность: ниже по этой же
+-- пачке лежат переезды, которые `path` снимают, ограничения переписывают и
+-- добавляют нынешние колонки. Повторённая история приводит чистую базу ровно к
+-- тому, чем живая стала за год; «чистое» определение разошлось бы с переездами
+-- молча — и разошлось бы в ту же сторону, в какую уже разошёлся сам донор:
+-- у `project_gates` он объявляет колонки, снятые этой весной.
+CREATE TABLE IF NOT EXISTS project_articles(
+    project_id TEXT NOT NULL, number INTEGER NOT NULL,
+    title TEXT NOT NULL, path TEXT NOT NULL, anchor TEXT NOT NULL, body TEXT NOT NULL,
+    PRIMARY KEY (project_id, number)
+  );
+
+CREATE TABLE IF NOT EXISTS project_checks(
+    project_id TEXT NOT NULL, id TEXT NOT NULL, area TEXT NOT NULL,
+    requirement_id TEXT, spec TEXT NOT NULL, path TEXT NOT NULL,
+    PRIMARY KEY (project_id, id)
+  );
+
+CREATE TABLE IF NOT EXISTS project_db_tables(
+    project_id TEXT NOT NULL, name TEXT NOT NULL, migration TEXT NOT NULL DEFAULT '',
+    migration_file TEXT NOT NULL DEFAULT '', columns TEXT NOT NULL DEFAULT '', path TEXT NOT NULL,
+    PRIMARY KEY (project_id, name)
+  );
+
+CREATE TABLE IF NOT EXISTS project_decision_alternatives(
+    project_id TEXT NOT NULL, decision_id TEXT NOT NULL, ord INTEGER NOT NULL,
+    title TEXT NOT NULL, body TEXT NOT NULL,
+    PRIMARY KEY (project_id, decision_id, ord)
+  );
+
+CREATE TABLE IF NOT EXISTS project_decision_links(
+    project_id TEXT NOT NULL, decision_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN
+      ('refines','related','relates-to-decision','supersedes','closes','amends-article')),
+    target TEXT NOT NULL,
+    PRIMARY KEY (project_id, decision_id, kind, target)
+  );
+
+CREATE TABLE IF NOT EXISTS project_decisions(
+    project_id TEXT NOT NULL, id TEXT NOT NULL, number INTEGER NOT NULL,
+    title TEXT NOT NULL, path TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('accepted','superseded','template')),
+    status_text TEXT NOT NULL DEFAULT '', date TEXT NOT NULL DEFAULT '',
+    deciders TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (project_id, id)
+  );
+
+CREATE TABLE IF NOT EXISTS project_document_links(
+    project_id TEXT NOT NULL, path TEXT NOT NULL, block_ord INTEGER NOT NULL, ord INTEGER NOT NULL,
+    label TEXT NOT NULL, target_path TEXT NOT NULL, target_anchor TEXT NOT NULL,
+    PRIMARY KEY (project_id, path, block_ord, ord)
+  );
+
+CREATE TABLE IF NOT EXISTS project_document_plan(
+    project_id TEXT NOT NULL, name TEXT NOT NULL, level TEXT NOT NULL DEFAULT '',
+    contains TEXT NOT NULL DEFAULT '', state_text TEXT NOT NULL DEFAULT '',
+    claim TEXT NOT NULL CHECK (claim IN ('present','absent','self','unknown')),
+    path TEXT NOT NULL,
+    PRIMARY KEY (project_id, name)
+  );
+
+CREATE TABLE IF NOT EXISTS project_document_plan_counts(
+    project_id TEXT NOT NULL, name TEXT NOT NULL, subject TEXT NOT NULL, claimed INTEGER NOT NULL,
+    PRIMARY KEY (project_id, name, subject)
+  );
+
+CREATE TABLE IF NOT EXISTS project_document_revisions(
+    id           BIGSERIAL PRIMARY KEY,
+    project_id   TEXT   NOT NULL,
+    path         TEXT   NOT NULL,
+    content      TEXT   NOT NULL,
+    content_hash TEXT   NOT NULL,
+    bytes        INTEGER NOT NULL,
+    revision     BIGINT NOT NULL,
+    written_at   BIGINT NOT NULL,
+    written_by   TEXT   NOT NULL,
+    UNIQUE (project_id, path, revision)
+  );
+
+CREATE TABLE IF NOT EXISTS project_documents(
+    project_id   TEXT   NOT NULL,
+    path         TEXT   NOT NULL,
+    content      TEXT   NOT NULL,
+    content_hash TEXT   NOT NULL,
+    bytes        INTEGER NOT NULL,
+    revision     BIGINT NOT NULL,
+    updated_at   BIGINT NOT NULL,
+    updated_by   TEXT   NOT NULL,
+    PRIMARY KEY (project_id, path)
+  );
+
+CREATE TABLE IF NOT EXISTS project_feature_stories(
+    project_id TEXT NOT NULL, feature_id TEXT NOT NULL, story_id TEXT NOT NULL,
+    PRIMARY KEY (project_id, feature_id, story_id)
+  );
+
+CREATE TABLE IF NOT EXISTS project_gates(
+    project_id TEXT NOT NULL, phase TEXT NOT NULL, item TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('query','command','signed')),
+    query TEXT, owner TEXT,
+    state TEXT NOT NULL DEFAULT 'unknown' CHECK (state IN ('unknown','passed','failed','refused')),
+    violations INTEGER NOT NULL DEFAULT 0,
+    detail TEXT NOT NULL DEFAULT '',
+    checked_at BIGINT,
+    signed_by TEXT,
+    signed_at BIGINT,
+    article INTEGER,
+    PRIMARY KEY (project_id, phase, item),
+    CHECK ((kind = 'query') = (query IS NOT NULL)),
+    CHECK ((kind = 'signed') = (owner IS NOT NULL))
+  );
+
+CREATE TABLE IF NOT EXISTS project_needs(
+    project_id TEXT NOT NULL, id TEXT NOT NULL, number INTEGER NOT NULL,
+    text TEXT NOT NULL DEFAULT '', sides TEXT NOT NULL DEFAULT '',
+    sources TEXT NOT NULL DEFAULT '', theme TEXT NOT NULL DEFAULT '',
+    priority TEXT NOT NULL CHECK (priority IN ('must','should','later','unknown')),
+    path TEXT NOT NULL,
+    PRIMARY KEY (project_id, id)
+  );
+
+CREATE TABLE IF NOT EXISTS project_plan_milestones(
+    project_id TEXT NOT NULL, id TEXT NOT NULL, version_id TEXT NOT NULL,
+    ord INTEGER NOT NULL, title TEXT NOT NULL, path TEXT NOT NULL,
+    PRIMARY KEY (project_id, id),
+    FOREIGN KEY (project_id, version_id) REFERENCES project_plan_versions(project_id, id) ON DELETE CASCADE
+  );
+
+CREATE TABLE IF NOT EXISTS project_plan_task_deps(
+    project_id TEXT NOT NULL, task_id TEXT NOT NULL, depends_on TEXT NOT NULL,
+    PRIMARY KEY (project_id, task_id, depends_on),
+    CHECK (task_id <> depends_on),
+    FOREIGN KEY (project_id, task_id) REFERENCES project_plan_tasks(project_id, id) ON DELETE CASCADE
+  );
+
+CREATE TABLE IF NOT EXISTS project_plan_tasks(
+    project_id TEXT NOT NULL, id TEXT NOT NULL, milestone_id TEXT NOT NULL,
+    ord INTEGER NOT NULL, title TEXT NOT NULL, path TEXT NOT NULL, size TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('not_started','claimed','closed')),
+    kind TEXT NOT NULL DEFAULT 'dev' CHECK (kind IN ('dev','test')),
+    closing_commit TEXT,
+    PRIMARY KEY (project_id, id),
+    FOREIGN KEY (project_id, milestone_id) REFERENCES project_plan_milestones(project_id, id) ON DELETE CASCADE
+  );
+
+CREATE TABLE IF NOT EXISTS project_plan_versions(
+    project_id TEXT NOT NULL, id TEXT NOT NULL, path TEXT NOT NULL,
+    PRIMARY KEY (project_id, id)
+  );
+
+CREATE TABLE IF NOT EXISTS project_questions(
+    project_id TEXT NOT NULL, id TEXT NOT NULL, number INTEGER NOT NULL,
+    title TEXT NOT NULL, path TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('open','decided','closed')),
+    state_text TEXT NOT NULL DEFAULT '', gate TEXT NOT NULL DEFAULT '',
+    opened_at TEXT NOT NULL DEFAULT '', closed_at TEXT NOT NULL DEFAULT '',
+    has_answer BOOLEAN NOT NULL DEFAULT FALSE,
+    PRIMARY KEY (project_id, id)
+  );
+
+CREATE TABLE IF NOT EXISTS project_requirements(
+    project_id TEXT NOT NULL, id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('FR','NFR')),
+    area TEXT NOT NULL, text TEXT NOT NULL, path TEXT NOT NULL,
+    satisfied BOOLEAN NOT NULL,
+    PRIMARY KEY (project_id, id)
+  );
+
+CREATE TABLE IF NOT EXISTS project_risks(
+    project_id TEXT NOT NULL, id TEXT NOT NULL, number INTEGER NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL CHECK (state IN ('open','accepted','closed')),
+    impact TEXT NOT NULL DEFAULT '', probability TEXT NOT NULL DEFAULT '',
+    owner TEXT NOT NULL DEFAULT '', trigger_sign TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT '', settled_by TEXT NOT NULL DEFAULT '',
+    path TEXT NOT NULL,
+    PRIMARY KEY (project_id, id)
+  );
+
+CREATE TABLE IF NOT EXISTS project_runs_log(
+    project_id TEXT NOT NULL, id TEXT NOT NULL, title TEXT NOT NULL, path TEXT NOT NULL,
+    version TEXT NOT NULL DEFAULT '', milestone TEXT NOT NULL DEFAULT '',
+    is_milestone BOOLEAN NOT NULL DEFAULT FALSE,
+    left_open BOOLEAN NOT NULL DEFAULT FALSE, sections INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (project_id, path)
+  );
+
+CREATE TABLE IF NOT EXISTS project_screen_references(
+    project_id TEXT NOT NULL, source TEXT NOT NULL,
+    source_kind TEXT NOT NULL CHECK (source_kind IN ('story','task')), screen_id TEXT NOT NULL,
+    PRIMARY KEY (project_id, source, screen_id)
+  );
+
+CREATE TABLE IF NOT EXISTS project_screens(
+    project_id TEXT NOT NULL, id TEXT NOT NULL, title TEXT NOT NULL, path TEXT NOT NULL,
+    area TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (project_id, id)
+  );
+
+CREATE TABLE IF NOT EXISTS project_stories(
+    project_id TEXT NOT NULL, id TEXT NOT NULL, title TEXT NOT NULL, path TEXT NOT NULL,
+    area TEXT NOT NULL DEFAULT '', persona TEXT NOT NULL DEFAULT '',
+    phase TEXT NOT NULL DEFAULT '', feature TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (project_id, id)
+  );
+
+CREATE TABLE IF NOT EXISTS project_story_requirements(
+    project_id TEXT NOT NULL, story_id TEXT NOT NULL, requirement_id TEXT NOT NULL,
+    PRIMARY KEY (project_id, story_id, requirement_id)
+  );
+
+CREATE TABLE IF NOT EXISTS project_terms(
+    project_id TEXT NOT NULL, id TEXT NOT NULL, term TEXT NOT NULL,
+    meaning TEXT NOT NULL DEFAULT '', area TEXT NOT NULL DEFAULT '', path TEXT NOT NULL,
+    PRIMARY KEY (project_id, id)
+  );
+
 -- Летопись сущности. Две породы записей, и они не смешиваются:
 --
 --   `declared` — то, что документ говорит о себе сам (журнал внутри вопроса).
