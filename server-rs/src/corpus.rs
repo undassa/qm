@@ -73,6 +73,7 @@ pub(crate) async fn search(
     pool: &Pool,
     project: &str,
     query: &str,
+    kinds: &[String],
     limit: i64,
 ) -> Result<Vec<Value>, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
@@ -88,8 +89,17 @@ pub(crate) async fn search(
             // плясал между запросами.
             "SELECT entity_kind, entity_name, bytes, excerpt FROM (
                SELECT entity_kind, entity_name, bytes,
-                      (SELECT string_agg(line, E'\\n')
-                         FROM (SELECT line FROM unnest(string_to_array(content, E'\\n')) AS line
+                      -- ВЫДЕРЖКА ОБРЕЗАЕТСЯ ВОКРУГ СОВПАДЕНИЯ. Строка реестра
+                      -- вопросов бывает в полторы тысячи знаков, и три таких
+                      -- хоронят ответ: спрашивавший получал простыню и всё равно
+                      -- шёл открывать документ. Двести знаков до и после хватает,
+                      -- чтобы понять, тот ли это документ.
+                      (SELECT string_agg(вырез, E'\\n')
+                         FROM (SELECT CASE WHEN length(line) <= 420 THEN line
+                                           ELSE '…' || substr(line,
+                                                  greatest(1, position(lower($2) in lower(line)) - 200),
+                                                  420) || '…' END AS вырез
+                                 FROM unnest(string_to_array(content, E'\\n')) AS line
                                 WHERE line ILIKE '%' || $2 || '%' LIMIT 3) hits) AS excerpt,
                       CASE
                         WHEN lower(entity_name) = lower($2) THEN 0
@@ -100,12 +110,14 @@ pub(crate) async fn search(
                       END AS weight
                  FROM project_documents
                 WHERE project_id = $1
+                  -- Пустой перечень видов — искать везде; названные — только в них.
+                  AND (cardinality($4::text[]) = 0 OR entity_kind = ANY($4))
                   AND (content ILIKE '%' || $2 || '%'
                        OR entity_name ILIKE '%' || $2 || '%'
                        OR entity_kind ILIKE '%' || $2 || '%')
              ) ranked
              ORDER BY weight, entity_kind, entity_name LIMIT $3",
-            &[&project, &query, &limit],
+            &[&project, &query, &limit, &kinds],
         )
         .await?;
     Ok(rows

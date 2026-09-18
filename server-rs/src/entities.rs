@@ -132,6 +132,45 @@ pub(crate) async fn locate_at(
     if let Some(r) = rows.first() {
         return Ok((r.get(0), r.get(1)));
     }
+    // ПОСЛАБЛЕНИЕ — ТОЛЬКО ОДНОЗНАЧНОЕ. Точного имени нет; пробуем два
+    // послабления и принимаем их, лишь когда подходит ровно одна сущность:
+    //
+    //   · регистр. `task id=m6-t2` не находил `M6-T2`, хотя образец имени вида
+    //     принимает обе записи, и регистр в имени задачи ничего не значит;
+    //   · номер. Решение зовётся `0026-имя-решения`, а набор печатает его всюду
+    //     как `ADR-0026`; чтобы открыть, приходилось тянуть перечень решений и
+    //     отфильтровывать slug глазами.
+    //
+    // Двое подошедших — не находка, а вопрос: отдать первого значило бы solve
+    // спор молчанием. Отвечается отказом с перечнем.
+    let number = name
+        .rsplit('-')
+        .next()
+        .filter(|tail| !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()))
+        .filter(|_| name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+        .map(str::to_owned)
+        .unwrap_or_default();
+    let relaxed = client
+        .query(
+            "SELECT entity_kind, entity_name FROM project_documents
+              WHERE project_id = $1 AND entity_kind = $2
+                AND (lower(entity_name) = lower($3)
+                     OR ($4 <> '' AND entity_name LIKE $4 || '-%'))",
+            &[&project, &kind, &name, &number],
+        )
+        .await?;
+    match relaxed.len() {
+        1 => return Ok((relaxed[0].get(0), relaxed[0].get(1))),
+        0 => {}
+        _ => {
+            let names: Vec<String> = relaxed.iter().map(|r| r.get::<_, String>(1)).collect();
+            return Err(Miss::Refused(format!(
+                "«{name}» называет несколько сущностей вида {kind}: {}. Назовите точно",
+                names.join(", ")
+            )));
+        }
+    }
+
     // Своего документа у сущности нет — значит она объявлена ВНУТРИ чужого, и
     // какого именно, знает предметная таблица. Так живут три экрана
     // `SCR-SHELL-01·07·08` в одном `shell`: вид объявлен документным, а набор
@@ -677,6 +716,33 @@ pub(crate) fn matches_id(k: &crate::kinds::Kind, id: &str) -> bool {
 ///
 /// Слово даёт набор: роль `id.<вид>` в словаре схемы. Не объявлена — образец
 /// раскладки, как и было.
+#[cfg(test)]
+mod relaxed {
+    /// Номер вынимается из имени только когда имя ЗАКАНЧИВАЕТСЯ числом и всё
+    /// состоит из букв, цифр и дефисов: иначе «послабление по номеру» ловило бы
+    /// половину набора. Правило то же, что в `locate`, и живёт оно здесь, потому
+    /// что ошибиться в нём легко, а увидеть ошибку — нет: она отдаёт ЧУЖУЮ
+    /// сущность, и отдаёт молча.
+    fn number_of(name: &str) -> String {
+        name.rsplit('-')
+            .next()
+            .filter(|tail| !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()))
+            .filter(|_| name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+            .map(str::to_owned)
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_number_is_taken_only_from_a_name_that_is_one() {
+        assert_eq!(number_of("ADR-0026"), "0026", "решение зовут номером, а лежит оно слагом");
+        assert_eq!(number_of("0026"), "0026");
+        assert_eq!(number_of("M6-T2"), "", "хвост не число");
+        assert_eq!(number_of("срок-2026"), "", "не латиница — не имя сущности");
+        assert_eq!(number_of("00-frame/questions"), "", "косая — часть имени, не номер");
+        assert_eq!(number_of(""), "");
+    }
+}
+
 pub(crate) async fn matches_id_of(
     pool: &Pool,
     project: &str,

@@ -164,8 +164,8 @@ impl Mcp {
             "inputSchema": { "type": "object", "properties": { "kind": s("вид"), "id": s("имя"), "anchor": s("якорь раздела") }, "required": ["kind", "anchor"] } }));
         tools.push(json!({ "name": "backlinks", "description": "кто ссылается на сущность — сущностями, а не файлами",
             "inputSchema": { "type": "object", "properties": { "kind": s("вид"), "id": s("имя") }, "required": ["kind"] } }));
-        tools.push(json!({ "name": "search", "description": "где встречается строка",
-            "inputSchema": { "type": "object", "properties": { "q": s("что ищем — короткое имя того же довода"), "query": s("что искать"), "limit": json!({"type":"integer"}) }, "required": ["query"] } }));
+        tools.push(json!({ "name": "search", "description": "ПОИСК ПО НАБОРУ: найти, где в документах встречается слово или строка — вид, имя и строки вокруг совпадения. Спрашивайте прежде, чем тянуть документы по одному: ответ на вопрос чаще уже записан",
+            "inputSchema": { "type": "object", "properties": { "q": s("что ищем — короткое имя того же довода"), "query": s("что искать"), "kinds": s("виды через запятую: искать только в них, например decision,srs,feature; пусто — искать везде"), "limit": json!({"type":"integer"}) }, "required": ["query"] } }));
         tools.push(json!({ "name": "put", "description": "записать сущность целиком; expectedRevision бережёт от потери чужой правки",
             "inputSchema": { "type": "object", "properties": { "deferProjection": json!({"type":"boolean","description":"не пересобирать проекции сейчас; позвать `reproject` после серии правок"}), "kind": s("вид"), "id": s("имя"), "content": s("текст целиком"), "expectedRevision": json!({"type":"integer"}),
                 "create": json!({"type":"boolean","description":"завести, если сущности ещё нет; без этого `put` только правит"}) }, "required": ["kind", "content"] } }));
@@ -940,7 +940,18 @@ impl Mcp {
                     ));
                 }
                 let limit = num(args, "limit").unwrap_or(20).clamp(1, 200);
-                match corpus::search(&self.pool, p, q, limit).await {
+                // Виды — через запятую: «ищи в решениях и требованиях» вместо
+                // «ищи везде и разбирайся сам». Просьба набора: ответ находился,
+                // но тонул в реестре вопросов и указателе.
+                let kinds: Vec<String> = args
+                    .get("kinds")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .split(',')
+                    .map(|k| k.trim().to_owned())
+                    .filter(|k| !k.is_empty())
+                    .collect();
+                match corpus::search(&self.pool, p, q, &kinds, limit).await {
                     Ok(hits) => ok(json!({ "count": hits.len(), "hits": hits })),
                     Err(e) => refusal(e.into()),
                 }

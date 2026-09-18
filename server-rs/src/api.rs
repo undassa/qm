@@ -314,7 +314,7 @@ async fn search(
     Query(q): Query<SearchQuery>,
 ) -> Result<Json<serde_json::Value>, Failure> {
     let limit = q.limit.unwrap_or(20).clamp(1, 200);
-    let hits = corpus::search(&app.pool, &project, &q.q, limit).await?;
+    let hits = corpus::search(&app.pool, &project, &q.q, &[], limit).await?;
     Ok(Json(json!({ "hits": hits, "count": hits.len() })))
 }
 
