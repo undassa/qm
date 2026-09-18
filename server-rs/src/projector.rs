@@ -7575,7 +7575,10 @@ pub(crate) async fn declare_risk(pool: &Pool, project: &str, fields: Risk<'_>, d
     if id.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "риск без имени не объявляется" }));
     }
-    let state = if matches!(state, "open" | "accepted" | "closed") { state } else { "open" };
+    let state = match settled(state, &["open", "accepted", "closed"]) {
+        Ok(v) => v,
+        Err(why) => return Ok(json!({ "status": "unknown_state", "why": why })),
+    };
     let client = crate::db::conn(pool).await?;
         // Снятие — той же ручкой, что и объявление. Без него объявленное
         // убирается только запросом мимо сервера, и сервер перестаёт быть
@@ -7596,6 +7599,44 @@ pub(crate) async fn declare_risk(pool: &Pool, project: &str, fields: Risk<'_>, d
            source = EXCLUDED.source, settled_by = EXCLUDED.settled_by, origin = 'declared'",
         &[&project, &id, &number, &title, &state, &owner, &trigger, &source, &mitigation]).await?;
     Ok(json!({ "status": "declared", "id": id, "state": state }))
+}
+
+/// Значение из закрытого перечня: пусто — первое (умолчание), незнакомое — отказ.
+///
+/// НЕЗНАКОМОЕ ЗНАЧЕНИЕ НЕ ЕСТЬ УМОЛЧАНИЕ. Прежде здесь стояло «не из перечня —
+/// бери первое», и `question-add state=решено` отвечала `state: "open"` без
+/// единого слова о подмене: звавший читал ответ как «принято» и шёл дальше с
+/// вопросом в чужом состоянии. Пустое значение — другое дело: его не называли
+/// вовсе, и умолчание тут честно.
+fn settled<'a>(value: &'a str, allowed: &[&'a str]) -> Result<&'a str, String> {
+    let v = value.trim();
+    if v.is_empty() {
+        return Ok(allowed[0]);
+    }
+    if allowed.contains(&v) {
+        return Ok(v);
+    }
+    Err(format!("«{v}» — не из перечня: {}", allowed.join(" · ")))
+}
+
+#[cfg(test)]
+mod settled_value {
+    use super::settled;
+
+    /// Принято сломом нарочно: верните «не из перечня → первое» — и первая
+    /// строка покраснеет. Именно так `question-add state=решено` отвечала
+    /// `state: "open"`, ничего не сказав.
+    #[test]
+    fn an_unknown_value_is_refused_and_an_empty_one_is_the_default() {
+        let states = ["open", "decided", "closed"];
+        assert!(settled("решено", &states).is_err(), "незнакомое значение не есть умолчание");
+        assert_eq!(settled("", &states), Ok("open"), "не названо — умолчание");
+        assert_eq!(settled("  ", &states), Ok("open"), "пробелы — то же, что не названо");
+        assert_eq!(settled(" closed ", &states), Ok("closed"), "лишние пробелы не мешают");
+        assert!(settled("Closed", &states).is_err(), "регистр не угадывается: перечень объявлен");
+        let why = settled("решено", &states).unwrap_err();
+        assert!(why.contains("open · decided · closed"), "отказ называет перечень: {why}");
+    }
 }
 
 /// Поля вопроса, как их принимает дверь `question-add`.
@@ -7624,7 +7665,10 @@ pub(crate) async fn declare_question(pool: &Pool, project: &str, fields: Questio
             .await?;
         return Ok(json!({ "status": if gone > 0 { "dropped" } else { "not_found" }, "id": id }));
     }
-    let state = if matches!(state, "open" | "decided" | "closed") { state } else { "open" };
+    let state = match settled(state, &["open", "decided", "closed"]) {
+        Ok(v) => v,
+        Err(why) => return Ok(json!({ "status": "unknown_state", "why": why })),
+    };
     let client = crate::db::conn(pool).await?;
     // Колонки вопроса объявлены проекцией; здесь заполняются те, что есть у
     // объявленного: остальное остаётся пустым и видно как пустое.
@@ -10135,7 +10179,10 @@ pub(crate) async fn declare_guard(pool: &Pool, project: &str, fields: Guard<'_>,
                                   &[&project, &name]).await?;
         return Ok(json!({ "status": if gone > 0 { "dropped" } else { "not_found" }, "name": name }));
     }
-    let acts_on = if matches!(acts_on, "write" | "command") { acts_on } else { "write" };
+    let acts_on = match settled(acts_on, &["write", "command"]) {
+        Ok(v) => v,
+        Err(why) => return Ok(json!({ "status": "unknown_acts_on", "why": why })),
+    };
     client.execute(
         "INSERT INTO project_guard (project_id, name, enforces, scope, refuses,
                                     acts_on, path_re, content_re, command_re)
