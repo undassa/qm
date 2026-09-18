@@ -851,6 +851,73 @@ mod declared {
 /// правило, зовущее снятую колонку, дальше этого теста не уезжает.
 #[cfg(test)]
 mod fresh {
+    /// Каждая читающая дверь отвечает на пустом наборе — и отвечает по существу,
+    /// а не «база не ответила».
+    ///
+    /// Класс, ради которого это стоит: запрос двери, зовущий снятую колонку.
+    /// Он не ловится ни сборкой, ни разбором — только исполнением, и потому
+    /// ловился до сих пор наборами. За один день так сломались `gate-measure`
+    /// (колонка заголовка в замере) и две ступени лестницы, и обе нашлись
+    /// случайно. Пустой набор для этого годится: «колонки нет» падает и на нуле
+    /// строк.
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn every_reading_door_answers_on_an_empty_set() {
+        let url = std::env::var("MH_TEST_DB_URL").expect("MH_TEST_DB_URL: адрес пустой базы");
+        let apart = format!("{}{}", if url.contains('?') { '&' } else { '?' },
+                            "options=-c%20search_path%3Ddoors");
+        let pool = crate::db::pool(&format!("{url}{apart}"), 4).expect("пул тестовой базы");
+        {
+            let client = pool.get().await.expect("соединение");
+            client
+                .batch_execute("DROP SCHEMA IF EXISTS doors CASCADE; CREATE SCHEMA doors;")
+                .await
+                .expect("своя схема");
+        }
+        crate::projector::ensure(&pool).await.expect("схема встаёт");
+        super::apply(&pool).await.expect("прибор раскладывается");
+        {
+            let client = pool.get().await.expect("соединение");
+            client
+                .execute("INSERT INTO projects (id, json) VALUES ('проба', '{}'::jsonb)", &[])
+                .await
+                .expect("набор заводится");
+        }
+        let kinds = crate::kinds::Kinds::from_db(&pool).await.expect("раскладка видов");
+        let door = crate::mcp::Mcp {
+            pool: pool.clone(),
+            kinds: std::sync::Arc::new(kinds),
+            project: "проба".to_owned(),
+            author: "проба".to_owned(),
+        };
+        // Спрашиваются ЧИТАЮЩИЕ двери: пишущая на пустом наборе отказывает по
+        // существу, и это не то, что здесь проверяется.
+        let writes = crate::mcp::Mcp::writes();
+        let mut broken: Vec<String> = Vec::new();
+        let names: Vec<String> = door
+            .tools()
+            .iter()
+            .filter_map(|t| t["name"].as_str().map(str::to_owned))
+            .filter(|n| !writes.contains(&n.as_str()))
+            .collect();
+        assert!(names.len() > 100, "читающих дверей {}: похоже на потерянный перечень", names.len());
+        for name in &names {
+            let said = door.call(name, &serde_json::json!({})).await;
+            let text = said["content"][0]["text"].as_str().unwrap_or("").to_owned();
+            // «База не ответила» — единственное, что здесь считается поломкой:
+            // отказ по существу («вида нет», «документа нет») на пустом наборе
+            // законен и ожидаем.
+            if text.contains("база не ответила") || text.contains("не выполнился") {
+                broken.push(format!("{name}: {}", text.chars().take(160).collect::<String>()));
+            }
+        }
+        {
+            let client = pool.get().await.expect("соединение");
+            let _ = client.batch_execute("DROP SCHEMA IF EXISTS doors CASCADE").await;
+        }
+        assert!(broken.is_empty(), "двери не отвечают ({}):\n{}", broken.len(), broken.join("\n"));
+    }
+
     #[tokio::test]
     #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
     async fn a_schema_and_the_instrument_rise_on_an_empty_database() {

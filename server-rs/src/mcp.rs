@@ -685,6 +685,13 @@ impl Mcp {
     /// Обратная ошибка того же рода — `step-selftest`: он работает в
     /// транзакции, которую всегда откатывает, и писал ноль строк, заказывая
     /// полный круг каждым прогоном.
+    /// Пишущие двери — перечнем, и он же отдаётся наружу: проба на пустом
+    /// наборе спрашивает только читающие, а знать их порознь значило бы завести
+    /// второй перечень.
+    pub fn writes() -> &'static [&'static str] {
+        Self::WRITES
+    }
+
     const WRITES: &[&str] = &[
         "put", "put-section", "rm", "document-add", "reparse", "reproject", "sweep",
         "task-state-push", "code-facts-push", "skills-push", "preflight-push", "worktree-push",
