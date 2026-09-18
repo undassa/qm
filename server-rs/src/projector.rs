@@ -1227,6 +1227,27 @@ CREATE TABLE IF NOT EXISTS owner_ask (
   decided_at  bigint
 );
 
+-- Прогон задачи агентом: одна строка на попытку. Таблица досталась от прежнего
+-- харнеса вместе со своим словарём состояний и запретом двух живых прогонов
+-- одной задачи; объявлена она здесь, чтобы у неё был один хозяин, и в точности
+-- такой, какая лежит в базе.
+CREATE TABLE IF NOT EXISTS project_task_runs (
+  id           text    NOT NULL PRIMARY KEY,
+  project_id   text    NOT NULL,
+  task_id      text    NOT NULL,
+  agent_id     text    NOT NULL DEFAULT '',
+  state        text    NOT NULL DEFAULT 'running',
+  attempt      integer NOT NULL DEFAULT 1,
+  run_id       text,
+  session_id   text,
+  note         text    NOT NULL DEFAULT '',
+  created_at   bigint  NOT NULL,
+  updated_at   bigint  NOT NULL,
+  finished_at  bigint
+);
+CREATE UNIQUE INDEX IF NOT EXISTS project_task_runs_one_active ON project_task_runs (project_id, task_id)
+  WHERE state <> ALL (ARRAY['done', 'failed', 'cancelled']);
+
 -- Переход прогона из состояния в состояние: чем кончилась попытка и по чьей
 -- воле. Таблица тоже от прежнего харнеса.
 CREATE TABLE IF NOT EXISTS project_task_run_events (
@@ -1522,6 +1543,69 @@ CREATE TABLE IF NOT EXISTS server_strain (
 -- тому, чем живая стала за год; «чистое» определение разошлось бы с переездами
 -- молча — и разошлось бы в ту же сторону, в какую уже разошёлся сам донор:
 -- у `project_gates` он объявляет колонки, снятые этой весной.
+CREATE TABLE IF NOT EXISTS project_article_references(
+    project_id TEXT NOT NULL, path TEXT NOT NULL, number INTEGER NOT NULL,
+    PRIMARY KEY (project_id, path, number)
+  );
+
+CREATE TABLE IF NOT EXISTS project_document_blocks(
+    project_id TEXT NOT NULL, path TEXT NOT NULL, ord INTEGER NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('heading','prose','table','code','list','html','blank')),
+    level INTEGER, raw TEXT NOT NULL,
+    PRIMARY KEY (project_id, path, ord)
+  );
+
+CREATE TABLE IF NOT EXISTS project_document_cells(
+    project_id TEXT NOT NULL, path TEXT NOT NULL, block_ord INTEGER NOT NULL,
+    row_ord INTEGER NOT NULL, col INTEGER NOT NULL, raw TEXT NOT NULL, value TEXT NOT NULL,
+    PRIMARY KEY (project_id, path, block_ord, row_ord, col)
+  );
+
+CREATE TABLE IF NOT EXISTS project_document_fields(
+    project_id TEXT NOT NULL, path TEXT NOT NULL, section_ord INTEGER NOT NULL, ord INTEGER NOT NULL,
+    name TEXT NOT NULL, shape TEXT NOT NULL CHECK (shape IN ('row','bullet')),
+    value_raw TEXT NOT NULL, value TEXT NOT NULL,
+    PRIMARY KEY (project_id, path, ord)
+  );
+
+CREATE TABLE IF NOT EXISTS project_document_sections(
+    project_id TEXT NOT NULL, path TEXT NOT NULL, ord INTEGER NOT NULL,
+    level INTEGER NOT NULL, title TEXT NOT NULL, anchor TEXT NOT NULL,
+    parent_ord INTEGER, first_block INTEGER NOT NULL, last_block INTEGER NOT NULL,
+    PRIMARY KEY (project_id, path, ord)
+  );
+
+CREATE TABLE IF NOT EXISTS project_features(
+    project_id TEXT NOT NULL, id TEXT NOT NULL, title TEXT NOT NULL, path TEXT NOT NULL,
+    stories INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (project_id, id)
+  );
+
+CREATE TABLE IF NOT EXISTS project_gate_signatures(
+    project_id TEXT NOT NULL, phase TEXT NOT NULL, item TEXT NOT NULL,
+    path TEXT NOT NULL, content_hash TEXT NOT NULL,
+    PRIMARY KEY (project_id, phase, item, path)
+  );
+
+CREATE TABLE IF NOT EXISTS project_plan_status(
+    project_id TEXT NOT NULL, task_id TEXT NOT NULL, milestone TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL CHECK (state IN ('not_started','claimed','closed')),
+    commit_hash TEXT NOT NULL DEFAULT '', path TEXT NOT NULL,
+    PRIMARY KEY (project_id, task_id)
+  );
+
+CREATE TABLE IF NOT EXISTS project_requirement_needs(
+    project_id TEXT NOT NULL, requirement_id TEXT NOT NULL, need_id TEXT NOT NULL,
+    PRIMARY KEY (project_id, requirement_id, need_id)
+  );
+
+CREATE TABLE IF NOT EXISTS project_traceability_claims(
+    project_id TEXT NOT NULL, area TEXT NOT NULL, title TEXT NOT NULL DEFAULT '',
+    requirements INTEGER NOT NULL DEFAULT 0, described INTEGER NOT NULL DEFAULT 0,
+    in_contract INTEGER, in_code TEXT NOT NULL DEFAULT '', path TEXT NOT NULL,
+    PRIMARY KEY (project_id, area)
+  );
+
 CREATE TABLE IF NOT EXISTS project_articles(
     project_id TEXT NOT NULL, number INTEGER NOT NULL,
     title TEXT NOT NULL, path TEXT NOT NULL, anchor TEXT NOT NULL, body TEXT NOT NULL,
@@ -2642,26 +2726,6 @@ ALTER TABLE owner_ask ADD COLUMN IF NOT EXISTS delivered_at bigint;
 -- видит.
 ALTER TABLE owner_ask ADD COLUMN IF NOT EXISTS question_id text NOT NULL DEFAULT '';
 
--- Прогон задачи агентом: одна строка на попытку. Таблица досталась от прежнего
--- харнеса вместе со своим словарём состояний и запретом двух живых прогонов
--- одной задачи; объявлена она здесь, чтобы у неё был один хозяин, и в точности
--- такой, какая лежит в базе.
-CREATE TABLE IF NOT EXISTS project_task_runs (
-  id           text    NOT NULL PRIMARY KEY,
-  project_id   text    NOT NULL,
-  task_id      text    NOT NULL,
-  agent_id     text    NOT NULL DEFAULT '',
-  state        text    NOT NULL DEFAULT 'running',
-  attempt      integer NOT NULL DEFAULT 1,
-  run_id       text,
-  session_id   text,
-  note         text    NOT NULL DEFAULT '',
-  created_at   bigint  NOT NULL,
-  updated_at   bigint  NOT NULL,
-  finished_at  bigint
-);
-CREATE UNIQUE INDEX IF NOT EXISTS project_task_runs_one_active ON project_task_runs (project_id, task_id)
-  WHERE state <> ALL (ARRAY['done', 'failed', 'cancelled']);
 CREATE INDEX IF NOT EXISTS task_run_event_by_run ON task_run_event (project_id, run_id, at DESC);
 CREATE INDEX IF NOT EXISTS task_run_message_by_run ON task_run_message (project_id, run_id, at);
 
