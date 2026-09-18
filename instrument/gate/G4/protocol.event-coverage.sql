@@ -63,7 +63,7 @@ SELECT 'Op::' || s.оп || ' — §4 обещает операцию, котор
 UNION ALL
 SELECT 'Op::' || s.оп || ' — строка §4 не называет ни одного события' FROM (SELECT DISTINCT оп FROM строки) s WHERE s.оп IN (SELECT вариант FROM опы) AND NOT EXISTS (SELECT 1 FROM пары p WHERE p.оп = s.оп)
 UNION ALL
-SELECT 'EventMsg::' || p.событие || ' — §4 называет событие, которого нет в EventMsg' FROM (SELECT DISTINCT событие FROM пары) p WHERE EXISTS (SELECT 1 FROM события) AND p.событие NOT IN (SELECT вариант FROM события) AND p.событие NOT IN (SELECT вариант FROM опы)
+SELECT 'EventMsg::' || p.событие || ' — так прочитана строка §4 про Op::' || p.откуда || ', а в EventMsg такого нет' FROM (SELECT событие, string_agg(DISTINCT оп, ' · ') AS откуда FROM пары GROUP BY событие) p WHERE EXISTS (SELECT 1 FROM события) AND p.событие NOT IN (SELECT вариант FROM события) AND p.событие NOT IN (SELECT вариант FROM опы)
 UNION ALL
 SELECT 'EventMsg::' || e.вариант || ' — не назван в §1–§4 protocol: контракт не знает события, которое крейт шлёт' FROM события e, раздел р WHERE р.норм !~ ('\y' || e.вариант || '\y')
 UNION ALL
