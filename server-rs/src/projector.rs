@@ -13831,9 +13831,15 @@ pub(crate) async fn phases(pool: &Pool, project: &str) -> Result<Value, crate::d
     let client = crate::db::conn(pool).await?;
     let rows = client
         .query(
-            "SELECT phase, title, gate, gate_state, documents_present, documents_absent,
-                    documents_declared, tasks_closed, tasks_open, tasks_total, checked_at
-               FROM phase_state WHERE project_id = $1 ORDER BY ord",
+            // Объявление фазы отдаётся ВМЕСТЕ с её замером — порядок, уровень плана
+            // и вид задачи. Их знал только сервер: прочесть объявление было
+            // нечем, а править — только дверью, вслепую. Та же беда, что была у
+            // пункта гейта, и то же лекарство: правило читается, а не угадывается.
+            "SELECT s.phase, s.title, s.gate, s.gate_state, s.documents_present, s.documents_absent,
+                    s.documents_declared, s.tasks_closed, s.tasks_open, s.tasks_total, s.checked_at,
+                    p.ord, p.plan_level, p.task_kind
+               FROM phase_state s JOIN phase p ON p.id = s.phase
+              WHERE s.project_id = $1 ORDER BY p.ord",
             &[&project],
         )
         .await?;
@@ -13869,6 +13875,9 @@ pub(crate) async fn phases(pool: &Pool, project: &str) -> Result<Value, crate::d
                 "tasks": if r.get::<_, Option<i32>>(9).is_none() { Value::Null } else {
                     json!({ "closed": opt(7), "open": opt(8), "total": opt(9) })
                 },
+                "ord": r.get::<_, i32>(11),
+                "planLevel": r.get::<_, String>(12),
+                "taskKind": r.get::<_, String>(13),
             })
         })
         .collect();
