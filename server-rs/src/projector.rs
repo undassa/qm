@@ -195,6 +195,41 @@ const DDL: &str = r#"
 -- потому, что её однажды кто-то завёл. Здесь она объявлена по тому, как её
 -- читают: имя набора и его запись. Больше двух колонок из неё не спрашивает
 -- никто — ни список наборов, ни отметка «пересчитать», ни раскладка прибора.
+-- ЕЩЁ ДВЕ ТАБЛИЦЫ, КОТОРЫХ СЕРВЕР НЕ ЗАВОДИЛ. Обе нашлись не глазами: проба
+-- зовёт каждую читающую дверь на пустом наборе, и `agents` с `console` ответили
+-- «relation does not exist». На живой базе они есть с донорских времён.
+--
+-- `effort` у агента читает дверь и не пишет никто — колонка того же рода, что
+-- `measured_by` у требования: живёт на боевой, объявления не имела.
+CREATE TABLE IF NOT EXISTS harness_agent (
+  set_name text NOT NULL,
+  name text NOT NULL,
+  description text NOT NULL DEFAULT '',
+  tools text NOT NULL DEFAULT '',
+  model text NOT NULL DEFAULT '',
+  effort text NOT NULL DEFAULT '',
+  body text NOT NULL DEFAULT '',
+  content_hash text NOT NULL DEFAULT '',
+  updated_at bigint NOT NULL DEFAULT 0,
+  PRIMARY KEY (set_name, name));
+
+-- Рабочая копия прогона: ветка, путь, состояние. Объявление взято у донора
+-- (`legacy-qm/src/projects/workspace-store.ts`) как есть, вместе с правилом
+-- «у прогона копия одна»: вторая означала бы два места, где идёт одна работа.
+CREATE TABLE IF NOT EXISTS project_task_workspaces (
+  id text PRIMARY KEY,
+  project_id text NOT NULL,
+  task_run_id text NOT NULL,
+  repository_id text NOT NULL,
+  state text NOT NULL,
+  path text NOT NULL,
+  base_branch text NOT NULL,
+  base_commit text,
+  branch text NOT NULL,
+  detail text NOT NULL DEFAULT '',
+  created_at bigint NOT NULL,
+  updated_at bigint NOT NULL);
+
 CREATE TABLE IF NOT EXISTS projects (
   id text PRIMARY KEY,
   json jsonb NOT NULL DEFAULT '{}'::jsonb
@@ -2827,6 +2862,8 @@ ALTER TABLE gate_item ADD COLUMN IF NOT EXISTS subject_query text NOT NULL DEFAU
 ALTER TABLE gate_item ADD COLUMN IF NOT EXISTS subject_why text NOT NULL DEFAULT '';
 ALTER TABLE project_gates ADD COLUMN IF NOT EXISTS probe_ok boolean;
 ALTER TABLE project_gates ADD COLUMN IF NOT EXISTS id text NOT NULL DEFAULT '';
+CREATE UNIQUE INDEX IF NOT EXISTS project_task_workspaces_one_per_run
+  ON project_task_workspaces (task_run_id);
 CREATE UNIQUE INDEX IF NOT EXISTS project_gates_by_id ON project_gates (project_id, phase, id);
 -- ЧИСТКИ СИРОТ ПРИ СТАРТЕ ЗДЕСЬ БОЛЬШЕ НЕТ, и это не упущение.
 --
