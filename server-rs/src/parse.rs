@@ -220,12 +220,27 @@ pub(crate) fn ragged_rows(cells: &[Cell]) -> Vec<String> {
             continue;
         }
         let Some(head) = width.get(&(*block, 0)) else { continue };
-        if n != head {
-            out.push(format!(
-                "таблица {block}, строка {row}: клеток {n}, а в шапке {head} — колонки разъехались, \
-                 и читаться будет соседнее значение. Чаще всего это труба `|` внутри клетки"
-            ));
+        if n == head {
+            continue;
         }
+        // СЧЁТ ЗАСТАВЛЯЕТ ИСКАТЬ, РАЗБИЕНИЕ ПОКАЗЫВАЕТ. Труба, разорвавшая
+        // строку, стояла внутри `` `Tests`|`Explore` `` — внутри кода, и в
+        // потоке текста её не видно вовсе. Строка отдаётся так, как её ПРОЧЛИ:
+        // клетки через « ¦ ». Лишняя граница тогда стоит там, где её поставил
+        // разбор, и искать нечего.
+        let read: Vec<&str> = cells
+            .iter()
+            .filter(|c| c.block_ord == *block && c.row == *row)
+            .map(|c| c.raw.trim())
+            .collect();
+        let mut shown: String = read.join(" ¦ ");
+        if shown.chars().count() > 200 {
+            shown = shown.chars().take(200).collect::<String>() + "…";
+        }
+        out.push(format!(
+            "таблица {block}, строка {row}: клеток {n}, а в шапке {head} — колонки разъехались, \
+             и читаться будет соседнее значение. Прочтено так: {shown}"
+        ));
     }
     out
 }
@@ -656,5 +671,6 @@ mod ragged {
         let said = ragged_rows(&cells_of_table(0, torn));
         assert_eq!(said.len(), 1, "рваная строка названа: {said:?}");
         assert!(said[0].contains("клеток 4, а в шапке 3"), "сказано, сколько и сколько ждали: {}", said[0]);
+        assert!(said[0].contains("`Tests` ¦ `Explore`"), "показано, ГДЕ разорвалось: {}", said[0]);
     }
 }
