@@ -1232,7 +1232,7 @@ pub(crate) fn contract_vs_schema(
             if let Some(missing) = named_column_missing(rule) {
                 out.push(Pair {
                     name: f.at.clone(),
-                    detail: format!("поле контракта без колонки: правило вывода называет {missing},                                      а такой колонки нет — пометка находку не снимает"),
+                    detail: format!("поле контракта без колонки: правило вывода называет {missing}, а такой колонки нет — пометка находку не снимает"),
                 });
             }
             continue;

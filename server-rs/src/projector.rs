@@ -4625,7 +4625,7 @@ pub(crate) async fn task_blockers(pool: &Pool, project: &str, task: &str) -> Res
                     Some(true) => "фаза задачи открыта".to_owned(),
                     Some(false) => format!("фаза не открыта: её открывает {}",
                                            held_by.clone().unwrap_or_else(|| "предшествующий гейт".into())),
-                    None => "вид задачи не отображён ни на одну фазу: отображение не объявлено,                              и это не «можно всё»".to_owned(),
+                    None => "вид задачи не отображён ни на одну фазу: отображение не объявлено, и это не «можно всё»".to_owned(),
                 },
             }),
             None => Value::Null,
@@ -5679,7 +5679,7 @@ pub(crate) async fn push_task_plan(
     let client = crate::db::conn(pool).await?;
     if body.trim().is_empty() {
         return Ok(json!({ "status": "empty",
-                          "why": "план без текста — это отметка о том, что думали, а не то,                                   что придумали. Записывать нечего" }));
+                          "why": "план без текста — это отметка о том, что думали, а не то, что придумали. Записывать нечего" }));
     }
     let row = client
         .query_opt(
@@ -5710,7 +5710,7 @@ pub(crate) async fn push_task_plan(
         .await?;
     Ok(json!({ "task": task, "at": now, "taskRevision": revision, "by": actor,
                "why": if state == "closed" {
-                   "задача уже закрыта: это пересказ сделанного, а не план. Правило порядка                     его не зачтёт"
+                   "задача уже закрыта: это пересказ сделанного, а не план. Правило порядка его не зачтёт"
                } else { "" } }))
 }
 
@@ -6002,7 +6002,7 @@ pub(crate) async fn question_holders(pool: &Pool, project: &str) -> Result<Value
         "waitingForHolder": waiting.len(), "waiting": waiting,
         "unjudgeable": blind,
         "unjudgeableWhy": if with_holder == 0 && blind > 0 {
-            format!("поле «Держатель» не заведено НИ У ОДНОГО вопроса набора — значит держателя здесь пишут прозой,                      а дверь читает только поле. Это одно решение набора, а не {blind} пропусков")
+            format!("поле «Держатель» не заведено НИ У ОДНОГО вопроса набора — значит держателя здесь пишут прозой, а дверь читает только поле. Это одно решение набора, а не {blind} пропусков")
         } else {
             String::new()
         },
@@ -12904,7 +12904,7 @@ pub(crate) async fn waves(pool: &Pool, project: &str) -> Result<Value, crate::db
         "openRed": open_red,
         "heldByPhase": held,
         "why": if held > 0 {
-            "карточки с `phaseOpen` не `true` в очередь не идут: их фаза не открыта либо              вид задачи не отображён ни на одну фазу"
+            "карточки с `phaseOpen` не `true` в очередь не идут: их фаза не открыта либо вид задачи не отображён ни на одну фазу"
         } else { "" },
     }))
 }
