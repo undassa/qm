@@ -3291,6 +3291,7 @@ ALTER TABLE project_document_plan_counts ADD COLUMN IF NOT EXISTS planned_kind t
 -- назван сценарием, которого нет», `role` ячейки — пункт про реестр вопросов.
 -- Чистая база поднималась без них, и оба правила падали «колонки нет».
 ALTER TABLE project_requirements ADD COLUMN IF NOT EXISTS measured_by text NOT NULL DEFAULT '';
+ALTER TABLE project_requirements ADD COLUMN IF NOT EXISTS priority text NOT NULL DEFAULT '';
 ALTER TABLE project_document_cells ADD COLUMN IF NOT EXISTS role text NOT NULL DEFAULT '';
 
 ALTER TABLE project_document_plan_counts ADD COLUMN IF NOT EXISTS planned_name text NOT NULL DEFAULT '';
