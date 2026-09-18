@@ -3294,26 +3294,35 @@ WITH RECURSIVE прямо AS (
 SELECT e.project_id, e.kind, e.id, st.updated_at, st.created_at,
        ц.cause AS stale_link, ц.cause_at AS link_changed, ц.depth,
        CASE WHEN ц.cause IS NOT NULL THEN 'reopened' ELSE 'current' END AS live_state,
+       -- ВТОРАЯ ПОЛОВИНА НАЗЫВАЕТ ДЕЙСТВИЕ. Прежде сообщение кончалось на
+       -- «а сама запись стояла с …» — то есть говорило о записи, и набор читал
+       -- находку как упрёк записи или как ошибку харнеса и шёл проверять
+       -- харнес. Дело не в записи, а в том, что перевод сделан с прежней
+       -- редакции: перечитать источник и переснять отпечаток. Зов приложен
+       -- готовым — тем же доводом, что и «достаётся» у двери документов:
+       -- дверь, которую надо угадывать, не найдут.
        CASE WHEN ц.cause IS NULL THEN ''
-            -- ДЕНЬ ГОДИТСЯ, ПОКА ДНИ РАЗНЫЕ. Правка и запись в один день давали
-            -- «обновлена 18-го, а стояла с 18-го» — предложение, читаемое как
-            -- ошибка правила: набор видит одну дату дважды и идёт проверять
-            -- харнес вместо своей работы. Сравнение всегда шло по мгновению, а
-            -- показывалось днём; теперь в один день показывается и время.
-            WHEN ц.depth = 0
-              THEN 'связь ' || ц.cause || ' обновлена '
-                   || to_char(to_timestamp(ц.cause_at/1000),
-                              CASE WHEN to_char(to_timestamp(ц.cause_at/1000),'YYYY-MM-DD')
-                                      = to_char(to_timestamp(st.updated_at/1000),'YYYY-MM-DD')
-                                   THEN 'YYYY-MM-DD HH24:MI' ELSE 'YYYY-MM-DD' END)
-                   || ', а сама запись стояла с '
-                   || to_char(to_timestamp(st.updated_at/1000),
-                              CASE WHEN to_char(to_timestamp(ц.cause_at/1000),'YYYY-MM-DD')
-                                      = to_char(to_timestamp(st.updated_at/1000),'YYYY-MM-DD')
-                                   THEN 'YYYY-MM-DD HH24:MI' ELSE 'YYYY-MM-DD' END)
-            ELSE 'переоткрыто по цепочке: ' || ц.cause || ' обновлена '
-                 || to_char(to_timestamp(ц.cause_at/1000),'YYYY-MM-DD')
-                 || ', через ' || ц.depth || ' связь' END AS why
+            ELSE (CASE WHEN ц.depth = 0
+                       -- ДЕНЬ ГОДИТСЯ, ПОКА ДНИ РАЗНЫЕ. Правка и запись в один
+                       -- день давали «обновлена 18-го, а стояла с 18-го» —
+                       -- одну дату дважды. Сравнение всегда шло по мгновению, а
+                       -- показывалось днём; теперь в один день показывается и
+                       -- время.
+                       THEN 'связь ' || ц.cause || ' обновлена '
+                            || to_char(to_timestamp(ц.cause_at/1000),
+                                       CASE WHEN to_char(to_timestamp(ц.cause_at/1000),'YYYY-MM-DD')
+                                               = to_char(to_timestamp(st.updated_at/1000),'YYYY-MM-DD')
+                                            THEN 'YYYY-MM-DD HH24:MI' ELSE 'YYYY-MM-DD' END)
+                            || ', запись — '
+                            || to_char(to_timestamp(st.updated_at/1000),
+                                       CASE WHEN to_char(to_timestamp(ц.cause_at/1000),'YYYY-MM-DD')
+                                               = to_char(to_timestamp(st.updated_at/1000),'YYYY-MM-DD')
+                                            THEN 'YYYY-MM-DD HH24:MI' ELSE 'YYYY-MM-DD' END)
+                       ELSE 'по цепочке из ' || ц.depth || ' связей: ' || ц.cause || ' обновлена '
+                            || to_char(to_timestamp(ц.cause_at/1000),'YYYY-MM-DD') END)
+                 || '. Перечитать ' || ц.cause || ' и переснять отпечаток: mh call entity-confirm kind='
+                 || e.kind || ' id=' || e.id || ' why="что перечитано и почему запись в силе"'
+       END AS why
   FROM entity_row e
   JOIN kind_layout k ON k.name = e.kind AND (k.spec->>'reopens')::boolean IS TRUE
   JOIN entity_stamp st
@@ -14202,5 +14211,20 @@ mod rename {
             rev("term", "словарь", 3),
         ]);
         tx.rollback().await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod reopened_why {
+    /// Находка «стоит на изменившемся» называет зов, которым запись
+    /// подтверждают. Зов, названный текстом, живёт отдельно от двери и
+    /// переживёт её переименование молча — а набор пойдёт по нему и получит
+    /// «такой двери нет». Проба связывает два перечня в один.
+    #[test]
+    fn the_call_the_finding_names_is_a_door_that_exists() {
+        let call = "mh call entity-confirm kind=";
+        assert!(super::DDL.contains(call), "находка больше не называет зов подтверждения");
+        let door = call.trim_start_matches("mh call ").split(' ').next().unwrap();
+        assert!(crate::mcp::Mcp::writes().contains(&door), "дверь «{door}» не объявлена пишущей");
     }
 }
