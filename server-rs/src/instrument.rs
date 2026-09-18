@@ -371,7 +371,24 @@ pub async fn apply(pool: &Pool) -> Result<Value, String> {
     // ФАЗЫ — ТОТ ЖЕ ПРИБОР. Порядок работы, гейт фазы и вид задач, который она
     // пускает, решают, что набору выдадут следующим; до сих пор их правила
     // правили дверью на живом, и прочесть объявление было нечем.
+    let phases_was = tx
+        .query("SELECT id, ord, title, gate, plan_level, task_kind FROM phase", &[])
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut phases_changed = Vec::new();
     for p in &steps {
+        let old = phases_was.iter().find(|w| w.get::<_, &str>(0) == p.id);
+        let same = old.is_some_and(|w| {
+            w.get::<_, i32>(1) == p.ord
+                && w.get::<_, &str>(2) == p.title
+                && w.get::<_, &str>(3) == p.gate
+                && w.get::<_, &str>(4) == p.plan_level
+                && w.get::<_, &str>(5) == p.task_kind
+        });
+        if !same {
+            phases_changed.push(json!({ "id": p.id,
+                                        "was": if old.is_some() { "изменена" } else { "заведена" } }));
+        }
         tx.execute(
             "INSERT INTO phase (id, ord, title, gate, plan_level, task_kind)
              VALUES ($1,$2,$3,$4,$5,$6)
@@ -413,13 +430,15 @@ pub async fn apply(pool: &Pool) -> Result<Value, String> {
     // набора, а правка ПРАВИЛА не ставила её никому: числа гейтов остались бы от
     // прежнего правила и выглядели бы настоящими до первой чужой правки. Новый
     // пункт при этом вовсе не имеет замера, и гейт над ним считался бы пройденным.
-    let touched = !changed.is_empty() || gone > 0 || measures > 0 || phases_gone > 0;
+    let touched = !changed.is_empty() || gone > 0 || measures > 0
+        || phases_gone > 0 || !phases_changed.is_empty();
     if touched {
         crate::watch::touch_all(pool, "правка прибора").await.map_err(|e| crate::db::Says::says(&e))?;
     }
     Ok(json!({ "гейтов": gates.len(), "пунктов": rules.len(), "фаз": steps.len(),
                "изменено": changed.len(), "что": changed,
                "снято пунктов": gone, "снято замеров": measures, "снято фаз": phases_gone,
+               "фазы": phases_changed,
                "перемерить": touched }))
 }
 
