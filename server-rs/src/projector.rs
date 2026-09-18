@@ -6387,6 +6387,22 @@ mod keys {
     }
 }
 
+/// Снять ключ сессии: секрет перестаёт пускать, а строка остаётся.
+///
+/// Строка остаётся НАРОЧНО: «кто ходил этим ключом и когда» — вопрос, который
+/// задают после того, как ключ сняли, а не до. Удалённая строка ответила бы
+/// молчанием.
+pub async fn key_drop(pool: &Pool, session: &str, why: &str) -> Result<u64, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
+    Ok(client
+        .execute(
+            "UPDATE session_key SET dropped_at = $2, why = CASE WHEN $3 = '' THEN why ELSE $3 END
+              WHERE session = $1 AND dropped_at IS NULL",
+            &[&session, &now_ms(), &why],
+        )
+        .await?)
+}
+
 /// Случайные байты от системы. Своего источника у харнеса нет и не нужно.
 fn getrandom(into: &mut [u8; 32]) {
     use std::io::Read;

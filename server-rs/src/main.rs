@@ -139,6 +139,26 @@ async fn main() {
         return;
     }
 
+    // Подкоманда `key-drop`: снять ключи сессии. Строка остаётся — «кто ходил
+    // этим ключом» спрашивают после снятия, а не до.
+    if std::env::args().nth(1).as_deref() == Some("key-drop") {
+        let mut rest = std::env::args().skip(2);
+        let session = rest.next().unwrap_or_default();
+        let why = rest.collect::<Vec<_>>().join(" ");
+        if session.is_empty() {
+            eprintln!("mh-server key-drop <сессия> [почему]");
+            std::process::exit(2);
+        }
+        match projector::key_drop(&app.pool, &session, &why).await {
+            Ok(n) => println!("снято ключей: {n}"),
+            Err(e) => {
+                eprintln!("ключ не снят: {}", e.says());
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     // Подкоманда `parse-check`: сверка порта разбора с тем, что в базе оставил
     // донор. Одноразовая по замыслу, но остаётся: порт, сошедшийся однажды,
     // может разойтись при первой же правке.
