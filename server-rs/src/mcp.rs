@@ -119,8 +119,79 @@ fn ok(value: Value) -> Value {
     json!({ "content": [{ "type": "text", "text": text }] })
 }
 
+#[cfg(test)]
+mod near {
+    use super::one_letter_apart;
+
+    /// Подсказка обязана быть подсказкой, а не вторым списком дверей: похожим
+    /// считается слово, отличающееся ОДНОЙ буквой. Проба держит эту границу —
+    /// без неё «похожие» разрастаются, и читать их будет тот, кто уже ошибся.
+    #[test]
+    fn a_typo_is_near_and_another_word_is_not() {
+        assert!(one_letter_apart("gate", "gat"), "пропущенная буква");
+        assert!(one_letter_apart("gate", "gates"), "лишняя буква");
+        assert!(one_letter_apart("task", "tesk"), "другая буква");
+        assert!(!one_letter_apart("gate", "gate"), "то же слово не похоже, а равно");
+        assert!(!one_letter_apart("release", "search"), "разные слова");
+        assert!(!one_letter_apart("task", "tasks-of"), "разница больше буквы");
+    }
+}
+
+/// Отличаются ли слова одной буквой: опечатка, а не другое слово.
+fn one_letter_apart(a: &str, b: &str) -> bool {
+    if a == b {
+        return false;
+    }
+    let (long, short) = if a.chars().count() >= b.chars().count() { (a, b) } else { (b, a) };
+    let (l, s): (Vec<char>, Vec<char>) = (long.chars().collect(), short.chars().collect());
+    if l.len() - s.len() > 1 {
+        return false;
+    }
+    let (mut i, mut j, mut slips) = (0usize, 0usize, 0usize);
+    while i < l.len() && j < s.len() {
+        if l[i] == s[j] {
+            i += 1;
+            j += 1;
+            continue;
+        }
+        slips += 1;
+        if slips > 1 {
+            return false;
+        }
+        if l.len() == s.len() {
+            i += 1;
+            j += 1;
+        } else {
+            i += 1;
+        }
+    }
+    slips + (l.len() - i) + (s.len() - j) <= 1
+}
+
 impl Mcp {
     /// Перечень инструментов: пара на вид плюс общие.
+    /// Двери, похожие на названную: общая приставка, вхождение, либо разница в
+    /// одну букву. Не «умный подбор», а три дешёвых правила: длинный список
+    /// похожих хуже короткого — читать его будет тот, кто уже ошибся.
+    fn near(&self, asked: &str) -> Vec<String> {
+        let asked = asked.trim().to_lowercase();
+        if asked.len() < 2 {
+            return Vec::new();
+        }
+        let mut near: Vec<String> = self
+            .tools()
+            .iter()
+            .filter_map(|t| t["name"].as_str().map(str::to_owned))
+            .filter(|name| {
+                let n = name.to_lowercase();
+                n.contains(&asked) || asked.contains(&n) || one_letter_apart(&n, &asked)
+            })
+            .collect();
+        near.sort();
+        near.truncate(5);
+        near
+    }
+
     pub fn tools(&self) -> Vec<Value> {
         let mut tools = Vec::new();
         for (name, k) in &self.kinds.0 {
@@ -164,6 +235,11 @@ impl Mcp {
             "inputSchema": { "type": "object", "properties": { "kind": s("вид"), "id": s("имя"), "anchor": s("якорь раздела") }, "required": ["kind", "anchor"] } }));
         tools.push(json!({ "name": "backlinks", "description": "кто ссылается на сущность — сущностями, а не файлами",
             "inputSchema": { "type": "object", "properties": { "kind": s("вид"), "id": s("имя") }, "required": ["kind"] } }));
+        tools.push(json!({ "name": "documents", "description": "ПЕРЕЧЕНЬ ДОКУМЕНТОВ НАБОРА: вид, имя и ЧЕМ ДОСТАЁТСЯ — готовая строка вызова. Спрашивайте, когда не знаете, какой дверью открыть документ",
+            "inputSchema": { "type": "object", "properties": {
+                "kind": s("только этот вид"),
+                "q": s("только те, в чьём виде или имени встречается это слово"),
+                "limit": json!({"type":"integer","description":"сколько строк отдать, по умолчанию 200"}) } } }));
         tools.push(json!({ "name": "search", "description": "ПОИСК ПО НАБОРУ: найти, где в документах встречается слово или строка — вид, имя и строки вокруг совпадения. Спрашивайте прежде, чем тянуть документы по одному: ответ на вопрос чаще уже записан",
             "inputSchema": { "type": "object", "properties": { "q": s("что ищем — короткое имя того же довода"), "query": s("что искать"), "kinds": s("виды через запятую: искать только в них, например decision,srs,feature; пусто — искать везде"), "limit": json!({"type":"integer"}) }, "required": ["query"] } }));
         tools.push(json!({ "name": "put", "description": "записать сущность целиком; expectedRevision бережёт от потери чужой правки",
@@ -805,6 +881,7 @@ impl Mcp {
         // достаётся `gate-list`. Без этого старшинства вид молча перехватывал бы
         // вызов и отдавал строку таблицы вместо вычисления.
         const RESERVED: &[&str] = &[
+            "documents",
             "method-set", "question-holders", "preflight-push", "worktree-push",
             "sensor-specs", "scheme-terms", "scheme-roles", "frozen-trees", "addresses-declared", "tree-declared", "donors", "skills-push", "skills", "agents", "code-facts-push", "code-facts", "summary", "links-of", "retired-terms", "term-retire", "entity-confirm", "request-add", "approval-ask", "question-ask", "asks", "ask-decide", "ask-inbox", "chat-start", "chat-say", "chat-inbox", "chat", "run-start", "run-state", "run-event", "run-say", "run-inbox", "runs", "order", "gate-measure", "gate-selftest", "links-rewrite", "links-retarget", "reparse", "screen-area-set", "skill-set", "skills-paths", "version-freeze", "version-delta", "generated-check", "principal-allow", "principals", "author-set", "authors", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "version-close", "gate-selftest", "next-step", "process-state", "statuses", "task-status", "status-anomaly", "pipeline", "board", "waves", "phases", "coverage", "blocks", "history", "at-revision", "process-history", "progress",
             "kinds", "kinds-due", "readiness-gaps", "declared-unwritten", "blame-set", "doors", "derived-copy-set", "holders", "counts-sync", "tree", "document-coverage", "sections", "section", "backlinks", "search", "put",
@@ -923,6 +1000,50 @@ impl Mcp {
                 Ok(list) => ok(json!({ "count": list.len(), "backlinks": list })),
                 Err(e) => refusal(e),
             },
+            // ЧЕМ ДОСТАЁТСЯ ДОКУМЕНТ — вопрос, на который набор отвечал перебором.
+            // Имена дверей у документов неоднородны по устройству: дверь названа
+            // ВИДОМ, а вид не всегда зовётся так же, как документ. Здесь на
+            // каждый документ стоит готовая строка вызова, и гадать больше не о
+            // чем. Просьба сессии `tot-ade`, пункт второй.
+            "documents" => {
+                let only = if kind_arg.is_empty() {
+                    args.get("kind").and_then(|v| v.as_str()).unwrap_or("")
+                } else {
+                    kind_arg
+                };
+                let q = args.get("q").and_then(|v| v.as_str()).unwrap_or("");
+                let limit = num(args, "limit").unwrap_or(200).clamp(1, 2000);
+                let client = match crate::db::conn(&self.pool).await {
+                    Ok(c) => c,
+                    Err(e) => return refusal(e.into()),
+                };
+                let rows = client
+                    .query(
+                        "SELECT entity_kind, entity_name, bytes FROM project_documents
+                          WHERE project_id = $1
+                            AND ($2 = '' OR entity_kind = $2)
+                            AND ($3 = '' OR entity_kind ILIKE '%' || $3 || '%'
+                                         OR entity_name ILIKE '%' || $3 || '%')
+                          ORDER BY entity_kind, entity_name LIMIT $4",
+                        &[&p, &only, &q, &limit],
+                    )
+                    .await;
+                match rows {
+                    Ok(rows) => ok(json!({
+                        "count": rows.len(),
+                        "documents": rows.iter().map(|r| {
+                            let (kind, name): (String, String) = (r.get(0), r.get(1));
+                            let call = if name.is_empty() {
+                                format!("mh call {kind}")
+                            } else {
+                                format!("mh call {kind} id={name}")
+                            };
+                            json!({ "kind": kind, "name": name, "bytes": r.get::<_, i32>(2), "достаётся": call })
+                        }).collect::<Vec<_>>(),
+                    })),
+                    Err(e) => refusal(crate::db::Fail::Db(e).into()),
+                }
+            }
             "search" => {
                 // `query` и `q` — одна и та же просьба. Дверь принимала только
                 // длинное имя, а короткое молча уходило пустотой: пустой запрос
@@ -2503,10 +2624,22 @@ impl Mcp {
                 Ok(v) => ok(json!({ "own": v })),
                 Err(e) => refusal(e),
             },
-            other => json!({
-                "content": [{ "type": "text", "text": format!("нет такого инструмента: {other}") }],
-                "isError": true
-            }),
+            // НЕИЗВЕСТНОЕ ИМЯ НАЗЫВАЕТ БЛИЖАЙШИЕ. «Нет такого инструмента:
+            // release» — правда, от которой нечего делать: имена дверей у
+            // документов неоднородны, и спрашивающий не знает, чем этот документ
+            // достаётся. Ответ теперь называет похожие двери и два пути дальше:
+            // `kinds` — чем набор вправе быть, `search` — где это слово вообще
+            // встречается. Просьба сессии `tot-ade`, пункт второй.
+            other => {
+                let near = self.near(other);
+                let mut text = format!("нет такого инструмента: {other}");
+                if !near.is_empty() {
+                    text.push_str(&format!(". Похожие: {}", near.join(" · ")));
+                }
+                text.push_str(". Что вообще бывает — `kinds` (виды набора) и `doors q=…` (двери по вопросу); \
+                               где встречается слово — `search q=…`");
+                json!({ "content": [{ "type": "text", "text": text }], "isError": true })
+            }
         }
     }
 
