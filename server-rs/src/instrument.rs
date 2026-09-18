@@ -17,6 +17,9 @@ include!(concat!(env!("OUT_DIR"), "/instrument.rs"));
 
 const KINDS: [&str; 4] = ["query", "command", "manual", "unknown"];
 
+/// Пусто — то, что разбирать не надо: способ-команду читает оболочка.
+static EMPTY: &String = &String::new();
+
 /// Строка, которой снимается необъявленное: пара «гейт — имя», а не имя.
 const UNDECLARED: &str = "NOT EXISTS (SELECT 1 FROM unnest($1::text[], $2::text[]) AS d(phase, id)
                                        WHERE d.phase = g.phase AND d.id = g.id)";
@@ -380,6 +383,49 @@ pub async fn apply(pool: &Pool) -> Result<Value, String> {
         .map(|r| r.get(0))
         .collect();
 
+    // ВЕСЬ ПРИБОР РАЗБИРАЕТСЯ ДО ЕДИНОЙ ЗАПИСИ, и беды называются ВСЕ разом.
+    //
+    // Подготовка ловит и разбор, и снятую колонку, и несуществующую таблицу, и
+    // не пишет ни строки. Прежде разбирались только изменённые пункты — а
+    // правило, сломанное чужой правкой схемы, изменённым не числится: ступень
+    // лестницы простояла так полдня. Прежде же разбор падал на первой беде, и
+    // каждая следующая стоила ещё одного круга выкладки.
+    //
+    // Точка возврата на каждую попытку: ошибка в транзакции прерывает её целиком,
+    // и без отката первая же беда сделала бы неразбираемым всё остальное.
+    let mut broken: Vec<String> = Vec::new();
+    for (what, whose, text) in rules
+        .iter()
+        .flat_map(|r| {
+            [("запрос", format!("пункта {}", r.item.id), &r.query),
+             ("проба", format!("пункта {}", r.item.id), &r.probe),
+             ("предмет", format!("пункта {}", r.item.id), &r.subject)]
+        })
+        .chain(rungs.iter().flat_map(|r| {
+            // Способ ступени бывает КОМАНДОЙ — её разбирает оболочка, а не база.
+            // Проба, условие и предмет — запросы всегда.
+            let method = if r.step.method_kind == "query" { &r.method } else { EMPTY };
+            [("способ", format!("ступени {}", r.step.ord), method),
+             ("проба", format!("ступени {}", r.step.ord), &r.probe),
+             ("условие", format!("ступени {}", r.step.ord), &r.when_query),
+             ("предмет", format!("ступени {}", r.step.ord), &r.subject)]
+        }))
+    {
+        if text.is_empty() {
+            continue;
+        }
+        tx.batch_execute("SAVEPOINT разбор").await.map_err(|e| e.to_string())?;
+        if let Err(e) = tx.prepare(text).await {
+            broken.push(format!("{what} {whose} не разбирается: {}", crate::db::Says::says(&e)));
+        }
+        tx.batch_execute("ROLLBACK TO SAVEPOINT разбор; RELEASE SAVEPOINT разбор")
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    if !broken.is_empty() {
+        return Err(format!("объявленного не исполнить ({}):\n{}", broken.len(), broken.join("\n")));
+    }
+
     let was = tx
         .query(
             "SELECT phase, id, item, kind, coalesce(query, ''), probe, coalesce(owner, ''), why,
@@ -419,14 +465,6 @@ pub async fn apply(pool: &Pool) -> Result<Value, String> {
         // дверь, и проверяла не зря: подстановка удваивала кавычку, пункт
         // ложился в объявление и молча отвечал «мерить нечем». Роняет — здесь:
         // прибор, который нельзя исполнить, не должен пережить выкладку.
-        for (what, text) in [("запрос", &r.query), ("проба", &r.probe)] {
-            if text.is_empty() {
-                continue;
-            }
-            tx.prepare(text).await.map_err(|e| {
-                format!("{what} пункта {} не разбирается: {}", r.item.id, crate::db::Says::says(&e))
-            })?;
-        }
         // ПРОБА ИСПОЛНЯЕТСЯ, А НЕ ТОЛЬКО РАЗБИРАЕТСЯ. Разбор пропускает пробу,
         // которая споткнётся о первое же правило таблицы: так уже было — проба
         // разобралась и упала на `project_requirements_kind_check`, то есть
@@ -598,15 +636,6 @@ pub async fn apply(pool: &Pool) -> Result<Value, String> {
         }
         ladder_changed.push(json!({ "ord": r.step.ord,
                                     "was": if old.is_some() { "изменена" } else { "заведена" } }));
-        for (what, text) in [("способ", &r.method), ("проба", &r.probe),
-                             ("условие", &r.when_query), ("предмет", &r.subject)] {
-            if text.is_empty() || r.step.method_kind == "command" {
-                continue;
-            }
-            tx.prepare(text).await.map_err(|e| {
-                format!("{what} ступени {} не разбирается: {}", r.step.ord, crate::db::Says::says(&e))
-            })?;
-        }
         tx.execute(
             "INSERT INTO harness_process_step (set_name, process, ord, question, method_kind, method,
                                                when_query, when_why, owner_kind, owner, touches,
