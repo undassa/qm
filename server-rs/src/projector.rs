@@ -322,18 +322,16 @@ CREATE TABLE IF NOT EXISTS project_needs(
     PRIMARY KEY (project_id, id)
   );
 
+CREATE TABLE IF NOT EXISTS project_plan_versions(
+    project_id TEXT NOT NULL, id TEXT NOT NULL, path TEXT NOT NULL,
+    PRIMARY KEY (project_id, id)
+  );
+
 CREATE TABLE IF NOT EXISTS project_plan_milestones(
     project_id TEXT NOT NULL, id TEXT NOT NULL, version_id TEXT NOT NULL,
     ord INTEGER NOT NULL, title TEXT NOT NULL, path TEXT NOT NULL,
     PRIMARY KEY (project_id, id),
     FOREIGN KEY (project_id, version_id) REFERENCES project_plan_versions(project_id, id) ON DELETE CASCADE
-  );
-
-CREATE TABLE IF NOT EXISTS project_plan_task_deps(
-    project_id TEXT NOT NULL, task_id TEXT NOT NULL, depends_on TEXT NOT NULL,
-    PRIMARY KEY (project_id, task_id, depends_on),
-    CHECK (task_id <> depends_on),
-    FOREIGN KEY (project_id, task_id) REFERENCES project_plan_tasks(project_id, id) ON DELETE CASCADE
   );
 
 CREATE TABLE IF NOT EXISTS project_plan_tasks(
@@ -346,9 +344,11 @@ CREATE TABLE IF NOT EXISTS project_plan_tasks(
     FOREIGN KEY (project_id, milestone_id) REFERENCES project_plan_milestones(project_id, id) ON DELETE CASCADE
   );
 
-CREATE TABLE IF NOT EXISTS project_plan_versions(
-    project_id TEXT NOT NULL, id TEXT NOT NULL, path TEXT NOT NULL,
-    PRIMARY KEY (project_id, id)
+CREATE TABLE IF NOT EXISTS project_plan_task_deps(
+    project_id TEXT NOT NULL, task_id TEXT NOT NULL, depends_on TEXT NOT NULL,
+    PRIMARY KEY (project_id, task_id, depends_on),
+    CHECK (task_id <> depends_on),
+    FOREIGN KEY (project_id, task_id) REFERENCES project_plan_tasks(project_id, id) ON DELETE CASCADE
   );
 
 CREATE TABLE IF NOT EXISTS project_questions(
@@ -417,6 +417,7 @@ CREATE TABLE IF NOT EXISTS project_terms(
     meaning TEXT NOT NULL DEFAULT '', area TEXT NOT NULL DEFAULT '', path TEXT NOT NULL,
     PRIMARY KEY (project_id, id)
   );
+
 
 -- Летопись сущности. Две породы записей, и они не смешиваются:
 --
