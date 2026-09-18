@@ -25,9 +25,9 @@ WITH границы AS (
     FROM док WHERE position('## 4. Операции' in т) > 0 AND position('## 5.' in т) > position('## 4. Операции' in т)),
 строки AS (
   SELECT m[2] AS оп, m[3] AS хвост, m[1] AS строка
-    FROM раздел, regexp_matches(replace(раздел.с, '\|', '∥'), '^(\| `([A-Z][A-Za-z]*)[^|]*\|(.*)\|\s*)$', 'gn') m
+    FROM раздел, regexp_matches(replace(раздел.с, '\|', '∥'), '^(\| `([A-Z][A-Za-z]*)(?![A-Za-z0-9-])[^|]*\|(.*)\|\s*)$', 'gn') m
    WHERE m[2] <> 'Op'),
-пары AS (SELECT DISTINCT с.оп, e[1] AS событие FROM строки с, regexp_matches(с.хвост, '`([A-Z][A-Za-z]*)', 'g') e),
+пары AS (SELECT DISTINCT с.оп, e[1] AS событие FROM строки с, regexp_matches(с.хвост, '`([A-Z][A-Za-z]*)(?![A-Za-z0-9-])', 'g') e),
 длит AS (
   SELECT DISTINCT x[1] AS оп FROM док,
          regexp_matches(coalesce(substring(док.т from '\*\*Длительные операции\*\*.*?\n\n(.*?)\n\n'), ''), '`([A-Z][A-Za-z]*)`', 'g') x),
@@ -69,7 +69,7 @@ SELECT 'EventMsg::' || e.вариант || ' — не назван в §1–§4 
 UNION ALL
 SELECT 'Op::' || д.оп || ' — §4.14 называет длительной операцию, которой нет в таблицах §4' FROM длит д WHERE д.оп NOT IN (SELECT оп FROM строки)
 UNION ALL
-SELECT 'Op::' || д.оп || ' — объявлена длительной, а несёт одно событие: начала и завершения у неё нет' FROM длит д WHERE д.оп IN (SELECT оп FROM строки) AND (SELECT count(*) FROM строки s, regexp_matches(s.хвост, '`([A-Z][A-Za-z]*)', 'g') e WHERE s.оп = д.оп) < 2 AND NOT EXISTS (SELECT 1 FROM строки s WHERE s.оп = д.оп AND (s.строка LIKE '%…%' OR s.строка LIKE '%далее%' OR s.строка LIKE '%затем%'))
+SELECT 'Op::' || д.оп || ' — объявлена длительной, а несёт одно событие: начала и завершения у неё нет' FROM длит д WHERE д.оп IN (SELECT оп FROM строки) AND (SELECT count(*) FROM строки s, regexp_matches(s.хвост, '`([A-Z][A-Za-z]*)(?![A-Za-z0-9-])', 'g') e WHERE s.оп = д.оп) < 2 AND NOT EXISTS (SELECT 1 FROM строки s WHERE s.оп = д.оп AND (s.строка LIKE '%…%' OR s.строка LIKE '%далее%' OR s.строка LIKE '%затем%'))
 UNION ALL
 SELECT f.name || ' — матчит EventMsg рукавом _ => (И-5)' FROM code_fact f WHERE f.project_id = $1 AND f.kind = 'event-wildcard-arm' AND EXISTS (SELECT 1 FROM исходники и WHERE left(f.name, length(и.src)) = и.src) AND NOT EXISTS (SELECT 1 FROM протокол п WHERE left(f.name, length(п.каталог)) = п.каталог)
 UNION ALL
