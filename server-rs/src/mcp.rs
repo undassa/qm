@@ -2924,33 +2924,11 @@ impl Mcp {
                                      о соседнем продукте указывает в ЕГО дерево, а не в наше" }))
             }
             "tree-declared" => {
-                // Объявленное дерево — таблица «Путь | Состояние» в предмете
-                // `file-tree`. Блок ищется по заголовку, а не по номеру: номер
-                // блока меняется от любой правки выше по документу.
-                let rows = client
-                    .query(
-                        "WITH head AS (
-                           SELECT block_ord FROM project_document_cells
-                            WHERE project_id = $1 AND entity_name = 'file-tree'
-                              AND row_ord = 0 AND col = 0 AND lower(value) = 'путь')
-                         SELECT c.row_ord,
-                                max(CASE WHEN c.col = 0 THEN c.value END),
-                                max(CASE WHEN c.col = 1 THEN c.value END)
-                           FROM project_document_cells c JOIN head h ON h.block_ord = c.block_ord
-                          WHERE c.project_id = $1 AND c.entity_name = 'file-tree'
-                            AND c.row_ord > 0
-                          GROUP BY c.row_ord ORDER BY c.row_ord",
-                        &[p],
-                    )
+                let paths: Vec<Value> = crate::projector::declared_tree(&*client, p)
                     .await
-                    .map_err(|e| Miss::Db(e.to_string()))?;
-                let paths: Vec<Value> = rows
-                    .iter()
-                    .filter_map(|r| {
-                        let path = r.get::<_, Option<String>>(1)?;
-                        Some(json!({ "path": path.trim().trim_matches('`').to_owned(),
-                                     "state": r.get::<_, Option<String>>(2).unwrap_or_default() }))
-                    })
+                    .map_err(|e| Miss::Db(e.to_string()))?
+                    .into_iter()
+                    .map(|(path, state)| json!({ "path": path, "state": state }))
                     .collect();
                 Ok(json!({ "count": paths.len(), "paths": paths }))
             }

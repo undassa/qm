@@ -9946,6 +9946,51 @@ pub async fn note_reproject(pool: &Pool, project: &str, ok: bool, why: &str) {
         .await;
 }
 
+/// Объявленное дерево: путь и состояние из таблицы «Путь | Состояние» предмета
+/// `file-tree`.
+///
+/// ОДНО МЕСТО, КОТОРОЕ ЭТУ ТАБЛИЦУ ЧИТАЕТ. Блок ищется по заголовку, а не по
+/// номеру: номер блока меняется от любой правки выше по документу.
+///
+/// Прежде «описанное вперёд» выводилось не отсюда, а из снимка датчика
+/// `tree-file` — то есть из ПЕРЕСКАЗА объявления, снятого клиентом когда-то.
+/// Набор завёл строку, документ её отдавал, а правило `task-path-exists`
+/// продолжало краснеть: снимок отставал на одну правку и держал строку,
+/// которую уже заменили. Набор при этом видел «нет даже каталога» — правду про
+/// диск и ложь про причину. Объявление лежит здесь, и спрашивать о нём надо
+/// здесь.
+pub(crate) async fn declared_tree(
+    client: &impl deadpool_postgres::GenericClient,
+    project: &str,
+) -> Result<Vec<(String, String)>, tokio_postgres::Error> {
+    let rows = client
+        .query(
+            "WITH head AS (
+               SELECT block_ord FROM project_document_cells
+                WHERE project_id = $1 AND entity_name = 'file-tree'
+                  AND row_ord = 0 AND col = 0 AND lower(value) = 'путь')
+             SELECT max(CASE WHEN c.col = 0 THEN c.value END),
+                    max(CASE WHEN c.col = 1 THEN c.value END)
+               FROM project_document_cells c JOIN head h ON h.block_ord = c.block_ord
+              WHERE c.project_id = $1 AND c.entity_name = 'file-tree'
+                AND c.row_ord > 0
+              GROUP BY c.row_ord ORDER BY c.row_ord",
+            &[&project],
+        )
+        .await?;
+    Ok(rows
+        .iter()
+        .filter_map(|r| {
+            let path = r.get::<_, Option<String>>(0)?;
+            let path = path.trim().trim_matches('`').trim().to_owned();
+            if path.is_empty() {
+                return None;
+            }
+            Some((path, r.get::<_, Option<String>>(1).unwrap_or_default().trim().to_owned()))
+        })
+        .collect())
+}
+
 /// Что известно о последней пересборке: `None` — не пересобирали ни разу.
 pub(crate) async fn last_reproject(
     client: &impl deadpool_postgres::GenericClient,
