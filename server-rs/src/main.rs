@@ -77,39 +77,24 @@ async fn main() {
         }
     }
 
-    // Раскладка видов — из БАЗЫ. Файл остаётся способом её завести: указали
-    // `MH_CORPUS_LAYOUT` — он читается и переносится в таблицу, дальше сервер
-    // живёт без него. Прежде путь к чужому репозиторию стоял умолчанием, и без
-    // того репозитория сервер не поднимался вовсе.
-    let kinds = match std::env::var("MH_CORPUS_LAYOUT") {
-        Ok(path) if !path.trim().is_empty() => match kinds::Kinds::load(&path) {
-            Ok(k) => {
-                match k.write_to_db(&pool, "MH_CORPUS_LAYOUT").await {
-                    Ok(n) => eprintln!("mh-server: раскладка видов перенесена в базу, {n} видов"),
-                    Err(why) => {
-                        eprintln!("mh-server: {why}");
-                        std::process::exit(2);
-                    }
-                }
-                k
-            }
-            Err(why) => {
-                eprintln!("mh-server: {why}");
-                std::process::exit(2);
-            }
-        },
-        _ => match kinds::Kinds::from_db(&pool).await {
-            Ok(k) if !k.is_empty() => k,
-            Ok(_) => {
-                eprintln!("mh-server: раскладки видов нет ни в базе, ни в MH_CORPUS_LAYOUT — \
-                           завести её нечем");
-                std::process::exit(2);
-            }
-            Err(why) => {
-                eprintln!("mh-server: {why}");
-                std::process::exit(2);
-            }
-        },
+    // Раскладка видов — ИЗ БАЗЫ, куда её положило объявление репозитория.
+    //
+    // Файла рядом (`MH_CORPUS_LAYOUT`) больше нет. Он заводил раскладку из чужого
+    // дерева — что в ней лежит, зависело от того, чей путь стоял в окружении, — и
+    // писал её РАЗОБРАННОЙ: в записи семнадцать ключей, а разбор знает десять,
+    // и `reopens` с `proves` он стирал молча. Проверено на себе 2026-09-18:
+    // сорок восемь значений у двадцати видов, восстановлены из часового снимка.
+    let kinds = match kinds::Kinds::from_db(&pool).await {
+        Ok(k) if !k.is_empty() => k,
+        Ok(_) => {
+            eprintln!("mh-server: раскладка видов пуста, хотя прибор только что разложен: \
+                       это несогласие базы с объявлением, а не пустой проект");
+            std::process::exit(2);
+        }
+        Err(why) => {
+            eprintln!("mh-server: {why}");
+            std::process::exit(2);
+        }
     };
 
     let app = api::App {

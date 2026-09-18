@@ -103,21 +103,6 @@ fn rows(args: &Value, key: &str) -> Vec<Value> {
     }
 }
 
-fn list(args: &Value, key: &str) -> Vec<String> {
-    let own;
-    let v = match args.get(key) {
-        Some(Value::String(t)) => match serde_json::from_str::<Value>(t) {
-            Ok(p) if p.is_array() => { own = p; &own }
-            // Одиночное имя без скобок — список из одного.
-            _ => return if t.trim().is_empty() { Vec::new() } else { vec![t.clone()] },
-        },
-        Some(v) => v,
-        None => return Vec::new(),
-    };
-    v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
-     .unwrap_or_default()
-}
-
 fn num(args: &Value, key: &str) -> Option<i64> {
     match args.get(key) {
         Some(Value::Number(n)) => n.as_i64(),
@@ -597,20 +582,6 @@ impl Mcp {
             "inputSchema": { "type": "object", "properties": {
                 "apply": json!({"type":"boolean","description":"записать измеренное; без него только показ"}),
                 "kind": s("вид документа — сузить область"), "id": s("имя документа — сузить область") } } }));
-        tools.push(json!({ "name": "kind-add", "description": "завести вид сущности: имя, форма, образец имени, довод",
-            "inputSchema": { "type": "object", "properties": { "kind": s("имя вида, латиницей через дефис"),
-                "shape": s("document · inner"), "id": s("образец имени, например ^[a-z][a-z0-9_]+$"),
-                "why": s("зачем вид нужен — обязательно") }, "required": ["kind", "shape", "why"] } }));
-        tools.push(json!({ "name": "kind-required", "description": "объявить вид обязательным для проекта: минимальный набор документов, общий для всех",
-            "inputSchema": { "type": "object", "properties": { "kind": s("имя вида"),
-                "required": json!({"type":"boolean"}), "why": s("почему обязателен — обязательно при required=true") },
-                "required": ["kind"] } }));
-        tools.push(json!({ "name": "kind-projection", "description": "объявить, чем вид становится в наборе: своя таблица, держатель чужих сущностей, проза",
-            "inputSchema": { "type": "object", "properties": { "kind": s("имя вида"),
-                "projection": s("done · container · due · prose · render · provenance"),
-                "holds": json!({"type":"array","items":{"type":"string"},
-                    "description":"для container: таблицы, где лежат его сущности — проверяются по entity_kind"}) },
-                "required": ["kind", "projection"] } }));
         tools.push(json!({ "name": "request-add", "description": "заявка на изменение харнеса: что не так, доказательство, что держит; ждёт решения на пульте",
             "inputSchema": { "type": "object", "properties": { "title": s("одна строка: что не так"),
                 "body": s("доказательство, что уже сделано в наборе, чего ждём от харнеса, что держит"),
@@ -677,22 +648,6 @@ impl Mcp {
         tools.push(json!({ "name": "document-coverage", "description": "что документа уже живёт в таблицах, а что держит только текст — по разделам",
             "inputSchema": { "type": "object", "properties": { "kind": s("вид документа"),
                 "name": s("имя документа; у одиночного вида пусто") }, "required": ["kind"] } }));
-        tools.push(json!({ "name": "kind-id-set", "description": "объявить образец имени вида — или поправить объявленный; сверяется на живых именах",
-            "inputSchema": { "type": "object", "properties": { "kind": s("имя вида"),
-                "id": s("образец, например ^Q-\\d+$"), "why": s("почему — обязательно") },
-                "required": ["kind", "id", "why"] } }));
-        tools.push(json!({ "name": "kind-domain", "description": "объявить область проекта, к которой принадлежит вид: чем он по сути, а не где живёт",
-            "inputSchema": { "type": "object", "properties": { "kind": s("имя вида"),
-                "domain": s("область, например «требования» или «план»"),
-                "why": s("почему — обязательно") }, "required": ["kind", "domain", "why"] } }));
-        tools.push(json!({ "name": "kind-proves", "description": "объявить, годится ли род доказательством требования: тест-кейс, правило кода, утверждение",
-            "inputSchema": { "type": "object", "properties": { "kind": s("имя вида"),
-                "proves": json!({"type":"boolean"}), "why": s("почему — обязательно") },
-                "required": ["kind", "why"] } }));
-        tools.push(json!({ "name": "kind-reopens", "description": "объявить, переоткрывается ли вид при правке того, на что он опирается",
-            "inputSchema": { "type": "object", "properties": { "kind": s("имя вида"),
-                "reopens": json!({"type":"boolean"}),
-                "why": s("почему — обязательно") }, "required": ["kind", "why"] } }));
         tools.push(json!({ "name": "holders", "description": "объявленные держатели инварианта: требование и путь",
             "inputSchema": { "type": "object", "properties": {} } }));
         tools.push(json!({ "name": "derived-copy-set", "description": "вот источник, вот копия, вот чем сверять: одна дверь для чисел и для тел",
@@ -734,7 +689,7 @@ impl Mcp {
         "put", "put-section", "rm", "document-add", "reparse", "reproject", "sweep",
         "task-state-push", "code-facts-push", "skills-push", "preflight-push", "worktree-push",
         "task-plan-push",
-        "blame-set", "derived-copy-set", "counts-sync", "kind-add", "kind-required", "kind-projection", "frozen-tree-set", "scheme-term-set", "orphans-purge", "surface-source-add", "sensor-spec-add", "agent-set", "donor-add", "guard-add", "method-set", "sensor-declare", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "version-close", "gate-selftest",
+        "blame-set", "derived-copy-set", "counts-sync", "frozen-tree-set", "scheme-term-set", "orphans-purge", "surface-source-add", "sensor-spec-add", "agent-set", "donor-add", "guard-add", "method-set", "sensor-declare", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "version-close", "gate-selftest",
         "author-set", "screen-area-set", "skill-set", "version-freeze",
         "links-rewrite", "links-retarget", "entity-rename", "entity-confirm", "term-retire",
     ];
@@ -845,7 +800,7 @@ impl Mcp {
         const RESERVED: &[&str] = &[
             "method-set", "question-holders", "preflight-push", "worktree-push",
             "sensor-specs", "scheme-terms", "scheme-roles", "frozen-trees", "addresses-declared", "tree-declared", "donors", "skills-push", "skills", "agents", "code-facts-push", "code-facts", "summary", "links-of", "retired-terms", "term-retire", "entity-confirm", "request-add", "approval-ask", "question-ask", "asks", "ask-decide", "ask-inbox", "chat-start", "chat-say", "chat-inbox", "chat", "run-start", "run-state", "run-event", "run-say", "run-inbox", "runs", "order", "gate-measure", "gate-selftest", "links-rewrite", "links-retarget", "reparse", "screen-area-set", "skill-set", "skills-paths", "version-freeze", "version-delta", "generated-check", "principal-allow", "principals", "author-set", "authors", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "version-close", "gate-selftest", "next-step", "process-state", "statuses", "task-status", "status-anomaly", "pipeline", "board", "waves", "phases", "coverage", "blocks", "history", "at-revision", "process-history", "progress",
-            "kinds", "kinds-due", "readiness-gaps", "declared-unwritten", "blame-set", "doors", "derived-copy-set", "holders", "counts-sync", "kind-add", "kind-required", "kind-projection", "kind-reopens", "kind-proves", "kind-id-set", "kind-domain", "tree", "document-coverage", "sections", "section", "backlinks", "search", "put",
+            "kinds", "kinds-due", "readiness-gaps", "declared-unwritten", "blame-set", "doors", "derived-copy-set", "holders", "counts-sync", "tree", "document-coverage", "sections", "section", "backlinks", "search", "put",
             "put-section", "rm", "document-add", "reproject", "sweep", "gate", "next-task", "what-if", "blockers", "events", "task-plan-push",
             "norm-versions", "measurements", "plan", "readiness", "requirements-of",
             "tasks-of", "preflight-queue", "claims",
@@ -1139,30 +1094,6 @@ impl Mcp {
                     Err(e) => refusal(e.into()),
                 }
             }
-            "kind-add" => {
-                let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
-                match crate::projector::add_kind(&self.pool, kind_arg, &g("shape"), &g("id"),
-                        &g("why")).await {
-                    Ok(v) => ok(v),
-                    Err(e) => refusal(e.into()),
-                }
-            }
-            "kind-required" => {
-                let req = args.get("required").map(|v| v == "true" || v == true).unwrap_or(true);
-                match crate::projector::set_kind_required(&self.pool, kind_arg,
-                        req, args.get("why").and_then(|v| v.as_str()).unwrap_or("")).await {
-                    Ok(v) => ok(v),
-                    Err(e) => refusal(e.into()),
-                }
-            }
-            "kind-projection" => {
-                let holds = list(args, "holds");
-                match crate::projector::set_kind_projection(&self.pool, kind_arg,
-                        args.get("projection").and_then(|v| v.as_str()).unwrap_or(""), &holds).await {
-                    Ok(v) => ok(v),
-                    Err(e) => refusal(e.into()),
-                }
-            }
             "chat-start" => {
                 let title = args.get("title").and_then(|v| v.as_str()).unwrap_or("").to_owned();
                 match crate::projector::start_chat(&self.pool, p, &title).await {
@@ -1299,36 +1230,6 @@ impl Mcp {
             "document-coverage" => {
                 let name = args.get("name").and_then(|v| v.as_str()).or(id).unwrap_or("");
                 match crate::projector::document_coverage(&self.pool, p, kind_arg, name).await {
-                    Ok(v) => ok(v),
-                    Err(e) => refusal(e.into()),
-                }
-            }
-            "kind-id-set" => {
-                let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
-                match crate::projector::set_kind_id(&self.pool, p, kind_arg, &g("id"), &g("why")).await {
-                    Ok(v) => ok(v),
-                    Err(e) => refusal(e.into()),
-                }
-            }
-            "kind-domain" => {
-                let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
-                match crate::projector::set_kind_domain(&self.pool, kind_arg, &g("domain"), &g("why")).await {
-                    Ok(v) => ok(v),
-                    Err(e) => refusal(e.into()),
-                }
-            }
-            "kind-proves" => {
-                let pr = args.get("proves").map(|v| v == "true" || v == true).unwrap_or(true);
-                match crate::projector::set_kind_proves(&self.pool, p, kind_arg, pr,
-                        args.get("why").and_then(|v| v.as_str()).unwrap_or("")).await {
-                    Ok(v) => ok(v),
-                    Err(e) => refusal(e.into()),
-                }
-            }
-            "kind-reopens" => {
-                let r = args.get("reopens").map(|v| v == "true" || v == true).unwrap_or(true);
-                match crate::projector::set_kind_reopens(&self.pool, kind_arg, r,
-                        args.get("why").and_then(|v| v.as_str()).unwrap_or("")).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),
                 }

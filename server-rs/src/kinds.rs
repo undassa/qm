@@ -8,7 +8,6 @@
 //! документов опознаётся только адресом, вид «одиночка» иначе не найти. Наружу
 //! путь не выходит ни одним маршрутом и ни одним инструментом.
 
-use crate::db::Says;
 use std::collections::BTreeMap;
 
 use serde::Deserialize;
@@ -58,11 +57,6 @@ impl Kind {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct Layout {
-    kinds: BTreeMap<String, Kind>,
-}
-
 /// Куда смотреть за сущностью вида: таблица, колонка имени, колонка подписи.
 ///
 /// Те же имена, что у потребителя в харнесе: словарь один на обе стороны, иначе
@@ -102,13 +96,7 @@ pub(crate) fn table_of(kind: &str) -> Option<(&'static str, &'static str, &'stat
 pub struct Kinds(pub BTreeMap<String, Kind>);
 
 impl Kinds {
-    pub fn load(path: &str) -> Result<Self, String> {
-        let raw = std::fs::read_to_string(path).map_err(|e| format!("раскладка видов не читается ({path}): {e}"))?;
-        let layout: Layout = serde_json::from_str(&raw).map_err(|e| format!("раскладка видов не разбирается: {e}"))?;
-        Ok(Kinds(layout.kinds))
-    }
-
-    /// Раскладка из базы — обычный способ; файл остаётся способом её завести.
+    /// Раскладка из базы, куда её кладёт объявление репозитория.
     pub async fn from_db(pool: &deadpool_postgres::Pool) -> Result<Self, crate::entities::Miss> {
         let client = crate::db::conn(pool).await?;
         let rows = client.query("SELECT name, spec FROM kind_layout", &[]).await?;
@@ -121,28 +109,6 @@ impl Kinds {
             kinds.insert(name, kind);
         }
         Ok(Kinds(kinds))
-    }
-
-    /// Записать раскладку в базу: файл → таблица, один раз при переносе.
-    pub async fn write_to_db(&self, pool: &deadpool_postgres::Pool, by: &str) -> Result<usize, String> {
-        let client = crate::db::conn(pool).await.map_err(|e| e.says())?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
-        let mut n = 0;
-        for (name, kind) in &self.0 {
-            let spec = serde_json::to_value(kind).map_err(|e| format!("вид {name} не сериализуется: {e}"))?;
-            client
-                .execute(
-                    "INSERT INTO kind_layout (name, spec, declared_at, declared_by) VALUES ($1,$2,$3,$4)
-                     ON CONFLICT (name) DO UPDATE SET spec = EXCLUDED.spec,
-                       declared_at = EXCLUDED.declared_at, declared_by = EXCLUDED.declared_by",
-                    &[name, &spec, &now, &by],
-                )
-                .await
-                .map_err(|e| format!("вид {name} не записан: {e}"))?;
-            n += 1;
-        }
-        Ok(n)
     }
 
     pub fn is_empty(&self) -> bool {
