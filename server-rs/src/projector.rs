@@ -3285,6 +3285,14 @@ SELECT q.project_id, q.id, q.number, q.title, q.state, q.created_at, q.updated_a
 -- совпадением строк: «constitution:» и «constitution.md» — одно и то же, и
 -- строковое равенство их не сводило ни разу.
 ALTER TABLE project_document_plan_counts ADD COLUMN IF NOT EXISTS planned_kind text NOT NULL DEFAULT '';
+-- КОЛОНКИ, КОТОРЫХ ОБЪЯВЛЕНИЯ НЕ БЫЛО. Обе живут на боевой базе с донорских
+-- времён, обе читаются правилами гейта, и ни одну из них не заводил никто в
+-- этом дереве: `measured_by` требования спрашивает пункт «способ измерения
+-- назван сценарием, которого нет», `role` ячейки — пункт про реестр вопросов.
+-- Чистая база поднималась без них, и оба правила падали «колонки нет».
+ALTER TABLE project_requirements ADD COLUMN IF NOT EXISTS measured_by text NOT NULL DEFAULT '';
+ALTER TABLE project_document_cells ADD COLUMN IF NOT EXISTS role text NOT NULL DEFAULT '';
+
 ALTER TABLE project_document_plan_counts ADD COLUMN IF NOT EXISTS planned_name text NOT NULL DEFAULT '';
 ALTER TABLE claim_subject ADD COLUMN IF NOT EXISTS entity_kind text NOT NULL DEFAULT '';
 ALTER TABLE claim_subject ADD COLUMN IF NOT EXISTS entity_name text NOT NULL DEFAULT '';

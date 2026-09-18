@@ -230,9 +230,9 @@ pub async fn apply(pool: &Pool) -> Result<Value, String> {
             if text.is_empty() {
                 continue;
             }
-            tx.prepare(text)
-                .await
-                .map_err(|e| format!("{what} пункта {} не разбирается: {e}", r.item.id))?;
+            tx.prepare(text).await.map_err(|e| {
+                format!("{what} пункта {} не разбирается: {}", r.item.id, crate::db::Says::says(&e))
+            })?;
         }
         // ПРОБА ИСПОЛНЯЕТСЯ, А НЕ ТОЛЬКО РАЗБИРАЕТСЯ. Разбор пропускает пробу,
         // которая споткнётся о первое же правило таблицы: так уже было — проба
@@ -254,9 +254,9 @@ pub async fn apply(pool: &Pool) -> Result<Value, String> {
                     Ok(n) => planted += n,
                     Err(e) => {
                         return Err(format!(
-                            "проба пункта {} не исполнилась на наборе {project}: {e}. \
+                            "проба пункта {} не исполнилась на наборе {project}: {}. \
                              Проба — запрос, ПОДСАЖИВАЮЩИЙ нарушение, и ею роняют правило",
-                            r.item.id))
+                            r.item.id, crate::db::Says::says(&e)))
                     }
                 }
             }
@@ -281,7 +281,7 @@ pub async fn apply(pool: &Pool) -> Result<Value, String> {
               &r.item.why, &r.subject, &r.item.subject_why, &r.item.since],
         )
         .await
-        .map_err(|e| format!("пункт {} не записан: {e}", r.item.id))?;
+        .map_err(|e| format!("пункт {} не записан: {}", r.item.id, crate::db::Says::says(&e)))?;
         // ПРИГОВОР ПРОБЕ СНИМАЕТСЯ ВМЕСТЕ С ПРАВКОЙ СУДЯЩЕГО ТЕКСТА. «Проба
         // роняет правило» сказано про ту пару «запрос — проба», которую прогнал
         // самотест; переписанная пара этого приговора не заслужила, а гейт
