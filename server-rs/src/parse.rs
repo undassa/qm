@@ -197,6 +197,39 @@ fn cells_of_table(block_ord: i32, raw: &str) -> Vec<Cell> {
     out
 }
 
+/// Строки таблицы, у которых клеток не столько, сколько в шапке.
+///
+/// РАЗЪЕЗД МОЛЧАЛИВ И ОТТОГО ДОРОГ. Markdown лишнюю клетку отбрасывает, а
+/// недостающую дописывает пустой: строка выглядит целой, а колонки съезжают, и
+/// читатель берёт из клетки соседнее значение. Так `tot-ade` записал в ответ
+/// `` `Tests`|`Explore` `` и `B|S` — труба внутри клетки стала разделителем, у
+/// строки вышло девять клеток вместо семи, и держатель уехал в чужую колонку.
+/// Заметить это глазами нельзя: в исходнике строка ровная.
+///
+/// Судится ТОЛЬКО расхождение с шапкой той же таблицы, а не с чужой: ширина —
+/// дело каждой таблицы, и общего числа колонок у документа не бывает.
+pub(crate) fn ragged_rows(cells: &[Cell]) -> Vec<String> {
+    let mut width: std::collections::BTreeMap<(i32, i32), usize> = std::collections::BTreeMap::new();
+    for c in cells {
+        let n = width.entry((c.block_ord, c.row)).or_insert(0);
+        *n = (*n).max(c.col as usize + 1);
+    }
+    let mut out = Vec::new();
+    for ((block, row), n) in &width {
+        if *row == 0 {
+            continue;
+        }
+        let Some(head) = width.get(&(*block, 0)) else { continue };
+        if n != head {
+            out.push(format!(
+                "таблица {block}, строка {row}: клеток {n}, а в шапке {head} — колонки разъехались, \
+                 и читаться будет соседнее значение. Чаще всего это труба `|` внутри клетки"
+            ));
+        }
+    }
+    out
+}
+
 /// Похоже ли это на адрес вообще.
 ///
 /// Образец `[текст](цель)` встречается не только в разметке: в js и css такие
@@ -607,4 +640,21 @@ pub async fn check_against_donor(pool: &deadpool_postgres::Pool, project: &str) 
         "mine": { "blocks": blocks, "sections": sections, "cells": cells, "links": links, "fields": fields },
         "examples": differ,
     }))
+}
+
+#[cfg(test)]
+mod ragged {
+    use super::{cells_of_table, ragged_rows};
+
+    /// Принято сломом нарочно: строка с трубой внутри клетки обязана назваться,
+    /// ровная таблица — промолчать.
+    #[test]
+    fn a_row_wider_than_its_head_is_named_and_an_even_table_is_silent() {
+        let even = "| ID | Вопрос | Держатель |\n|---|---|---|\n| Q-1 | раз | M1-T1 |\n| Q-2 | два |  |\n";
+        assert!(ragged_rows(&cells_of_table(0, even)).is_empty(), "ровная таблица молчит");
+        let torn = "| ID | Вопрос | Держатель |\n|---|---|---|\n| Q-1 | `Tests`|`Explore` | M1-T1 |\n";
+        let said = ragged_rows(&cells_of_table(0, torn));
+        assert_eq!(said.len(), 1, "рваная строка названа: {said:?}");
+        assert!(said[0].contains("клеток 4, а в шапке 3"), "сказано, сколько и сколько ждали: {}", said[0]);
+    }
 }

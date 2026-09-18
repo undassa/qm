@@ -111,7 +111,7 @@ pub(crate) async fn create(pool: &Pool, kinds: &crate::kinds::Kinds, project: &s
         &[&project, &kind, &name, &content, &content_hash, &bytes32, &now_ms, &author, &revision],
     )
     .await?;
-    write_structure(&tx, project, kind, name, content).await?;
+    let torn = write_structure(&tx, project, kind, name, content).await?;
     crate::watch::mark(&tx, project, "заведён документ").await?;
     tx.commit().await?;
     let mut answer = json!({ "status": "created", "kind": kind, "name": name,
@@ -121,7 +121,7 @@ pub(crate) async fn create(pool: &Pool, kinds: &crate::kinds::Kinds, project: &s
     if revision > 1 {
         answer["why"] = json!("имя уже жило: номер продолжает его летопись, а не начинает заново");
     }
-    Ok(answer)
+    Ok(with_torn(answer, torn))
 }
 
 /// Записать сущность целиком.
@@ -198,7 +198,7 @@ pub(crate) async fn put(pool: &Pool, project: &str, fields: Document<'_>, author
         &[&project, &kind, &name, &content, &content_hash, &bytes32, &revision, &now_ms, &author],
     )
     .await?;
-    write_structure(&tx, project, kind, name, content).await?;
+    let torn = write_structure(&tx, project, kind, name, content).await?;
 
     // ЛЕТОПИСЬ ЗДЕСЬ НЕ ПИШЕТСЯ, и это решение, а не пропуск.
     //
@@ -213,7 +213,19 @@ pub(crate) async fn put(pool: &Pool, project: &str, fields: Document<'_>, author
     // второго соединения из пула не просит.
     crate::watch::mark(&tx, project, "правка документа").await?;
     tx.commit().await?;
-    Ok(json!({ "status": "written", "revision": revision, "bytes": bytes }))
+    Ok(with_torn(json!({ "status": "written", "revision": revision, "bytes": bytes }), torn))
+}
+
+/// Дописать к ответу то, о чём предупреждает разбор.
+///
+/// ПУСТОГО ПОЛЯ НЕ БЫВАЕТ: всегда присутствующее «предупреждений нет» читается
+/// как украшение и перестаёт замечаться на второй день. Поле появляется ровно
+/// тогда, когда есть что сказать.
+fn with_torn(mut answer: Value, torn: Vec<String>) -> Value {
+    if !torn.is_empty() {
+        answer["таблицы"] = json!(torn);
+    }
+    answer
 }
 
 /// Что за документ и что в нём: одни и те же три поля у заведения и у правки.
@@ -354,15 +366,19 @@ pub(crate) async fn reparse_all(pool: &Pool, project: &str) -> Result<Value, cra
         .await?;
     drop(client);
     let mut done = 0usize;
+    let mut uneven: Vec<String> = Vec::new();
     for d in &docs {
         let (kind, name, content): (String, String, String) = (d.get(0), d.get(1), d.get(2));
         let mut c = crate::db::conn(pool).await?;
         let tx = c.transaction().await?;
-        write_structure(&tx, project, &kind, &name, &content).await?;
+        let torn = write_structure(&tx, project, &kind, &name, &content).await?;
         tx.commit().await?;
         done += 1;
+        for note in torn {
+            uneven.push(format!("{kind} {name}: {note}"));
+        }
     }
-    Ok(json!({ "reparsed": done }))
+    Ok(with_torn(json!({ "reparsed": done }), uneven))
 }
 
 /// Куда ведёт ссылка: вид и имя цели.
@@ -434,13 +450,16 @@ async fn link_target(
     Ok(rows.first().map(|r| (r.get(0), r.get(1))).unwrap_or_default())
 }
 
+/// Разложить документ по таблицам — и вернуть то, о чём стоит предупредить
+/// пишущего. Предупреждение, а не отказ: таблица с лишней клеткой бывает и
+/// намеренной, а запись, отбитая догадкой, стоит дороже разъехавшейся колонки.
 async fn write_structure(
     tx: &deadpool_postgres::Transaction<'_>,
     project: &str,
     kind: &str,
     name: &str,
     content: &str,
-) -> Result<(), crate::db::Fail> {
+) -> Result<Vec<String>, crate::db::Fail> {
     for table in [
         "project_document_blocks",
         "project_document_sections",
@@ -501,5 +520,5 @@ async fn write_structure(
         )
         .await?;
     }
-    Ok(())
+    Ok(crate::parse::ragged_rows(&s.cells))
 }
