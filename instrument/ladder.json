@@ -1,0 +1,119 @@
+{
+ "set": "godzy",
+ "process": "godzy",
+ "title": "ступени лестницы",
+ "steps": [
+  {
+   "ord": 0,
+   "question": "в наборе есть хотя бы один документ",
+   "methodKind": "query",
+   "ownerKind": "skill",
+   "owner": "godzy-update",
+   "touches": "corpus"
+  },
+  {
+   "ord": 1,
+   "question": "каждая ссылка карты ведёт к документу набора",
+   "methodKind": "query",
+   "ownerKind": "skill",
+   "owner": "godzy-plan",
+   "touches": "corpus",
+   "subjectWhy": "карты проекта нет: проверять ссылки не в чем"
+  },
+  {
+   "ord": 2,
+   "question": "конституция и концепция заведены",
+   "methodKind": "query",
+   "ownerKind": "skill",
+   "owner": "godzy-plan",
+   "touches": "corpus"
+  },
+  {
+   "ord": 3,
+   "question": "объявлен ровно один открытый выпуск",
+   "methodKind": "query",
+   "ownerKind": "skill",
+   "owner": "godzy-version",
+   "touches": "corpus"
+  },
+  {
+   "ord": 4,
+   "question": "в плане не осталось ненаписанных без объяснённой причины",
+   "methodKind": "query",
+   "ownerKind": "skill",
+   "owner": "godzy-docs",
+   "touches": "corpus",
+   "subjectWhy": "плана документов нет вовсе: «ненаписанных не осталось» сказать не о чем"
+  },
+  {
+   "ord": 5,
+   "question": "открытых вопросов, кроме отданных владельцу, не осталось",
+   "methodKind": "query",
+   "ownerKind": "agent",
+   "owner": "godzy-answer",
+   "touches": "corpus",
+   "workRun": "mh call question id={name}"
+  },
+  {
+   "ord": 6,
+   "question": "ни один пункт гейта корпусной фазы не провален",
+   "methodKind": "query",
+   "ownerKind": "skill",
+   "owner": "godzy-gate",
+   "touches": "corpus",
+   "workRun": "mh call gate id={name}"
+  },
+  {
+   "ord": 7,
+   "question": "каждый объявленный датчик репозитория подавал факт, и подача не протухла",
+   "methodKind": "query",
+   "ownerKind": "skill",
+   "owner": "godzy-update",
+   "touches": "repository"
+  },
+  {
+   "ord": 8,
+   "question": "у каждого этапа есть задачи",
+   "methodKind": "query",
+   "ownerKind": "skill",
+   "owner": "godzy-breakdown",
+   "touches": "repository"
+  },
+  {
+   "ord": 9,
+   "question": "у каждой незакрытой задачи есть свежий вердикт предполёта",
+   "methodKind": "query",
+   "ownerKind": "skill",
+   "owner": "godzy-preflight",
+   "touches": "repository",
+   "subjectWhy": "ни одна открытая фаза не несёт задач: предполёт освежать не на чем, и это не «пройдено»"
+  },
+  {
+   "ord": 10,
+   "question": "незакрытых задач не осталось",
+   "methodKind": "query",
+   "ownerKind": "skill",
+   "owner": "godzy-milestone",
+   "touches": "repository",
+   "subjectWhy": "ни одна открытая фаза не несёт задач: закрывать нечего, и это не «пройдено»"
+  },
+  {
+   "ord": 11,
+   "question": "ни один пункт гейта не провален",
+   "methodKind": "query",
+   "ownerKind": "skill",
+   "owner": "godzy-gate",
+   "touches": "repository",
+   "workRun": "mh call gate id={name}"
+  },
+  {
+   "ord": 12,
+   "question": "у каждого закрытого выпуска снят слепок набора",
+   "methodKind": "query",
+   "ownerKind": "skill",
+   "owner": "godzy-version",
+   "touches": "corpus",
+   "whenWhy": "ни один выпуск ещё не закрыт: слепок снимают при закрытии, а посреди работы черта легла бы не там"
+  }
+ ]
+}

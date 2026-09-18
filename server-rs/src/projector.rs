@@ -453,15 +453,6 @@ CREATE TABLE IF NOT EXISTS kind_status (
   terminal boolean NOT NULL DEFAULT false,
   PRIMARY KEY (kind, name));
 
--- Объявленный способ СТУПЕНИ живёт отдельно от самой ступени — ровно по тому
--- же образцу, что способ пункта готовности. Причина та же и уже измеренная:
--- способ, лежащий в строке ступени, стирается всяким проходом, который эту
--- строку трогает, и объявленное исчезает молча. Семь способов так и пропали.
-CREATE TABLE IF NOT EXISTS harness_process_method (
-  set_name text NOT NULL, process text NOT NULL, ord integer NOT NULL,
-  method_kind text NOT NULL CHECK (method_kind IN ('query','command','unknown')),
-  method text NOT NULL DEFAULT '', declared_by text NOT NULL DEFAULT '',
-  PRIMARY KEY (set_name, process, ord));
 
 -- Подпись — утверждение ЧЕЛОВЕКА, и запись о ней обязана нести всё, что делает
 -- её проверяемой годы спустя: кто, когда, под какой формулировкой, под какими
@@ -561,13 +552,6 @@ CREATE TABLE IF NOT EXISTS harness_process_step (
   PRIMARY KEY (set_name, process, ord),
   FOREIGN KEY (set_name, process) REFERENCES harness_process(set_name, name) ON DELETE CASCADE);
 
--- Владелец-скилл проверяется внешним ключом, а не надеждой.
-CREATE TABLE IF NOT EXISTS harness_process_step_skill (
-  set_name text NOT NULL, process text NOT NULL, ord integer NOT NULL, skill text NOT NULL,
-  PRIMARY KEY (set_name, process, ord),
-  FOREIGN KEY (set_name, process, ord)
-    REFERENCES harness_process_step(set_name, process, ord) ON DELETE CASCADE,
-  FOREIGN KEY (set_name, skill) REFERENCES harness_skill(set_name, name));
 
 -- Каждый проход диспетчера записывается: «почему выбрал это» отвечается после,
 -- а ступень, которая скачет, видна запросом.
@@ -3363,15 +3347,6 @@ EXCEPTION WHEN others THEN NULL; END $$;
 -- Связь была объявлена только `ON DELETE CASCADE`: снятая ступень уносила своё
 -- умение, а переехавшая — оставляла его показывать на пустое место. Вставка
 -- ступени в середину лестницы на этом и споткнулась.
-DO $$ BEGIN
-  ALTER TABLE harness_process_step_skill
-    DROP CONSTRAINT IF EXISTS harness_process_step_skill_set_name_process_ord_fkey;
-  ALTER TABLE harness_process_step_skill
-    ADD CONSTRAINT harness_process_step_skill_set_name_process_ord_fkey
-    FOREIGN KEY (set_name, process, ord)
-    REFERENCES harness_process_step(set_name, process, ord)
-    ON DELETE CASCADE ON UPDATE CASCADE;
-END $$;
 CREATE INDEX IF NOT EXISTS server_strain_at ON server_strain (at DESC);
 
 -- ЗАМЕР БОЛЬШЕ НЕ ДЕРЖИТ КОПИЮ ПРАВИЛА. Запрос, проба, довод, подписант,
@@ -3397,6 +3372,16 @@ ALTER TABLE project_gates DROP COLUMN IF EXISTS article;
 -- знает. Колонка, которую нельзя ни прочесть, ни объявить, — обещание связи,
 -- которой нет.
 ALTER TABLE gate_item DROP COLUMN IF EXISTS article;
+
+-- СПОСОБ СТУПЕНИ ЖИЛ В ДВУХ ТАБЛИЦАХ. Объявленный лежал в
+-- `harness_process_method`, копия — в строке ступени, и особый проход переносил
+-- одно в другое: всякий проход, трогавший ступень, стирал объявленное. Теперь
+-- объявление приходит из репозитория и пишется прямо в ступень — ни второй
+-- таблице, ни переносу работы не осталось. `harness_process_step_skill`
+-- уходит с ними: её не писал и не читал никто, а хозяин ступени и так назван
+-- её строкой.
+DROP TABLE IF EXISTS harness_process_method;
+DROP TABLE IF EXISTS harness_process_step_skill;
 
 -- КЛЮЧ ПУНКТА — ЕГО ИМЯ, а не заголовок. Первичным ключом стояла пара (гейт,
 -- заголовок), а имя держал ЧАСТИЧНЫЙ уникальный указатель `WHERE id <> ''`:
@@ -4094,16 +4079,6 @@ pub async fn rebuild(pool: &Pool, project: &str) -> Result<Value, crate::db::Fai
     // ── Порождённый порядок против вычисленного ─────────────────────────────
     // Файл — производное сервера; отстав, он врёт исполнителю. Сверка идёт
     // здесь, а гейт читает её след: правило гейта — запрос.
-    // Объявленный способ ступени возвращается на ступень — как у пунктов.
-    let step_methods = tx
-        .execute(
-            "UPDATE harness_process_step s SET method_kind = m.method_kind, method = m.method
-               FROM harness_process_method m
-              WHERE m.set_name = s.set_name AND m.process = s.process AND m.ord = s.ord",
-            &[],
-        )
-        .await?;
-
     // Объявленные способы возвращаются на пересобранные пункты.
     let methods = tx
         .execute(
@@ -4231,7 +4206,6 @@ pub async fn rebuild(pool: &Pool, project: &str) -> Result<Value, crate::db::Fai
         "red_task_check": red_checks,
         "readiness_item": readiness,
         "readiness_method": methods,
-        "harness_process_method": step_methods,
         "term_retired": retired,
         "screen_states": screens,
         "decision_status": decisions,
@@ -6813,74 +6787,6 @@ async fn subject_planted(
             .to_owned()),
         Ok(_) => Ok(()),
     }
-}
-
-/// Ошибка базы словами, а не «db error».
-///
-/// Снять ступень и сдвинуть номера следом идущих.
-///
-/// Обратная сторона `add_step`, и с той же заботой: номер ступени — ссылка на
-/// неё в способе, умении и журнале прогонов, и все они едут вместе. Способ и
-/// проба снятой ступени уходят вместе с ней: оставленные, они однажды
-/// достанутся чужой ступени, въехавшей на освободившийся номер.
-pub(crate) async fn remove_step(
-    pool: &Pool,
-    project: &str,
-    set_name: &str,
-    process: &str,
-    ord: i32,
-) -> Result<Value, crate::db::Fail> {
-    let mut client = crate::db::conn(pool).await?;
-    let tx = client.transaction().await?;
-    let question: Option<String> = tx
-        .query_opt(
-            "SELECT question FROM harness_process_step
-              WHERE set_name = $1 AND process = $2 AND ord = $3",
-            &[&set_name, &process, &ord],
-        )
-        .await?
-        .map(|r| r.get(0));
-    let Some(question) = question else {
-        return Ok(json!({ "status": "not_found", "why": "ступени с таким номером нет" }));
-    };
-    tx.execute(
-        "DELETE FROM harness_process_step WHERE set_name = $1 AND process = $2 AND ord = $3",
-        &[&set_name, &process, &ord],
-    )
-    .await?;
-    tx.execute(
-        "DELETE FROM harness_process_method WHERE set_name = $1 AND process = $2 AND ord = $3",
-        &[&set_name, &process, &ord],
-    )
-    .await?;
-    tx.execute(
-        "DELETE FROM process_run WHERE project_id = $1 AND process = $2 AND ord = $3",
-        &[&project, &process, &ord],
-    )
-    .await?;
-    for (table, keyed_by_project) in [
-        ("harness_process_step", false),
-        ("harness_process_method", false),
-        ("process_run", true),
-    ] {
-        let (down, back) = if keyed_by_project {
-            (
-                format!("UPDATE {table} SET ord = -(ord - 1) WHERE project_id = $1 AND process = $2 AND ord > $3"),
-                format!("UPDATE {table} SET ord = -ord WHERE project_id = $1 AND process = $2 AND ord < 0"),
-            )
-        } else {
-            (
-                format!("UPDATE {table} SET ord = -(ord - 1) WHERE set_name = $1 AND process = $2 AND ord > $3"),
-                format!("UPDATE {table} SET ord = -ord WHERE set_name = $1 AND process = $2 AND ord < 0"),
-            )
-        };
-        let first: &(dyn tokio_postgres::types::ToSql + Sync) =
-            if keyed_by_project { &project } else { &set_name };
-        tx.execute(down.as_str(), &[first, &process, &ord]).await?;
-        tx.execute(back.as_str(), &[first, &process]).await?;
-    }
-    tx.commit().await?;
-    Ok(json!({ "status": "removed", "ord": ord, "question": question }))
 }
 
 /// Поля записи прогона, как их принимает дверь `run-record-add`.
@@ -10894,92 +10800,6 @@ pub(crate) async fn sensors(pool: &Pool, project: &str) -> Result<Value, crate::
     }))
 }
 
-/// Поля ступени лестницы, как их принимает дверь `step-add`.
-pub(crate) struct Step<'a> {
-    pub set_name: &'a str,
-    pub process: &'a str,
-    pub ord: i32,
-    pub question: &'a str,
-    pub owner_kind: &'a str,
-    pub owner: &'a str,
-    pub touches: &'a str,
-}
-
-/// Завести ступень лестницы на указанное место.
-///
-/// Место — не украшение: лестница читается сверху вниз, и ступень «объявлен ли
-/// открытый выпуск» обязана стоять ДО «снят ли с него слепок». Оттого заведение
-/// умеет вставлять в середину, раздвигая номера.
-///
-/// Раздвигаются все таблицы, где номер ступени — ссылка на неё: способ, умение,
-/// и ЖУРНАЛ ПРОГОНОВ тоже. Оставить журнал непередвинутым значило бы, что его
-/// прошлые записи начнут показывать на соседнюю ступень: запись сама не менялась,
-/// а рассказывать станет о другом.
-///
-/// Сдвиг идёт через отрицательные номера. Прямое `ord = ord + 1` натыкается на
-/// собственный первичный ключ на первой же строке: третья ступень становится
-/// четвёртой, а четвёртая ещё на месте.
-pub(crate) async fn add_step(pool: &Pool, project: &str, fields: Step<'_>) -> Result<Value, crate::db::Fail> {
-    let Step { set_name, process, ord, question, owner_kind, owner, touches } = fields;
-    if !matches!(owner_kind, "skill" | "agent" | "none") {
-        return Ok(json!({ "status": "bad_owner_kind", "why": "закрывает ступень скилл, субагент либо человек" }));
-    }
-    if !matches!(touches, "corpus" | "repository") {
-        return Ok(json!({ "status": "bad_touches", "why": "ступень читает набор либо пишет в репозиторий" }));
-    }
-    if question.trim().is_empty() {
-        return Ok(json!({ "status": "nameless", "why": "ступень без условия не заводится" }));
-    }
-    let mut client = crate::db::conn(pool).await?;
-    let tx = client.transaction().await?;
-    let known: i64 = tx
-        .query_one(
-            "SELECT count(*) FROM harness_process WHERE set_name = $1 AND name = $2",
-            &[&set_name, &process],
-        )
-        .await?
-        .get(0);
-    if known == 0 {
-        return Ok(json!({ "status": "unknown_process",
-                          "why": format!("процесса «{process}» в наборе «{set_name}» нет") }));
-    }
-    // Умение ступени здесь не двигают: связь объявлена `ON UPDATE CASCADE`, и
-    // база переносит его сама. Сдвинуть его руками значило бы сдвинуть дважды.
-    for (table, keyed_by_project) in [
-        ("harness_process_step", false),
-        ("harness_process_method", false),
-        ("process_run", true),
-    ] {
-        let (up, back) = if keyed_by_project {
-            (
-                format!("UPDATE {table} SET ord = -(ord + 1) WHERE project_id = $1 AND process = $2 AND ord >= $3"),
-                format!("UPDATE {table} SET ord = -ord WHERE project_id = $1 AND process = $2 AND ord < 0"),
-            )
-        } else {
-            (
-                format!("UPDATE {table} SET ord = -(ord + 1) WHERE set_name = $1 AND process = $2 AND ord >= $3"),
-                format!("UPDATE {table} SET ord = -ord WHERE set_name = $1 AND process = $2 AND ord < 0"),
-            )
-        };
-        let first: &(dyn tokio_postgres::types::ToSql + Sync) =
-            if keyed_by_project { &project } else { &set_name };
-        tx.execute(up.as_str(), &[first, &process, &ord]).await?;
-        tx.execute(back.as_str(), &[first, &process]).await?;
-    }
-    tx.execute(
-        "INSERT INTO harness_process_step
-            (set_name, process, ord, question, method_kind, method, owner_kind, owner, touches)
-         VALUES ($1,$2,$3,$4,'unknown','',$5,$6,$7)",
-        &[&set_name, &process, &ord, &question, &owner_kind, &owner, &touches],
-    )
-    .await?;
-    tx.commit().await?;
-    // Способ и проба объявляются отдельно и после: заведённая без них ступень
-    // честно зовётся «нечем ответить», а не молча считается пройденной.
-    Ok(json!({ "status": "added", "ord": ord, "question": question,
-               "why": "способ и проба не объявлены: ступень отвечает «нечем ответить», пока их не назовут" }))
-}
-
 /// Объявить выпуск закрытым или снова открытым.
 ///
 /// Это решение человека, а не вывод из текста: «закрыт» значит, что от него
@@ -11027,73 +10847,6 @@ pub(crate) async fn set_version_state(
         )
         .await?;
     Ok(json!({ "version": version, "state": state, "by": actor }))
-}
-
-/// Объявить, когда ступень вообще в игре.
-pub(crate) async fn set_step_when(
-    pool: &Pool,
-    set_name: &str,
-    process: &str,
-    ord: i32,
-    when_query: &str,
-    when_why: &str,
-    drop_it: bool,
-) -> Result<Value, crate::db::Fail> {
-    let client = crate::db::conn(pool).await?;
-        // Снятие — очистка объявленного, а не удаление строки: строка тут
-        // принадлежит не этому объявлению. Пустое значение и есть «не
-        // объявлено», и читатель обязан звать это словом, а не пустотой.
-        if drop_it {
-            let gone = client
-                .execute("UPDATE harness_process_step SET when_query = '', when_why = '' \
-                          WHERE set_name = $1 AND process = $2 AND ord = $3",
-                         &[&set_name, &process, &ord])
-                .await?;
-            return Ok(json!({ "status": if gone > 0 { "dropped" } else { "not_found" } }));
-        }
-
-    let n = client
-        .execute(
-            "UPDATE harness_process_step SET when_query = $4, when_why = $5
-              WHERE set_name = $1 AND process = $2 AND ord = $3",
-            &[&set_name, &process, &ord, &when_query, &when_why],
-        )
-        .await?;
-    Ok(json!({ "updated": n, "ord": ord,
-               "why": if n == 0 { "ступени с таким номером нет" } else { "" } }))
-}
-
-/// Объявить, чем ронять ступень.
-pub(crate) async fn set_step_probe(
-    pool: &Pool,
-    set_name: &str,
-    process: &str,
-    ord: i32,
-    probe: &str,
-    drop_it: bool,
-) -> Result<Value, crate::db::Fail> {
-    let client = crate::db::conn(pool).await?;
-        // Снятие — очистка объявленного, а не удаление строки: строка тут
-        // принадлежит не этому объявлению. Пустое значение и есть «не
-        // объявлено», и читатель обязан звать это словом, а не пустотой.
-        if drop_it {
-            let gone = client
-                .execute("UPDATE harness_process_step SET probe = '' \
-                          WHERE set_name = $1 AND process = $2 AND ord = $3",
-                         &[&set_name, &process, &ord])
-                .await?;
-            return Ok(json!({ "status": if gone > 0 { "dropped" } else { "not_found" } }));
-        }
-
-    let n = client
-        .execute(
-            "UPDATE harness_process_step SET probe = $4
-              WHERE set_name = $1 AND process = $2 AND ord = $3",
-            &[&set_name, &process, &ord, &probe],
-        )
-        .await?;
-    Ok(json!({ "updated": n, "ord": ord,
-               "why": if n == 0 { "ступени с таким номером нет" } else { "" } }))
 }
 
 /// Самотест лестницы: каждую ступень роняют подсаженным нарушением.
@@ -11186,144 +10939,6 @@ pub(crate) async fn step_selftest(
         "undeclared": undeclared.len(), "undeclaredSteps": undeclared,
         "why": "живой считается ступень, у которой на подсадке ИЗМЕНИЛСЯ ОТВЕТ: красная и без подсадки красна, и по одному её цвету ничего не докажешь",
     }))
-}
-
-/// Переименовать ступень: то, что должно быть верно, чтобы она была пройдена.
-///
-/// Ступени звались вопросами — «есть ли открытые вопросы», «полон ли набор», —
-/// и зелёный знак на них читался наугад: у одной он значил «да», у соседней
-/// «нет». Условие читается одинаково: зелено — значит верно.
-///
-/// Пишется через сервер, а не правкой строки в базе: у ступени своя таблица со
-/// своей колонкой, и дверь к ней одна.
-pub(crate) async fn set_step_question(
-    pool: &Pool,
-    set_name: &str,
-    process: &str,
-    ord: i32,
-    question: &str,
-    drop_it: bool,
-) -> Result<Value, crate::db::Fail> {
-    let client = crate::db::conn(pool).await?;
-        // Снятие — очистка объявленного, а не удаление строки: строка тут
-        // принадлежит не этому объявлению. Пустое значение и есть «не
-        // объявлено», и читатель обязан звать это словом, а не пустотой.
-        if drop_it {
-            let gone = client
-                .execute("UPDATE harness_process_step SET question = '' \
-                          WHERE set_name = $1 AND process = $2 AND ord = $3",
-                         &[&set_name, &process, &ord])
-                .await?;
-            return Ok(json!({ "status": if gone > 0 { "dropped" } else { "not_found" } }));
-        }
-
-    let n = client
-        .execute(
-            "UPDATE harness_process_step SET question = $4
-              WHERE set_name = $1 AND process = $2 AND ord = $3",
-            &[&set_name, &process, &ord, &question],
-        )
-        .await?;
-    // Ноль строк — не «сделано»: такой ступени нет, и молчание об этом выдало бы
-    // промах за успех.
-    Ok(json!({ "updated": n, "ord": ord,
-               "why": if n == 0 { "ступени с таким номером нет" } else { "" } }))
-}
-
-/// Виды единицы работы ступени. Перечень закрыт: слово вне него дверь не примет.
-const UNITS: [&str; 8] = ["document", "link", "version", "question", "gate", "sensor", "milestone", "task"];
-
-/// Поля способа ступени, как их принимает дверь `step-method-set`.
-pub(crate) struct StepMethod<'a> {
-    pub set_name: &'a str,
-    pub process: &'a str,
-    pub ord: i32,
-    pub method_kind: &'a str,
-    pub method: &'a str,
-    /// Команда, которой видна единица работы этой ступени. `None` — не трогать
-    /// уже объявленную.
-    pub run: Option<&'a str>,
-    /// Вид единицы работы ступени. `None` — не трогать объявленный.
-    pub unit: Option<&'a str>,
-    /// Запрос предмета ступени и слово о пустом предмете. `None` — не трогать.
-    pub subject: Option<&'a str>,
-    pub subject_why: Option<&'a str>,
-    pub declared_by: &'a str,
-    pub drop: bool,
-}
-
-pub(crate) async fn set_step_method(pool: &Pool, fields: StepMethod<'_>) -> Result<Value, crate::db::Fail> {
-    let StepMethod { set_name, process, ord, method_kind, method, run, unit, subject,
-                        subject_why, declared_by, drop } = fields;
-    let client = crate::db::conn(pool).await?;
-    if drop {
-        let n = client
-            .execute(
-                "DELETE FROM harness_process_method WHERE set_name = $1 AND process = $2 AND ord = $3",
-                &[&set_name, &process, &ord],
-            )
-            .await?;
-        return Ok(json!({ "status": if n > 0 { "dropped" } else { "not_found" }, "ord": ord }));
-    }
-    // Способ объявляется СУЩЕСТВУЮЩЕЙ ступени. Прежде вызов без номера писал
-    // строку с `ord = -1`: способ, который никому не принадлежит и никогда не
-    // исполнится, но лежит в наборе как объявленный.
-    let known: i64 = client
-        .query_one(
-            "SELECT count(*) FROM harness_process_step WHERE set_name = $1 AND process = $2 AND ord = $3",
-            &[&set_name, &process, &ord],
-        )
-        .await?
-        .get(0);
-    if known == 0 {
-        return Ok(json!({ "status": "not_found",
-                          "why": format!("ступени {ord} в процессе «{process}» нет: способ объявлять некому") }));
-    }
-    // НЕ ПЕРЕДАННОЕ БЕРЁТСЯ У СТРОКИ. Дверь писала `method` всегда, и вызов,
-    // объявлявший одну лишь команду, СТИРАЛ запрос ступени: ступень оставалась
-    // объявленной, отвечала «мерить нечем» и молчала об этом. Проверено на себе
-    // дважды за один проход — на шестой ступени и на одиннадцатой.
-    // Слово вида сверяется с перечнем: опечатка `tasks` вместо `task` молча сняла
-    // бы барьер лестницы — задачная ступень перестала бы находиться.
-    let unit: Option<&str> = unit.map(str::trim).filter(|u| !u.is_empty());
-    if let Some(u) = unit {
-        if !UNITS.contains(&u) {
-            return Ok(json!({ "status": "unknown_unit", "unit": u,
-                              "why": format!("вида единицы «{u}» не бывает; бывают: {}", UNITS.join(" · ")) }));
-        }
-    }
-    let method: Option<&str> = if method.trim().is_empty() { None } else { Some(method) };
-    client
-        .execute(
-            "INSERT INTO harness_process_method (set_name, process, ord, method_kind, method, declared_by)
-             VALUES ($1,$2,$3,$4,coalesce($5,''),$6)
-             ON CONFLICT (set_name, process, ord) DO UPDATE SET method_kind = EXCLUDED.method_kind,
-               method = coalesce($5, harness_process_method.method),
-               declared_by = EXCLUDED.declared_by",
-            &[&set_name, &process, &ord, &method_kind, &method, &declared_by],
-        )
-        .await?;
-    // Метка имени приводится к объявленной: описания у наборов разъезжаются с
-    // кодом, и поданная по старой памяти `{имя}` не подставилась бы молча.
-    let run = run.map(|command| command.replace("{имя}", WORK_RUN_NAME));
-    let run = run.as_deref();
-    // Команда, не переданная, БЕРЁТСЯ У СТРОКИ: правка запроса не должна стирать
-    // уже объявленную команду — так же, как правка запроса пункта гейта не
-    // стирает его пробу.
-    let n = client
-        .execute(
-            "UPDATE harness_process_step SET method_kind = $4,
-                    method = coalesce($5, method),
-                    work_run = coalesce($6, work_run),
-                    subject_query = coalesce($7, subject_query),
-                    subject_why = coalesce($8, subject_why),
-                    unit = coalesce($9, unit)
-              WHERE set_name = $1 AND process = $2 AND ord = $3",
-            &[&set_name, &process, &ord, &method_kind, &method, &run, &subject, &subject_why, &unit],
-        )
-        .await?;
-    Ok(json!({ "updated": n, "methodKind": method_kind, "declaredBy": declared_by,
-               "survivesRebuild": true }))
 }
 
 /// Сдвинуть ВСЕ гейты проекта в одно состояние — внутри откатываемой пробы.
@@ -13062,13 +12677,6 @@ fn holding_step(asked_step: &Value, task: i64, red_earlier: &[String]) -> Option
 /// самих записях набора, и разъехавшись, они перестают подставляться молча.
 pub(crate) const WORK_RUN_NAME: &str = "{name}";
 
-/// Как дверь объясняет эту метку. Словами двери, а не второй копией строки:
-/// описание и подстановка разъезжаются молча, и набор пишет команду с меткой,
-/// которой никто не подставит.
-pub(crate) fn step_run_hint() -> String {
-    format!("команда, которой видна единица работы ступени; `{WORK_RUN_NAME}` — первое слово находки")
-}
-
 pub(crate) async fn next_step(pool: &Pool, project: &str, process: &str) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     position(&*client, project, process).await
@@ -14641,7 +14249,7 @@ mod redo {
 
 #[cfg(test)]
 mod work_run_token {
-    use super::{step_run_hint, DDL, WORK_RUN_NAME};
+    use super::{DDL, WORK_RUN_NAME};
 
     /// Метка подстановки живёт В ЗАПИСЯХ набора, а не только в коде. Пока её
     /// меняли правкой буквы в исходнике, все объявленные ступени переставали
@@ -14653,7 +14261,6 @@ mod work_run_token {
             DDL.contains("replace(work_run, '{имя}', '{name}')"),
             "перенос записанных ступеней на новую метку идёт схемой"
         );
-        assert!(step_run_hint().contains(WORK_RUN_NAME), "дверь объясняет ту же метку, что подставляет");
         let command = "mh call question id={name}";
         assert_eq!(command.replace(WORK_RUN_NAME, "Q-1"), "mh call question id=Q-1");
         let from_old_memory = "mh call question id={имя}".replace("{имя}", WORK_RUN_NAME);

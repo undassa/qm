@@ -1,0 +1,1 @@
+SELECT v.version || ' — закрыт, а слепок не снят' AS detail FROM version_state v WHERE v.project_id = $1 AND v.state = 'closed' AND NOT EXISTS (SELECT 1 FROM version_freeze f WHERE f.project_id = v.project_id AND f.version = v.version) ORDER BY 1

@@ -249,15 +249,6 @@ impl Mcp {
                 "required": ["term"] } }));
         tools.push(json!({ "name": "retired-terms", "description": "слова, снятые из словаря: встреченные в свежем тексте — находка",
             "inputSchema": { "type": "object", "properties": {} } }));
-        tools.push(json!({ "name": "step-method-set", "description": "объявить способ проверки ступени лестницы; переживает пересборку и выкатку",
-            "inputSchema": { "type": "object", "properties": { "set": s("набор лестницы; по умолчанию godzy"), "process": s("процесс, по умолчанию godzy"),
-                "ord": json!({"type":"integer"}), "methodKind": s("query · command"), "method": s("запрос либо команда"),
-                "run": s(&crate::projector::step_run_hint()),
-                "unit": s("вид единицы работы: document · link · version · question · gate · sensor · milestone · task. Ступень `task` — та, с которой лестница выдаёт задачи: до неё `next-task` отказывает"),
-                "subject": s("запрос ПРЕДМЕТА ступени: пусто в ответе — «нечем мерить», а не «пройдено»"),
-                "subjectWhy": s("чем объяснить пустой предмет"),
-                "drop": json!({"type":"boolean"}) },
-                "required": ["ord", "methodKind"] } }));
         tools.push(json!({ "name": "document-add", "description": "завести новый документ объявленного вида; правит существующий — `put`, и заводить он отказывается",
             "inputSchema": { "type": "object", "properties": { "kind": s("вид из раскладки"),
                 "id": s("имя; у одиночки пусто"), "content": s("текст документа") },
@@ -265,9 +256,6 @@ impl Mcp {
         tools.push(json!({ "name": "agents", "description": "субагенты набора: имя, описание, инструменты, модель; тело — по просьбе",
             "inputSchema": { "type": "object", "properties": { "set": s("набор, по умолчанию godzy"),
                 "body": json!({"type":"boolean"}) } } }));
-        tools.push(json!({ "name": "step-remove", "description": "снять ступень лестницы и сдвинуть номера следом идущих; способ и проба уходят вместе с ней",
-            "inputSchema": { "type": "object", "properties": { "set": s("набор лестницы; по умолчанию godzy"), "process": s("процесс, по умолчанию godzy"),
-                "ord": json!({"type":"integer"}) }, "required": ["ord"] } }));
         tools.push(json!({ "name": "run-record-add", "description": "объявить запись прогона: задача, коммиты, даты, ревью, что появилось и что осталось открытым",
             "inputSchema": { "type": "object", "properties": { "drop": json!({"type":"boolean","description":"снять объявленное этой же дверью"}), "id": s("имя прогона"), "task": s("задача"),
                 "milestone": s("этап"), "title": s("заголовок"), "commits": s("диапазон коммитов"),
@@ -470,30 +458,13 @@ impl Mcp {
                 "required": ["fact"] } }));
         tools.push(json!({ "name": "sensors", "description": "объявленные датчики и когда каждый подавал; отдельно — подающие, которых никто не объявлял",
             "inputSchema": { "type": "object", "properties": {} } }));
-        tools.push(json!({ "name": "step-add", "description": "завести ступень лестницы на указанное место, раздвинув номера; способ и пробу объявляют отдельно",
-            "inputSchema": { "type": "object", "properties": { "set": s("набор лестницы; по умолчанию godzy"), "process": s("процесс, по умолчанию godzy"),
-                "ord": json!({"type":"integer"}), "question": s("условие словами"),
-                "ownerKind": s("skill · agent · none"), "owner": s("имя скилла или субагента"),
-                "touches": s("corpus · repository") }, "required": ["ord", "question", "touches"] } }));
         tools.push(json!({ "name": "version-close", "description": "объявить выпуск закрытым или снова открытым; от закрытого считают, что изменилось после него",
             "inputSchema": { "type": "object", "properties": { "drop": json!({"type":"boolean","description":"снять объявленное этой же дверью"}), "version": s("имя выпуска"),
                 "state": s("closed · open, по умолчанию closed") }, "required": ["version"] } }));
-        tools.push(json!({ "name": "step-when-set", "description": "объявить, когда ступень вообще в игре: запрос условия и причина пропуска",
-            "inputSchema": { "type": "object", "properties": { "set": s("набор лестницы; по умолчанию godzy"), "drop": json!({"type":"boolean","description":"снять объявленное этой же дверью"}), "process": s("процесс, по умолчанию godzy"),
-                "ord": json!({"type":"integer"}), "whenQuery": s("запрос условия; пусто — всегда в игре"),
-                "whenWhy": s("причина пропуска словами") }, "required": ["ord"] } }));
-        tools.push(json!({ "name": "step-probe-set", "description": "объявить пробу ступени: запрос, подсаживающий нарушение — им самотест её роняет",
-            "inputSchema": { "type": "object", "properties": { "set": s("набор лестницы; по умолчанию godzy"), "drop": json!({"type":"boolean","description":"снять объявленное этой же дверью"}), "process": s("процесс, по умолчанию godzy"),
-                "ord": json!({"type":"integer"}), "probe": s("запрос подсадки") },
-                "required": ["ord", "probe"] } }));
         tools.push(json!({ "name": "step-selftest", "description": "самотест лестницы: каждая ступень роняется подсаженным нарушением в откатываемой транзакции; живой считается та, у которой число выросло — и выросло при всех зелёных гейтах и при всех красных, а не только в сегодняшнем состоянии",
             "inputSchema": { "type": "object", "properties": { "set": s("набор, по умолчанию godzy"),
                 "process": s("процесс, по умолчанию godzy"),
                 "under": s("green · red — прогнать при всех зелёных либо всех красных гейтах; пусто — как есть") } } }));
-        tools.push(json!({ "name": "step-question-set", "description": "переименовать ступень лестницы: условие, которое должно быть верно, чтобы она считалась пройденной",
-            "inputSchema": { "type": "object", "properties": { "set": s("набор лестницы; по умолчанию godzy"), "drop": json!({"type":"boolean","description":"снять объявленное этой же дверью"}), "process": s("процесс, по умолчанию godzy"),
-                "ord": json!({"type":"integer"}), "question": s("условие словами") },
-                "required": ["ord", "question"] } }));
         tools.push(json!({ "name": "scheme-roles", "description": "роли словаря: что спрашивают проекции, что объявлено набором либо общим слоем, что молчит — и какое правило молчанием выключено",
             "inputSchema": { "type": "object", "properties": {} } }));
         tools.push(json!({ "name": "scheme-term-set", "description": "объявить слово схемы этого набора; роль, объявленная набором, замещает общий список целиком",
@@ -763,7 +734,7 @@ impl Mcp {
         "put", "put-section", "rm", "document-add", "reparse", "reproject", "sweep",
         "task-state-push", "code-facts-push", "skills-push", "preflight-push", "worktree-push",
         "task-plan-push",
-        "blame-set", "derived-copy-set", "counts-sync", "kind-add", "kind-required", "kind-projection", "frozen-tree-set", "scheme-term-set", "orphans-purge", "surface-source-add", "sensor-spec-add", "agent-set", "donor-add", "guard-add", "method-set", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "version-close", "gate-selftest",
+        "blame-set", "derived-copy-set", "counts-sync", "kind-add", "kind-required", "kind-projection", "frozen-tree-set", "scheme-term-set", "orphans-purge", "surface-source-add", "sensor-spec-add", "agent-set", "donor-add", "guard-add", "method-set", "sensor-declare", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "version-close", "gate-selftest",
         "author-set", "screen-area-set", "skill-set", "version-freeze",
         "links-rewrite", "links-retarget", "entity-rename", "entity-confirm", "term-retire",
     ];
@@ -776,9 +747,8 @@ impl Mcp {
     // вовсе: он работает в транзакции, которую всегда откатывает, и не пишет
     // ни строки. Пока он числился пишущим, каждый его прогон — а их в проверке
     // шесть — заказывал полный пересчёт всем проектам ни за чем.
-    const SHARED_WRITES: [&'static str; 6] = [
-        "step-add", "step-remove",
-        "step-method-set", "step-question-set", "step-probe-set", "gate-selftest",
+    const SHARED_WRITES: [&'static str; 1] = [
+        "gate-selftest",
     ];
 
     const TRY_ON: &[&str] = &[
@@ -874,7 +844,7 @@ impl Mcp {
         // вызов и отдавал строку таблицы вместо вычисления.
         const RESERVED: &[&str] = &[
             "method-set", "question-holders", "preflight-push", "worktree-push",
-            "sensor-specs", "scheme-terms", "scheme-roles", "frozen-trees", "addresses-declared", "tree-declared", "donors", "skills-push", "skills", "agents", "code-facts-push", "code-facts", "summary", "links-of", "retired-terms", "term-retire", "entity-confirm", "request-add", "approval-ask", "question-ask", "asks", "ask-decide", "ask-inbox", "chat-start", "chat-say", "chat-inbox", "chat", "run-start", "run-state", "run-event", "run-say", "run-inbox", "runs", "order", "gate-measure", "gate-selftest", "links-rewrite", "links-retarget", "reparse", "screen-area-set", "skill-set", "skills-paths", "version-freeze", "version-delta", "generated-check", "principal-allow", "principals", "author-set", "authors", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "version-close", "gate-selftest", "next-step", "process-state", "statuses", "task-status", "status-anomaly", "pipeline", "board", "waves", "phases", "coverage", "blocks", "history", "at-revision", "process-history", "progress",
+            "sensor-specs", "scheme-terms", "scheme-roles", "frozen-trees", "addresses-declared", "tree-declared", "donors", "skills-push", "skills", "agents", "code-facts-push", "code-facts", "summary", "links-of", "retired-terms", "term-retire", "entity-confirm", "request-add", "approval-ask", "question-ask", "asks", "ask-decide", "ask-inbox", "chat-start", "chat-say", "chat-inbox", "chat", "run-start", "run-state", "run-event", "run-say", "run-inbox", "runs", "order", "gate-measure", "gate-selftest", "links-rewrite", "links-retarget", "reparse", "screen-area-set", "skill-set", "skills-paths", "version-freeze", "version-delta", "generated-check", "principal-allow", "principals", "author-set", "authors", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "version-close", "gate-selftest", "next-step", "process-state", "statuses", "task-status", "status-anomaly", "pipeline", "board", "waves", "phases", "coverage", "blocks", "history", "at-revision", "process-history", "progress",
             "kinds", "kinds-due", "readiness-gaps", "declared-unwritten", "blame-set", "doors", "derived-copy-set", "holders", "counts-sync", "kind-add", "kind-required", "kind-projection", "kind-reopens", "kind-proves", "kind-id-set", "kind-domain", "tree", "document-coverage", "sections", "section", "backlinks", "search", "put",
             "put-section", "rm", "document-add", "reproject", "sweep", "gate", "next-task", "what-if", "blockers", "events", "task-plan-push",
             "norm-versions", "measurements", "plan", "readiness", "requirements-of",
@@ -1687,31 +1657,6 @@ impl Mcp {
                     Err(e) => refusal(e.into()),
                 }
             }
-            "step-method-set" => {
-                let process = args.get("process").and_then(|v| v.as_str()).unwrap_or("godzy");
-                let set_name = args.get("set").and_then(|v| v.as_str()).unwrap_or("godzy");
-                let ord = num(args, "ord").unwrap_or(-1) as i32;
-                let mk = args.get("methodKind").and_then(|v| v.as_str()).unwrap_or("unknown");
-                let method = args.get("method").and_then(|v| v.as_str()).unwrap_or("");
-                let drop = args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false);
-                match crate::projector::set_step_method(
-                    &self.pool,
-                    crate::projector::StepMethod {
-                        set_name, process, ord, method_kind: mk, method,
-                        run: args.get("run").and_then(|v| v.as_str()),
-                        unit: args.get("unit").and_then(|v| v.as_str()),
-                        subject: args.get("subject").and_then(|v| v.as_str()),
-                        subject_why: args.get("subjectWhy").and_then(|v| v.as_str()),
-                        declared_by: &self.author,
-                        drop,
-                    },
-                )
-                .await
-                {
-                    Ok(v) => ok(v),
-                    Err(e) => refusal(e.into()),
-                }
-            }
             "agents" => {
                 let set_name = args.get("set").and_then(|v| v.as_str()).unwrap_or("godzy").to_owned();
                 let with_body = args.get("body").map(|v| v == "true" || v == true).unwrap_or(false);
@@ -1737,15 +1682,6 @@ impl Mcp {
                         "effort": r.get::<_, String>(4), "hash": r.get::<_, String>(5),
                         "bytes": r.get::<_, i32>(6), "body": r.get::<_, String>(7),
                     })).collect::<Vec<_>>() }))
-            }
-            "step-remove" => {
-                let process = args.get("process").and_then(|v| v.as_str()).unwrap_or("godzy");
-                let set_name = args.get("set").and_then(|v| v.as_str()).unwrap_or("godzy");
-                let ord = num(args, "ord").unwrap_or(-1) as i32;
-                match crate::projector::remove_step(&self.pool, p, set_name, process, ord).await {
-                    Ok(v) => ok(v),
-                    Err(e) => refusal(e.into()),
-                }
             }
             "run-record-add" => {
                 let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
@@ -2121,44 +2057,10 @@ impl Mcp {
                 Ok(v) => ok(v),
                 Err(e) => refusal(e.into()),
             },
-            "step-add" => {
-                let process = args.get("process").and_then(|v| v.as_str()).unwrap_or("godzy");
-                let set_name = args.get("set").and_then(|v| v.as_str()).unwrap_or("godzy");
-                let ord = num(args, "ord").unwrap_or(-1) as i32;
-                let question = args.get("question").and_then(|v| v.as_str()).unwrap_or("");
-                let owner_kind = args.get("ownerKind").and_then(|v| v.as_str()).unwrap_or("none");
-                let owner = args.get("owner").and_then(|v| v.as_str()).unwrap_or("");
-                let touches = args.get("touches").and_then(|v| v.as_str()).unwrap_or("");
-                match crate::projector::add_step(&self.pool, p, crate::projector::Step { set_name, process, ord, question, owner_kind, owner, touches }).await {
-                    Ok(v) => ok(v),
-                    Err(e) => refusal(e.into()),
-                }
-            }
             "version-close" => {
                 let version = args.get("version").and_then(|v| v.as_str()).unwrap_or("");
                 let state = args.get("state").and_then(|v| v.as_str()).unwrap_or("closed");
                 match crate::projector::set_version_state(&self.pool, p, version, state, &self.author, args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
-                    Ok(v) => ok(v),
-                    Err(e) => refusal(e.into()),
-                }
-            }
-            "step-when-set" => {
-                let process = args.get("process").and_then(|v| v.as_str()).unwrap_or("godzy");
-                let set_name = args.get("set").and_then(|v| v.as_str()).unwrap_or("godzy");
-                let ord = num(args, "ord").unwrap_or(-1) as i32;
-                let when_query = args.get("whenQuery").and_then(|v| v.as_str()).unwrap_or("");
-                let when_why = args.get("whenWhy").and_then(|v| v.as_str()).unwrap_or("");
-                match crate::projector::set_step_when(&self.pool, set_name, process, ord, when_query, when_why, args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
-                    Ok(v) => ok(v),
-                    Err(e) => refusal(e.into()),
-                }
-            }
-            "step-probe-set" => {
-                let process = args.get("process").and_then(|v| v.as_str()).unwrap_or("godzy");
-                let set_name = args.get("set").and_then(|v| v.as_str()).unwrap_or("godzy");
-                let ord = num(args, "ord").unwrap_or(-1) as i32;
-                let probe = args.get("probe").and_then(|v| v.as_str()).unwrap_or("");
-                match crate::projector::set_step_probe(&self.pool, set_name, process, ord, probe, args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),
                 }
@@ -2168,19 +2070,6 @@ impl Mcp {
                 let set_name = args.get("set").and_then(|v| v.as_str()).unwrap_or("godzy");
                 match crate::projector::step_selftest(&self.pool, p, set_name, process,
                         args.get("under").and_then(|v| v.as_str()).unwrap_or("")).await {
-                    Ok(v) => ok(v),
-                    Err(e) => refusal(e.into()),
-                }
-            }
-            "step-question-set" => {
-                let process = args.get("process").and_then(|v| v.as_str()).unwrap_or("godzy");
-                let set_name = args.get("set").and_then(|v| v.as_str()).unwrap_or("godzy");
-                let ord = num(args, "ord").unwrap_or(-1) as i32;
-                let question = args.get("question").and_then(|v| v.as_str()).unwrap_or("");
-                if question.trim().is_empty() {
-                    return refusal(Miss::Refused("ступень без условия не переименовывается".into()));
-                }
-                match crate::projector::set_step_question(&self.pool, set_name, process, ord, question, args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false)).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),
                 }

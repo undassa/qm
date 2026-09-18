@@ -1,0 +1,1 @@
+SELECT k || ' — рамка не написана' AS detail FROM unnest(ARRAY['constitution','concept']) AS k WHERE NOT EXISTS (SELECT 1 FROM project_documents d WHERE d.project_id = $1 AND d.entity_kind = k AND length(d.content) > 400)

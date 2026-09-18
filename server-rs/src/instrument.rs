@@ -74,6 +74,45 @@ struct Phases {
     phases: Vec<Phase>,
 }
 
+/// Ступень лестницы: чем она мерится, кому принадлежит и что трогает.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Step {
+    ord: i32,
+    question: String,
+    #[serde(rename = "methodKind")]
+    method_kind: String,
+    #[serde(rename = "ownerKind")]
+    owner_kind: String,
+    #[serde(default)]
+    owner: String,
+    touches: String,
+    #[serde(default, rename = "workRun")]
+    work_run: String,
+    #[serde(default, rename = "whenWhy")]
+    when_why: String,
+    #[serde(default, rename = "subjectWhy")]
+    subject_why: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Ladder {
+    set: String,
+    process: String,
+    title: String,
+    steps: Vec<Step>,
+}
+
+/// Ступень вместе с запросами, разложенными по файлам рядом.
+struct Rung {
+    step: Step,
+    method: String,
+    probe: String,
+    when_query: String,
+    subject: String,
+}
+
 /// Объявленный пункт вместе с текстами, разложенными по файлам рядом.
 struct Rule {
     item: Item,
@@ -91,7 +130,50 @@ fn text(name: &str) -> Option<&'static str> {
     FILES.iter().find(|(f, _)| *f == name).map(|(_, body)| *body)
 }
 
-fn read() -> Result<(Vec<Gate>, Vec<Rule>), String> {
+/// Гейты с их пунктами и файлы, которые пошли в дело.
+struct Gates {
+    gates: Vec<Gate>,
+    rules: Vec<Rule>,
+    used: Vec<String>,
+}
+
+/// Лестница: чья она, как зовётся и из чего сложена.
+struct Rungs {
+    set: String,
+    process: String,
+    title: String,
+    rungs: Vec<Rung>,
+    used: Vec<String>,
+}
+
+/// Прибор целиком, как его объявляет репозиторий.
+struct Instrument {
+    gates: Vec<Gate>,
+    rules: Vec<Rule>,
+    phases: Vec<Phase>,
+    set: String,
+    process: String,
+    title: String,
+    rungs: Vec<Rung>,
+}
+
+/// Прочесть и проверить ВСЁ объявление разом: половина прибора хуже прежнего целиком.
+fn declared() -> Result<Instrument, String> {
+    let Gates { gates, rules, mut used } = read()?;
+    checked(&gates, &rules)?;
+    let phases = phases()?;
+    let Rungs { set, process, title, rungs, used: ladder_files } = ladder()?;
+    used.extend(ladder_files);
+    no_orphan_files(&used)?;
+    for p in &phases {
+        if !p.gate.is_empty() && !gates.iter().any(|g| g.phase == p.gate) {
+            return Err(format!("фаза {} стоит на гейте {}, которого нет в объявлении", p.id, p.gate));
+        }
+    }
+    Ok(Instrument { gates, rules, phases, set, process, title, rungs })
+}
+
+fn read() -> Result<Gates, String> {
     let raw = text("gates.json").ok_or("объявления гейтов нет: instrument/gates.json")?;
     let declared: Declared =
         serde_json::from_str(raw).map_err(|e| format!("instrument/gates.json не разбирается: {e}"))?;
@@ -112,13 +194,65 @@ fn read() -> Result<(Vec<Gate>, Vec<Rule>), String> {
         let (query, probe, subject) = (take(".sql"), take(".probe.sql"), take(".subject.sql"));
         rules.push(Rule { item, query, probe, subject });
     }
-    // ФАЙЛ БЕЗ ПУНКТА — НЕ УКРАШЕНИЕ. Запрос, который никто не объявил, выглядит
-    // работающим правилом и не меряет ничего; переименованный пункт оставляет
-    // такой файл за собой молча.
-    if let Some((orphan, _)) = FILES.iter().find(|(f, _)| !used.contains(&(*f).to_owned())) {
-        return Err(format!("файл {orphan} не принадлежит ни одному объявленному пункту"));
+    Ok(Gates { gates: declared.gates, rules, used })
+}
+
+fn ladder() -> Result<Rungs, String> {
+    let raw = text("ladder.json").ok_or("объявления лестницы нет: instrument/ladder.json")?;
+    let declared: Ladder =
+        serde_json::from_str(raw).map_err(|e| format!("instrument/ladder.json не разбирается: {e}"))?;
+    if declared.steps.is_empty() {
+        return Err("объявлено ноль ступеней: лестнице нечем отвечать «что делать дальше»".into());
     }
-    Ok((declared.gates, rules))
+    let (set, process, title) =
+        (declared.set.clone(), declared.process.clone(), declared.title.clone());
+    let mut rungs = Vec::new();
+    let mut used = vec!["ladder.json".to_owned()];
+    let mut seen: Vec<i32> = Vec::new();
+    for step in declared.steps {
+        if seen.contains(&step.ord) {
+            return Err(format!("ступень {} объявлена дважды", step.ord));
+        }
+        seen.push(step.ord);
+        let base = format!("ladder/{:02}", step.ord);
+        let mut take = |suffix: &str| match text(&format!("{base}{suffix}")) {
+            Some(body) => {
+                used.push(format!("{base}{suffix}"));
+                body.trim().to_owned()
+            }
+            None => String::new(),
+        };
+        let (method, probe) = (take(".sql"), take(".probe.sql"));
+        let (when_query, subject) = (take(".when.sql"), take(".subject.sql"));
+        if step.question.trim().is_empty() {
+            return Err(format!("у ступени {} нет вопроса: без него она ничего не спрашивает", step.ord));
+        }
+        // Род способа и наличие способа обязаны сходиться — ровно как у пункта
+        // гейта: ступень без способа честно отвечает «мерить нечем», и молчать
+        // об этом она не должна.
+        if (step.method_kind == "query" || step.method_kind == "command") != !method.is_empty() {
+            return Err(format!(
+                "у ступени {} род «{}» и {}способ", step.ord, step.method_kind,
+                if method.is_empty() { "не объявлен " } else { "объявлен " }));
+        }
+        if !["query", "command", "unknown"].contains(&step.method_kind.as_str()) {
+            return Err(format!("у ступени {} род способа «{}»", step.ord, step.method_kind));
+        }
+        if !["skill", "agent", "none"].contains(&step.owner_kind.as_str()) {
+            return Err(format!("у ступени {} хозяин рода «{}»", step.ord, step.owner_kind));
+        }
+        if !["corpus", "repository"].contains(&step.touches.as_str()) {
+            return Err(format!("ступень {} трогает «{}»: бывает corpus либо repository", step.ord, step.touches));
+        }
+        if !when_query.is_empty() && step.when_why.is_empty() {
+            return Err(format!("у ступени {} есть условие и нет довода: пропуск обязан быть виден с причиной", step.ord));
+        }
+        if subject.is_empty() != step.subject_why.is_empty() {
+            return Err(format!("у ступени {} предмет и довод пустого предмета объявлены порознь", step.ord));
+        }
+        rungs.push(Rung { step, method, probe, when_query, subject });
+    }
+    Ok(Rungs { set, process, title, rungs, used })
 }
 
 fn phases() -> Result<Vec<Phase>, String> {
@@ -147,6 +281,17 @@ fn phases() -> Result<Vec<Phase>, String> {
         return Err("две фазы объявлены с одним порядком: какая из них раньше — решал бы случай".into());
     }
     Ok(declared.phases)
+}
+
+/// ФАЙЛ БЕЗ ХОЗЯИНА — НЕ УКРАШЕНИЕ. Запрос, который никто не объявил, выглядит
+/// работающим правилом и не меряет ничего; переименованный пункт или снятая
+/// ступень оставляют такой файл за собой молча. Судится всё дерево разом:
+/// порознь каждая половина считала бы чужие файлы своими сиротами.
+fn no_orphan_files(used: &[String]) -> Result<(), String> {
+    match FILES.iter().find(|(f, _)| !used.contains(&(*f).to_owned())) {
+        Some((orphan, _)) => Err(format!("файл {orphan} не принадлежит ничему объявленному")),
+        None => Ok(()),
+    }
 }
 
 fn checked(gates: &[Gate], rules: &[Rule]) -> Result<(), String> {
@@ -218,9 +363,7 @@ fn checked(gates: &[Gate], rules: &[Rule]) -> Result<(), String> {
 /// Всё одной транзакцией под общим замком: раскладывают двое — сервер и всякая
 /// подкоманда, — и половина прибора хуже прежнего целиком.
 pub async fn apply(pool: &Pool) -> Result<Value, String> {
-    let (gates, rules) = read()?;
-    checked(&gates, &rules)?;
-    let steps = phases()?;
+    let Instrument { gates, rules, phases: steps, set, process, title, rungs } = declared()?;
     let mut client = crate::db::conn(pool).await.map_err(|e| crate::db::Says::says(&e))?;
     let tx = client.transaction().await.map_err(|e| e.to_string())?;
     tx.execute("SELECT pg_advisory_xact_lock(hashtext('instrument'))", &[])
@@ -411,6 +554,88 @@ pub async fn apply(pool: &Pool) -> Result<Value, String> {
         .await
         .map_err(|e| e.to_string())?;
 
+    // ЛЕСТНИЦА — ТОТ ЖЕ ПРИБОР. Ступень отвечает «что делать дальше» всем наборам
+    // сразу; правилась она шестью дверьми на живом, и способ при этом лежал в
+    // ДВУХ таблицах: объявленный отдельно и его копия в строке ступени, которую
+    // переносил особый проход. Объявление пришло из репозитория — копии и
+    // проходу не осталось работы, и `harness_process_method` снята.
+    tx.execute(
+        "INSERT INTO harness_process (set_name, name, title) VALUES ($1,$2,$3)
+         ON CONFLICT (set_name, name) DO UPDATE SET title = EXCLUDED.title",
+        &[&set, &process, &title],
+    )
+    .await
+    .map_err(|e| format!("процесс {process} не записан: {}", crate::db::Says::says(&e)))?;
+
+    let ladder_was = tx
+        .query(
+            "SELECT ord, question, method_kind, method, when_query, when_why, owner_kind, owner,
+                    touches, probe, work_run, subject_query, subject_why
+               FROM harness_process_step WHERE set_name = $1 AND process = $2",
+            &[&set, &process],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut ladder_changed = Vec::new();
+    for r in &rungs {
+        let old = ladder_was.iter().find(|w| w.get::<_, i32>(0) == r.step.ord);
+        let same = old.is_some_and(|w| {
+            w.get::<_, &str>(1) == r.step.question
+                && w.get::<_, &str>(2) == r.step.method_kind
+                && w.get::<_, &str>(3).trim() == r.method
+                && w.get::<_, &str>(4).trim() == r.when_query
+                && w.get::<_, &str>(5) == r.step.when_why
+                && w.get::<_, &str>(6) == r.step.owner_kind
+                && w.get::<_, &str>(7) == r.step.owner
+                && w.get::<_, &str>(8) == r.step.touches
+                && w.get::<_, &str>(9).trim() == r.probe
+                && w.get::<_, &str>(10) == r.step.work_run
+                && w.get::<_, &str>(11).trim() == r.subject
+                && w.get::<_, &str>(12) == r.step.subject_why
+        });
+        if same {
+            continue;
+        }
+        ladder_changed.push(json!({ "ord": r.step.ord,
+                                    "was": if old.is_some() { "изменена" } else { "заведена" } }));
+        for (what, text) in [("способ", &r.method), ("проба", &r.probe),
+                             ("условие", &r.when_query), ("предмет", &r.subject)] {
+            if text.is_empty() || r.step.method_kind == "command" {
+                continue;
+            }
+            tx.prepare(text).await.map_err(|e| {
+                format!("{what} ступени {} не разбирается: {}", r.step.ord, crate::db::Says::says(&e))
+            })?;
+        }
+        tx.execute(
+            "INSERT INTO harness_process_step (set_name, process, ord, question, method_kind, method,
+                                               when_query, when_why, owner_kind, owner, touches,
+                                               probe, work_run, subject_query, subject_why)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+             ON CONFLICT (set_name, process, ord) DO UPDATE SET
+               question = EXCLUDED.question, method_kind = EXCLUDED.method_kind,
+               method = EXCLUDED.method, when_query = EXCLUDED.when_query,
+               when_why = EXCLUDED.when_why, owner_kind = EXCLUDED.owner_kind,
+               owner = EXCLUDED.owner, touches = EXCLUDED.touches, probe = EXCLUDED.probe,
+               work_run = EXCLUDED.work_run, subject_query = EXCLUDED.subject_query,
+               subject_why = EXCLUDED.subject_why",
+            &[&set, &process, &r.step.ord, &r.step.question, &r.step.method_kind, &r.method,
+              &r.when_query, &r.step.when_why, &r.step.owner_kind, &r.step.owner, &r.step.touches,
+              &r.probe, &r.step.work_run, &r.subject, &r.step.subject_why],
+        )
+        .await
+        .map_err(|e| format!("ступень {} не записана: {}", r.step.ord, crate::db::Says::says(&e)))?;
+    }
+    let ords: Vec<i32> = rungs.iter().map(|r| r.step.ord).collect();
+    let rungs_gone = tx
+        .execute(
+            "DELETE FROM harness_process_step
+              WHERE set_name = $1 AND process = $2 AND NOT (ord = ANY($3))",
+            &[&set, &process, &ords],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
     let heads: Vec<String> = gates.iter().map(|g| g.phase.clone()).collect();
     for g in &gates {
         tx.execute(
@@ -431,14 +656,16 @@ pub async fn apply(pool: &Pool) -> Result<Value, String> {
     // прежнего правила и выглядели бы настоящими до первой чужой правки. Новый
     // пункт при этом вовсе не имеет замера, и гейт над ним считался бы пройденным.
     let touched = !changed.is_empty() || gone > 0 || measures > 0
-        || phases_gone > 0 || !phases_changed.is_empty();
+        || phases_gone > 0 || !phases_changed.is_empty()
+        || !ladder_changed.is_empty() || rungs_gone > 0;
     if touched {
         crate::watch::touch_all(pool, "правка прибора").await.map_err(|e| crate::db::Says::says(&e))?;
     }
     Ok(json!({ "гейтов": gates.len(), "пунктов": rules.len(), "фаз": steps.len(),
                "изменено": changed.len(), "что": changed,
                "снято пунктов": gone, "снято замеров": measures, "снято фаз": phases_gone,
-               "фазы": phases_changed,
+               "фазы": phases_changed, "ступеней": rungs.len(),
+               "ступени": ladder_changed, "снято ступеней": rungs_gone,
                "перемерить": touched }))
 }
 
@@ -488,20 +715,25 @@ mod removal {
 
 #[cfg(test)]
 mod declared {
-    use super::{checked, read, FILES};
+    use super::FILES;
 
     #[test]
     fn instrument_of_the_repository_is_whole() {
-        let (gates, rules) = read().expect("объявление прибора разбирается");
-        checked(&gates, &rules).expect("объявление прибора цело");
-        let steps = super::phases().expect("объявление фаз цело");
-        assert!(steps.len() >= 5, "фаз объявлено {}: работа идёт не в двух шагах", steps.len());
-        for p in &steps {
-            assert!(p.gate.is_empty() || gates.iter().any(|g| g.phase == p.gate),
-                    "фаза {} стоит на гейте {}, которого нет в объявлении", p.id, p.gate);
+        let i = super::declared().expect("объявление прибора цело");
+        assert!(i.rules.len() > 100, "пунктов гейта {}: похоже на потерянное дерево", i.rules.len());
+        assert!(i.phases.len() >= 5, "фаз объявлено {}: работа идёт не в двух шагах", i.phases.len());
+        assert!(i.rungs.len() >= 10, "ступеней {}: лестница короче, чем была", i.rungs.len());
+        assert!(FILES.len() > i.rules.len(), "у пунктов нет ни запросов, ни проб");
+        // Метка подстановки у ступени — та самая, которую подставляет сервер.
+        // Объявление и код называют её порознь, и разойтись им нельзя: `next-step`
+        // отдал бы команду с меткой внутри вместо имени находки.
+        for r in &i.rungs {
+            if r.step.work_run.contains('{') {
+                assert!(r.step.work_run.contains(crate::projector::WORK_RUN_NAME),
+                        "ступень {} подставляет метку, которой сервер не знает: {}",
+                        r.step.ord, r.step.work_run);
+            }
         }
-        assert!(rules.len() > 100, "пунктов гейта {}: похоже на потерянное дерево", rules.len());
-        assert!(FILES.len() > rules.len(), "у пунктов нет ни запросов, ни проб");
     }
 
     // Файл, чьё имя не выводится из имени пункта, не нашёлся бы при раскладке и

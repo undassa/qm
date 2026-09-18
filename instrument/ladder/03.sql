@@ -1,0 +1,1 @@
+SELECT CASE WHEN count(*) = 0 THEN 'открытый выпуск не объявлен: какой из ' || (SELECT count(*) FROM project_plan_versions WHERE project_id = $1) || ' мы делаем — не сказано' ELSE 'открытыми объявлены сразу ' || count(*) || ': ' || string_agg(version, ', ') END AS detail FROM version_state WHERE project_id = $1 AND state = 'open' HAVING count(*) <> 1

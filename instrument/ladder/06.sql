@@ -1,0 +1,1 @@
+SELECT g.phase || ' · ' || g.item AS detail FROM project_gates g WHERE g.project_id = $1 AND g.state = 'failed' AND (g.phase = 'corpus' OR g.phase = (SELECT ph.gate FROM phase ph WHERE EXISTS (SELECT 1 FROM project_gates x WHERE x.project_id = $1 AND x.phase = ph.gate AND x.state <> 'passed') ORDER BY ph.ord LIMIT 1)) ORDER BY g.phase, g.item
