@@ -1,0 +1,657 @@
+{
+ "kinds": {
+  "acceptance": {
+   "id": null,
+   "in": null,
+   "holds": [],
+   "shape": "document",
+   "single": true,
+   "name-is": null,
+   "required": true,
+   "projection": "due",
+   "required-why": "вид читает общий чеклист либо его документ кормит предметную таблицу: без него харнесу нечем отвечать"
+  },
+  "after": {
+   "id": "^[A-Za-z0-9][A-Za-z0-9/._-]*$",
+   "in": null,
+   "shape": "document",
+   "single": false,
+   "name-is": "путь под корнем вида без расширения",
+   "projection": "due"
+  },
+  "archive": {
+   "id": null,
+   "in": null,
+   "shape": "document",
+   "single": false,
+   "name-is": "снятая с обихода запись реестра",
+   "projection": "provenance"
+  },
+  "article": {
+   "id": "^\\d+$",
+   "in": "constitution",
+   "shape": "inner",
+   "domain": "знание",
+   "single": false,
+   "name-is": null,
+   "domain-why": "почему устроено так: выбор, спор о выборе и довод под ним",
+   "projection": "done"
+  },
+  "assertion": {
+   "id": "^[a-z-]+:[a-z-]+$",
+   "why": "утверждение с пространством имён: assertions:derived-not-authored — не номерной тест-кейс, а названное притязание",
+   "shape": "inner",
+   "proves": true,
+   "proves-why": "утверждение об отношении в данных или в потоке событий — шестой род проверки (50-plan/verify §Шесть родов)"
+  },
+  "board": {
+   "id": "^(red/)?(order|status)$",
+   "in": null,
+   "holds": [
+    "project_plan_status"
+   ],
+   "shape": "document",
+   "single": false,
+   "name-is": "доска, порождаемая скриптом",
+   "reopens": false,
+   "projection": "container",
+   "reopens-why": "доска — отображение состояний задач, своего состояния у неё нет: переоткрывать надо задачу, а доска пересоберётся"
+  },
+  "brs": {
+   "id": null,
+   "in": null,
+   "holds": [],
+   "shape": "document",
+   "single": true,
+   "name-is": null,
+   "projection": "prose"
+  },
+  "check": {
+   "id": "^TC-[A-Z]+-\\d+[a-z]?$",
+   "in": "test-cases",
+   "holds": [
+    "project_checks"
+   ],
+   "shape": "inner",
+   "domain": "доказательство",
+   "proves": true,
+   "single": false,
+   "name-is": null,
+   "domain-why": "чем доказано, что хотимое сделано: проверка, прогон, правило кода",
+   "projection": "done",
+   "proves-why": "ключ сценария приёмки — проверка (ADR-0107)"
+  },
+  "chronicle": {
+   "id": null,
+   "in": null,
+   "shape": "document",
+   "single": true,
+   "name-is": "хроника харнеса: что и почему менялось в нём самом",
+   "required": true,
+   "projection": "prose",
+   "required-why": "вид читает общий чеклист либо его документ кормит предметную таблицу: без него харнесу нечем отвечать"
+  },
+  "cjm": {
+   "id": null,
+   "in": null,
+   "holds": [],
+   "shape": "document",
+   "single": true,
+   "name-is": null,
+   "projection": "due"
+  },
+  "claims": {
+   "id": null,
+   "in": null,
+   "shape": "document",
+   "single": true,
+   "name-is": "правила внешних заявлений: что разрешено утверждать и чем это закреплено",
+   "projection": "prose"
+  },
+  "concept": {
+   "id": null,
+   "in": null,
+   "holds": [],
+   "shape": "document",
+   "single": true,
+   "name-is": null,
+   "required": true,
+   "projection": "prose",
+   "required-why": "вид читает общий чеклист либо его документ кормит предметную таблицу: без него харнесу нечем отвечать"
+  },
+  "constitution": {
+   "id": null,
+   "in": null,
+   "holds": [
+    "project_articles",
+    "norm_version"
+   ],
+   "shape": "document",
+   "single": true,
+   "name-is": null,
+   "required": true,
+   "projection": "container",
+   "required-why": "вид читает общий чеклист либо его документ кормит предметную таблицу: без него харнесу нечем отвечать"
+  },
+  "coverage": {
+   "id": null,
+   "in": null,
+   "shape": "document",
+   "single": true,
+   "name-is": null,
+   "projection": "prose"
+  },
+  "data-model": {
+   "id": null,
+   "in": null,
+   "holds": [
+    "project_db_tables"
+   ],
+   "shape": "document",
+   "single": true,
+   "name-is": null,
+   "required": true,
+   "projection": "container",
+   "required-why": "вид читает общий чеклист либо его документ кормит предметную таблицу: без него харнесу нечем отвечать"
+  },
+  "decision": {
+   "id": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+   "in": null,
+   "holds": [
+    "project_decisions"
+   ],
+   "shape": "document",
+   "domain": "знание",
+   "single": false,
+   "name-is": "имя решения, как его зовёт сам набор",
+   "reopens": false,
+   "domain-why": "почему устроено так: выбор, спор о выборе и довод под ним",
+   "projection": "done",
+   "reopens-why": "решение — датированная запись о выборе, а не вывод из требований. Оно не становится непринятым; его отменяют другим решением, и это работа человека, а не пересборки"
+  },
+  "decision-template": {
+   "id": null,
+   "in": null,
+   "shape": "document",
+   "single": true,
+   "name-is": null,
+   "projection": "prose"
+  },
+  "design-view": {
+   "id": "^[A-Za-z0-9][A-Za-z0-9/._-]*$",
+   "in": null,
+   "holds": [
+    "project_document_cells"
+   ],
+   "shape": "document",
+   "single": false,
+   "name-is": "путь под корнем вида без расширения",
+   "projection": "container"
+  },
+  "document-plan": {
+   "id": null,
+   "in": null,
+   "holds": [
+    "project_document_plan"
+   ],
+   "shape": "document",
+   "single": true,
+   "name-is": null,
+   "required": true,
+   "projection": "container",
+   "required-why": "вид читает общий чеклист либо его документ кормит предметную таблицу: без него харнесу нечем отвечать"
+  },
+  "feature": {
+   "id": null,
+   "in": null,
+   "holds": [
+    "project_features"
+   ],
+   "shape": "document",
+   "domain": "требования",
+   "single": false,
+   "name-is": null,
+   "domain-why": "чего от продукта хотят и для кого: это входит в проект, а не выводится из него",
+   "projection": "done"
+  },
+  "freeze": {
+   "id": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+   "in": null,
+   "shape": "document",
+   "single": false,
+   "name-is": "выпуск, набор которого заморожен: черта, от которой считают дельту",
+   "projection": "provenance"
+  },
+  "gate": {
+   "id": "^G\\d$",
+   "in": "document-plan",
+   "shape": "inner",
+   "domain": "надзор",
+   "single": false,
+   "name-is": null,
+   "domain-why": "какими словами проект говорит о себе и чем сторожит сам себя",
+   "projection": "done"
+  },
+  "generator": {
+   "id": null,
+   "in": null,
+   "shape": "document",
+   "single": true,
+   "name-is": null,
+   "projection": "prose"
+  },
+  "glossary": {
+   "id": null,
+   "in": null,
+   "holds": [
+    "project_terms"
+   ],
+   "shape": "document",
+   "single": true,
+   "name-is": null,
+   "required": true,
+   "projection": "container",
+   "required-why": "вид читает общий чеклист либо его документ кормит предметную таблицу: без него харнесу нечем отвечать"
+  },
+  "goals": {
+   "id": null,
+   "in": null,
+   "shape": "document",
+   "single": true,
+   "name-is": "цели проекта и критерии успеха: у каждой цели измерение и момент проверки",
+   "projection": "due"
+  },
+  "guide": {
+   "id": "^[A-Za-z0-9][A-Za-z0-9/._-]*$",
+   "in": null,
+   "shape": "document",
+   "single": false,
+   "name-is": "путь под корнем вида без расширения",
+   "projection": "prose"
+  },
+  "index": {
+   "id": "^[A-Za-z0-9][A-Za-z0-9/._-]*$",
+   "in": null,
+   "holds": [
+    "project_document_links",
+    "project_surface_source"
+   ],
+   "shape": "document",
+   "single": false,
+   "name-is": "каталог, который указатель описывает",
+   "projection": "container"
+  },
+  "lint-rule": {
+   "id": "^[a-z][a-z0-9_]+$",
+   "why": "имя правила живёт в коде: 141 из 227 «проверок» tot-ade найдены в crates/ как идентификаторы, и свести их к TC-ОБЛАСТЬ-nn значит порвать связь кода с его же правилами",
+   "shape": "inner",
+   "proves": true,
+   "proves-why": "правило кода доказывает запретом: линт не пробует случай, он отказывается собирать нарушение. AGENTS.md объявляет тест носителем идентификатора требования"
+  },
+  "map": {
+   "id": null,
+   "in": null,
+   "shape": "document",
+   "single": true,
+   "name-is": "карта набора",
+   "required": true,
+   "projection": "prose",
+   "required-why": "вид читает общий чеклист либо его документ кормит предметную таблицу: без него харнесу нечем отвечать"
+  },
+  "milestone": {
+   "id": "^[MV]\\d+$",
+   "in": null,
+   "holds": [
+    "project_plan_milestones"
+   ],
+   "shape": "document",
+   "domain": "план",
+   "single": false,
+   "name-is": "имя этапа, как его зовёт сам набор",
+   "reopens": true,
+   "domain-why": "что делается и в каком порядке: единицы работы и её вехи",
+   "projection": "done",
+   "reopens-why": "этап закрывается своими задачами: переоткрылась задача — переоткрыт и он"
+  },
+  "mockup": {
+   "id": "^[A-Za-z0-9][A-Za-z0-9/._-]*$",
+   "in": null,
+   "shape": "document",
+   "single": false,
+   "name-is": "путь под корнем вида без расширения",
+   "projection": "render"
+  },
+  "need": {
+   "id": "^ST-\\d+$",
+   "in": "strs",
+   "shape": "inner",
+   "domain": "требования",
+   "single": false,
+   "name-is": null,
+   "domain-why": "чего от продукта хотят и для кого: это входит в проект, а не выводится из него",
+   "projection": "done"
+  },
+  "positioning": {
+   "id": null,
+   "in": null,
+   "shape": "document",
+   "single": true,
+   "name-is": "позиционирование: несущий тезис и кому он продаётся",
+   "projection": "prose"
+  },
+  "postmortem": {
+   "id": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+   "in": null,
+   "shape": "document",
+   "single": false,
+   "name-is": "разбор случившегося: риски смотрят вперёд, постмортемы назад",
+   "projection": "prose"
+  },
+  "process": {
+   "id": null,
+   "in": null,
+   "shape": "document",
+   "single": true,
+   "name-is": "процесс: фазы, артефакты и чего не хватает для перехода к следующей",
+   "required": false,
+   "projection": "prose",
+   "required-why": ""
+  },
+  "project-map": {
+   "id": null,
+   "in": null,
+   "shape": "document",
+   "single": true,
+   "name-is": "карта проекта: где код, куда ложатся леса прогона, как открывается сессия",
+   "required": true,
+   "projection": "prose",
+   "required-why": "вид читает общий чеклист либо его документ кормит предметную таблицу: без него харнесу нечем отвечать"
+  },
+  "question": {
+   "id": "^Q-\\d+$",
+   "in": null,
+   "holds": [
+    "project_questions"
+   ],
+   "shape": "document",
+   "domain": "знание",
+   "single": false,
+   "name-is": null,
+   "reopens": true,
+   "domain-why": "почему устроено так: выбор, спор о выборе и довод под ним",
+   "projection": "done",
+   "reopens-why": "ответ говорил о том, что с тех пор изменили: закрыт по памяти"
+  },
+  "rationale": {
+   "id": "^[a-zа-яё][a-zа-яё0-9./-]*(#[a-zа-яё0-9-]+)?$",
+   "why": "рассуждение раздела: объяснение, почему правило такое. Своего имени у него нет, и потому сущностью оно быть не могло — адресуется якорем раздела, который выведен из заголовка и переживает правки выше по тексту",
+   "holds": [
+    "project_rationale"
+   ],
+   "shape": "inner",
+   "domain": "знание",
+   "id-why": "имя рассуждения — его АДРЕС: документ и якорь через решётку, потому что своего имени у довода нет",
+   "domain-why": "почему устроено так: выбор, спор о выборе и довод под ним",
+   "projection": "done"
+  },
+  "red-task": {
+   "id": "^[RrVv][-\\w]*$",
+   "in": null,
+   "holds": [
+    "project_plan_tasks"
+   ],
+   "shape": "document",
+   "domain": "план",
+   "single": false,
+   "name-is": "имя задачи трека проверок",
+   "reopens": true,
+   "domain-why": "что делается и в каком порядке: единицы работы и её вехи",
+   "projection": "done",
+   "reopens-why": "красная задача — задача: её закрывали против текста требования, и с его правкой закрытие держится памятью"
+  },
+  "reference": {
+   "id": "^[A-Za-z0-9][A-Za-z0-9/._-]*$",
+   "in": null,
+   "shape": "document",
+   "single": false,
+   "name-is": "путь под корнем вида без расширения",
+   "projection": "provenance"
+  },
+  "register": {
+   "id": null,
+   "in": null,
+   "holds": [
+    "project_questions",
+    "project_risks"
+   ],
+   "shape": "document",
+   "single": true,
+   "name-is": "реестр открытых вопросов, рисков и расхождений одним документом",
+   "required": false,
+   "projection": "container",
+   "required-why": ""
+  },
+  "requirement": {
+   "id": "^(FR|NFR)-[A-Z0-9]+(-\\d+)?$",
+   "in": "srs",
+   "holds": [
+    "project_requirements"
+   ],
+   "shape": "inner",
+   "domain": "требования",
+   "single": false,
+   "name-is": null,
+   "reopens": true,
+   "domain-why": "чего от продукта хотят и для кого: это входит в проект, а не выводится из него",
+   "projection": "done",
+   "reopens-why": "«удовлетворено» — утверждение о доказательстве; изменилась проверка, доказывавшая его, — доказательства больше нет"
+  },
+  "research": {
+   "id": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+   "in": null,
+   "shape": "document",
+   "single": false,
+   "name-is": "исследование: спрос, чужие решения, прошлая реализация",
+   "projection": "prose"
+  },
+  "risk": {
+   "id": "^R-\\d+$",
+   "in": "risks",
+   "shape": "inner",
+   "domain": "надзор",
+   "single": false,
+   "name-is": null,
+   "reopens": false,
+   "domain-why": "какими словами проект говорит о себе и чем сторожит сам себя",
+   "projection": "done",
+   "reopens-why": "состояние риска — суждение о будущем, а не следствие связей: снять его может только тот, кто им управляет"
+  },
+  "risks": {
+   "id": null,
+   "in": null,
+   "holds": [
+    "project_risks"
+   ],
+   "shape": "document",
+   "single": true,
+   "name-is": null,
+   "required": true,
+   "projection": "container",
+   "required-why": "вид читает общий чеклист либо его документ кормит предметную таблицу: без него харнесу нечем отвечать"
+  },
+  "run": {
+   "id": "^([MV][0-9]+(-T[0-9a-z]+)?|v[0-9]+|v[0-9]+/[A-Za-z0-9-]+(/[A-Za-z0-9-]+)?)$",
+   "in": null,
+   "holds": [
+    "project_runs_log"
+   ],
+   "shape": "document",
+   "domain": "доказательство",
+   "id-why": "переходный образец на время переноса имён прогонов: и каталожное имя, и голое. Снимается сразу после",
+   "single": false,
+   "name-is": null,
+   "reopens": false,
+   "domain-why": "чем доказано, что хотимое сделано: проверка, прогон, правило кода",
+   "projection": "done",
+   "reopens-why": "прогон — запись о случившемся: изменить прошлое пересборкой нельзя"
+  },
+  "scope": {
+   "id": null,
+   "in": null,
+   "shape": "document",
+   "single": true,
+   "name-is": "что строим и что не строим, и по какому критерию проведена граница",
+   "projection": "prose"
+  },
+  "screen": {
+   "id": "^SCR-[A-Z0-9]+-[0-9]+$",
+   "in": null,
+   "holds": [
+    "project_screens"
+   ],
+   "shape": "document",
+   "domain": "требования",
+   "id-why": "грамматику имён держит харнес: разбор объявляет экран заголовком по образцу ^SCR-[A-Z0-9]+-\\d+. Прежние имена NN-slug приставки не имели и в таблицу имён не попадали вовсе — оба правила про экран были непостроимы. Переименовано 2026-09-11; человеческий номер остался в заголовке вторым полем, на нём держится ссылка «страница 31»",
+   "single": false,
+   "name-is": "имя экрана, как его зовёт сам набор",
+   "domain-why": "чего от продукта хотят и для кого: это входит в проект, а не выводится из него",
+   "projection": "done"
+  },
+  "srs": {
+   "id": null,
+   "in": null,
+   "holds": [
+    "project_requirements",
+    "project_checks"
+   ],
+   "shape": "document",
+   "single": true,
+   "name-is": null,
+   "required": true,
+   "projection": "container",
+   "required-why": "вид читает общий чеклист либо его документ кормит предметную таблицу: без него харнесу нечем отвечать"
+  },
+  "stand": {
+   "id": null,
+   "in": null,
+   "shape": "document",
+   "single": true,
+   "name-is": "стенд: на чём получены числа, чтобы их можно было повторить",
+   "projection": "prose"
+  },
+  "story": {
+   "id": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+   "in": null,
+   "holds": [
+    "project_stories"
+   ],
+   "shape": "document",
+   "domain": "требования",
+   "single": false,
+   "name-is": "имя истории, как её зовёт сам набор",
+   "domain-why": "чего от продукта хотят и для кого: это входит в проект, а не выводится из него",
+   "projection": "done"
+  },
+  "strs": {
+   "id": null,
+   "in": null,
+   "holds": [
+    "project_needs"
+   ],
+   "shape": "document",
+   "single": true,
+   "name-is": null,
+   "required": true,
+   "projection": "container",
+   "required-why": "вид читает общий чеклист либо его документ кормит предметную таблицу: без него харнесу нечем отвечать"
+  },
+  "task": {
+   "id": "^[MmVv]\\d+-[Tt][\\w-]+$",
+   "in": null,
+   "holds": [
+    "project_plan_tasks"
+   ],
+   "shape": "document",
+   "domain": "план",
+   "single": false,
+   "name-is": "имя задачи, как её зовёт сам набор",
+   "reopens": true,
+   "domain-why": "что делается и в каком порядке: единицы работы и её вехи",
+   "projection": "done",
+   "reopens-why": "закрытая задача, сделавшая изменённое требование, не сделана: её проверяли против текста, которого больше нет"
+  },
+  "tdd": {
+   "id": null,
+   "in": null,
+   "holds": [],
+   "shape": "document",
+   "single": true,
+   "name-is": null,
+   "projection": "prose"
+  },
+  "term": {
+   "id": "^.+$",
+   "in": "glossary",
+   "shape": "inner",
+   "domain": "надзор",
+   "single": false,
+   "name-is": null,
+   "domain-why": "какими словами проект говорит о себе и чем сторожит сам себя",
+   "projection": "done"
+  },
+  "test-cases": {
+   "id": null,
+   "in": null,
+   "holds": [
+    "project_checks"
+   ],
+   "shape": "document",
+   "single": true,
+   "name-is": null,
+   "required": true,
+   "projection": "container",
+   "required-why": "вид читает общий чеклист либо его документ кормит предметную таблицу: без него харнесу нечем отвечать"
+  },
+  "test-plan": {
+   "id": null,
+   "in": null,
+   "holds": [],
+   "shape": "document",
+   "single": true,
+   "name-is": null,
+   "projection": "prose"
+  },
+  "traceability": {
+   "id": null,
+   "in": null,
+   "holds": [
+    "project_traceability_claims"
+   ],
+   "shape": "document",
+   "single": true,
+   "name-is": null,
+   "projection": "container"
+  },
+  "ui-spec": {
+   "id": null,
+   "in": null,
+   "holds": [],
+   "shape": "document",
+   "single": true,
+   "name-is": null,
+   "required": true,
+   "projection": "prose",
+   "required-why": "вид читает общий чеклист либо его документ кормит предметную таблицу: без него харнесу нечем отвечать"
+  },
+  "version": {
+   "id": "^v\\d+$",
+   "in": null,
+   "shape": "document",
+   "domain": "план",
+   "single": false,
+   "name-is": null,
+   "domain-why": "что делается и в каком порядке: единицы работы и её вехи",
+   "projection": "done"
+  }
+ }
+}

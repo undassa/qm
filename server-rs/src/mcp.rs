@@ -888,6 +888,18 @@ impl Mcp {
         match name {
             "kinds" => {
                 let registry = match self.live_registry().await { Ok(k) => k, Err(e) => return refusal(e) };
+                // ОБЪЯВЛЕНИЕ БЕРЁТСЯ ИЗ БАЗЫ СЫРЫМ, а не собирается обратно из
+                // разобранного. Разбор знает не все ключи: `proves` и `reopens`
+                // кладут прямо в `jsonb`, и `Kind` их молча теряет — собранное
+                // им объявление стёрло бы оба на первой же записи. Виды читают
+                // эти ключи представлениями, и потеря была бы тихой.
+                let raw: std::collections::HashMap<String, Value> = match crate::db::conn(&self.pool).await {
+                    Ok(client) => match client.query("SELECT name, spec FROM kind_layout", &[]).await {
+                        Ok(rows) => rows.iter().map(|r| (r.get(0), r.get(1))).collect(),
+                        Err(e) => return refusal(crate::db::Fail::from(e).into()),
+                    },
+                    Err(e) => return refusal(e.into()),
+                };
                 let mut out = Vec::new();
                 for (kind, k) in &registry.0 {
                     let count = match entities::ids(&self.pool, &registry, p, kind).await {
@@ -918,7 +930,7 @@ impl Mcp {
                         // человеку, но пустая строка в нём и «не объявлено»
                         // читаются одинаково: вернуть по нему объявление нельзя,
                         // а объявление вида — часть прибора, и оно переезжает.
-                        "spec": serde_json::to_value(k).unwrap_or(Value::Null)
+                        "spec": raw.get(kind).cloned().unwrap_or(Value::Null)
                     }));
                 }
                 ok(json!({ "kinds": out }))

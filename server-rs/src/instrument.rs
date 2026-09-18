@@ -133,6 +133,14 @@ fn text(name: &str) -> Option<&'static str> {
     FILES.iter().find(|(f, _)| *f == name).map(|(_, body)| *body)
 }
 
+/// Раскладка видов: чем набор вправе быть. Объявление лежит тем же складом,
+/// каким его читает `Kinds`, — и раскладывается той же мерой.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Layout {
+    kinds: std::collections::BTreeMap<String, Value>,
+}
+
 /// Гейты с их пунктами и файлы, которые пошли в дело.
 struct Gates {
     gates: Vec<Gate>,
@@ -151,6 +159,7 @@ struct Rungs {
 
 /// Прибор целиком, как его объявляет репозиторий.
 struct Instrument {
+    kinds: std::collections::BTreeMap<String, Value>,
     gates: Vec<Gate>,
     rules: Vec<Rule>,
     phases: Vec<Phase>,
@@ -167,13 +176,27 @@ fn declared() -> Result<Instrument, String> {
     let phases = phases()?;
     let Rungs { set, process, title, rungs, used: ladder_files } = ladder()?;
     used.extend(ladder_files);
+    used.push("kinds.json".to_owned());
     no_orphan_files(&used)?;
+    let raw = text("kinds.json").ok_or("объявления видов нет: instrument/kinds.json")?;
+    let layout: Layout =
+        serde_json::from_str(raw).map_err(|e| format!("instrument/kinds.json не разбирается: {e}"))?;
+    if layout.kinds.len() < 10 {
+        return Err(format!("объявлено {} видов: набору нечем быть", layout.kinds.len()));
+    }
+    // Объявление вида обязано разбираться ТЕМ ЖЕ складом, каким его читает
+    // сервер: раскладка, которую он не поймёт, остановит его на следующем старте
+    // — и остановит уже после записи.
+    for (name, spec) in &layout.kinds {
+        serde_json::from_value::<crate::kinds::Kind>(spec.clone())
+            .map_err(|e| format!("вид {name} не разбирается: {e}"))?;
+    }
     for p in &phases {
         if !p.gate.is_empty() && !gates.iter().any(|g| g.phase == p.gate) {
             return Err(format!("фаза {} стоит на гейте {}, которого нет в объявлении", p.id, p.gate));
         }
     }
-    Ok(Instrument { gates, rules, phases, set, process, title, rungs })
+    Ok(Instrument { kinds: layout.kinds, gates, rules, phases, set, process, title, rungs })
 }
 
 fn read() -> Result<Gates, String> {
@@ -366,7 +389,7 @@ fn checked(gates: &[Gate], rules: &[Rule]) -> Result<(), String> {
 /// Всё одной транзакцией под общим замком: раскладывают двое — сервер и всякая
 /// подкоманда, — и половина прибора хуже прежнего целиком.
 pub async fn apply(pool: &Pool) -> Result<Value, String> {
-    let Instrument { gates, rules, phases: steps, set, process, title, rungs } = declared()?;
+    let Instrument { kinds, gates, rules, phases: steps, set, process, title, rungs } = declared()?;
     let mut client = crate::db::conn(pool).await.map_err(|e| crate::db::Says::says(&e))?;
     let tx = client.transaction().await.map_err(|e| e.to_string())?;
     tx.execute("SELECT pg_advisory_xact_lock(hashtext('instrument'))", &[])
@@ -549,6 +572,39 @@ pub async fn apply(pool: &Pool) -> Result<Value, String> {
         .await
         .map_err(|e| e.to_string())?;
 
+    // РАСКЛАДКА ВИДОВ — ТОТ ЖЕ ПРИБОР. Чем набор вправе быть, решали двери
+    // `kind-add`, `kind-id-set` и ещё пять — на живом и для всех наборов сразу:
+    // таблица у раскладки одна. Файл рядом (`MH_CORPUS_LAYOUT`) снят вместе с
+    // ними: он заводил раскладку из чужого дерева, и что в ней лежит, зависело
+    // от того, чей путь стоял в окружении.
+    let kinds_was = tx
+        .query("SELECT name, spec FROM kind_layout", &[])
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut kinds_changed = Vec::new();
+    for (name, spec) in &kinds {
+        let old = kinds_was.iter().find(|w| w.get::<_, &str>(0) == name);
+        if old.is_some_and(|w| &w.get::<_, Value>(1) == spec) {
+            continue;
+        }
+        kinds_changed.push(json!({ "вид": name,
+                                   "было": if old.is_some() { "изменён" } else { "заведён" } }));
+        tx.execute(
+            "INSERT INTO kind_layout (name, spec, declared_at, declared_by)
+             VALUES ($1,$2,$3,'instrument')
+             ON CONFLICT (name) DO UPDATE SET spec = EXCLUDED.spec,
+               declared_at = EXCLUDED.declared_at, declared_by = EXCLUDED.declared_by",
+            &[name, spec, &crate::projector::now_ms()],
+        )
+        .await
+        .map_err(|e| format!("вид {name} не записан: {}", crate::db::Says::says(&e)))?;
+    }
+    let kind_names: Vec<String> = kinds.keys().cloned().collect();
+    let kinds_gone = tx
+        .execute("DELETE FROM kind_layout WHERE NOT (name = ANY($1))", &[&kind_names])
+        .await
+        .map_err(|e| e.to_string())?;
+
     // ФАЗЫ — ТОТ ЖЕ ПРИБОР. Порядок работы, гейт фазы и вид задач, который она
     // пускает, решают, что набору выдадут следующим; до сих пор их правила
     // правили дверью на живом, и прочесть объявление было нечем.
@@ -686,11 +742,13 @@ pub async fn apply(pool: &Pool) -> Result<Value, String> {
     // пункт при этом вовсе не имеет замера, и гейт над ним считался бы пройденным.
     let touched = !changed.is_empty() || gone > 0 || measures > 0
         || phases_gone > 0 || !phases_changed.is_empty()
-        || !ladder_changed.is_empty() || rungs_gone > 0;
+        || !ladder_changed.is_empty() || rungs_gone > 0
+        || !kinds_changed.is_empty() || kinds_gone > 0;
     if touched {
         crate::watch::touch_all(pool, "правка прибора").await.map_err(|e| crate::db::Says::says(&e))?;
     }
     Ok(json!({ "гейтов": gates.len(), "пунктов": rules.len(), "фаз": steps.len(),
+               "видов": kinds.len(), "виды": kinds_changed, "снято видов": kinds_gone,
                "изменено": changed.len(), "что": changed,
                "снято пунктов": gone, "снято замеров": measures, "снято фаз": phases_gone,
                "фазы": phases_changed, "ступеней": rungs.len(),
@@ -752,6 +810,14 @@ mod declared {
         assert!(i.rules.len() > 100, "пунктов гейта {}: похоже на потерянное дерево", i.rules.len());
         assert!(i.phases.len() >= 5, "фаз объявлено {}: работа идёт не в двух шагах", i.phases.len());
         assert!(i.rungs.len() >= 10, "ступеней {}: лестница короче, чем была", i.rungs.len());
+        assert!(i.kinds.len() >= 40, "видов {}: раскладка похудела", i.kinds.len());
+        // Вид, на который ссылается другой видом-хозяином, обязан быть объявлен:
+        // внутренний вид без хозяина адресовать нечем.
+        for (name, spec) in &i.kinds {
+            if let Some(home) = spec.get("in").and_then(|v| v.as_str()) {
+                assert!(i.kinds.contains_key(home), "вид {name} живёт внутри {home}, которого нет");
+            }
+        }
         assert!(FILES.len() > i.rules.len(), "у пунктов нет ни запросов, ни проб");
         // Метка подстановки у ступени — та самая, которую подставляет сервер.
         // Объявление и код называют её порознь, и разойтись им нельзя: `next-step`
