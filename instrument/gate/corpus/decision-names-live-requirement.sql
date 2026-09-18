@@ -1,0 +1,1 @@
+SELECT l.decision_id || ' → ' || l.target AS detail FROM project_decision_links l WHERE l.project_id = $1 AND l.target LIKE 'FR-%' AND NOT EXISTS (SELECT 1 FROM project_requirements r WHERE r.project_id = l.project_id AND r.id = l.target) AND NOT EXISTS (SELECT 1 FROM requirement_retired q WHERE q.project_id = l.project_id AND q.id = l.target) ORDER BY 1

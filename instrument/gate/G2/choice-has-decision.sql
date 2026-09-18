@@ -1,0 +1,1 @@
+SELECT d.id || ' — ' || left(d.title, 50) AS detail FROM project_decisions d WHERE d.project_id = $1 AND d.status = 'accepted' AND true AND NOT EXISTS (SELECT 1 FROM project_decision_alternatives a WHERE a.project_id = d.project_id AND a.decision_id = d.id) ORDER BY d.number

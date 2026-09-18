@@ -1,0 +1,1 @@
+SELECT 'датчик «revoked-mention» ' || fact_gap($1, 'revoked-mention') || ': проверить нечем, и это не зелёное' AS detail WHERE NOT fact_fresh($1, 'revoked-mention') UNION ALL SELECT f.name || '  ' || f.detail AS detail FROM code_fact f WHERE f.project_id = $1 AND f.kind = 'revoked-mention' AND f.detail !~* '(ADR-0082|донор|donor|удал|отмен|прежн|историч)' ORDER BY 1

@@ -1,0 +1,1 @@
+SELECT 'порождённый порядок ' || fact_gap($1, 'generated-order') || ': пусто здесь значит «не знаем», а не «совпало»' AS detail WHERE NOT fact_fresh($1, 'generated-order') UNION ALL SELECT name || ' — ' || detail FROM generated_drift WHERE project_id = $1 ORDER BY 1

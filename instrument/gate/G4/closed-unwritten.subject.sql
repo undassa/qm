@@ -1,0 +1,1 @@
+SELECT tc.task_id || ' → ' || tc.check_id AS entity FROM project_task_check tc JOIN project_plan_tasks t ON t.project_id = tc.project_id AND t.id = tc.task_id AND t.state = 'closed' WHERE tc.project_id = $1 AND tc.said_as = 'доказательство'

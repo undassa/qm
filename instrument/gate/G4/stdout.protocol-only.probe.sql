@@ -1,0 +1,1 @@
+INSERT INTO code_fact (project_id, kind, name, detail) VALUES ($1::text, 'crate-manifest', 'probe-selftest/low/Cargo.toml', 'есть на диске'), ($1::text, 'stdout-unlocked', 'probe-selftest/low/src/main.rs:1', '#[allow(clippy::print_stdout)]'), ($1::text, 'workspace-lint', 'probe-selftest/Cargo.toml:1', 'print_stdout = "deny"')

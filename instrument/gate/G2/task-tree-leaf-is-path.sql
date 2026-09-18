@@ -1,0 +1,1 @@
+SELECT l.task_id || ' — ' || coalesce(nullif(l.dir,''),'?') || ' → ' || l.leaf || ': не путь, а имя предмета' AS detail FROM project_task_tree_leaf l WHERE l.project_id = $1 AND NOT l.is_path AND NOT l.exempt ORDER BY 1

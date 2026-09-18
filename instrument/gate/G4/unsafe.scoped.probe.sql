@@ -1,0 +1,1 @@
+INSERT INTO code_fact (project_id, kind, name, detail) VALUES ($1::text, 'crate-manifest', 'probe-selftest/low/Cargo.toml', 'есть на диске'), ($1::text, 'crate', 'probe-low', 'названо в probe-selftest/low/Cargo.toml'), ($1::text, 'unsafe-site', 'probe-selftest/low/src/lib.rs:1', 'unsafe { core::hint::unreachable_unchecked() }')

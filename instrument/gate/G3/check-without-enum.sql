@@ -1,0 +1,1 @@
+SELECT 'датчик «domain-check» ' || fact_gap($1, 'domain-check') || ': проверить нечем, и это не зелёное' AS detail WHERE NOT fact_fresh($1, 'domain-check') UNION ALL SELECT f.name || '  —  ' || f.detail AS detail FROM code_fact f WHERE f.project_id = $1 AND f.kind = 'domain-check' AND f.detail LIKE 'множество CHECK без перечисления%' AND true ORDER BY 1

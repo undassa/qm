@@ -1,0 +1,1 @@
+INSERT INTO code_fact (project_id, kind, name, detail) VALUES ($1, 'translation-stamp', 'FR-01 · `00000000`', 'названо в crates/tot-probe/tests/probe.rs') ON CONFLICT DO NOTHING

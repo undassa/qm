@@ -1,0 +1,1 @@
+SELECT q.id || ' — вопрос решён, а ни одна задача его не называет: исполнять решение некому' AS detail FROM project_questions q WHERE q.project_id = $1 AND q.state = 'decided' AND NOT EXISTS (SELECT 1 FROM project_documents d WHERE d.project_id = q.project_id AND d.entity_kind = 'task' AND d.content ~ ('\y' || q.id || '\y')) AND true ORDER BY 1

@@ -1,0 +1,1 @@
+INSERT INTO project_documents(project_id, entity_kind, entity_name, content, content_hash, bytes, revision, updated_at, updated_by) VALUES ($1,'run','проба-имени','# проба',md5('# проба'),7,1,0,'проба')

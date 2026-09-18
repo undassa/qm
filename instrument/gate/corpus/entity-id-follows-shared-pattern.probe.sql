@@ -1,0 +1,1 @@
+INSERT INTO project_requirements (project_id, id, kind, area, text, satisfied, priority, entity_kind, entity_name) VALUES ($1,'ЧУЖОЕ-ИМЯ','FR','X','проба образца имени',false,'О','srs','') ON CONFLICT DO NOTHING

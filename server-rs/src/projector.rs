@@ -281,12 +281,13 @@ ALTER TABLE kind_status ADD COLUMN IF NOT EXISTS durable boolean NOT NULL DEFAUL
 --     получали гейт, которому будто нужны две подписи;
 --   `unknown` — пункт плана, машинного способа у которого пока нет. Он обязан
 --     существовать: отсутствие пункта нельзя ни показать, ни посчитать.
+--
+-- Стережёт их `gate_item`: род объявляется там, и там же стоит ограничение. У
+-- замера своего рода больше нет — он был копией.
 DO $$ BEGIN
   ALTER TABLE project_gates DROP CONSTRAINT IF EXISTS project_gates_kind_check;
   ALTER TABLE project_gates DROP CONSTRAINT IF EXISTS project_gates_check;
   ALTER TABLE project_gates DROP CONSTRAINT IF EXISTS project_gates_check1;
-  ALTER TABLE project_gates ADD CONSTRAINT project_gates_kind_check
-    CHECK (kind IN ('query','command','manual','unknown'));
 EXCEPTION WHEN others THEN NULL; END $$;
 
 -- Объявленный способ СТУПЕНИ живёт отдельно от самой ступени — ровно по тому
@@ -2565,7 +2566,6 @@ CREATE TABLE IF NOT EXISTS gate_item (
   owner text,
   probe text NOT NULL DEFAULT '',
   why text NOT NULL DEFAULT '',
-  article integer,
   PRIMARY KEY (phase, item));
 
 CREATE TABLE IF NOT EXISTS gate_head (
@@ -2752,17 +2752,29 @@ CREATE TABLE IF NOT EXISTS server_strain (
   nested bigint NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS server_strain_at ON server_strain (at DESC);
 
--- ЗАМЕР БОЛЬШЕ НЕ ДЕРЖИТ КОПИЮ ПРАВИЛА. Запрос, проба, довод и подписант лежали
--- и в объявлении, и в каждой строке замера — по числу наборов. Копию писал
--- только круг замера, и пробу он не писал вовсе: её колонку заполняли переезды
--- схемы, а дверь отдавала пустое у всех ста шестидесяти пунктов. Два описания
--- одного правила расходятся молча; описание теперь одно, и дверь читает его.
-ALTER TABLE project_gates DROP CONSTRAINT IF EXISTS project_gates_query_check;
-ALTER TABLE project_gates DROP CONSTRAINT IF EXISTS project_gates_owner_check;
+-- ЗАМЕР БОЛЬШЕ НЕ ДЕРЖИТ КОПИЮ ПРАВИЛА. Запрос, проба, довод, подписант,
+-- заголовок и род лежали и в объявлении, и в каждой строке замера — по числу
+-- наборов. Копию писал только круг замера, и пробу он не писал вовсе: её
+-- колонку заполняли переезды схемы, а дверь отдавала пустое у всех ста
+-- шестидесяти пунктов. Заголовок и род при этом отставали на круг: правка была
+-- не видна ни в двери, ни на доске до следующего пересчёта.
+--
+-- Два описания одного правила расходятся молча; описание теперь одно —
+-- `gate_item`, — и читают его все, кому нужно правило, а не замер.
 ALTER TABLE project_gates DROP COLUMN IF EXISTS query;
 ALTER TABLE project_gates DROP COLUMN IF EXISTS probe;
 ALTER TABLE project_gates DROP COLUMN IF EXISTS why;
 ALTER TABLE project_gates DROP COLUMN IF EXISTS owner;
+ALTER TABLE project_gates DROP COLUMN IF EXISTS item;
+ALTER TABLE project_gates DROP COLUMN IF EXISTS kind;
+ALTER TABLE project_gates DROP COLUMN IF EXISTS article;
+
+-- Статья конституции держится за пункт таблицей `project_article_gates` — и
+-- держалась всегда. Колонка `article` у пункта и у замера осталась от прежнего
+-- устройства: её не читал и не писал никто, а объявление в репозитории её и не
+-- знает. Колонка, которую нельзя ни прочесть, ни объявить, — обещание связи,
+-- которой нет.
+ALTER TABLE gate_item DROP COLUMN IF EXISTS article;
 "#;
 
 /// Переименование внутри колонок. Отдельной пачкой, а не в `DDL`: её же заводит
@@ -3966,7 +3978,7 @@ pub(crate) async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, c
     // вопрос «можно ли идти дальше», и ответ не должен зависеть от того, кто как
     // завёл проверки у себя.
     let rows = client
-        .query("SELECT phase, item, kind, query, why, owner, id, subject_query, subject_why, since
+        .query("SELECT phase, kind, query, why, id, subject_query, subject_why, since
                   FROM gate_item ORDER BY phase, id", &[])
         .await?;
     let now = now_ms();
@@ -3975,12 +3987,11 @@ pub(crate) async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, c
     let mut unwritten: Vec<Value> = Vec::new();
     for r in &rows {
         let phase: String = r.get(0);
-        let item: String = r.get(1);
-        let kind: String = r.get(2);
-        let query: Option<String> = r.get(3);
+        let kind: String = r.get(1);
+        let query: Option<String> = r.get(2);
         // Отмена и отметка адресуются ИМЕНЕМ, а не заголовком: заголовок
         // переписывают, и прежде всякая правка формулировки роняла отмену.
-        let id: String = r.get(6);
+        let id: String = r.get(4);
         // Неприменимый пункт НЕ ИСПОЛНЯЕТСЯ. Исполнить и прощать значило бы
         // считать нарушением то, чего в этом проекте не существует: `.sqlx` у
         // проекта без sqlx не «не снята» — её тут не бывает.
@@ -4003,7 +4014,7 @@ pub(crate) async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, c
         // сущностей пункта, и пункт пройден. Поэтому предмет обязан быть
         // непустым, пока отсутствие не установлено: датчик не свеж, сборка не
         // прогонялась. Есть сущности — пункт мерится, и красное только чинится.
-        let subject: String = r.get(7);
+        let subject: String = r.get(5);
         let subject_rows = if subject.trim().is_empty() {
             Ok(1)
         } else {
@@ -4011,20 +4022,17 @@ pub(crate) async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, c
         };
         let entry = match subject_rows {
             Ok(0) => {
-                let w: String = r.get(8);
-                json!({ "item": item, "kind": kind, "computed": "passed",
-                        "violations": 0, "detail": [],
+                let w: String = r.get(6);
+                json!({ "computed": "passed", "violations": 0, "detail": [],
                         "why": if w.trim().is_empty() {
                             "сущностей пункта в проекте нет: проверять нечего".to_owned()
-                        } else { w },
-                        "means": r.get::<_, String>(4) })
+                        } else { w } })
             }
-            Ok(_) => measure_item(&client, project, &item, &kind, query.as_deref(), r).await?,
+            Ok(_) => measure_item(&client, project, &kind, query.as_deref(), r).await?,
             // Запрос предмета, который не исполнился, — не «предмет пуст» и не
             // повод мерить: транзакция после ошибки прервана до точки возврата.
-            Err(e) => json!({ "item": item, "kind": kind, "computed": "unknown",
-                              "why": format!("запрос предмета не исполнился: {}", e.says()),
-                              "means": r.get::<_, String>(4) }),
+            Err(e) => json!({ "computed": "unknown",
+                              "why": format!("запрос предмета не исполнился: {}", e.says()) }),
         };
         // Откат ВСЕГДА: замер обязан только читать, и терять ему нечего. Заодно
         // он отменяет то, что объявленный запрос успел написать: дверь проверяет
@@ -4054,25 +4062,22 @@ pub(crate) async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, c
         // а правило — из объявления.
         // ЗАПИСЬ — ПОД СВОЕЙ ТОЧКОЙ ВОЗВРАТА, и это не та же точка, что у замера.
         //
-        // Ограничения `project_gates` строже, чем `gate_item`: род пункта там
-        // сверяется с четырьмя словами и обязан сходиться с наличием запроса, а
-        // `gate_item` ничего этого не требует. Отказ записи так уже случался —
-        // «new row violates check constraint», четыре пункта из сорока не
-        // мерились вовсе. Тогда это стоило четырёх пунктов; в транзакции без
-        // этой точки стоило бы всего круга.
+        // Строку замера таблица отвергала по своим ограничениям — четыре пункта
+        // из сорока однажды не мерились вовсе, — и стоило это четырёх пунктов;
+        // в транзакции без этой точки стоило бы всего круга. Ограничений тех
+        // больше нет вместе с колонками объявления, но отказ записи бывает и
+        // другой, а круг обязан пережить его тем же способом.
         client.batch_execute("SAVEPOINT запись").await?;
         let written = client
             .execute(
-                "INSERT INTO project_gates (project_id, phase, item, kind,
-                                            state, violations, detail, result, checked_at, id)
-                 VALUES ($1,$2,$3,$9,$4,$5,$6,$7,$8,$10)
+                "INSERT INTO project_gates (project_id, phase, state, violations, detail,
+                                            result, checked_at, id)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
                  ON CONFLICT (project_id, phase, id) DO UPDATE SET
-                   item = EXCLUDED.item, kind = EXCLUDED.kind, id = EXCLUDED.id,
                    state = EXCLUDED.state, violations = EXCLUDED.violations,
                    detail = EXCLUDED.detail, result = EXCLUDED.result,
                    checked_at = EXCLUDED.checked_at",
-                &[&project, &phase, &item, &flat, &violations, &detail, &entry, &now,
-                  &kind, &id],
+                &[&project, &phase, &flat, &violations, &detail, &entry, &now, &id],
             )
             .await;
         match written {
@@ -4131,16 +4136,14 @@ pub(crate) async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, c
 async fn measure_item(
     client: &impl deadpool_postgres::GenericClient,
     project: &str,
-    item: &str,
     kind: &str,
     query: Option<&str>,
     r: &tokio_postgres::Row,
 ) -> Result<Value, crate::db::Fail> {
-    let item = item.to_owned();
     let kind = kind.to_owned();
         let why_col: String = r.try_get("why").unwrap_or_default();
         let entry = if kind == "unknown" || kind == "manual" {
-            json!({ "item": item, "kind": kind, "computed": "unknown",
+            json!({ "computed": "unknown",
                     "why": if why_col.is_empty() {
                         if kind == "manual" { "проиграно ли — не записано" } else { "требуется, но машинного способа нет" }
                     } else { why_col.as_str() } })
@@ -4153,16 +4156,13 @@ async fn measure_item(
                 {
                     let since: i64 = r.try_get("since").unwrap_or(0);
                     let v = execute_method_upto(client, project, "query", sql.unwrap_or(""), 200, since).await;
+                    // `why` — про то, ПОЧЕМУ запрос не выполнился; это про
+                    // ЭТОТ круг замера и потому здесь. Чем пункт меряет
+                    // (`means`) — объявление, и его отдаёт дверь из `gate_item`:
+                    // снимок объявления в замере отставал на круг.
                     json!({
-                        "item": item, "kind": kind,
                         "computed": v.state, "violations": v.violations, "detail": v.detail,
-                        // `why` исполнителя — про то, ПОЧЕМУ запрос не выполнился;
-                        // `means` — про то, что пункт вообще меряет. Второе
-                        // объявляется вместе с пунктом и до сих пор наружу не
-                        // выходило: доска показывала имя пункта и знак, а чем он
-                        // меряет и зачем — знал только тот, кто заводил.
                         "why": v.why,
-                        "means": why_col,
                     })
                 }
             }
@@ -4172,7 +4172,7 @@ async fn measure_item(
             // добавляла — только откладывала. Ветка остаётся отказом, а не
             // тишиной: род пункта, которого машина не знает, — дефект объявления.
             json!({
-                "item": item, "kind": kind, "computed": "unknown",
+                "computed": "unknown",
                 "why": format!("род пункта «{kind}» машине не известен: мерить им нечем"),
             })
         };
@@ -4228,12 +4228,22 @@ pub(crate) async fn gate(pool: &Pool, project: &str, phase: Option<&str>) -> Res
            // хуже непрочитанного: оно выглядит полным. Предмет и граница `since`
            // не отдавались вовсе, а именно они решают, когда пункт говорит
            // «судить нечем».
-            "SELECT g.phase, g.item, g.kind, g.result, g.checked_at, i.why, g.id, i.query, i.probe,
-                    i.owner, g.probe_ok, i.subject_query, i.subject_why, i.since
-               FROM project_gates g
-               JOIN gate_item i ON i.phase = g.phase AND i.id = g.id
-              WHERE g.project_id = $1 AND ($2 = '' OR g.phase = $2)
-              ORDER BY g.phase, g.id, g.item",
+           // СОЕДИНЕНИЕ ПОЛНОЕ, и это не про аккуратность. Объявление без замера
+           // — «ещё не мерили», и оно обязано быть видно: иначе заведённый пункт
+           // не существует до первого круга. Замер без объявления — сирота, и он
+           // обязан быть виден ТЕМ ЖЕ ответом: его считает `gate_state` и им
+           // держится барьер фаз, а внутренним соединением он пропадал из ответа
+           // молча — дверь говорила «у гейта нет ни одного пункта» там, где
+           // барьер называл его непройденным.
+            "SELECT coalesce(i.phase, g.phase), coalesce(i.id, g.id), i.item, i.kind,
+                    g.result, g.checked_at, i.why, i.query, i.probe, i.owner, g.probe_ok,
+                    i.subject_query, i.subject_why, i.since
+               FROM gate_item i
+               FULL JOIN project_gates g
+                 ON g.phase = i.phase AND g.id = i.id AND g.project_id = $1
+              WHERE (i.id IS NOT NULL OR g.project_id = $1)
+                AND ($2 = '' OR coalesce(i.phase, g.phase) = $2)
+              ORDER BY 1, 2",
                &[&project, &phase.unwrap_or("")],
         )
         .await?;
@@ -4270,32 +4280,49 @@ pub(crate) async fn gate(pool: &Pool, project: &str, phase: Option<&str>) -> Res
     let mut checked_at: std::collections::BTreeMap<String, Option<i64>> = std::collections::BTreeMap::new();
     for r in &rows {
         let phase: String = r.get(0);
-        let item: String = r.get(1);
-        let kind: String = r.get(2);
-        let stored: Option<Value> = r.get(3);
-        let at: Option<i64> = r.get(4);
-        let why_col: String = r.get(5);
+        let rule: String = r.get(1);
+        let title: Option<String> = r.get(2);
+        let stored: Option<Value> = r.get(4);
+        let at: Option<i64> = r.get(5);
         // Пустой замер — не «пройден» и не «провален». Он значит, что пункт ещё
         // ни разу не мерили, и сказать это надо словом.
         let mut entry = stored.unwrap_or_else(|| {
-            json!({ "item": item, "kind": kind, "computed": "unknown",
-                    "why": "ещё не мерили: пересчёт с заведения пункта не запускался",
-                    "means": why_col })
+            json!({ "computed": "unknown",
+                    "why": "ещё не мерили: пересчёт с заведения пункта не запускался" })
         });
 
-        // Само правило — рядом с замером. Отдельной ручкой это было бы вторым
-
-        // местом, где надо помнить имя пункта; здесь оно там же, где число.
-
+        // ПРАВИЛО — ИЗ ОБЪЯВЛЕНИЯ, ЦЕЛИКОМ И ПОВЕРХ ЗАМЕРА. Заголовок, род и
+        // довод лежали ещё и в снимке замера, и снимок этот делался в прошлый
+        // круг: правка рода или довода не была видна ни в двери, ни на доске до
+        // следующего пересчёта — то самое молчаливое расхождение двух описаний,
+        // только спрятанное внутрь `result`.
         if let Some(m) = entry.as_object_mut() {
-            m.insert("id".into(), json!(r.get::<_, Option<String>>(6).unwrap_or_default()));
-            m.insert("query".into(), json!(r.get::<_, Option<String>>(7).unwrap_or_default()));
-            m.insert("probe".into(), json!(r.get::<_, String>(8)));
-            m.insert("owner".into(), json!(r.get::<_, Option<String>>(9).unwrap_or_default()));
-            m.insert("subject".into(), json!(r.get::<_, String>(11)));
-            m.insert("subjectWhy".into(), json!(r.get::<_, String>(12)));
-            m.insert("since".into(), json!(r.get::<_, i64>(13)));
+            m.insert("id".into(), json!(rule));
             m.insert("phase".into(), json!(phase));
+            match title {
+                Some(title) => {
+                    m.insert("item".into(), json!(title));
+                    m.insert("kind".into(), json!(r.get::<_, Option<String>>(3).unwrap_or_default()));
+                    m.insert("means".into(), json!(r.get::<_, Option<String>>(6).unwrap_or_default()));
+                    m.insert("query".into(), json!(r.get::<_, Option<String>>(7).unwrap_or_default()));
+                    m.insert("probe".into(), json!(r.get::<_, Option<String>>(8).unwrap_or_default()));
+                    m.insert("owner".into(), json!(r.get::<_, Option<String>>(9).unwrap_or_default()));
+                    m.insert("subject".into(), json!(r.get::<_, Option<String>>(11).unwrap_or_default()));
+                    m.insert("subjectWhy".into(), json!(r.get::<_, Option<String>>(12).unwrap_or_default()));
+                    m.insert("since".into(), json!(r.get::<_, Option<i64>>(13).unwrap_or(0)));
+                }
+                // СИРОТА НАЗЫВАЕТСЯ ВСЛУХ. Замер, чьё правило снято, продолжает
+                // считаться состоянием гейта и держать барьер фаз; молча спрятав
+                // его, дверь сказала бы «пунктов нет» о том, чем барьер держит.
+                None => {
+                    m.insert("item".into(), json!(rule.clone()));
+                    m.insert("kind".into(), json!("unknown"));
+                    m.insert("orphan".into(), json!(true));
+                    m.insert("means".into(), json!(
+                        "замер есть, а правила нет: пункт снят, а его замер остался и \
+                         продолжает считаться состоянием гейта"));
+                }
+            }
             // ВЕРДИКТ ОДНИМ СЛОВОМ. Состояние у пункта было — `computed`, — но
             // рядом лежало `violations`, и всякий подсчёт вида «красный, если
             // нарушений больше нуля» клал `unknown` в зелёные: у него
@@ -4319,7 +4346,6 @@ pub(crate) async fn gate(pool: &Pool, project: &str, phase: Option<&str>) -> Res
             // ЧЕЙ ПРЕДМЕТ СПОРА. Находка остаётся красной, но счёт разделён:
             // «одиннадцать нарушений» смешивало своё с чужим, и по одному числу
             // нельзя было решить, работа это набора или слепота сервера.
-            let rule = r.get::<_, String>(6);
             if let Some(b) = blame_of.get(&rule) {
                 m.insert("blamed".into(), json!(b.len()));
                 m.insert(
@@ -4328,13 +4354,10 @@ pub(crate) async fn gate(pool: &Pool, project: &str, phase: Option<&str>) -> Res
                         "entityId": e, "blame": bl, "fixedBy": fx
                     })).collect::<Vec<_>>()),
                 );
-                let mine = (r.get::<_, Option<Value>>(3)
-                    .and_then(|v| v.get("violations").and_then(|n| n.as_i64()))
-                    .unwrap_or(0) as usize)
+                let mine = (m.get("violations").and_then(|n| n.as_i64()).unwrap_or(0) as usize)
                     .saturating_sub(b.iter().filter(|(_, bl, _)| bl == "harness").count());
                 m.insert("violationsOurs".into(), json!(mine));
             }
-
         }
         let slot = checked_at.entry(phase.clone()).or_insert(at);
         // У гейта одно время замера — самое старое из его пунктов. Показывать
@@ -10410,8 +10433,8 @@ pub(crate) async fn set_phase(pool: &Pool, fields: Phase<'_>, drop_it: bool) -> 
     // единственный посев при старте, из проектной таблицы, — на новой установке
     // он пуст, и проверка по нему отказывала бы всякому непустому имени. Выход
     // был бы только один и нигде не названный: пересобрать документ, объявляющий
-    // гейты, и перезапустить процесс. Пункты же пишет живая дверь
-    // `gate-item-set`, и «у гейта есть хоть один объявленный пункт» — ровно то
+    // гейты, и перезапустить процесс. Пункты же приходят объявлением репозитория
+    // при выкладке, и «у гейта есть хоть один объявленный пункт» — ровно то
     // условие, при котором замеры вообще могут появиться. Заголовок принимается
     // тоже: объявленный гейт без пунктов — намерение, и оно падает закрытым.
     if let Some(g) = gate.filter(|g| !g.is_empty()) {
@@ -10428,7 +10451,8 @@ pub(crate) async fn set_phase(pool: &Pool, fields: Phase<'_>, drop_it: bool) -> 
                               "why": format!("гейта «{g}» в наборе нет ни одним пунктом и ни одним \
                                               заголовком. Привязать фазу к несуществующему гейту значит \
                                               закрыть все последующие навсегда: замеров у него не будет \
-                                              никогда. Пункт объявляется дверью `gate-item-set`") }));
+                                              никогда. Пункты гейта объявляются в репозитории харнеса, \
+                                              каталог `instrument/gate`") }));
         }
     }
     // ПУСТОЙ ГЕЙТ У ФАЗЫ, ЗА КОТОРОЙ ЕСТЬ ДРУГИЕ, — сказан вслух. Читатель
@@ -11464,236 +11488,6 @@ pub(crate) async fn rewrite_links(
     }))
 }
 
-/// Поля пункта гейта, как их принимает дверь `gate-item-set`.
-pub(crate) struct GateItem<'a> {
-    pub phase: &'a str,
-    pub id: &'a str,
-    pub title: &'a str,
-    pub kind: &'a str,
-    pub query: Option<&'a str>,
-    pub owner: Option<&'a str>,
-    pub probe: Option<&'a str>,
-    pub why: &'a str,
-    /// Над чем пункт меряет. Пусто в ответе — «неизвестно», а не «пройдено».
-    pub subject: Option<&'a str>,
-    pub subject_why: Option<&'a str>,
-    /// С какого мгновения пункт судит. `None` — не трогать объявленное, 0 —
-    /// судить всё, и это умолчание нового пункта.
-    pub since: Option<i64>,
-}
-
-/// Объявить пункт гейта.
-///
-/// Гейты — таблица ОБЪЯВЛЕННОГО, её не пересобирает ни один проход; до сих пор
-/// её наполняла команда донора, и потому у `G5` не было ни одного пункта, а
-/// «проект закончен» оставалось мнением. Дверь та же, что у всего остального:
-/// ручка, а не прямой запрос к базе.
-pub(crate) async fn set_gate_item(pool: &Pool, project: &str, fields: GateItem<'_>, drop_it: bool) -> Result<Value, crate::db::Fail> {
-    let GateItem { phase, id, title, kind, query, owner, probe, why, subject, subject_why, since } =
-        fields;
-    let mut client = crate::db::conn(pool).await?;
-    // Снятие пункта — той же ручкой. Без него пункт, оказавшийся неверным,
-    // снимался бы только запросом в базу мимо сервера; замеры снятого пункта
-    // уходят вместе с ним, иначе гейт продолжал бы считать его непройденным.
-    if drop_it {
-        let gone = client
-            .execute("DELETE FROM gate_item WHERE phase = $1 AND id = $2", &[&phase, &id])
-            .await?;
-        client
-            .execute("DELETE FROM project_gates WHERE phase = $1 AND id = $2", &[&phase, &id])
-            .await?;
-        return Ok(json!({ "status": if gone > 0 { "dropped" } else { "not_found" },
-                          "phase": phase, "id": id }));
-    }
-    // РОД ПУНКТА СВЕРЯЕТСЯ ЗДЕСЬ, а не там, где на нём спотыкается запись.
-    //
-    // Ограничение живёт на `project_gates`, а не на `gate_item`, и до записи
-    // замера род никто не смотрел: дверь принимала любое слово, пункт ложился в
-    // объявление, и падал уже замер — «new row violates check constraint».
-    // Ограничение требует и согласия рода с запросом: запросный пункт без
-    // запроса таблица не принимает, и это тоже лучше сказать здесь.
-    const KINDS: [&str; 4] = ["query", "command", "manual", "unknown"];
-    if !KINDS.contains(&kind) {
-        return Ok(json!({ "status": "kind_unknown", "phase": phase, "id": id, "itemKind": kind,
-                          "why": format!("рода «{kind}» у пунктов не бывает: замер такого пункта \
-                                          не записался бы вовсе. Бывают {}", KINDS.join(" · ")) }));
-    }
-    if (kind == "query") != query.map(|q| !q.trim().is_empty()).unwrap_or(false) {
-        return Ok(json!({ "status": "kind_and_query_disagree", "phase": phase, "id": id,
-                          "itemKind": kind,
-                          "why": "запросный пункт обязан нести запрос, а незапросный — не нести: \
-                                  таблица замеров требует их согласия, и рассогласованный пункт \
-                                  не мерился бы никогда" }));
-    }
-    // ПРОБА ОБЯЗАНА БЫТЬ ЗАПРОСОМ. Дверь принимала прозу — «убрать колонку»,
-    // «назвать сценарий», «завести задачу», — и такой пункт не роняли ни разу:
-    // самотест отвечал «проба не исполнилась: syntax error at or near "убрать"».
-    // На myack так стояли СЕМЬДЕСЯТ СЕМЬ проб из ста десяти, и зелёное у них не
-    // значило ничего — ровно то, против чего этот харнес и написан.
-    //
-    // Проверяется подготовкой запроса, а не исполнением: подготовка ловит и
-    // разбор, и несуществующую таблицу, и не пишет ни строки.
-    // Не переданное берётся у существующей строки: объявить пробу, не повторяя
-    // запрос, — обычное дело, а вставляемая строка проверяется целиком, и
-    // `query IS NULL` при `kind='query'` не проходит по правилу таблицы.
-    // Заголовок не переданный — берётся у существующей строки: правка запроса
-    // не должна требовать повторять текст, а пустой заголовок сделал бы пункт
-    // безымянным в глазах человека.
-    // Имя АДРЕСУЕТ пункт — так сказано в самой двери. Но ключ таблицы —
-    // (фаза, имя), и вызов с чужой фазой заводил ВТОРОЙ пункт под тем же именем:
-    // правило раздваивалось, старое оставалось считать, новое стояло пустым, и
-    // ни в одном ответе это не было видно. Проверено на себе: правка
-    // `section-link-resolves` с `phase=G2` вместо `corpus` завела двойника.
-    //
-    // Переезд пункта в другую фазу — снять и завести, двумя явными вызовами.
-    if !drop_it {
-        let elsewhere = client
-            .query("SELECT phase FROM gate_item WHERE id = $1 AND phase <> $2", &[&id, &phase])
-            .await?;
-        if let Some(r) = elsewhere.first() {
-            let there: String = r.get(0);
-            return Ok(json!({
-                "status": "wrong_phase",
-                "why": format!(
-                    "пункт `{id}` уже объявлен в фазе `{there}`, а вызов пришёл с `{phase}`. \
-                     Имя адресует пункт: заводить его второй раз под другой фазой значит \
-                     раздвоить правило. Правьте в `{there}` либо снимите пункт и заведите заново."),
-                "id": id, "declaredIn": there, "asked": phase,
-            }));
-        }
-    }
-    let was = client
-        .query(
-            "SELECT query, owner, probe, item, subject_query FROM gate_item WHERE phase = $1 AND id = $2",
-            &[&phase, &id],
-        )
-        .await?;
-    let had: (Option<String>, Option<String>, String, String, String) = match was.first() {
-        Some(r) => (r.get(0), r.get(1), r.get(2), r.get(3), r.get(4)),
-        None => (None, None, String::new(), String::new(), String::new()),
-    };
-    // Проба проверяется ПОСЛЕ подстановки прежней, и отметка ставится той пробе,
-    // которая в строке останется. Прежде отметка бралась только у переданной, и
-    // правка одного запроса гасила `probe_ok` у нетронутой пробы в NULL — пункт
-    // становился «неизвестно, исполняется ли», ничем это не заслужив.
-    //
-    // Отказ — только на ПЕРЕДАННУЮ пробу. Унаследованная, которая не разбирается,
-    // — уже стоящая беда, и запрещать из-за неё правку запроса значит запирать
-    // пункт в том виде, в котором он сломан.
-    // ВЛАДЕЛЕЦ БЫВАЕТ ТОЛЬКО У ПОДПИСНОГО ПУНКТА — так сказано правилом самой
-    // таблицы замеров. Дверь этого не знала и принимала владельца у запросного:
-    // пункт заводился, а ЗАМЕР ВСЕГО ГЕЙТА падал на первичной записи. Одна
-    // невнимательная строка роняла счёт целиком, и связь между ней и отказом
-    // приходилось искать глазами.
-    if owner.map(|o| !o.trim().is_empty()).unwrap_or(false) {
-        return Ok(json!({
-            "status": "owner_without_signature",
-            "why": format!(
-                "у пункта не бывает владельца: гейт АВТОМАТИЧЕСКИЙ и закрыт, когда \
-                 выполнены его условия. Подписывать машинный замер некому, и род \
-                 «signed» снят вместе с этим — пункт «{kind}» судит свой запрос."),
-        }));
-    }
-
-    // ЗАПРОС ТОЖЕ ОБЯЗАН РАЗБИРАТЬСЯ. Дверь проверяла пробу и принимала любой
-    // запрос: пункт с непарным запросом молча отвечал «мерить нечем», и узнать
-    // об этом можно было только самотестом. Поймано на себе — подстановка
-    // удвоила кавычку, дверь сказала «записано».
-    //
-    // Проверяется ПОДГОТОВКОЙ: она ловит и разбор, и несуществующую таблицу, и
-    // не читает ни строки.
-    if let Some(text) = query.map(str::trim).filter(|q| !q.is_empty()) {
-        if let Err(e) = client.prepare(text).await {
-            return Ok(json!({
-                "status": "query_not_a_query",
-                "why": format!(
-                    "запрос пункта не разбирается, и мерить им нельзя: {}. \
-                     Пункт с таким запросом отвечает «мерить нечем» и молчит об этом.",
-                    e.says()
-                ),
-            }));
-        }
-    }
-
-    // Проба ИСПОЛНЯЕТСЯ, а не разбирается. Разбор пропускает пробу, которая
-    // споткнётся о первое же правило таблицы: собственная проба этого пункта
-    // разобралась и упала на `project_requirements_kind_check` — то есть дверь
-    // сказала «принято», а уронить пункт этой пробой было нельзя.
-    //
-    // Исполнение — в транзакции с откатом, ровно как в самотесте: набор после
-    // объявления пункта обязан остаться тем же, чем был.
-    //
-    // Ноль подсаженных строк — тот же отказ. Проба, ничего не подсадившая, не
-    // роняет ничего, и самотест назовёт такой пункт сломанным; узнать об этом у
-    // двери лучше, чем через сто десять пунктов самотеста.
-    let probe_text = probe.map(|p| p.to_owned()).unwrap_or_else(|| had.2.clone());
-    if !probe_text.trim().is_empty() {
-        let text = probe_text.trim().to_owned();
-        let tx = client.transaction().await?;
-        let ran = tx.execute(text.as_str(), &[&project]).await;
-        tx.rollback().await?;
-        let why = match &ran {
-            Err(e) => Some(format!(
-                "проба не исполнилась, и уронить ею правило нельзя: {}. \
-                 Проба — это ЗАПРОС, ПОДСАЖИВАЮЩИЙ нарушение, а не описание того, что надо сделать.",
-                e.says())),
-            Ok(0) => Some(
-                "проба исполнилась и не подсадила ни строки: уронить ею правило нельзя".to_owned()),
-            Ok(_) => None,
-        };
-        // ПРИГОВОР ПРОБЕ ЗДЕСЬ НЕ ВЫНОСИТСЯ, и `probe_runs` больше никуда не
-        // едет. «Проба подсадила строку» и «правило на подсаженное
-        // отреагировало» — разные утверждения, а колонка была одна, и правка
-        // ЗАГОЛОВКА пункта перекрашивала сломанную самотестом пробу в
-        // проверенную: слабый смысл побеждал сильный на каждой правке. Дверь
-        // по-прежнему отказывает пробе, не подсадившей ничего, — но приговор
-        // выносит самотест, а до него колонка честно пуста.
-        let _ = why.is_none();
-        if let (Some(why), Some(_)) = (why, probe) {
-            return Ok(json!({ "status": "probe_does_not_plant", "why": why, "probe": text }));
-        }
-    }
-    let title = if title.trim().is_empty() { had.3.clone() } else { title.to_owned() };
-    if id.trim().is_empty() {
-        return Ok(json!({ "status": "nameless",
-                          "why": "пункт гейта без имени не заводится: имя адресует пункт, заголовок его объясняет" }));
-    }
-    let judged_changed = query.is_some_and(|q| Some(q) != had.0.as_deref())
-        || probe.is_some_and(|p| p != had.2)
-        || subject.is_some_and(|q| q != had.4);
-    let query = query.map(|q| q.to_owned()).or(had.0);
-    let owner = owner.map(|o| o.to_owned()).or(had.1);
-    let probe = probe_text;
-    let n = client
-        .execute(
-            "INSERT INTO gate_item (phase, id, item, kind, query, owner, probe,
-                                    subject_query, subject_why, since)
-             VALUES ($1, $2, $7, $3, $4, $5, $6, coalesce($8, ''), coalesce($9, ''),
-                     coalesce($10::bigint, 0))
-             ON CONFLICT (phase, id) WHERE id <> ''
-               DO UPDATE SET item = EXCLUDED.item, kind = EXCLUDED.kind, query = EXCLUDED.query,
-                             owner = EXCLUDED.owner, probe = EXCLUDED.probe,
-                             subject_query = coalesce($8, gate_item.subject_query),
-                             subject_why = coalesce($9, gate_item.subject_why),
-                             since = coalesce($10::bigint, gate_item.since)",
-            &[&phase, &id, &kind, &query, &owner, &probe, &title,
-              &subject, &subject_why, &since],
-        )
-        .await?;
-    if judged_changed {
-        client
-            .execute("UPDATE project_gates SET probe_ok = NULL WHERE phase = $1 AND id = $2", &[&phase, &id])
-            .await?;
-    }
-    if !why.is_empty() {
-        client
-            .execute("UPDATE gate_item SET why = $3 WHERE phase = $1 AND id = $2",
-                     &[&phase, &id, &why])
-            .await?;
-    }
-    Ok(json!({ "phase": phase, "id": id, "item": title, "kind": kind, "written": n, "why": why }))
-}
-
 /// Виды, чьи пункты готовности переносятся. Список назван здесь один раз и
 /// используется и переносом, и отказом: иначе «пунктов нет» и «спрашивать
 /// нечем» перестанут различаться.
@@ -12688,10 +12482,11 @@ async fn ladder_holds(
     let asked_step = position(client, project, "godzy").await?;
     let red_earlier: Vec<String> = client
         .query(
-            "SELECT g.phase || ' · ' || g.item FROM project_gates g
+            "SELECT g.phase || ' · ' || i.item FROM project_gates g
+               JOIN gate_item i ON i.phase = g.phase AND i.id = g.id
               WHERE g.project_id = $1 AND g.state = 'failed'
                 AND g.phase NOT IN (SELECT ph.gate FROM phase ph WHERE ph.ord >= $2)
-              ORDER BY g.phase, g.item",
+              ORDER BY g.phase, i.item",
             &[&project, &own_phase.unwrap_or(i32::MAX)],
         )
         .await?
@@ -13844,11 +13639,11 @@ async fn try_on(
     let mut moved = Vec::new();
     let mut changed = Vec::new();
     let mut not_with_than_compare = Vec::new();
-    for ((phase, item), (was, was_found, _)) in &before {
-        let Some((became, now_found, than)) = after.get(&(phase.clone(), item.clone())) else {
+    for ((phase, rule), (was, was_found, _)) in &before {
+        let Some((became, now_found, than)) = after.get(&(phase.clone(), rule.clone())) else {
             continue;
         };
-        let name_said = format!("{phase} · {item}");
+        let name_said = format!("{phase} · {rule}");
         // НЕСВЕЖЕЕ «ДО» НЕ СРАВНИВАЕТСЯ, А НАЗЫВАЕТСЯ. Пункт, у которого до
         // правки не было ответа, после неё покажется покрасневшим от неё — хотя
         // краснел он и без всякой правки. Одной оговорки внизу мало: находка
@@ -13906,7 +13701,7 @@ async fn snapshot_gate(
             // три» не говорит, ЧТО чинить, а примерка затем и заводится, чтобы
             // сказать это до правки. Берутся первые три — перечень целиком
             // бывает в сотни строк и хоронит ответ.
-            "SELECT phase, item, coalesce(result->>'computed', 'unknown'),
+            "SELECT phase, id, coalesce(result->>'computed', 'unknown'),
                     coalesce(result->>'violations', ''),
                     coalesce((SELECT string_agg(д, ' | ')
                                 FROM (SELECT jsonb_array_elements_text(result->'detail') AS д

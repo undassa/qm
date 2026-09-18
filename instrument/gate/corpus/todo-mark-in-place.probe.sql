@@ -1,0 +1,1 @@
+INSERT INTO project_documents(project_id, entity_kind, entity_name, content, content_hash, bytes, revision, updated_at, updated_by) SELECT $1, 'question', 'PROBE-9990', 'проба самотеста: ' || m.value, 'probe-selftest', 0, 1, 1757000000000, 'probe-selftest' FROM scheme($1) m WHERE m.role = 'marker.unresolved' ORDER BY m.ord, m.value LIMIT 1

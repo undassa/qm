@@ -1,0 +1,1 @@
+INSERT INTO code_fact (project_id, kind, name, detail) VALUES ($1::text, 'protocol-item', 'probe-selftest/src/op.rs:1', 'pub enum Op {'), ($1::text, 'protocol-variant', 'probe-selftest/src/op.rs:2', 'ProbeCalibration {')

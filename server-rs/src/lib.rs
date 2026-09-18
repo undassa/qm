@@ -14,6 +14,7 @@ pub mod documents;
 pub mod door;
 pub mod entities;
 pub mod identity;
+pub mod instrument;
 pub mod kinds;
 pub mod mcp;
 pub mod parse;

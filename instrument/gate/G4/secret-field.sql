@@ -1,0 +1,1 @@
+SELECT 'датчик «secret-field» ' || fact_gap($1, 'secret-field') || ': проверить нечем, и это не зелёное' AS detail WHERE NOT fact_fresh($1, 'secret-field') UNION ALL SELECT f.name AS detail FROM code_fact f WHERE f.project_id = $1 AND f.kind = 'secret-field' AND true ORDER BY 1

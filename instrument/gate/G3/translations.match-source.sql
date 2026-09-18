@@ -1,0 +1,47 @@
+WITH строки AS (
+  SELECT d.entity_kind AS док, s.н, s.т
+    FROM project_documents d, regexp_split_to_table(d.content, E'\n') WITH ORDINALITY AS s(т, н)
+   WHERE d.project_id = $1 AND d.entity_kind IN ('srs', 'ui-spec')),
+шапки AS (
+  SELECT док, н, substring(т from '^\*\*((?:N?FR|FR-UI)-\d+) · ') AS ид,
+         trim(rtrim(substring(т from '^\*\*(?:N?FR|FR-UI)-\d+ · (.*)$'), '*')) AS заг
+    FROM строки WHERE т ~ '^\*\*(?:N?FR|FR-UI)-\d+ · '),
+стопы AS (SELECT док, н FROM строки WHERE т ~ '^(#|---)' UNION ALL SELECT док, н FROM шапки),
+треб AS (
+  SELECT ш.ид, left(encode(sha256(convert_to(ш.заг || E'\n' || coalesce((
+           SELECT string_agg(rtrim(с.т), E'\n' ORDER BY с.н) FROM строки с
+            WHERE с.док = ш.док AND с.н > ш.н AND trim(с.т) <> ''
+              AND с.н < coalesce((SELECT min(х.н) FROM стопы х WHERE х.док = ш.док AND х.н > ш.н), 2147483647)), ''),
+         'UTF8')), 'hex'), 8) AS отп
+    FROM шапки ш),
+пстроки AS (
+  SELECT s.н, s.т FROM project_documents d, regexp_split_to_table(d.content, E'\n') WITH ORDINALITY AS s(т, н)
+   WHERE d.project_id = $1 AND d.entity_kind = 'acceptance'),
+пшапки AS (
+  SELECT н, substring(т from '^### ([A-Z][A-Z0-9-]*) · ') AS ид, trim(substring(т from '^### [A-Z][A-Z0-9-]* · (.+)$')) AS заг
+    FROM пстроки WHERE т ~ '^### [A-Z][A-Z0-9-]* · .'),
+сцен AS (
+  SELECT п.ид, left(encode(sha256(convert_to(п.заг || coalesce(E'\n' || (
+           SELECT string_agg(rtrim(с.т), E'\n' ORDER BY с.н) FROM пстроки с
+            WHERE с.н > п.н AND trim(с.т) <> ''
+              AND с.н < coalesce((SELECT min(х.н) FROM пстроки х WHERE х.н > п.н AND х.т ~ '^#'), 2147483647)), ''),
+         'UTF8')), 'hex'), 8) AS отп
+    FROM пшапки п),
+ключи AS (
+  SELECT 'S' || substring(a.story_id from '\d+') || '-AC-' || a.number AS ключ, a.id AS ид
+    FROM project_acceptance a WHERE a.project_id = $1),
+штампы AS (
+  SELECT substring(f.name from '^([A-Z]+(?:-[A-Z]+)?-\d+|S\d+-AC-\d+) · ') AS ид,
+         substring(f.name from '`([0-9a-f]{8})`') AS отп,
+         coalesce(substring(f.detail from 'названо в (.*)$'), f.detail) AS файл
+    FROM code_fact f WHERE f.project_id = $1 AND f.kind = 'translation-stamp')
+SELECT 'датчик «translation-stamp» ' || fact_gap($1, 'translation-stamp') || ': сверять отпечатки переводов нечем' AS detail WHERE NOT fact_fresh($1, 'translation-stamp')
+UNION ALL
+SELECT ш.файл || ' — ' || ш.ид || ': отпечаток снят с имени, которого в наборе нет' || CASE WHEN EXISTS (SELECT 1 FROM треб т WHERE т.ид = 'FR-' || ш.ид) THEN '; требование зовётся FR-' || ш.ид ELSE '' END FROM штампы ш WHERE ш.ид !~ '^S\d+-AC-' AND NOT EXISTS (SELECT 1 FROM треб т WHERE т.ид = ш.ид)
+UNION ALL
+SELECT ш.файл || ' — ' || ш.ид || ' переписан: отпечаток ' || ш.отп || ', текст даёт ' || т.отп || ' — перевод сделан с прежней редакции' FROM штампы ш JOIN треб т ON т.ид = ш.ид WHERE т.отп <> ш.отп
+UNION ALL
+SELECT ш.файл || ' — ' || ш.ид || ': пункта приёмки с этим ключом в наборе нет' FROM штампы ш WHERE ш.ид ~ '^S\d+-AC-' AND NOT EXISTS (SELECT 1 FROM ключи к JOIN сцен с ON с.ид = к.ид WHERE к.ключ = ш.ид)
+UNION ALL
+SELECT ш.файл || ' — ' || ш.ид || ' (' || к.ид || ') переписан: отпечаток ' || ш.отп || ', текст даёт ' || с.отп || ' — перевод сделан с прежней редакции' FROM штампы ш JOIN ключи к ON к.ключ = ш.ид JOIN сцен с ON с.ид = к.ид WHERE с.отп <> ш.отп
+ORDER BY 1

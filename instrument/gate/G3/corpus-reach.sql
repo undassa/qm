@@ -1,0 +1,1 @@
+SELECT 'датчик состава ' || fact_gap($1, 'domain-check') || ': разобран ли корпус — неизвестно' AS detail WHERE NOT fact_fresh($1, 'domain-check') UNION ALL SELECT f.name || '  —  ' || f.detail FROM code_fact f WHERE f.project_id = $1 AND f.kind = 'domain-check' AND (f.detail LIKE 'обходом%' OR f.detail LIKE 'не разобрано%') ORDER BY 1

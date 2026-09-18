@@ -1,0 +1,1 @@
+WITH пол AS (INSERT INTO scheme_term (project_id, role, value) VALUES ($1::text, 'lint.floor', 'clippy::probe_selftest deny') RETURNING 1) INSERT INTO code_fact (project_id, kind, name, detail) VALUES ($1::text, 'workspace-lint', 'probe-selftest/Cargo.toml:1', '[workspace.lints.clippy]'), ($1::text, 'workspace-lint', 'probe-selftest/Cargo.toml:2', 'probe_selftest = "allow"')

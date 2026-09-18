@@ -1,0 +1,1 @@
+SELECT f.dir || '/  —  ' || string_agg(f.base, ' · ' ORDER BY f.base) || '  →  ' || f.prefix || '/' AS detail FROM project_code_file f WHERE f.project_id = $1 AND f.prefix <> '' GROUP BY f.dir, f.prefix HAVING count(*) >= 2 ORDER BY 1

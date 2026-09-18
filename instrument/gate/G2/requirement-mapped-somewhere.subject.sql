@@ -1,0 +1,1 @@
+SELECT r.id FROM project_requirements r WHERE r.project_id = $1 AND r.kind = 'FR' UNION ALL SELECT 'пересборка набора не прошла: записи не установлены' WHERE NOT EXISTS (SELECT 1 FROM reproject_state r WHERE r.project_id = $1 AND r.ok)

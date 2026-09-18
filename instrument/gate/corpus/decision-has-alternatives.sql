@@ -1,0 +1,1 @@
+SELECT d.entity_name || ' — раздела «Отвергнутые варианты» нет, и почему — не сказано' AS detail FROM project_decisions d WHERE d.project_id = $1 AND true AND NOT EXISTS (SELECT 1 FROM project_document_sections s WHERE s.project_id = d.project_id AND s.entity_kind = 'decision' AND s.entity_name = d.entity_name AND s.title = 'Отвергнутые варианты') ORDER BY d.number

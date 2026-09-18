@@ -1,0 +1,1 @@
+INSERT INTO code_fact (project_id, kind, name, detail) VALUES ($1::text, 'crate-manifest', 'probe-selftest/low/Cargo.toml', 'есть на диске'), ($1::text, 'secret-field', 'probe-selftest/low/src/lib.rs#Probe.token', 'голым под derive(Debug), тип String')

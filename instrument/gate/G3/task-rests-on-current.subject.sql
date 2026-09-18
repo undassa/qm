@@ -1,0 +1,1 @@
+SELECT t.id FROM project_plan_tasks t WHERE t.project_id = $1 AND t.state = 'closed' UNION ALL SELECT m.id FROM project_plan_milestones m WHERE m.project_id = $1 AND m.closed <> '' UNION ALL SELECT 'пересборка набора не прошла: записи не установлены' WHERE NOT EXISTS (SELECT 1 FROM reproject_state r WHERE r.project_id = $1 AND r.ok)

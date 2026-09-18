@@ -1,0 +1,1 @@
+INSERT INTO project_document_cells(project_id, entity_kind, entity_name, block_ord, row_ord, col, raw, value) SELECT $1, 'story', (SELECT min(entity_name) FROM project_documents WHERE project_id=$1 AND entity_kind='story'), 9990, 1, c.k, c.v, c.v FROM (VALUES (0,'`FR-POL-16`'),(1,'подсадка самотеста: цитата, которой в требовании нет')) AS c(k, v)

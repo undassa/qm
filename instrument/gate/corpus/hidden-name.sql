@@ -1,0 +1,1 @@
+SELECT h.entity_kind || ' ' || coalesce(nullif(h.entity_name, ''), '(одиночный)') || ' — голое «' || h.number || '» в перечне «' || h.line || '»' AS detail FROM project_hidden_name h WHERE h.project_id = $1 AND true ORDER BY 1

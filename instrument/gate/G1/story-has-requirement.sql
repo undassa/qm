@@ -1,0 +1,1 @@
+SELECT s.id || '  —  история не названа ни одним требованием: чем она обоснована, из набора не выводится' AS detail FROM project_stories s WHERE s.project_id = $1 AND NOT EXISTS (SELECT 1 FROM project_story_requirements r WHERE r.project_id = s.project_id AND r.story_id = s.id) AND true ORDER BY 1

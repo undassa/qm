@@ -1,0 +1,1 @@
+SELECT 'датчик «donor-tooling» читает ' || s.reads AS entity FROM project_sensor_spec s WHERE s.project_id = $1 AND s.fact = 'donor-tooling' UNION ALL SELECT f.name FROM code_fact f WHERE f.project_id = $1 AND f.kind = 'donor-tooling'

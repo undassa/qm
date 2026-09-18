@@ -1,0 +1,1 @@
+SELECT d.entity_kind || ' ' || d.entity_name AS detail FROM project_documents d WHERE d.project_id = $1 AND d.entity_kind NOT IN ('map','index','project-map','chronicle') AND NOT EXISTS (SELECT 1 FROM project_document_links l WHERE l.project_id = d.project_id AND l.target_kind = d.entity_kind AND l.target_name = d.entity_name) ORDER BY 1

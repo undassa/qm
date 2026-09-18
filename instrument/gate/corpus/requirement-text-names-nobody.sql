@@ -1,0 +1,1 @@
+SELECT s.requirement_id || ' — текст требования называет ' || s.target || ' прозой; связь уже записана строкой, имя из текста можно убрать' AS detail FROM project_requirement_sources s WHERE s.project_id = $1 AND s.origin = 'projected' AND true ORDER BY 1

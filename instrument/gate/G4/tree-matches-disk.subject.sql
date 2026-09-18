@@ -1,0 +1,1 @@
+SELECT c.value AS entity FROM project_document_cells c WHERE c.project_id = $1 AND c.entity_name = 'file-tree' AND c.row_ord > 0 AND c.col = 0 UNION ALL SELECT f.name FROM code_fact f WHERE f.project_id = $1 AND f.kind = 'tree-file'

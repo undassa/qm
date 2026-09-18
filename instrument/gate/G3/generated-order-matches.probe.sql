@@ -1,0 +1,1 @@
+WITH o AS (INSERT INTO code_fact (project_id, kind, name, detail) VALUES ($1, 'plan-order', 'probe-selftest/order.md', 'проба самотеста') RETURNING name) INSERT INTO generated_drift (project_id, name, detail) SELECT $1, o.name, 'порождённый порядок разошёлся с доской (проба самотеста)' FROM o

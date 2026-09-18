@@ -1,0 +1,1 @@
+SELECT t.id FROM project_plan_tasks t WHERE t.project_id = $1 AND t.kind = 'red' UNION ALL SELECT d.entity_name FROM project_documents d WHERE d.project_id = $1 AND d.entity_kind = 'red-task' UNION ALL SELECT 'пересборка набора не прошла: записи не установлены' WHERE NOT EXISTS (SELECT 1 FROM reproject_state r WHERE r.project_id = $1 AND r.ok)

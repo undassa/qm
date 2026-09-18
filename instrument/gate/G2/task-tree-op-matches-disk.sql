@@ -1,0 +1,35 @@
+WITH свежий AS (
+  SELECT k FROM unnest(ARRAY['repo-file', 'code-file']) AS k WHERE fact_fresh($1, k)),
+датчик AS (
+  SELECT EXISTS (SELECT 1 FROM свежий) AS свеж),
+лист AS (
+  SELECT l.task_id, l.op, l.path,
+         CASE WHEN right(l.path, 1) = '/'
+              THEN EXISTS (SELECT 1 FROM code_fact f WHERE f.project_id = l.project_id AND f.kind IN (SELECT k FROM свежий)
+                            AND left(f.name, length(l.path)) = l.path)
+              ELSE EXISTS (SELECT 1 FROM code_fact f WHERE f.project_id = l.project_id AND f.kind IN (SELECT k FROM свежий)
+                            AND f.name = l.path) END AS на_диске
+    FROM project_task_tree_leaf l
+    JOIN project_plan_tasks t ON t.project_id = l.project_id AND t.id = l.task_id AND t.state <> 'closed'
+   WHERE l.project_id = $1 AND l.is_path AND NOT l.exempt AND l.path <> '' AND l.op <> ''),
+предок AS (
+  WITH RECURSIVE до(task_id, dep) AS (
+    SELECT d.task_id, d.depends_on FROM project_plan_task_deps d WHERE d.project_id = $1
+    UNION
+    SELECT д.task_id, d.depends_on FROM до д JOIN project_plan_task_deps d ON d.project_id = $1 AND d.task_id = д.dep)
+  SELECT task_id, dep FROM до)
+SELECT 'датчик файлов дерева «repo-file» ' || fact_gap($1, 'repo-file')
+       || ': сверить пометки «+ ! -» задач с деревом нечем, и это не зелёное' AS detail
+  FROM датчик WHERE NOT свеж AND EXISTS (SELECT 1 FROM лист)
+UNION ALL
+SELECT л.task_id || ' — «+ ' || л.path || '»: файл уже есть в дереве — пометка «!»'
+  FROM лист л, датчик WHERE датчик.свеж AND л.op = '+' AND л.на_диске AND л.path NOT LIKE '%/'
+UNION ALL
+SELECT л.task_id || ' — «' || л.op || ' ' || л.path || '»: файла нет, и ни одна зависимость задачи его не создаёт'
+  FROM лист л, датчик
+ WHERE датчик.свеж AND л.op IN ('!', '-') AND NOT л.на_диске
+   AND NOT EXISTS (SELECT 1 FROM предок п
+                     JOIN project_plan_tasks pt ON pt.project_id = $1 AND pt.id = п.dep AND pt.state <> 'closed'
+                     JOIN project_task_tree_leaf pl ON pl.project_id = $1 AND pl.task_id = п.dep AND pl.op = '+' AND pl.path = л.path
+                    WHERE п.task_id = л.task_id)
+ ORDER BY 1

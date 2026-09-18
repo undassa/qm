@@ -1,0 +1,1 @@
+DELETE FROM project_document_sections WHERE project_id=$1 AND entity_kind='decision' AND title ~ '^Отвергнутые варианты' AND entity_name=(SELECT min(entity_name) FROM project_document_sections WHERE project_id=$1 AND entity_kind='decision' AND title ~ '^Отвергнутые варианты')

@@ -600,15 +600,6 @@ impl Mcp {
                 "open": { "type": "array", "description": "[{task, branch, since}]", "items": { "type": "object" } } } } }));
         tools.push(json!({ "name": "question-holders", "description": "вопрос и его задача-держатель: пора закрывать, закрыт рано, судить нечем",
             "inputSchema": { "type": "object", "properties": {} } }));
-        tools.push(json!({ "name": "gate-item-set", "description": "объявить пункт гейта: запрос, команда или подпись",
-            "inputSchema": { "type": "object", "properties": { "owner": s("владелец бывает только у подписного пункта: у запросного дверь откажет"), "id": s("устойчивое имя пункта, латиницей через дефис — им пункт адресуется"), "phase": s("гейт, например G5"), "item": s("заголовок пункта для человека; переписывается свободно, ссылок не рвёт"),
-                "itemKind": s("query · command"), "query": s("запрос для вида query"),
-                                "probe": s("запрос, подсаживающий нарушение — им самотест роняет пункт"),
-                "subject": s("запрос ПРЕДМЕТА пункта: пусто в ответе — «неизвестно», а не «пройдено»"),
-                "subjectWhy": s("чем объяснить пустой предмет"),
-                "since": s("с какого мгновения (мс) пункт судит: факт раньше него им не судится. Нужно ПРАВИЛАМ ПОРЯДКА — «план записан до закрытия» не может судить закрытие, случившееся прежде самого правила. Запрос читает границу как `$2`; пусто — судит всё"),
-                "why": s("почему способа нет — для рода unknown"),
-                "drop": json!({"type":"boolean","description":"снять пункт вместе с его замерами"}) }, "required": ["phase", "id", "itemKind"] } }));
         tools.push(json!({ "name": "requirements-of", "description": "требования задачи; объявленное отсутствие доезжает фразой, а не пустотой",
             "inputSchema": { "type": "object", "properties": { "id": s("имя задачи") }, "required": ["id"] } }));
         tools.push(json!({ "name": "tasks-of", "description": "задачи истории через требования",
@@ -778,7 +769,7 @@ impl Mcp {
         "put", "put-section", "rm", "document-add", "reparse", "reproject", "sweep",
         "task-state-push", "code-facts-push", "skills-push", "preflight-push", "worktree-push",
         "task-plan-push",
-        "blame-set", "derived-copy-set", "counts-sync", "kind-add", "kind-required", "kind-projection", "frozen-tree-set", "scheme-term-set", "orphans-purge", "surface-source-add", "sensor-spec-add", "agent-set", "donor-add", "guard-add", "gate-item-set", "method-set", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "version-close", "phase-set", "gate-selftest",
+        "blame-set", "derived-copy-set", "counts-sync", "kind-add", "kind-required", "kind-projection", "frozen-tree-set", "scheme-term-set", "orphans-purge", "surface-source-add", "sensor-spec-add", "agent-set", "donor-add", "guard-add", "method-set", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "version-close", "phase-set", "gate-selftest",
         "author-set", "screen-area-set", "skill-set", "version-freeze",
         "links-rewrite", "links-retarget", "entity-rename", "entity-confirm", "term-retire",
     ];
@@ -791,8 +782,8 @@ impl Mcp {
     // вовсе: он работает в транзакции, которую всегда откатывает, и не пишет
     // ни строки. Пока он числился пишущим, каждый его прогон — а их в проверке
     // шесть — заказывал полный пересчёт всем проектам ни за чем.
-    const SHARED_WRITES: [&'static str; 8] = [
-        "gate-item-set", "phase-set", "step-add", "step-remove",
+    const SHARED_WRITES: [&'static str; 7] = [
+        "phase-set", "step-add", "step-remove",
         "step-method-set", "step-question-set", "step-probe-set", "gate-selftest",
     ];
 
@@ -808,7 +799,7 @@ impl Mcp {
         // ОТКАЗ УЗНАЁТСЯ ПО `isError`, а не по ключу `error`, которого отказ не
         // несёт вовсе: `refusal` отдаёт `{content, isError}`. Условие было верно
         // ВСЕГДА, и отметку ставил всякий отказ — а для общей двери это
-        // `touch_all`: кривой `gate-item-set`, отвергнутый базой, запускал полный
+        // `touch_all`: кривая общая дверь, отвергнутая базой, запускала полный
         // пересчёт всем проектам разом. Ровно то, чего доводом выше сказано не
         // делать.
         let failed = out.get("isError").and_then(|v| v.as_bool()).unwrap_or(false)
@@ -888,7 +879,7 @@ impl Mcp {
         // достаётся `gate-list`. Без этого старшинства вид молча перехватывал бы
         // вызов и отдавал строку таблицы вместо вычисления.
         const RESERVED: &[&str] = &[
-            "method-set", "gate-item-set", "question-holders", "preflight-push", "worktree-push",
+            "method-set", "question-holders", "preflight-push", "worktree-push",
             "sensor-specs", "scheme-terms", "scheme-roles", "frozen-trees", "addresses-declared", "tree-declared", "donors", "skills-push", "skills", "agents", "code-facts-push", "code-facts", "summary", "links-of", "retired-terms", "term-retire", "entity-confirm", "request-add", "approval-ask", "question-ask", "asks", "ask-decide", "ask-inbox", "chat-start", "chat-say", "chat-inbox", "chat", "run-start", "run-state", "run-event", "run-say", "run-inbox", "runs", "order", "gate-measure", "gate-selftest", "links-rewrite", "links-retarget", "reparse", "screen-area-set", "skill-set", "skills-paths", "version-freeze", "version-delta", "generated-check", "principal-allow", "principals", "author-set", "authors", "step-method-set", "step-question-set", "step-probe-set", "step-when-set", "step-add", "step-remove", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "version-close", "phase-set", "gate-selftest", "next-step", "process-state", "statuses", "task-status", "status-anomaly", "pipeline", "board", "waves", "phases", "coverage", "blocks", "history", "at-revision", "process-history", "progress",
             "kinds", "kinds-due", "readiness-gaps", "declared-unwritten", "blame-set", "doors", "derived-copy-set", "holders", "counts-sync", "kind-add", "kind-required", "kind-projection", "kind-reopens", "kind-proves", "kind-id-set", "kind-domain", "tree", "document-coverage", "sections", "section", "backlinks", "search", "put",
             "put-section", "rm", "document-add", "reproject", "sweep", "gate", "next-task", "what-if", "blockers", "events", "task-plan-push",
@@ -2556,39 +2547,6 @@ impl Mcp {
                 Ok(v) => ok(v),
                 Err(e) => refusal(e.into()),
             },
-            "gate-item-set" => {
-                let phase = args.get("phase").and_then(|v| v.as_str()).unwrap_or("");
-                // `id` адресует пункт, `item` — заголовок для человека. Прежде
-                // ключом был заголовок, и всякая правка формулировки заводила
-                // пункт заново, оставляя прежний сиротой вместе с его отметками.
-                let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                let item = args.get("item").and_then(|v| v.as_str()).unwrap_or("");
-                let gk = args.get("itemKind").and_then(|v| v.as_str()).unwrap_or("query");
-                let why = args.get("why").and_then(|v| v.as_str()).unwrap_or("");
-                let query = args.get("query").and_then(|v| v.as_str());
-                let owner = args.get("owner").and_then(|v| v.as_str());
-                let probe = args.get("probe").and_then(|v| v.as_str());
-                if phase.is_empty() || id.is_empty() {
-                    return refusal(Miss::Refused(
-                        "пункт гейта без фазы или без имени не заводится: `id` адресует пункт, `item` его объясняет".into()));
-                }
-                match crate::projector::set_gate_item(
-                    &self.pool,
-                    p,
-                    crate::projector::GateItem {
-                        phase, id, title: item, kind: gk, query, owner, probe, why,
-                        subject: args.get("subject").and_then(|v| v.as_str()),
-                        subject_why: args.get("subjectWhy").and_then(|v| v.as_str()),
-                        since: num(args, "since"),
-                    },
-                    args.get("drop").map(|v| v == "true" || v == true).unwrap_or(false),
-                )
-                .await
-                {
-                    Ok(v) => ok(v),
-                    Err(e) => refusal(e.into()),
-                }
-            }
             "method-set" => {
                 let ord = num(args, "ord").unwrap_or(-1) as i32;
                 let mk = args.get("methodKind").and_then(|v| v.as_str()).unwrap_or("unknown");

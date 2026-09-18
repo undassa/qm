@@ -1,0 +1,1 @@
+INSERT INTO code_fact (project_id, kind, name, detail) VALUES ($1::text, 'crate-manifest', 'probe-selftest/proto/Cargo.toml', 'есть на диске'), ($1::text, 'protocol-item', 'probe-selftest/proto/src/op.rs:1', 'pub enum Op {'), ($1::text, 'render-field', 'probe-selftest/proto/src/view.rs:1', 'pub width: u32,')

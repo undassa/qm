@@ -1,0 +1,1 @@
+WITH c AS (INSERT INTO project_crate(project_id, name, does, does_not, in_repo, test_functions) VALUES ($1,'проба-крейта2','','',true,3) RETURNING name) INSERT INTO project_traceability_said(project_id, block_ord, subject, column_name, said, is_total) SELECT $1, 9998, c.name, 'тестовых функций', 77, false FROM c

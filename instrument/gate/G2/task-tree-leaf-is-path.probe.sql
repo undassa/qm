@@ -1,0 +1,1 @@
+INSERT INTO project_task_tree_leaf(project_id, task_id, ord, dir, leaf, is_path, exempt, target_dir, forward_declared) SELECT $1, min(id), 9999, 'проба', 'не путь, а предмет', false, false, '', false FROM project_plan_tasks WHERE project_id=$1

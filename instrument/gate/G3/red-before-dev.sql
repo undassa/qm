@@ -1,0 +1,1 @@
+SELECT t.id || ' — закрыта, а её красная ' || r.id || ' нет' AS detail FROM project_plan_tasks t JOIN red_task r ON r.project_id = t.project_id AND r.parent_task = t.id JOIN project_plan_tasks rt ON rt.project_id = r.project_id AND rt.id = r.id WHERE t.project_id = $1 AND t.kind <> 'red' AND t.state = 'closed' AND rt.state <> 'closed' ORDER BY t.id

@@ -1,0 +1,1 @@
+INSERT INTO project_plan_tasks(project_id, id, milestone_id, ord, title, size, state, kind, origin) SELECT $1,'M9-TPROBE2', min(milestone_id), 9998, 'подсадка самотеста', 'S', 'not_started', 'dev', 'declared' FROM project_plan_tasks WHERE project_id=$1

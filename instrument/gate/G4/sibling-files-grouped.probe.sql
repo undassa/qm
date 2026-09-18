@@ -1,0 +1,1 @@
+INSERT INTO project_code_file(project_id, path, dir, base, prefix) VALUES ($1,'проба/каталог/имя-один.rs','проба/каталог','имя-один.rs','имя'),($1,'проба/каталог/имя-два.rs','проба/каталог','имя-два.rs','имя')

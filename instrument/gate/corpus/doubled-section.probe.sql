@@ -1,0 +1,1 @@
+INSERT INTO project_document_sections(project_id, entity_kind, entity_name, ord, level, title, anchor, first_block, last_block) SELECT $1, s.entity_kind, s.entity_name, 9999, s.level, s.title, s.anchor||'-проба', s.first_block, s.last_block FROM project_document_sections s WHERE s.project_id=$1 AND s.title<>'' LIMIT 1

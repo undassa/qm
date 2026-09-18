@@ -1,0 +1,1 @@
+SELECT q.id || ' — ' || q.state || ', ответа не объявлено и решения нет' AS detail FROM project_questions q WHERE q.project_id = $1 AND q.state IN ('closed','decided') AND q.answer_state = 'unsaid' AND NOT EXISTS (SELECT 1 FROM project_decision_links l WHERE l.project_id = q.project_id AND l.kind = 'closes' AND l.target = q.id) ORDER BY q.id

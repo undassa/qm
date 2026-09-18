@@ -1,0 +1,1 @@
+WITH c AS (INSERT INTO code_fact (project_id, kind, name, detail) VALUES ($1, 'contract-file', 'probe-selftest/openapi.yaml', 'проба самотеста') RETURNING name) INSERT INTO project_requirements (project_id, id, kind, area, text, satisfied, title) SELECT $1, 'FR-PROBE-9990', 'FR', 'проба', 'проба самотеста', false, 'проба самотеста' FROM c

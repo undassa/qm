@@ -1,0 +1,1 @@
+SELECT f.kind || ' · ' || f.name FROM code_fact f WHERE f.project_id = $1 AND (f.kind IN ('sqlx-offline', 'db-test-file', 'migration-file', 'migration-table') OR (f.kind = 'direct-dep' AND f.detail ~ '\msqlx\M')) UNION ALL SELECT 'датчик «direct-dep» ' || fact_gap($1, 'direct-dep') || ': зависит ли код от sqlx — не установлено' WHERE NOT fact_fresh($1, 'direct-dep')

@@ -1,0 +1,1 @@
+SELECT 'датчик «contract-head» ' || fact_gap($1, 'contract-head') || ': проверить нечем, и это не зелёное' AS detail WHERE NOT fact_fresh($1, 'contract-head') UNION ALL SELECT f.name || '  —  ' || f.detail FROM code_fact f WHERE f.project_id = $1 AND f.kind = 'contract-head' AND f.name NOT LIKE 'шапка · всего требований%' AND true ORDER BY 1

@@ -1,0 +1,1 @@
+SELECT 'проигрыш онбординга ' || fact_gap($1, 'onboarding-run') || ': неизвестно, а не «проигран»' AS detail WHERE NOT fact_fresh($1, 'onboarding-run') UNION ALL SELECT 'проигрыш подан, но исход не «дошли до первого пейджа»: ' || c.detail FROM code_fact c WHERE c.project_id = $1 AND c.kind = 'onboarding-run' AND c.detail NOT ILIKE '%пейдж%'

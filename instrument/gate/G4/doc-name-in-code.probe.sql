@@ -1,0 +1,1 @@
+INSERT INTO code_fact (project_id, kind, name, detail) VALUES ($1::text, 'crate-manifest', 'probe-selftest/low/Cargo.toml', 'есть на диске'), ($1::text, 'doc-name-in-code', 'probe-selftest/low/src/lib.rs:1', '// см. probe-no-such-doc.md')

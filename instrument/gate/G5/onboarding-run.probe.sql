@@ -1,0 +1,1 @@
+INSERT INTO code_fact (project_id, kind, name, detail) VALUES ($1,'onboarding-run','проба самотеста','проигрыш оборвался на третьем шаге') ON CONFLICT (project_id, kind, name) DO UPDATE SET detail = EXCLUDED.detail

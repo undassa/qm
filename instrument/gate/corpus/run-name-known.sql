@@ -1,0 +1,1 @@
+SELECT d.entity_name || ' — документ прогона заведён, а в наборе его нет: имя не подошло ни под один образец (задача, этап, версия)' AS detail FROM project_documents d WHERE d.project_id = $1 AND d.entity_kind = 'run' AND NOT EXISTS (SELECT 1 FROM project_runs_log r WHERE r.project_id = d.project_id AND r.entity_name = d.entity_name) AND true ORDER BY 1

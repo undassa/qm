@@ -4,7 +4,7 @@
 //! Границы и порядок работы описаны в `DESIGN.md` рядом.
 
 
-use mh_server::{api, db, kinds, mcp, parse, projector, reproject, watch};
+use mh_server::{api, db, instrument, kinds, mcp, parse, projector, reproject, watch};
 use mh_server::db::Says;
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
@@ -58,6 +58,16 @@ async fn main() {
     if let Err(e) = projector::ensure(&pool).await {
         eprintln!("mh-server: таблицы проекций не заводятся: {e}");
         std::process::exit(2);
+    }
+
+    // Прибор — из репозитория, и раскладывается он ДО всего остального: пункт
+    // гейта, снятый слиянием, не должен пережить выкладку ни одним замером.
+    match instrument::apply(&pool).await {
+        Ok(v) => eprintln!("mh-server: прибор разложен: {v}"),
+        Err(why) => {
+            eprintln!("mh-server: прибор не раскладывается: {why}");
+            std::process::exit(2);
+        }
     }
 
     // Раскладка видов — из БАЗЫ. Файл остаётся способом её завести: указали

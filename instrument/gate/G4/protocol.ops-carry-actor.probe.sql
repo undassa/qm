@@ -1,0 +1,1 @@
+WITH снято AS (DELETE FROM code_fact WHERE project_id = $1::text AND kind = 'protocol-form' RETURNING 1) INSERT INTO code_fact (project_id, kind, name, detail) VALUES ($1::text, 'protocol-item', 'probe-selftest/src/op.rs:1', 'pub enum Op {')

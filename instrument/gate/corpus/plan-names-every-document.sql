@@ -1,0 +1,1 @@
+SELECT d.entity_kind || ' — документ заведён, а план документов о нём молчит: реестр неполон, и что ещё в наборе есть, из него не узнать' AS detail FROM project_documents d WHERE d.project_id = $1 AND d.entity_name = '' AND NOT EXISTS (SELECT 1 FROM project_document_plan p WHERE p.project_id = d.project_id AND p.planned_kind = d.entity_kind) AND true ORDER BY 1

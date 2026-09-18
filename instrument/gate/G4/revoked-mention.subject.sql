@@ -1,0 +1,1 @@
+SELECT 'датчик «revoked-mention» читает ' || s.reads AS entity FROM project_sensor_spec s WHERE s.project_id = $1 AND s.fact = 'revoked-mention' UNION ALL SELECT f.name FROM code_fact f WHERE f.project_id = $1 AND f.kind = 'revoked-mention'

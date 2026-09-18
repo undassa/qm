@@ -1,0 +1,1 @@
+SELECT s.entity_kind || ' ' || coalesce(nullif(s.entity_name, ''), '(одиночный)') || ' — раздел «' || s.title || '» встречается ' || count(*) || ' раза' AS detail FROM project_document_sections s WHERE s.project_id = $1 AND s.title <> '' GROUP BY s.entity_kind, s.entity_name, s.title HAVING count(*) > 1 AND true ORDER BY 1

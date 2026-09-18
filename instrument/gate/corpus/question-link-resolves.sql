@@ -1,0 +1,1 @@
+SELECT DISTINCT x[1] || ' — на вопрос ссылаются, а его нет в наборе' AS detail FROM project_documents d CROSS JOIN LATERAL regexp_matches(d.content, '\yQ-[0-9]{2,4}\y', 'g') AS x WHERE d.project_id = $1 AND NOT EXISTS (SELECT 1 FROM project_questions q WHERE q.project_id = d.project_id AND q.id = x[1]) ORDER BY 1

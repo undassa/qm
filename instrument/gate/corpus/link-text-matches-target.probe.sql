@@ -1,0 +1,1 @@
+INSERT INTO project_documents(project_id, entity_kind, entity_name, content, content_hash, bytes, revision, updated_at, updated_by) VALUES ($1, 'question', 'PROBE-9990', 'проба самотеста: [`00-frame/srs.md`](question:PROBE-9990)', 'probe-selftest', 0, 1, 1757000000000, 'probe-selftest')

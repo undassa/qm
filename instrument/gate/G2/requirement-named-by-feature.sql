@@ -1,0 +1,1 @@
+SELECT r.id AS detail FROM project_requirements r WHERE r.project_id = $1 AND r.kind = 'FR' AND NOT EXISTS (SELECT 1 FROM project_feature_requirements f WHERE f.project_id = r.project_id AND f.requirement_id = r.id) ORDER BY r.id

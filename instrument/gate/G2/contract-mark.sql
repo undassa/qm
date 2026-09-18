@@ -1,0 +1,1 @@
+SELECT 'датчик пометок ' || fact_gap($1, 'contract-mark') || ': помечено ли поле — неизвестно' AS detail WHERE NOT fact_fresh($1, 'contract-mark') UNION ALL SELECT f.name || '  —  ' || f.detail FROM code_fact f WHERE f.project_id = $1 AND f.kind = 'contract-mark' AND true ORDER BY 1

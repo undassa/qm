@@ -1,0 +1,1 @@
+SELECT d.entity_name FROM project_documents d WHERE d.project_id = $1 AND d.entity_kind = 'milestone' UNION ALL SELECT 'пересборка набора не прошла: записи не установлены' WHERE NOT EXISTS (SELECT 1 FROM reproject_state r WHERE r.project_id = $1 AND r.ok)

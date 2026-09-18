@@ -1,0 +1,1 @@
+WITH снято AS (INSERT INTO term_retired (project_id, term, retired_by, declared_in) VALUES ($1::text, 'ProbeRetiredTerm9991', 'проба самотеста', 'проба самотеста') RETURNING term) INSERT INTO code_fact (project_id, kind, name, detail) SELECT $1::text, 'retired-term', 'probe-selftest/low/src/lib.rs:1', 'let x = ' || term || ';' FROM снято
