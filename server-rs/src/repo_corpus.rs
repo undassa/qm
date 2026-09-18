@@ -1239,7 +1239,7 @@ pub(crate) fn contract_vs_schema(
         let owners: Vec<&String> = map.iter().filter(|(_, t)| t == table).map(|(s, _)| s).collect();
         fields
             .iter()
-            .filter(|f| bodies.iter().any(|b| *b == f.schema))
+            .filter(|f| bodies.contains(&f.schema))
             .filter(|f| owners.iter().any(|o| f.schema == **o || f.schema.starts_with(o.as_str())))
             .map(|f| f.name.clone())
             .chain(stored.iter().filter(|(t, _)| *t == table).map(|(_, c)| (*c).to_owned()))
