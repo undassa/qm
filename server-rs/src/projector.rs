@@ -2775,6 +2775,23 @@ ALTER TABLE project_gates DROP COLUMN IF EXISTS article;
 -- знает. Колонка, которую нельзя ни прочесть, ни объявить, — обещание связи,
 -- которой нет.
 ALTER TABLE gate_item DROP COLUMN IF EXISTS article;
+
+-- КЛЮЧ ПУНКТА — ЕГО ИМЯ, а не заголовок. Первичным ключом стояла пара (гейт,
+-- заголовок), а имя держал ЧАСТИЧНЫЙ уникальный указатель `WHERE id <> ''`:
+-- запись «по имени» приходилось оговаривать этим же условием, иначе Postgres
+-- отказывал — «нет ограничения, подходящего к ON CONFLICT». Условие это давно
+-- пустое: имя есть у каждого пункта, а объявление без имени раскладка не
+-- принимает вовсе. Заодно уходит случайное правило «заголовки в гейте
+-- различны»: заголовок — слова для человека, и одинаковыми им быть можно.
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_constraint c
+               JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey)
+              WHERE c.conname = 'gate_item_pkey' AND a.attname = 'item') THEN
+    ALTER TABLE gate_item DROP CONSTRAINT gate_item_pkey;
+    ALTER TABLE gate_item ADD PRIMARY KEY (phase, id);
+    DROP INDEX IF EXISTS gate_item_by_id;
+  END IF;
+END $$;
 "#;
 
 /// Переименование внутри колонок. Отдельной пачкой, а не в `DDL`: её же заводит

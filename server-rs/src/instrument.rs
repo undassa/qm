@@ -165,15 +165,20 @@ pub async fn apply(pool: &Pool) -> Result<Value, String> {
         let old = was.iter().find(|w| {
             w.get::<_, &str>(0) == r.item.phase && w.get::<_, &str>(1) == r.item.id
         });
+        // ТЕКСТ СРАВНИВАЕТСЯ ОБРЕЗАННЫМ С ОБЕИХ СТОРОН. Файл кончается переводом
+        // строки, строка базы — нет, и без обрезки сорок один пункт из ста
+        // шестидесяти числился переписанным на одном пустом знаке: раскладка
+        // шумит, а вместе с ней слетает приговор пробе.
         let same = old.is_some_and(|w| {
-            w.get::<_, &str>(2) == r.item.title
-                && w.get::<_, &str>(3) == r.item.kind
-                && w.get::<_, &str>(4) == r.query
-                && w.get::<_, &str>(5) == r.probe
-                && w.get::<_, &str>(6) == r.item.owner
-                && w.get::<_, &str>(7) == r.item.why
-                && w.get::<_, &str>(8) == r.subject
-                && w.get::<_, &str>(9) == r.item.subject_why
+            let db = |n: usize| w.get::<_, &str>(n).trim();
+            db(2) == r.item.title
+                && db(3) == r.item.kind
+                && db(4) == r.query
+                && db(5) == r.probe
+                && db(6) == r.item.owner
+                && db(7) == r.item.why
+                && db(8) == r.subject
+                && db(9) == r.item.subject_why
                 && w.get::<_, i64>(10) == r.item.since
         });
         if same {
@@ -214,9 +219,9 @@ pub async fn apply(pool: &Pool) -> Result<Value, String> {
         // самотест; переписанная пара этого приговора не заслужила, а гейт
         // показывал бы её проверенной.
         let judged = old.is_some_and(|w| {
-            w.get::<_, &str>(4) != r.query
-                || w.get::<_, &str>(5) != r.probe
-                || w.get::<_, &str>(8) != r.subject
+            w.get::<_, &str>(4).trim() != r.query
+                || w.get::<_, &str>(5).trim() != r.probe
+                || w.get::<_, &str>(8).trim() != r.subject
         });
         if judged {
             tx.execute("UPDATE project_gates SET probe_ok = NULL WHERE id = $1", &[&r.item.id])
