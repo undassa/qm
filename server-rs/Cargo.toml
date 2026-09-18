@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 axum = "0.7"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "process", "io-util", "io-std"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "process", "io-util", "io-std", "net"] }
 tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] }
 deadpool-postgres = "0.14"
 serde = { version = "1", features = ["derive"] }
