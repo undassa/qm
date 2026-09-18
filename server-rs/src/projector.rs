@@ -12912,6 +12912,10 @@ pub(crate) async fn process_state(
             "touches": r.get::<_, String>(8),
             "workRun": r.get::<_, String>(10),
             "subjectQuery": subject_query,
+            // Объявление ступени отдаётся ЦЕЛИКОМ: довод пустого предмета доезжал
+            // только внутри `why`, и то лишь когда предмет и вправду пуст. Правило
+            // читается, а не собирается обратно из объяснений.
+            "subjectWhy": subject_why.clone(),
             "computed": match &verdict {
                 Some(v) => v.state,
                 None if skipped => "skipped",
