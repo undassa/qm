@@ -53,6 +53,27 @@ struct Item {
     since: i64,
 }
 
+/// Фаза работы: порядок, гейт, уровень плана и вид задач, который она пускает.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Phase {
+    id: String,
+    ord: i32,
+    title: String,
+    #[serde(default)]
+    gate: String,
+    #[serde(default, rename = "planLevel")]
+    plan_level: String,
+    #[serde(default, rename = "taskKind")]
+    task_kind: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Phases {
+    phases: Vec<Phase>,
+}
+
 /// Объявленный пункт вместе с текстами, разложенными по файлам рядом.
 struct Rule {
     item: Item,
@@ -75,7 +96,7 @@ fn read() -> Result<(Vec<Gate>, Vec<Rule>), String> {
     let declared: Declared =
         serde_json::from_str(raw).map_err(|e| format!("instrument/gates.json не разбирается: {e}"))?;
     let mut rules = Vec::new();
-    let mut used = vec!["gates.json".to_owned()];
+    let mut used = vec!["gates.json".to_owned(), "phases.json".to_owned()];
     for item in declared.items {
         let base = format!("gate/{}/{}", item.phase, file_of(&item.id));
         let mut take = |suffix: &str| -> String {
@@ -98,6 +119,34 @@ fn read() -> Result<(Vec<Gate>, Vec<Rule>), String> {
         return Err(format!("файл {orphan} не принадлежит ни одному объявленному пункту"));
     }
     Ok((declared.gates, rules))
+}
+
+fn phases() -> Result<Vec<Phase>, String> {
+    let raw = text("phases.json").ok_or("объявления фаз нет: instrument/phases.json")?;
+    let declared: Phases =
+        serde_json::from_str(raw).map_err(|e| format!("instrument/phases.json не разбирается: {e}"))?;
+    if declared.phases.is_empty() {
+        return Err("объявлено ноль фаз: без них лестница не знает, где проект стоит".into());
+    }
+    let mut seen: Vec<&str> = Vec::new();
+    for p in &declared.phases {
+        if p.id.is_empty() || p.title.is_empty() {
+            return Err(format!("фаза {} объявлена без имени или заголовка", p.id));
+        }
+        if seen.contains(&p.id.as_str()) {
+            return Err(format!("фаза {} объявлена дважды", p.id));
+        }
+        seen.push(&p.id);
+    }
+    // ПОРЯДОК РАЗЛИЧАЕТ ФАЗЫ. По нему решают, какая раньше, и две с одним числом
+    // сделали бы «предыдущую фазу» делом случая.
+    let mut ords: Vec<i32> = declared.phases.iter().map(|p| p.ord).collect();
+    ords.sort_unstable();
+    ords.dedup();
+    if ords.len() != declared.phases.len() {
+        return Err("две фазы объявлены с одним порядком: какая из них раньше — решал бы случай".into());
+    }
+    Ok(declared.phases)
 }
 
 fn checked(gates: &[Gate], rules: &[Rule]) -> Result<(), String> {
@@ -171,6 +220,7 @@ fn checked(gates: &[Gate], rules: &[Rule]) -> Result<(), String> {
 pub async fn apply(pool: &Pool) -> Result<Value, String> {
     let (gates, rules) = read()?;
     checked(&gates, &rules)?;
+    let steps = phases()?;
     let mut client = crate::db::conn(pool).await.map_err(|e| crate::db::Says::says(&e))?;
     let tx = client.transaction().await.map_err(|e| e.to_string())?;
     tx.execute("SELECT pg_advisory_xact_lock(hashtext('instrument'))", &[])
@@ -318,6 +368,32 @@ pub async fn apply(pool: &Pool) -> Result<Value, String> {
         .await
         .map_err(|e| e.to_string())?;
 
+    // ФАЗЫ — ТОТ ЖЕ ПРИБОР. Порядок работы, гейт фазы и вид задач, который она
+    // пускает, решают, что набору выдадут следующим; до сих пор их правила
+    // правили дверью на живом, и прочесть объявление было нечем.
+    for p in &steps {
+        tx.execute(
+            "INSERT INTO phase (id, ord, title, gate, plan_level, task_kind)
+             VALUES ($1,$2,$3,$4,$5,$6)
+             ON CONFLICT (id) DO UPDATE SET ord = EXCLUDED.ord, title = EXCLUDED.title,
+               gate = EXCLUDED.gate, plan_level = EXCLUDED.plan_level,
+               task_kind = EXCLUDED.task_kind",
+            &[&p.id, &p.ord, &p.title, &p.gate, &p.plan_level, &p.task_kind],
+        )
+        .await
+        .map_err(|e| format!("фаза {} не записана: {}", p.id, crate::db::Says::says(&e)))?;
+    }
+    let phase_ids: Vec<String> = steps.iter().map(|p| p.id.clone()).collect();
+    // Снятая фаза уносит свои замеры: строка `phase_state` без объявления
+    // читается как фаза, которой больше нет, и держит барьер на пустоте.
+    let phases_gone = tx
+        .execute("DELETE FROM phase WHERE NOT (id = ANY($1))", &[&phase_ids])
+        .await
+        .map_err(|e| e.to_string())?;
+    tx.execute("DELETE FROM phase_state WHERE NOT (phase = ANY($1))", &[&phase_ids])
+        .await
+        .map_err(|e| e.to_string())?;
+
     let heads: Vec<String> = gates.iter().map(|g| g.phase.clone()).collect();
     for g in &gates {
         tx.execute(
@@ -337,13 +413,13 @@ pub async fn apply(pool: &Pool) -> Result<Value, String> {
     // набора, а правка ПРАВИЛА не ставила её никому: числа гейтов остались бы от
     // прежнего правила и выглядели бы настоящими до первой чужой правки. Новый
     // пункт при этом вовсе не имеет замера, и гейт над ним считался бы пройденным.
-    let touched = !changed.is_empty() || gone > 0 || measures > 0;
+    let touched = !changed.is_empty() || gone > 0 || measures > 0 || phases_gone > 0;
     if touched {
         crate::watch::touch_all(pool, "правка прибора").await.map_err(|e| crate::db::Says::says(&e))?;
     }
-    Ok(json!({ "гейтов": gates.len(), "пунктов": rules.len(),
+    Ok(json!({ "гейтов": gates.len(), "пунктов": rules.len(), "фаз": steps.len(),
                "изменено": changed.len(), "что": changed,
-               "снято пунктов": gone, "снято замеров": measures,
+               "снято пунктов": gone, "снято замеров": measures, "снято фаз": phases_gone,
                "перемерить": touched }))
 }
 
@@ -399,6 +475,12 @@ mod declared {
     fn instrument_of_the_repository_is_whole() {
         let (gates, rules) = read().expect("объявление прибора разбирается");
         checked(&gates, &rules).expect("объявление прибора цело");
+        let steps = super::phases().expect("объявление фаз цело");
+        assert!(steps.len() >= 5, "фаз объявлено {}: работа идёт не в двух шагах", steps.len());
+        for p in &steps {
+            assert!(p.gate.is_empty() || gates.iter().any(|g| g.phase == p.gate),
+                    "фаза {} стоит на гейте {}, которого нет в объявлении", p.id, p.gate);
+        }
         assert!(rules.len() > 100, "пунктов гейта {}: похоже на потерянное дерево", rules.len());
         assert!(FILES.len() > rules.len(), "у пунктов нет ни запросов, ни проб");
     }

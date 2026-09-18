@@ -176,7 +176,7 @@ CREATE VIEW phase_open AS
     CROSS JOIN phase ph;
 
 -- Задача и её фаза. Отображение объявлено записью — `phase.task_kind`, дверь
--- `phase-set`, — а не прозой плана.
+-- объявлением репозитория, — а не прозой плана.
 --
 -- `phase` пусто — вид задачи НЕ ОТОБРАЖЁН ни на одну фазу, и это «не
 -- объявлено», а не «можно всё»: `open` тогда тоже пусто, и всякий читатель
@@ -2131,7 +2131,8 @@ EXCEPTION WHEN others THEN NULL; END $$;
 -- `project_phase` объявляла то же, что общая `phase`, и однажды её засеяла. С
 -- тех пор читатели ходили в `phase`, а единственная дверь писала в
 -- `project_phase`: объявленное дверью не читал никто, и привязка гейта к фазе
--- пропадала молча. Одна запись, одна дверь — `phase` и `phase-set`.
+-- пропадала молча. Одна запись и один источник — `phase`, объявленная
+-- репозиторием харнеса.
 DROP TABLE IF EXISTS project_phase;
 ALTER TABLE kind_status ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT '';
 -- Почему факта нет. Пустой статус без причины читается как «забыли»; с
@@ -4365,11 +4366,11 @@ pub(crate) async fn next_task(pool: &Pool, project: &str) -> Result<Value, crate
                 "candidate": id,
                 "why": if phases == 0 {
                     "цепочка фаз не объявлена ни одной фазой: порядок работ сказать нечем, \
-                     и это не «можно всё». Фаза объявляется дверью `phase-set`: \
+                     и это не «можно всё». Фаза объявляется в репозитории харнеса, `instrument/phases.json`: \
                      `phase`, `ord`, `title`, `gate`, `taskKind`".to_owned()
                 } else {
                     format!("вид задачи «{}» не отображён ни на одну фазу: отображение НЕ ОБЪЯВЛЕНО, \
-                             и это не «можно всё». Объявляется дверью `phase-set` доводом `taskKind`",
+                             и это не «можно всё». Объявляется в репозитории харнеса, `instrument/phases.json` доводом `taskKind`",
                             r.get::<_, Option<String>>(3).unwrap_or_default())
                 },
             }));
@@ -11026,147 +11027,6 @@ pub(crate) async fn set_version_state(
         )
         .await?;
     Ok(json!({ "version": version, "state": state, "by": actor }))
-}
-
-/// Поля фазы, как их принимает дверь `phase-set`.
-pub(crate) struct Phase<'a> {
-    pub phase: &'a str,
-    pub ord: Option<i32>,
-    pub title: Option<&'a str>,
-    pub gate: Option<&'a str>,
-    pub plan_level: Option<&'a str>,
-    pub task_kind: Option<&'a str>,
-}
-
-/// Объявить фазу: место в цепочке, заголовок, гейт и вид её задач.
-///
-/// ВИД ЗАДАЧ — ЗАПИСЬ, А НЕ ПРОЗА. «Красная задача принадлежит Ф3, задача кода —
-/// Ф4» жило абзацем в плане проекта, и оттого барьер фаз не мог его прочесть:
-/// `next-task` предлагал задачу Ф4 при красном G3, а ступени звали владельца
-/// отправлять то, что отправлять нельзя. Объявленное здесь читают все трое
-/// через `task_phase`.
-///
-/// Проект, не назвавший отображение, получает пустоту — «не объявлено», — и
-/// читатель обязан звать её словом, а не разрешением.
-pub(crate) async fn set_phase(pool: &Pool, fields: Phase<'_>, drop_it: bool) -> Result<Value, crate::db::Fail> {
-    let Phase { phase, ord, title, gate, plan_level, task_kind } = fields;
-    let client = crate::db::conn(pool).await?;
-    if drop_it {
-        let gone = client.execute("DELETE FROM phase WHERE id = $1", &[&phase]).await?;
-        return Ok(json!({ "status": if gone > 0 { "dropped" } else { "not_found" }, "phase": phase }));
-    }
-    // Заводится фаза ЦЕЛИКОМ: без места в цепочке «раньше» и «позже» не
-    // существует, а на них держится вся открытость фаз.
-    let known: i64 = client
-        .query_one("SELECT count(*) FROM phase WHERE id = $1", &[&phase])
-        .await?
-        .get(0);
-    if known == 0 && (ord.is_none() || title.is_none()) {
-        return Ok(json!({ "status": "not_found", "phase": phase,
-                          "why": "фазы с таким именем нет, а завести её без `ord` и `title` нельзя: \
-                                  без места в цепочке не считается ни «раньше», ни «позже»" }));
-    }
-    // ГЕЙТ ПРОВЕРЯЕТСЯ ПО ИМЕНИ. Опечатка в нём — не описка, а вечный затвор:
-    // гейта с таким именем нет, замеров у него не будет никогда, и всякая
-    // последующая фаза окажется закрыта навсегда отказом, называющим гейт,
-    // которого не найти.
-    //
-    // СПРАШИВАЕТСЯ `gate_item`, а не `gate_head`. Заголовок гейта пишет
-    // единственный посев при старте, из проектной таблицы, — на новой установке
-    // он пуст, и проверка по нему отказывала бы всякому непустому имени. Выход
-    // был бы только один и нигде не названный: пересобрать документ, объявляющий
-    // гейты, и перезапустить процесс. Пункты же приходят объявлением репозитория
-    // при выкладке, и «у гейта есть хоть один объявленный пункт» — ровно то
-    // условие, при котором замеры вообще могут появиться. Заголовок принимается
-    // тоже: объявленный гейт без пунктов — намерение, и оно падает закрытым.
-    if let Some(g) = gate.filter(|g| !g.is_empty()) {
-        let heard: bool = client
-            .query_one(
-                "SELECT EXISTS (SELECT 1 FROM gate_item WHERE phase = $1)
-                     OR EXISTS (SELECT 1 FROM gate_head WHERE phase = $1)",
-                &[&g],
-            )
-            .await?
-            .get(0);
-        if !heard {
-            return Ok(json!({ "status": "not_found", "phase": phase, "gate": g,
-                              "why": format!("гейта «{g}» в наборе нет ни одним пунктом и ни одним \
-                                              заголовком. Привязать фазу к несуществующему гейту значит \
-                                              закрыть все последующие навсегда: замеров у него не будет \
-                                              никогда. Пункты гейта объявляются в репозитории харнеса, \
-                                              каталог `instrument/gate`") }));
-        }
-    }
-    // ПУСТОЙ ГЕЙТ У ФАЗЫ, ЗА КОТОРОЙ ЕСТЬ ДРУГИЕ, — сказан вслух. Читатель
-    // считает такую фазу непройденной и держит на ней всю оставшуюся цепочку;
-    // молчание здесь означало бы, что забытая при заведении привязка
-    // останавливает проект, и никто не сказал об этом ни слова.
-    let tail = match (gate, ord) {
-        (Some(""), _) | (None, _) if known == 0 => client
-            .query_one("SELECT count(*) FROM phase WHERE ord > coalesce($1, 0)", &[&ord])
-            .await?
-            .get::<_, i64>(0),
-        (Some(""), _) => client
-            .query_one("SELECT count(*) FROM phase WHERE ord > (SELECT ord FROM phase WHERE id = $1)",
-                       &[&phase])
-            .await?
-            .get::<_, i64>(0),
-        _ => 0,
-    };
-    // ЗАНЯТОЕ МЕСТО И ЗАНЯТЫЙ ВИД называются словом, а не отказом Postgres.
-    //
-    // Уникальность держат индексы, но заводятся они с проглоченной ошибкой:
-    // база, где пара уже стоит, осталась бы вовсе без индекса, и тогда эта
-    // проверка — единственная. Она же превращает `duplicate key value violates
-    // unique constraint` в имя фазы, которая место занимает.
-    let taken = |what: &str, val: &str| {
-        format!("{what} уже за фазой «{val}»: два одинаковых делают вопрос о порядке \
-                 двусмысленным, и барьер между такими фазами исчезает молча. \
-                 Сперва освободите место у неё")
-    };
-    if let Some(o) = ord {
-        if let Some(row) = client
-            .query_opt("SELECT id FROM phase WHERE ord = $1 AND id <> $2", &[&o, &phase])
-            .await?
-        {
-            return Ok(json!({ "status": "taken", "phase": phase, "ord": o,
-                              "why": taken("место в цепочке", &row.get::<_, String>(0)) }));
-        }
-    }
-    if let Some(k) = task_kind.filter(|k| !k.is_empty()) {
-        if let Some(row) = client
-            .query_opt("SELECT id FROM phase WHERE task_kind = $1 AND id <> $2", &[&k, &phase])
-            .await?
-        {
-            return Ok(json!({ "status": "taken", "phase": phase, "taskKind": k,
-                              "why": taken(&format!("вид задач «{k}»"), &row.get::<_, String>(0)) }));
-        }
-    }
-    client
-        .execute(
-            "INSERT INTO phase (id, ord, title, gate, plan_level, task_kind)
-             VALUES ($1, coalesce($2, 0), coalesce($3, ''), coalesce($4, ''),
-                     coalesce($5, ''), coalesce($6, ''))
-             ON CONFLICT (id) DO UPDATE SET
-               ord = coalesce($2, phase.ord), title = coalesce($3, phase.title),
-               gate = coalesce($4, phase.gate), plan_level = coalesce($5, phase.plan_level),
-               task_kind = coalesce($6, phase.task_kind)",
-            &[&phase, &ord, &title, &gate, &plan_level, &task_kind],
-        )
-        .await?;
-    let r = client
-        .query_one(
-            "SELECT ord, title, gate, plan_level, task_kind FROM phase WHERE id = $1",
-            &[&phase],
-        )
-        .await?;
-    Ok(json!({ "phase": phase, "ord": r.get::<_, i32>(0), "title": r.get::<_, String>(1),
-               "gate": r.get::<_, String>(2), "planLevel": r.get::<_, String>(3),
-               "taskKind": r.get::<_, String>(4),
-               "why": if tail > 0 && r.get::<_, String>(2).is_empty() {
-                   format!("гейт не объявлен, а за этой фазой стоят ещё {tail}: проходить нечего, \
-                            и читатель держит на ней всю оставшуюся цепочку. Это не «можно всё»")
-               } else { String::new() } }))
 }
 
 /// Объявить, когда ступень вообще в игре.

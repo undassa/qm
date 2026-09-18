@@ -1,0 +1,52 @@
+{
+ "phases": [
+  {
+   "id": "Ф0",
+   "ord": 0,
+   "title": "рамка",
+   "gate": "G0",
+   "planLevel": "Уровень 0 — рамка",
+   "taskKind": ""
+  },
+  {
+   "id": "Ф1",
+   "ord": 1,
+   "title": "требования",
+   "gate": "G1",
+   "planLevel": "Уровень 1 — что и зачем",
+   "taskKind": ""
+  },
+  {
+   "id": "Ф2",
+   "ord": 2,
+   "title": "проект",
+   "gate": "G2",
+   "planLevel": "Уровень 2 — как|Проектные документы",
+   "taskKind": ""
+  },
+  {
+   "id": "Ф3",
+   "ord": 3,
+   "title": "тесты",
+   "gate": "G3",
+   "planLevel": "Уровень 3 — проверка",
+   "taskKind": "red"
+  },
+  {
+   "id": "Ф4",
+   "ord": 4,
+   "title": "генерация",
+   "gate": "G4",
+   "planLevel": "",
+   "taskKind": "dev"
+  },
+  {
+   "id": "Ф5",
+   "ord": 5,
+   "title": "выпуск",
+   "gate": "G5",
+   "planLevel": "Уровень 4 — выпуск",
+   "taskKind": ""
+  }
+ ]
+}
