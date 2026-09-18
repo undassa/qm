@@ -17,13 +17,19 @@ include!(concat!(env!("OUT_DIR"), "/instrument.rs"));
 
 const KINDS: [&str; 4] = ["query", "command", "manual", "unknown"];
 
+/// Строка, которой снимается необъявленное: пара «гейт — имя», а не имя.
+const UNDECLARED: &str = "NOT EXISTS (SELECT 1 FROM unnest($1::text[], $2::text[]) AS d(phase, id)
+                                       WHERE d.phase = g.phase AND d.id = g.id)";
+
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Declared {
     gates: Vec<Gate>,
     items: Vec<Item>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Gate {
     phase: String,
     #[serde(default)]
@@ -31,6 +37,7 @@ struct Gate {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Item {
     phase: String,
     id: String,
@@ -134,6 +141,25 @@ fn checked(gates: &[Gate], rules: &[Rule]) -> Result<(), String> {
         if !gates.iter().any(|g| g.phase == phase) {
             return Err(format!("пункт {id} стоит в гейте {phase}, которого нет в объявлении"));
         }
+        // ПРЕДМЕТ И ЕГО ОБЪЯСНЕНИЕ ХОДЯТ ПАРОЙ. Пустой предмет значит «пройдено
+        // на отсутствии сущностей», и почему он бывает пуст — обязан сказать
+        // `subjectWhy`. Потерянный файл предмета иначе прошёл бы молча: сироты
+        // нет (файла нет), а пункт стал бы судить по всему набору.
+        if r.subject.is_empty() != r.item.subject_why.is_empty() {
+            return Err(format!(
+                "у пункта {id} {}: предмет и объяснение пустого предмета объявляются вместе",
+                if r.subject.is_empty() { "объяснение предмета без самого предмета" }
+                else { "предмет без объяснения пустоты" }));
+        }
+        // ИМЯ ФАЙЛА ВЫВОДИТСЯ ИЗ ИМЕНИ ПУНКТА, и вывод обязан быть взаимно
+        // однозначным: `a:b` и `a.b` дали бы ОДИН файл, оба пункта считали бы
+        // его своим, и сироты бы не нашлось — два правила с общим запросом.
+        if let Some(twin) = rules.iter().find(|o| {
+            !std::ptr::eq(*o, r) && o.item.phase == r.item.phase && file_of(&o.item.id) == file_of(id)
+        }) {
+            return Err(format!(
+                "имена пунктов {id} и {} дают один файл {}", twin.item.id, file_of(id)));
+        }
     }
     Ok(())
 }
@@ -150,6 +176,16 @@ pub async fn apply(pool: &Pool) -> Result<Value, String> {
     tx.execute("SELECT pg_advisory_xact_lock(hashtext('instrument'))", &[])
         .await
         .map_err(|e| e.to_string())?;
+
+    // Настоящие наборы — те, что объявлены проектами. Копии примерки живут в
+    // тех же таблицах, но проектами не числятся, и подсаживать в них нечего.
+    let sets: Vec<String> = tx
+        .query("SELECT id FROM projects ORDER BY id", &[])
+        .await
+        .map_err(|e| e.to_string())?
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
 
     let was = tx
         .query(
@@ -198,6 +234,38 @@ pub async fn apply(pool: &Pool) -> Result<Value, String> {
                 .await
                 .map_err(|e| format!("{what} пункта {} не разбирается: {e}", r.item.id))?;
         }
+        // ПРОБА ИСПОЛНЯЕТСЯ, А НЕ ТОЛЬКО РАЗБИРАЕТСЯ. Разбор пропускает пробу,
+        // которая споткнётся о первое же правило таблицы: так уже было — проба
+        // разобралась и упала на `project_requirements_kind_check`, то есть
+        // объявление приняли, а уронить пункт ею было нельзя. Исполняется по
+        // каждому настоящему набору под точкой возврата, и ни одна строка не
+        // остаётся. Ноль подсаженных строк ВЕЗДЕ — тот же отказ: такой пробой не
+        // роняется ничего. Ноль в одном наборе законен — у него может не быть
+        // того, во что подсаживать.
+        if !r.probe.is_empty() {
+            let mut planted = 0u64;
+            for project in &sets {
+                tx.batch_execute("SAVEPOINT проба").await.map_err(|e| e.to_string())?;
+                let ran = tx.execute(r.probe.as_str(), &[project]).await;
+                tx.batch_execute("ROLLBACK TO SAVEPOINT проба; RELEASE SAVEPOINT проба")
+                    .await
+                    .map_err(|e| e.to_string())?;
+                match ran {
+                    Ok(n) => planted += n,
+                    Err(e) => {
+                        return Err(format!(
+                            "проба пункта {} не исполнилась на наборе {project}: {e}. \
+                             Проба — запрос, ПОДСАЖИВАЮЩИЙ нарушение, и ею роняют правило",
+                            r.item.id))
+                    }
+                }
+            }
+            if planted == 0 && !sets.is_empty() {
+                return Err(format!(
+                    "проба пункта {} не подсадила ни строки ни в одном наборе: уронить им правило нечем",
+                    r.item.id));
+            }
+        }
         let query = (!r.query.is_empty()).then(|| r.query.clone());
         let owner = (!r.item.owner.is_empty()).then(|| r.item.owner.clone());
         tx.execute(
@@ -224,7 +292,8 @@ pub async fn apply(pool: &Pool) -> Result<Value, String> {
                 || w.get::<_, &str>(8).trim() != r.subject
         });
         if judged {
-            tx.execute("UPDATE project_gates SET probe_ok = NULL WHERE id = $1", &[&r.item.id])
+            tx.execute("UPDATE project_gates SET probe_ok = NULL WHERE phase = $1 AND id = $2",
+                       &[&r.item.phase, &r.item.id])
                 .await
                 .map_err(|e| e.to_string())?;
         }
@@ -232,13 +301,20 @@ pub async fn apply(pool: &Pool) -> Result<Value, String> {
 
     // Снятый пункт уносит С СОБОЙ СВОИ ЗАМЕРЫ. Оставленный замер читается как
     // правило: доска показывает его вердикт, а меряться ему больше нечем.
+    //
+    // СНИМАЕТСЯ ПАРОЙ (ГЕЙТ, ИМЯ), а не именем. Ключ пункта — пара, и снятие по
+    // одному имени не убрало бы пункт, ПЕРЕЕХАВШИЙ в другой гейт: он завёлся бы
+    // на новом месте, а старый остался бы мерить, считаться в состояние гейта и
+    // держать барьер — правило раздваивается молча. Ровно это однажды сделала
+    // снятая дверь на `section-link-resolves`, и снять двойника теперь нечем.
+    let phases: Vec<String> = rules.iter().map(|r| r.item.phase.clone()).collect();
     let ids: Vec<String> = rules.iter().map(|r| r.item.id.clone()).collect();
     let gone = tx
-        .execute("DELETE FROM gate_item WHERE NOT (id = ANY($1))", &[&ids])
+        .execute(&format!("DELETE FROM gate_item g WHERE {UNDECLARED}"), &[&phases, &ids])
         .await
         .map_err(|e| e.to_string())?;
     let measures = tx
-        .execute("DELETE FROM project_gates WHERE NOT (id = ANY($1))", &[&ids])
+        .execute(&format!("DELETE FROM project_gates g WHERE {UNDECLARED}"), &[&phases, &ids])
         .await
         .map_err(|e| e.to_string())?;
 
@@ -256,9 +332,63 @@ pub async fn apply(pool: &Pool) -> Result<Value, String> {
         .await
         .map_err(|e| e.to_string())?;
     tx.commit().await.map_err(|e| e.to_string())?;
+    drop(client);
+    // ПРАВКА ПРИБОРА — ПОВОД ПЕРЕМЕРИТЬ ВСЕХ. Отметку ставит всякая правка
+    // набора, а правка ПРАВИЛА не ставила её никому: числа гейтов остались бы от
+    // прежнего правила и выглядели бы настоящими до первой чужой правки. Новый
+    // пункт при этом вовсе не имеет замера, и гейт над ним считался бы пройденным.
+    let touched = !changed.is_empty() || gone > 0 || measures > 0;
+    if touched {
+        crate::watch::touch_all(pool, "правка прибора").await.map_err(|e| crate::db::Says::says(&e))?;
+    }
     Ok(json!({ "гейтов": gates.len(), "пунктов": rules.len(),
                "изменено": changed.len(), "что": changed,
-               "снято пунктов": gone, "снято замеров": measures }))
+               "снято пунктов": gone, "снято замеров": measures,
+               "перемерить": touched }))
+}
+
+/// Снятие необъявленного — на живой базе, потому что ошибка тут в SQL, а не в Rust.
+///
+/// Ключ пункта — пара, и первая раскладка снимала по одному имени: пункт,
+/// переехавший в другой гейт, оставался мерить на прежнем месте, а снять его
+/// было уже нечем — дверь правки снята. Проверяется тем же текстом, которым
+/// снимает раскладка.
+#[cfg(test)]
+mod removal {
+    use super::UNDECLARED;
+
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn a_rule_moved_to_another_gate_leaves_no_twin() {
+        let url = std::env::var("MH_TEST_DB_URL").expect("MH_TEST_DB_URL: адрес пустой базы");
+        let pool = crate::db::pool(&url, 1).expect("пул тестовой базы");
+        let client = pool.get().await.expect("соединение с тестовой базой");
+        client
+            .batch_execute(
+                "SET search_path TO pg_temp;
+                 CREATE TEMP TABLE gate_item (phase text NOT NULL, id text NOT NULL);
+                 INSERT INTO gate_item VALUES ('G2', 'direct-dep'), ('G2', 'кто-остаётся'),
+                                              ('G3', 'снятый');",
+            )
+            .await
+            .unwrap();
+        // Объявление: `direct-dep` переехал в G3, `снятый` снят вовсе.
+        let phases: Vec<String> = vec!["G3".into(), "G2".into()];
+        let ids: Vec<String> = vec!["direct-dep".into(), "кто-остаётся".into()];
+        let gone = client
+            .execute(&format!("DELETE FROM gate_item g WHERE {UNDECLARED}"), &[&phases, &ids])
+            .await
+            .unwrap();
+        let left: Vec<(String, String)> = client
+            .query("SELECT phase, id FROM gate_item ORDER BY phase, id", &[])
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| (r.get(0), r.get(1)))
+            .collect();
+        assert_eq!(gone, 2, "снимаются и переехавший с прежнего места, и снятый вовсе");
+        assert_eq!(left, vec![("G2".to_owned(), "кто-остаётся".to_owned())]);
+    }
 }
 
 #[cfg(test)]

@@ -23,7 +23,8 @@ fn collect(root: &Path, at: &Path, into: &mut Vec<(String, String)>) {
     // Каталог тоже под наблюдением: заведённый файл не меняет ни одного из
     // прежних, и пересборка по одним файлам его бы не заметила.
     println!("cargo:rerun-if-changed={}", at.display());
-    let Ok(entries) = fs::read_dir(at) else { return };
+    let entries = fs::read_dir(at)
+        .unwrap_or_else(|e| panic!("объявления прибора не читаются ({}): {e}", at.display()));
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {

@@ -113,8 +113,14 @@ DROP VIEW IF EXISTS gate_state;
 -- Гейт БЕЗ ЕДИНОЙ СТРОКИ замера сюда не попадает вовсе, и читатель обязан
 -- считать его непройденным: «не мерили» — это не «пройден». Пустота, принятая
 -- за зелёное, снимает барьер там, где его ни разу не проверяли.
+--
+-- СЧИТАЮТСЯ ОБЪЯВЛЕННЫЕ ПУНКТЫ, А НЕ ЗАМЕРЫ. Правило то же и для одного пункта:
+-- объявленный, но ни разу не меренный пункт — это «не мерили», а не «пройден».
+-- Пока считались строки замера, заведённый пункт до первого круга не считался
+-- вовсе, и гейт над ним отвечал `passed`: прибор изменили, числа остались от
+-- прежнего, и выглядели они настоящими.
 CREATE VIEW gate_state AS
-  SELECT g.project_id, g.phase AS gate,
+  SELECT p.project_id, i.phase AS gate,
          count(*) FILTER (WHERE g.result->>'computed' = 'failed') AS failed,
          count(*) FILTER (WHERE g.result IS NULL
                              OR g.result->>'computed' IN ('unknown','stale')) AS open,
@@ -124,7 +130,11 @@ CREATE VIEW gate_state AS
                                     OR g.result->>'computed' IN ('unknown','stale')) > 0 THEN 'open'
            ELSE 'passed'
          END AS computed
-    FROM project_gates g GROUP BY 1, 2;
+    FROM (SELECT DISTINCT project_id FROM project_gates) p
+    CROSS JOIN gate_item i
+    LEFT JOIN project_gates g
+      ON g.project_id = p.project_id AND g.phase = i.phase AND g.id = i.id
+   GROUP BY 1, 2;
 
 -- ОТКРЫТА ЛИ ФАЗА — одним местом на всех, кто про это спрашивает.
 --
@@ -1733,7 +1743,6 @@ ALTER TABLE gate_item ADD COLUMN IF NOT EXISTS subject_query text NOT NULL DEFAU
 ALTER TABLE gate_item ADD COLUMN IF NOT EXISTS subject_why text NOT NULL DEFAULT '';
 ALTER TABLE project_gates ADD COLUMN IF NOT EXISTS probe_ok boolean;
 ALTER TABLE project_gates ADD COLUMN IF NOT EXISTS id text NOT NULL DEFAULT '';
-CREATE UNIQUE INDEX IF NOT EXISTS gate_item_by_id ON gate_item (phase, id) WHERE id <> '';
 CREATE UNIQUE INDEX IF NOT EXISTS project_gates_by_id ON project_gates (project_id, phase, id);
 -- ЧИСТКИ СИРОТ ПРИ СТАРТЕ ЗДЕСЬ БОЛЬШЕ НЕТ, и это не упущение.
 --
@@ -2787,10 +2796,15 @@ DO $$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_constraint c
                JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey)
               WHERE c.conname = 'gate_item_pkey' AND a.attname = 'item') THEN
+    -- Безымянная строка ключом не становится: две такие в одной фазе уронили бы
+    -- перевод ключа, а с ним и всю схему — сервер не поднялся бы больше никогда,
+    -- и лечилось бы это только руками в базе. Объявить такой пункт нельзя, и
+    -- раскладка сняла бы его следующей же строкой.
+    DELETE FROM gate_item WHERE id = '';
     ALTER TABLE gate_item DROP CONSTRAINT gate_item_pkey;
     ALTER TABLE gate_item ADD PRIMARY KEY (phase, id);
-    DROP INDEX IF EXISTS gate_item_by_id;
   END IF;
+  DROP INDEX IF EXISTS gate_item_by_id;
 END $$;
 "#;
 

@@ -310,11 +310,11 @@ export function Readiness({
           {shownItems.map((i) => (
             <ItemRow
               lang={lang}
-              key={`${i.gate}·${i.item}`}
+              key={`${i.gate}·${i.id}`}
               item={i}
               phase={gateOfPhase.get(i.gate)?.phase ?? i.gate}
-              open={shown === `${i.gate}·${i.item}`}
-              onShow={() => setShown(shown === `${i.gate}·${i.item}` ? null : `${i.gate}·${i.item}`)}
+              open={shown === `${i.gate}·${i.id}`}
+              onShow={() => setShown(shown === `${i.gate}·${i.id}` ? null : `${i.gate}·${i.id}`)}
               onFind={onFind}
             />
           ))}
