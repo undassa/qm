@@ -14095,6 +14095,7 @@ mod redo {
                                       gate text NOT NULL DEFAULT '', task_kind text NOT NULL DEFAULT '');
              CREATE TEMP TABLE project_gates (project_id text NOT NULL, phase text NOT NULL, id text NOT NULL,
                                               result jsonb);
+             CREATE TEMP TABLE gate_item (phase text NOT NULL, id text NOT NULL);
              CREATE TEMP TABLE project_plan_tasks (project_id text NOT NULL, id text NOT NULL, kind text NOT NULL,
                                                    state text NOT NULL DEFAULT 'not_started', closing_commit text);
              CREATE TEMP TABLE task_state (project_id text NOT NULL, task_id text NOT NULL, state text NOT NULL,
@@ -14109,6 +14110,7 @@ mod redo {
                                           PRIMARY KEY (project_id, task_id));
              INSERT INTO projects VALUES ('{P}');
              INSERT INTO phase VALUES ('Ф2', 2, 'проект', 'G2', ''), ('Ф3', 3, 'тесты', 'G3', 'red');
+             INSERT INTO gate_item VALUES ('G2', 'пункт');
              INSERT INTO project_gates VALUES ('{P}', 'G2', 'пункт', '{{\"computed\": \"passed\"}}');"
         ))
         .await
