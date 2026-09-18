@@ -190,28 +190,6 @@ CREATE VIEW task_phase AS
 "#;
 
 const DDL: &str = r#"
--- ─── Таблицы, которых сервер не заводил ──────────────────────────────────────
---
--- ДВАДЦАТЬ СЕМЬ ТАБЛИЦ СЕРВЕР ТОЛЬКО ПРАВИЛ, а заводил их когда-то донор —
--- среди них `project_documents`, `project_gates`, `project_plan_tasks`. Жили
--- они с тех пор и существовали лишь потому, что однажды их кто-то создал.
--- Значит, нового экземпляра харнеса не существовало: на чистой базе первый же
--- `ALTER` несуществующей таблицы ронял всю схему, и проверить её было негде —
--- ни в CI, ни на стенде. Класс ошибок «запрос зовёт снятую колонку» ловился
--- поэтому только наборами и только на живом.
---
--- Определения взяты у донора (`legacy-qm/src/projects/*.ts`) КАК ЕСТЬ, вместе с
--- колонкой `path` и старыми ограничениями. Это не небрежность: ниже по этой же
--- пачке лежат переезды, которые `path` снимают, ограничения переписывают и
--- добавляют нынешние колонки. Повторённая история приводит чистую базу ровно к
--- тому, чем живая стала за год; «чистое» определение разошлось бы с переездами
--- молча — и разошлось бы в ту же сторону, в какую уже разошёлся сам донор:
--- у `project_gates` он объявляет колонки, снятые этой весной.
-CREATE TABLE IF NOT EXISTS project_articles(
-    project_id TEXT NOT NULL, number INTEGER NOT NULL,
-    title TEXT NOT NULL, path TEXT NOT NULL, anchor TEXT NOT NULL, body TEXT NOT NULL,
-    PRIMARY KEY (project_id, number)
-  );
 
 CREATE TABLE IF NOT EXISTS project_checks(
     project_id TEXT NOT NULL, id TEXT NOT NULL, area TEXT NOT NULL,
@@ -417,12 +395,6 @@ CREATE TABLE IF NOT EXISTS project_terms(
     meaning TEXT NOT NULL DEFAULT '', area TEXT NOT NULL DEFAULT '', path TEXT NOT NULL,
     PRIMARY KEY (project_id, id)
   );
-
-
--- Летопись сущности. Две породы записей, и они не смешиваются:
---
---   `declared` — то, что документ говорит о себе сам (журнал внутри вопроса).
---     Выводится из текста и пересобирается вместе с ним;
 --   `edit`     — то, что случилось: правка, её ревизия и имя правившего.
 --     Пересборка её НЕ ТРОГАЕТ, иначе след правки жил бы до первой пересборки.
 --
@@ -434,11 +406,6 @@ CREATE TABLE IF NOT EXISTS entity_event (
   at date, event text NOT NULL, actor text NOT NULL DEFAULT '',
   by_decision text, by_commit text,
   PRIMARY KEY (project_id, entity_kind, entity_id, ord));
-ALTER TABLE entity_event ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'declared';
-DO $$ BEGIN
-  ALTER TABLE entity_event DROP CONSTRAINT entity_event_pkey;
-  ALTER TABLE entity_event ADD PRIMARY KEY (project_id, entity_kind, entity_id, source, ord);
-EXCEPTION WHEN others THEN NULL; END $$;
 
 CREATE TABLE IF NOT EXISTS norm_version (
   project_id text NOT NULL, entity_kind text NOT NULL, entity_id text NOT NULL,
@@ -451,24 +418,6 @@ CREATE TABLE IF NOT EXISTS measurement (
   value text NOT NULL, method text NOT NULL DEFAULT '',
   stated_in_kind text, stated_in_id text,
   PRIMARY KEY (project_id, subject, at));
-
--- Разрыв пути и требование, которым он закрыт.
---
--- Таблица заводится ПУСТОЙ и пустой остаётся. В `cjm.md` семь разрывов, и
--- колонка «Чем закрываем» у всех семи — проза: «ведущий по восьми шагам»,
--- «приёмка смены». Идентификатора требования нет ни у одного, вычислить его
--- нельзя, и догадка здесь была бы связью, которой набор не объявлял.
---
--- Место держится, чтобы связь было куда записать, когда владелец её назовёт.
--- Пустая таблица честнее заполненной догадками: по ней видно, что работа не
--- сделана, а не что её сделали неверно.
--- ПРОЕКТНОЙ КОПИИ ЦЕПОЧКИ ФАЗ ЗДЕСЬ БОЛЬШЕ НЕТ, и это не упущение.
---
--- `project_phase` объявляла то же, что общая `phase`, и однажды её засеяла. С
--- тех пор читатели ходили в `phase`, а единственная дверь писала в
--- `project_phase`: объявленное дверью не читал никто, и привязка гейта к фазе
--- пропадала молча. Одна запись, одна дверь — `phase` и `phase-set`.
-DROP TABLE IF EXISTS project_phase;
 
 -- Словарь статусов — таблица, а не `CHECK`.
 --
@@ -493,41 +442,6 @@ CREATE TABLE IF NOT EXISTS kind_status (
   source text NOT NULL DEFAULT '',
   terminal boolean NOT NULL DEFAULT false,
   PRIMARY KEY (kind, name));
-ALTER TABLE kind_status ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT '';
--- Почему факта нет. Пустой статус без причины читается как «забыли»; с
--- причиной — как решение, которое кто-то принял и записал.
-ALTER TABLE kind_status ADD COLUMN IF NOT EXISTS why text NOT NULL DEFAULT '';
--- Переживает ли факт ступени её прохождение. У большинства ступеней факт
--- накопительный: трейлер закрытия остаётся в истории навсегда. У «в работе»
--- факт — текущее состояние: ветку заводят и сносят, и её отсутствие СЕГОДНЯ
--- ничего не говорит о том, была ли задача в работе ВЧЕРА. Доска отличает одно
--- от другого: пропуском считается только непройденная накопительная ступень.
-ALTER TABLE kind_status ADD COLUMN IF NOT EXISTS durable boolean NOT NULL DEFAULT true;
-
--- Подача факта: кто и когда подал. Без этой записи пустая таблица деревьев
--- значит и «никто не работает», и «никто ни разу не подавал» — а это разные
--- ответы, и второй обязан быть «неизвестно».
--- Наблюдение датчика о РЕПОЗИТОРИИ: таблицы миграций, операции контракта,
--- крейты. Сервер репозитория не видит и видеть не будет; харнес видит и
--- **молчит о выводах** — он подаёт факт, судит сервер.
--- Расхождение порождённого файла с тем, что считает сервер. Пишется сборкой,
--- читается гейтом: правило гейта — запрос, и вычисление на Rust должно оставить
--- ему след в базе, а не проситься исключением в исполнитель.
--- Родов у пункта четыре, а было три.
---
---   `manual` — проиграно человеком: онбординг на чистой установке — это
---     ДЕЙСТВИЕ с исходом, а не утверждение о тексте. Назвав его подписью, мы
---     получали гейт, которому будто нужны две подписи;
---   `unknown` — пункт плана, машинного способа у которого пока нет. Он обязан
---     существовать: отсутствие пункта нельзя ни показать, ни посчитать.
---
--- Стережёт их `gate_item`: род объявляется там, и там же стоит ограничение. У
--- замера своего рода больше нет — он был копией.
-DO $$ BEGIN
-  ALTER TABLE project_gates DROP CONSTRAINT IF EXISTS project_gates_kind_check;
-  ALTER TABLE project_gates DROP CONSTRAINT IF EXISTS project_gates_check;
-  ALTER TABLE project_gates DROP CONSTRAINT IF EXISTS project_gates_check1;
-EXCEPTION WHEN others THEN NULL; END $$;
 
 -- Объявленный способ СТУПЕНИ живёт отдельно от самой ступени — ровно по тому
 -- же образцу, что способ пункта готовности. Причина та же и уже измеренная:
@@ -538,15 +452,6 @@ CREATE TABLE IF NOT EXISTS harness_process_method (
   method_kind text NOT NULL CHECK (method_kind IN ('query','command','unknown')),
   method text NOT NULL DEFAULT '', declared_by text NOT NULL DEFAULT '',
   PRIMARY KEY (set_name, process, ord));
-
--- Ответ вопроса — ПОЛЕ, а не догадка по заголовку раздела. Рядом флаг для
--- быстрого поиска и сортировки: отвечен · искали и не нашли · не сказано.
--- Третье состояние обязательно: «искали, набор молчит» зовёт владельца, а
--- «не сказано» — автора вопроса, и это разные работы.
-ALTER TABLE project_questions ADD COLUMN IF NOT EXISTS answer text NOT NULL DEFAULT '';
-ALTER TABLE project_questions ADD COLUMN IF NOT EXISTS answer_state text NOT NULL DEFAULT 'unsaid';
-CREATE INDEX IF NOT EXISTS project_questions_by_answer
-  ON project_questions(project_id, answer_state);
 
 -- Подпись — утверждение ЧЕЛОВЕКА, и запись о ней обязана нести всё, что делает
 -- её проверяемой годы спустя: кто, когда, под какой формулировкой, под какими
@@ -568,31 +473,6 @@ CREATE TABLE IF NOT EXISTS gate (
   project_id text NOT NULL, phase text NOT NULL,
   title text NOT NULL DEFAULT '',
   PRIMARY KEY (project_id, phase));
-
--- ПОДПИСИ ГЕЙТА БОЛЬШЕ НЕТ. Гейт автоматический: он закрыт, когда выполнены
--- его условия, и человеку нечего добавить к машинному замеру. Подпись только
--- откладывала закрытие — `G2` стоял с двадцатью пятью зелёными пунктами и
--- ждал росчерка, — а однажды заставила меня написать правило на понятие,
--- которого в наборе нет.
---
--- Таблицы `gate_signature` и `gate_signature_doc` НЕ СНОСЯТСЯ из базы: в них
--- лежат две записи с формулировками владельца о принятом — свидетельство о
--- дне, а не механизм. Снятие DDL их не трогает; решать их судьбу владельцу.
-
--- Имя сущности — в самой таблице документов, рядом с путём.
---
--- Путь остаётся полем ПРОИСХОЖДЕНИЯ («откуда приехало»), но опознаётся документ
--- видом и именем. Пока ключ был файловым, два `onboarding.md` были неразличимы
--- не потому, что набор чего-то не сказал, а потому что спрашивали не о том.
---
--- Шаг добавляющий: ни одна из тридцати трёх колонок с путём не тронута, и
--- ничего на него опирающееся не ломается. Ключ переносится следующим заходом,
--- когда имя будет заполнено у всех и проверено.
-ALTER TABLE project_documents ADD COLUMN IF NOT EXISTS entity_kind text NOT NULL DEFAULT '';
-ALTER TABLE project_documents ADD COLUMN IF NOT EXISTS entity_name text NOT NULL DEFAULT '';
-CREATE UNIQUE INDEX IF NOT EXISTS project_documents_by_entity
-  ON project_documents(project_id, entity_kind, entity_name)
-  WHERE entity_kind <> '';
 
 CREATE TABLE IF NOT EXISTS generated_drift (
   project_id text NOT NULL, name text NOT NULL, detail text NOT NULL DEFAULT '',
@@ -618,7 +498,6 @@ CREATE TABLE IF NOT EXISTS term_retired (
   retired_by text NOT NULL DEFAULT '',
   declared_in text NOT NULL DEFAULT '',
   PRIMARY KEY (project_id, term));
-DELETE FROM term_retired WHERE retired_by = '' AND declared_in = 'docs-lint RETIRED + Article 12';
 
 -- Признак раздела «Состояния» у экрана. Карта проекта просит проверять ПО
 -- ОТСУТСТВИЮ ЗАГОЛОВКА, а не по перечню: перечень она сама объявляет неполным.
@@ -700,18 +579,6 @@ CREATE TABLE IF NOT EXISTS task_state (
   state text NOT NULL CHECK (state IN ('not_started','claimed','closed')),
   closing_commit text NOT NULL DEFAULT '',
   seen_at bigint NOT NULL,
-  PRIMARY KEY (project_id, task_id));
-
--- Объявленное отсутствие требований — факт, и у факта есть строка.
---
--- `M0-T12` пишет «нет собственных; исполняет решения Q-277 и Q-282 (ADR-0150)».
--- Разбор вытащил оттуда Q-277 и Q-282 и записал их ТРЕБОВАНИЯМИ задачи — то
--- есть ровно обратное написанному. Из объяснения отсутствия связи не
--- добываются: имена в такой фразе суть упоминания.
-CREATE TABLE IF NOT EXISTS task_requirements_declared (
-  project_id text NOT NULL, task_id text NOT NULL,
-  has_own boolean,                       -- NULL: поле не заполнено вовсе, и это дефект документа
-  note text NOT NULL DEFAULT '',         -- фраза целиком, как написана
   PRIMARY KEY (project_id, task_id));
 
 CREATE TABLE IF NOT EXISTS task_requirement (
@@ -836,24 +703,6 @@ CREATE TABLE IF NOT EXISTS project_named_id (
   caveated boolean NOT NULL DEFAULT false,
   PRIMARY KEY (project_id, entity_kind, entity_name, said_id));
 
--- Числа, СКАЗАННЫЕ документом прослеживаемости. Правило сверяет их с
--- измеренным; чтобы сверять равенством, сказанное обязано быть значением, а не
--- ячейкой, из которой его вынимают на каждом прогоне.
-CREATE TABLE IF NOT EXISTS project_traceability_said (
-  project_id text NOT NULL, block_ord integer NOT NULL,
-  subject text NOT NULL, column_name text NOT NULL, said integer NOT NULL,
-  -- Строка итога — не предмет: сверять её с числом предмета значит требовать,
-  -- чтобы итог равнялся одному из слагаемых.
-  is_total boolean NOT NULL DEFAULT false,
-  PRIMARY KEY (project_id, block_ord, subject, column_name));
-
--- Держатель инварианта: требование, которое не видно ни на одной поверхности,
--- но названо МЕСТОМ В КОДЕ. Строка держателя без места — не держатель, а
--- обещание; место, где стоит заглушка, — тоже не держатель.
-CREATE TABLE IF NOT EXISTS project_requirement_holder (
-  project_id text NOT NULL, requirement_id text NOT NULL, path text NOT NULL,
-  PRIMARY KEY (project_id, requirement_id, path));
-
 -- Поверхности, названные РЕШЕНИЕМ. Множество закрыто им, и закрытость обязана
 -- сверяться на равных: гейт, читающий свой перечень и ничей больше, закрытым
 -- множество не делает — он делает закрытым СВОЙ список.
@@ -889,6 +738,924 @@ CREATE TABLE IF NOT EXISTS task_worktree (
   project_id text NOT NULL, task_id text NOT NULL,
   branch text NOT NULL DEFAULT '', since bigint NOT NULL,
   PRIMARY KEY (project_id, task_id));
+
+-- СДЕЛАННОЕ НЕ В СВОЙ ЧЕРЁД — ЭТО ДОЛГ, И ДОЛГ ЗАПИСЫВАЕТСЯ.
+--
+-- Задача, закрытая при закрытой фазе, нарушила порядок: гейт, который эту фазу
+-- открывает, тогда не был пройден, и то, на что работа опиралась, ещё не стояло.
+-- Границы фаз двигать нельзя — двигается способ выйти: делать то, что фазой
+-- ниже, а сделанное раньше срока ПЕРЕДЕЛЫВАТЬ.
+--
+-- Считать это на лету нельзя: правило видит долг, пока фаза закрыта, и теряет
+-- его в тот самый миг, когда гейт зеленеет, — то есть ровно тогда, когда
+-- переделывать становится можно. Поэтому долг замечается и лежит.
+--
+-- Гасится он одним: задача закрыта ЗАНОВО, коммитом позже того, которым долг
+-- замечен. Не словом, не побегом и не позеленевшим гейтом.
+CREATE TABLE IF NOT EXISTS task_redo (
+  project_id text NOT NULL,
+  task_id    text NOT NULL,
+  noticed_at bigint NOT NULL,
+  phase      text NOT NULL DEFAULT '',
+  gate       text NOT NULL DEFAULT '',
+  PRIMARY KEY (project_id, task_id)
+);
+-- Закрытие судится ОДИН РАЗ — первым замером, начатым после того, как план его
+-- увидел, и отмечается своим коммитом. Судить каждой пересборкой значило судить
+-- давнее закрытие по нынешней фазе: гейт, покрасневший после, ставил долг
+-- задачам, закрытым в свой черёд. А судить пересборкой — по замеру, сделанному
+-- ДО закрытия.
+--
+-- Отметка — своей таблицей, а не колонкой `task_state`: подача полная и снимает
+-- строки задач, которых в ней нет. Задача, выпавшая из одной подачи, теряла бы
+-- отметку и судилась заново по нынешней фазе.
+CREATE TABLE IF NOT EXISTS task_closing_judged (
+  project_id     text NOT NULL,
+  task_id        text NOT NULL,
+  closing_commit text NOT NULL,
+  PRIMARY KEY (project_id, task_id, closing_commit)
+);
+
+CREATE TABLE IF NOT EXISTS task_plan (
+  project_id text NOT NULL,
+  task_id text NOT NULL,
+  at bigint NOT NULL,
+  task_revision bigint NOT NULL,
+  body text NOT NULL DEFAULT '',
+  declared_by text NOT NULL DEFAULT '',
+  PRIMARY KEY (project_id, task_id, at));
+
+CREATE TABLE IF NOT EXISTS preflight_verdict (
+  project_id text NOT NULL, task_id text NOT NULL, at bigint NOT NULL,
+  task_revision bigint NOT NULL,
+  verdict text NOT NULL CHECK (verdict IN ('ready','ready-with-risks','blocked')),
+  findings integer NOT NULL DEFAULT 0, body text NOT NULL DEFAULT '',
+  PRIMARY KEY (project_id, task_id, at));
+
+-- Что именно считает заявленное число: запрос, дающий факт, и оговорка.
+CREATE TABLE IF NOT EXISTS claim_subject (
+  project_id text NOT NULL, name text NOT NULL, subject text NOT NULL,
+  counts text NOT NULL,
+  note text NOT NULL DEFAULT '',
+  PRIMARY KEY (project_id, name, subject));
+
+CREATE TABLE IF NOT EXISTS cjm_gap (
+  project_id text NOT NULL, ord integer NOT NULL,
+  gap text NOT NULL, phase text NOT NULL, closes_with text NOT NULL,
+  PRIMARY KEY (project_id, ord));
+
+CREATE TABLE IF NOT EXISTS cjm_gap_requirement (
+  project_id text NOT NULL, gap_ord integer NOT NULL,
+  gap text NOT NULL, phase text NOT NULL,
+  closed_by_requirement text NOT NULL,
+  PRIMARY KEY (project_id, gap_ord, closed_by_requirement));
+
+CREATE TABLE IF NOT EXISTS task_milestone_dep (
+  project_id text NOT NULL, task_id text NOT NULL, milestone_id text NOT NULL,
+  said text NOT NULL,
+  PRIMARY KEY (project_id, task_id, milestone_id));
+
+-- ─── Кто может войти ─────────────────────────────────────────────────────────
+--
+-- Край (Caddy) утверждает личность двумя заголовками: общий секрет и имя
+-- вошедшего. Секрет отвечает на вопрос «это точно край», но НЕ на вопрос «этому
+-- человеку сюда можно» — имя край подставляет какое настроено, и сервер прежде
+-- верил любому непустому. «Кто дотянулся до порта — владелец» было правдой.
+--
+-- Допущенные объявляются здесь. Список пуст — сервер пускает, но КАЖДЫЙ вход
+-- записывает как незаявленный, и `principals` их называет. Список непуст —
+-- незаявленному отказ. Пустой список не запирает свежую установку и при этом
+-- не молчит о дыре.
+CREATE TABLE IF NOT EXISTS edge_principal (
+  principal text PRIMARY KEY,
+  note text NOT NULL DEFAULT '',
+  declared_at bigint NOT NULL,
+  declared_by text NOT NULL DEFAULT '');
+
+-- Кто входил и когда. Не журнал запросов, а последний след на каждого: вопрос
+-- «кто сюда ходит» обязан отвечаться и через неделю, а не жить в памяти
+-- процесса, которую стирает каждая выкатка.
+CREATE TABLE IF NOT EXISTS edge_seen (
+  principal text PRIMARY KEY,
+  first_at bigint NOT NULL,
+  last_at bigint NOT NULL,
+  requests bigint NOT NULL DEFAULT 0,
+  refused bigint NOT NULL DEFAULT 0);
+
+-- Заморозка набора на начало выпуска.
+--
+-- Скилл `godzy-version` делал её обходом файлов с `shasum` и складывал в
+-- `freeze.md`. База знает то же самое сама: у каждого документа есть хеш и
+-- ревизия. Заморозка — снимок этого, а разница выпуска — сравнение с ним.
+--
+-- `fate` заполняется сравнением, а не рукой: `unchanged` · `changed` ·
+-- `removed` · `new`. Удалённый документ виден именно этой колонкой — прежде
+-- пропущенная строка означала требование, исчезнувшее молча.
+CREATE TABLE IF NOT EXISTS version_freeze (
+  project_id text NOT NULL,
+  version text NOT NULL,
+  entity_kind text NOT NULL,
+  entity_name text NOT NULL,
+  content_hash text NOT NULL,
+  revision bigint NOT NULL,
+  frozen_at bigint NOT NULL,
+  frozen_by text NOT NULL DEFAULT '',
+  PRIMARY KEY (project_id, version, entity_kind, entity_name));
+
+-- Область экрана — ОБЪЯВЛЕННАЯ величина, а не вывод.
+--
+-- `configure`, `mobile`, `shell` — раздел интерфейса, к которому принадлежит
+-- экран. Набор о ней нигде не говорит: она была видна только по каталогу, в
+-- котором лежал файл. Вывести её из имени (`SCR-CFG-01` → `configure`) можно —
+-- соответствие взаимно однозначно на всех 68, — но такого правила набор не
+-- объявлял, и завести его значило бы выдумать.
+--
+-- Поэтому она становится тем, чем и является: ДАННЫМИ. Своя таблица, потому что
+-- `project_screens` пересборка удаляет и пишет заново, а объявленное переживает
+-- пересборку — тем же устройством, что и состояния задач в `task_state`.
+CREATE TABLE IF NOT EXISTS screen_area (
+  project_id text NOT NULL,
+  screen_id text NOT NULL,
+  area text NOT NULL,
+  PRIMARY KEY (project_id, screen_id));
+
+CREATE TABLE IF NOT EXISTS project_postmortem (
+  project_id text NOT NULL,
+  id text NOT NULL,
+  title text NOT NULL DEFAULT '',
+  summary text NOT NULL DEFAULT '',
+  timeline text NOT NULL DEFAULT '',
+  root_cause text NOT NULL DEFAULT '',
+  lesson text NOT NULL DEFAULT '',
+  PRIMARY KEY (project_id, id));
+
+CREATE TABLE IF NOT EXISTS project_token (
+  project_id text NOT NULL,
+  name text NOT NULL,
+  dark text NOT NULL DEFAULT '',
+  light text NOT NULL DEFAULT '',
+  purpose text NOT NULL DEFAULT '',
+  section text NOT NULL DEFAULT '',
+  PRIMARY KEY (project_id, name));
+
+CREATE TABLE IF NOT EXISTS project_reference_source (
+  project_id text NOT NULL,
+  entity_name text NOT NULL,
+  source text NOT NULL DEFAULT '',
+  note text NOT NULL DEFAULT '',
+  taken text NOT NULL DEFAULT '',
+  sha text NOT NULL DEFAULT '',
+  ref_type text NOT NULL DEFAULT '',
+  from_project text NOT NULL DEFAULT '',
+  repo text NOT NULL DEFAULT '',
+  PRIMARY KEY (project_id, entity_name));
+
+CREATE TABLE IF NOT EXISTS project_algorithm (
+  project_id text NOT NULL,
+  id text NOT NULL,
+  story_id text NOT NULL DEFAULT '',
+  title text NOT NULL DEFAULT '',
+  preconditions text NOT NULL DEFAULT '',
+  flow text NOT NULL DEFAULT '',
+  failure_branches text NOT NULL DEFAULT '',
+  not_covered text NOT NULL DEFAULT '',
+  PRIMARY KEY (project_id, id));
+
+CREATE TABLE IF NOT EXISTS project_algorithm_links (
+  project_id text NOT NULL,
+  algorithm_id text NOT NULL,
+  kind text NOT NULL,
+  target text NOT NULL,
+  PRIMARY KEY (project_id, algorithm_id, kind, target));
+
+CREATE TABLE IF NOT EXISTS project_stand (
+  project_id text NOT NULL,
+  section text NOT NULL,
+  name text NOT NULL,
+  value text NOT NULL DEFAULT '',
+  PRIMARY KEY (project_id, section, name));
+
+CREATE TABLE IF NOT EXISTS project_crate (
+  project_id text NOT NULL,
+  name text NOT NULL,
+  does text NOT NULL DEFAULT '',
+  does_not text NOT NULL DEFAULT '',
+  PRIMARY KEY (project_id, name));
+
+CREATE TABLE IF NOT EXISTS project_protocol_op (
+  project_id text NOT NULL,
+  op text NOT NULL,
+  op_group text NOT NULL DEFAULT '',
+  events text NOT NULL DEFAULT '',
+  PRIMARY KEY (project_id, op));
+
+CREATE TABLE IF NOT EXISTS project_protocol_requirements (
+  project_id text NOT NULL,
+  op_group text NOT NULL,
+  requirement_id text NOT NULL,
+  PRIMARY KEY (project_id, op_group, requirement_id));
+
+CREATE TABLE IF NOT EXISTS project_article_gates (
+  project_id text NOT NULL,
+  article integer NOT NULL,
+  gate text NOT NULL,
+  state text NOT NULL DEFAULT '',
+  PRIMARY KEY (project_id, article, gate));
+
+CREATE TABLE IF NOT EXISTS project_requirement_sources (
+  project_id text NOT NULL,
+  requirement_id text NOT NULL,
+  kind text NOT NULL,
+  target text NOT NULL,
+  PRIMARY KEY (project_id, requirement_id, kind, target));
+
+-- Прогон: что на самом деле произошло с задачей.
+--
+-- Документ прогона — единственное место, где записано, чем задача закончилась:
+-- диапазон коммитов, даты, ревью и — главное — что осталось открытым. Последнее
+-- терялось целиком: задача закрывалась, а её открытый хвост оставался прозой.
+CREATE TABLE IF NOT EXISTS project_run_record (
+  project_id text NOT NULL,
+  id text NOT NULL,
+  task_id text NOT NULL DEFAULT '',
+  milestone_id text NOT NULL DEFAULT '',
+  title text NOT NULL DEFAULT '',
+  commits text NOT NULL DEFAULT '',
+  dates text NOT NULL DEFAULT '',
+  review text NOT NULL DEFAULT '',
+  appeared text NOT NULL DEFAULT '',
+  left_open text NOT NULL DEFAULT '',
+  PRIMARY KEY (project_id, id));
+
+CREATE TABLE IF NOT EXISTS project_guarantee (
+  project_id text NOT NULL,
+  number integer NOT NULL,
+  title text NOT NULL,
+  held_by text NOT NULL DEFAULT '',
+  body text NOT NULL DEFAULT '',
+  PRIMARY KEY (project_id, number));
+
+-- Правило внешнего заявления: что разрешено утверждать и чем это закрепляется.
+CREATE TABLE IF NOT EXISTS project_claim_rule (
+  project_id text NOT NULL,
+  number integer NOT NULL,
+  title text NOT NULL,
+  body text NOT NULL DEFAULT '',
+  PRIMARY KEY (project_id, number));
+
+CREATE TABLE IF NOT EXISTS project_stage (
+  project_id text NOT NULL,
+  ord integer NOT NULL,
+  name text NOT NULL,
+  produces text NOT NULL DEFAULT '',
+  closed_by text NOT NULL DEFAULT '',
+  PRIMARY KEY (project_id, name));
+
+-- Раскладка набора по фазам: какой артефакт фазы есть, какой частично, какого
+-- нет. Состояние объявлено самим документом, а не выведено из наличия файла:
+-- документ может лежать и быть заглушкой.
+CREATE TABLE IF NOT EXISTS project_phase_artifact (
+  project_id text NOT NULL,
+  phase text NOT NULL,
+  artifact text NOT NULL,
+  we_have text NOT NULL DEFAULT '',
+  state text NOT NULL DEFAULT '',
+  PRIMARY KEY (project_id, phase, artifact));
+
+CREATE TABLE IF NOT EXISTS project_milestone_requirements (
+  project_id text NOT NULL,
+  milestone_id text NOT NULL,
+  requirement_id text NOT NULL,
+  PRIMARY KEY (project_id, milestone_id, requirement_id));
+
+CREATE TABLE IF NOT EXISTS project_milestone_gates (
+  project_id text NOT NULL,
+  milestone_id text NOT NULL,
+  gate text NOT NULL,
+  PRIMARY KEY (project_id, milestone_id, gate));
+
+CREATE TABLE IF NOT EXISTS project_screen_requirements (
+  project_id text NOT NULL,
+  screen_id text NOT NULL,
+  requirement_id text NOT NULL,
+  PRIMARY KEY (project_id, screen_id, requirement_id));
+
+-- Проект как сущность: у него есть имя и репозиторий.
+--
+-- Проектов не существовало таблицей — только строкой `project_id` в двух
+-- десятках других, вперемешку с двенадцатью огрызками проб (`s1`…`p6`,
+-- `mine`). Из-за этого клиент не мог спросить «чей это репозиторий» и держал
+-- ответ файлом в самом репозитории: `.harness/mh.json`. Знание о том, какому
+-- проекту принадлежит дерево, — знание сервера, а не дерева.
+CREATE TABLE IF NOT EXISTS project (
+  id text PRIMARY KEY,
+  name text NOT NULL DEFAULT '',
+  repo text NOT NULL DEFAULT '',
+  declared_at bigint NOT NULL DEFAULT 0,
+  declared_by text NOT NULL DEFAULT '');
+
+-- Чем датчик снимает факт с репозитория.
+--
+-- Пять датчиков жили пятью скриптами на другом языке: каждый ходил по своим
+-- файлам своим образцом и подавал свой род факта. Общего у них ровно это —
+-- «где искать, что вынимать, чем назвать», — и оно объявляется, а исполняет
+-- клиент, у которого есть репозиторий.
+CREATE TABLE IF NOT EXISTS project_sensor_spec (
+  project_id text NOT NULL,
+  fact text NOT NULL,
+  reads text NOT NULL DEFAULT '',
+  extract_re text NOT NULL DEFAULT '',
+  note text NOT NULL DEFAULT '',
+  how text NOT NULL DEFAULT 'extract',
+  PRIMARY KEY (project_id, fact));
+-- НАД ЧЕМ ПУНКТ МЕРЯЕТ. Правило, у которого предмет ИСЧЕЗ, отчитывалось
+-- тишиной: строк нет — нарушений нет — пункт зелен и пропал из перечня
+-- непройденных. Счёт при этом улучшался, и гейт зеленел от того, что мерить
+-- стало нечего.
+--
+-- Ровно тот класс, против которого в наборе написано «пустой список вместо
+-- ответа врёт», — и он сработал на самом харнесе: сто пятьдесят четыре нарушения
+-- ушли молча, когда из плана пропали красные задачи.
+-- ПРОГОН ВЕРСИИ. Прогоны раскладывались по имени: задачные и этапные, а всё
+-- прочее уходило в `_ => continue` БЕЗ ЕДИНОГО СЛОВА. Документ `run` с именем
+-- `v1` не появлялся в наборе, ошибки не было, счётчик не менялся — тот же род
+-- молчания, который вычищен из подачи фактов.
+-- ИСТОЧНИК И ЕГО КОПИИ. Нормативный перечень живёт в четырёх местах, и
+-- равенство держит рука: три копии честно помечены производными, но пометка —
+-- ПРОЗА. Двадцать первая настройка потребует пяти правок, и красной станет ноль.
+--
+-- Дверь одна на два решения владельца: там сверяется пара чисел, здесь — тело
+-- названной функции (запрет восьмой копии помощника). Разница только в способе
+-- сравнения, и он объявляется полем, а не второй дверью.
+CREATE TABLE IF NOT EXISTS derived_copy (
+  project_id text NOT NULL,
+  name text NOT NULL,
+  source_kind text NOT NULL,
+  source_name text NOT NULL,
+  copy_kind text NOT NULL,
+  copy_name text NOT NULL,
+  compare text NOT NULL CHECK (compare IN ('count', 'body')),
+  -- ОБРАЗЕЦ У КАЖДОЙ СТОРОНЫ СВОЙ. Источник и копия говорят одно и то же
+  -- РАЗНЫМИ словами — «`ADR-0020` называет девять» против «гейтятся девять», — и
+  -- один образец на обоих берёт из одного нужное, из другого соседнее слово.
+  source_pattern text NOT NULL DEFAULT '',
+  pattern text NOT NULL,
+  why text NOT NULL DEFAULT '',
+  decided_by text NOT NULL DEFAULT '',
+  PRIMARY KEY (project_id, name, copy_kind, copy_name));
+-- Сама функция — `RENAME_IN_COLUMNS`: её заводит `ensure` следом за этой пачкой.
+
+-- ДОМА ПРАВИЛУ КОДА И УТВЕРЖДЕНИЮ. У `tot-ade` под видом `check` лежали три
+-- разные вещи: 56 критериев приёмки, 141 ИМЯ ПРАВИЛА В КОДЕ (11 из 12 найдены
+-- в `crates/`) и 30 утверждений с пространством имён.
+--
+-- Пока дома нет, чинить извлечение нельзя: заработавшая пересборка снесла бы
+-- 171 запись как «устаревшую проекцию» — и это была бы потеря, а не уборка.
+CREATE TABLE IF NOT EXISTS project_lint_rules (
+    project_id  text NOT NULL,
+    id          text NOT NULL,
+    area        text NOT NULL DEFAULT '',
+    entity_kind text NOT NULL DEFAULT '',
+    entity_name text NOT NULL DEFAULT '',
+    section_ord integer,
+    origin      text NOT NULL DEFAULT 'projected',
+    PRIMARY KEY (project_id, id)
+);
+-- РАССУЖДЕНИЕ КАК СУЩНОСТЬ. В пяти документах `myack` 81 килобайт прозы не
+-- держала ни одна колонка: разделы, которые ничего не объявляют, а объясняют —
+-- «Инварианты и их держатели», «MON — мониторы», «Открытые вопросы». Померено
+-- дверью `document-coverage`: из 41 раздела `srs` 14 только текст, 13 смешанных.
+--
+-- Своего имени у рассуждения нет, и потому сущностью оно стать не могло. Но
+-- адрес есть: ЯКОРЬ раздела — он выведен из заголовка, уникален внутри
+-- документа (7394 из 7394) и переживает правки выше по тексту, в отличие от
+-- номера блока.
+--
+-- Тело хранится колонкой: рассуждение — это и есть его текст, и вынимать из
+-- него «суть» значило бы пересказывать, а пересказ протухает.
+-- Имя рассуждения — ЕГО АДРЕС: документ и якорь, склеенные решёткой
+-- (`srs#3-20-invarianty`). Якорь уникален внутри документа, но не в наборе, а
+-- отметки и связи ключуются парой «род, имя» — значит имя обязано быть
+-- полным адресом, иначе рассуждения двух документов слились бы в одно.
+CREATE TABLE IF NOT EXISTS project_rationale (
+    project_id  text NOT NULL,
+    id          text NOT NULL,
+    entity_kind text NOT NULL,
+    entity_name text NOT NULL,
+    anchor      text NOT NULL,
+    section_ord integer,
+    title       text NOT NULL DEFAULT '',
+    body        text NOT NULL DEFAULT '',
+    origin      text NOT NULL DEFAULT 'projected',
+    PRIMARY KEY (project_id, id)
+);
+
+-- ЧЕМ ДОКАЗАНО ТРЕБОВАНИЕ — одной таблицей на все роды доказательства.
+--
+-- Правило «у каждого требования есть проверка» знало ровно три источника, и
+-- все три — про тест-кейс. А у `tot-ade` 122 требования доказываются ПРАВИЛОМ
+-- КОДА: линт не пробует случай, он отказывается собирать нарушение. Считать
+-- это «непокрытым» значит требовать сценарий там, где стоит запрет.
+--
+-- Годится ли род доказательством — ОБЪЯВЛЯЕТСЯ (`kind-proves`), а не решается
+-- здесь: это суждение о том, чем в проекте принято доказывать.
+CREATE TABLE IF NOT EXISTS project_requirement_proof (
+    project_id     text NOT NULL,
+    requirement_id text NOT NULL,
+    proof_kind     text NOT NULL,
+    proof_id       text NOT NULL,
+    origin         text NOT NULL DEFAULT 'projected',
+    PRIMARY KEY (project_id, requirement_id, proof_kind, proof_id)
+);
+
+CREATE TABLE IF NOT EXISTS project_assertions (
+    project_id  text NOT NULL,
+    id          text NOT NULL,
+    area        text NOT NULL DEFAULT '',
+    entity_kind text NOT NULL DEFAULT '',
+    entity_name text NOT NULL DEFAULT '',
+    section_ord integer,
+    origin      text NOT NULL DEFAULT 'projected',
+    PRIMARY KEY (project_id, id)
+);
+
+-- КОГДА СТРОКА СУЩНОСТИ МЕНЯЛАСЬ. Прежде это искалось по ревизиям: самая
+-- ранняя запись документа, где текст стоит дословно. Стоило 5,5 секунды при
+-- каждом замере гейта, требовало «различимого» текста и потому выбрасывало
+-- истории с короткими заголовками.
+--
+-- Помнить проще, чем восстанавливать. Пересборка сверяет отпечаток текста с
+-- прошлым: совпал — дата держится, разошёлся — ставится новая. Никакого
+-- поиска по истории, и любой род сущности годится без разбора, различим его
+-- текст или нет.
+CREATE TABLE IF NOT EXISTS entity_stamp (
+    project_id text   NOT NULL,
+    kind       text   NOT NULL,
+    id         text   NOT NULL,
+    text_hash  text   NOT NULL,
+    created_at bigint NOT NULL,
+    updated_at bigint NOT NULL,
+    PRIMARY KEY (project_id, kind, id)
+);
+CREATE TABLE IF NOT EXISTS entity_confirm (
+    project_id text   NOT NULL,
+    kind       text   NOT NULL,
+    id         text   NOT NULL,
+    at         bigint NOT NULL,
+    by_whom    text   NOT NULL DEFAULT '',
+    why        text   NOT NULL,
+    cause      text   NOT NULL DEFAULT '',
+    PRIMARY KEY (project_id, kind, id, at)
+);
+
+-- ОЧЕРЕДЬ РЕШЕНИЙ ВЛАДЕЛЬЦА. Заявка сессии на изменение харнеса и просьба
+-- подтвердить коммит лежат в одной очереди: человек открывает пульт с одним
+-- вопросом — «что от меня ждут», — и два места для ответа означали бы, что
+-- половина ожиданий не видна.
+CREATE TABLE IF NOT EXISTS owner_ask (
+  id          bigserial PRIMARY KEY,
+  project_id  text   NOT NULL DEFAULT '',
+  kind        text   NOT NULL,
+  title       text   NOT NULL,
+  body        text   NOT NULL DEFAULT '',
+  asked_by    text   NOT NULL DEFAULT '',
+  at          bigint NOT NULL,
+  run_id      text   NOT NULL DEFAULT '',
+  state       text   NOT NULL DEFAULT 'open',
+  why         text   NOT NULL DEFAULT '',
+  decided_by  text   NOT NULL DEFAULT '',
+  decided_at  bigint
+);
+
+-- Переход прогона из состояния в состояние: чем кончилась попытка и по чьей
+-- воле. Таблица тоже от прежнего харнеса.
+CREATE TABLE IF NOT EXISTS project_task_run_events (
+  id          bigserial PRIMARY KEY,
+  task_run_id text   NOT NULL REFERENCES project_task_runs (id) ON DELETE CASCADE,
+  from_state  text,
+  to_state    text   NOT NULL,
+  reason      text   NOT NULL DEFAULT '',
+  actor       text   NOT NULL,
+  at          bigint NOT NULL
+);
+
+-- ЧТО ПРОГОН УСПЕЛ: шаги, вопросы, отказы. Переход состояния лежит рядом, в
+-- своей таблице, и о работе не говорит ничего: состояние сообщает, что прогон
+-- жив, и молчит о том, дошёл ли он хоть до чего-нибудь.
+CREATE TABLE IF NOT EXISTS task_run_event (
+  id          bigserial PRIMARY KEY,
+  project_id  text   NOT NULL,
+  run_id      text   NOT NULL,
+  at          bigint NOT NULL,
+  kind        text   NOT NULL,
+  text        text   NOT NULL
+);
+
+-- Слово человека прогону и ответ прогона. Доставленное помечается, иначе
+-- агент читал бы одно и то же на каждом круге.
+CREATE TABLE IF NOT EXISTS task_run_message (
+  id           bigserial PRIMARY KEY,
+  project_id   text   NOT NULL,
+  run_id       text   NOT NULL,
+  at           bigint NOT NULL,
+  side         text   NOT NULL,
+  text         text   NOT NULL,
+  delivered_at bigint
+);
+
+CREATE TABLE IF NOT EXISTS chat_message (
+  id           bigserial PRIMARY KEY,
+  project_id   text   NOT NULL,
+  thread_id    text   NOT NULL,
+  at           bigint NOT NULL,
+  side         text   NOT NULL,
+  text         text   NOT NULL,
+  delivered_at bigint
+);
+
+-- ПЕРЕЧНИ ЭТАПА. Документ этапа несёт четыре списка — «Требования (6)»,
+-- «Истории (6)», «Экраны (10)», «Проверки (27)» — и сам говорит рядом: «все
+-- ссылки списками, потому что этап проверяется по ним». Дом был только у
+-- первого: 372 имени проверок и 213 имён историй жили одним лишь разбором,
+-- таблицы `milestone × check` не существовало вовсе.
+--
+-- Одна таблица, «что» — колонка. Три новые (`milestone_checks`,
+-- `milestone_stories`, `milestone_screens`) разошлись бы между собой, а пар
+-- «вид → вид» в наборе замерено 132: по таблице на пару набор не удержит.
+--
+-- `project_milestone_requirements` НЕ переносится сюда намеренно: её читают
+-- правила, и у неё свой инвариант — требование принадлежит ровно одному
+-- этапу. Переезд ради стройности стоил бы переписывания работающих правил.
+CREATE TABLE IF NOT EXISTS project_milestone_links (
+    project_id   text NOT NULL,
+    milestone_id text NOT NULL,
+    kind         text NOT NULL,
+    target       text NOT NULL,
+    origin       text NOT NULL DEFAULT 'projected',
+    PRIMARY KEY (project_id, milestone_id, kind, target)
+);
+
+-- Раскладка видов — знание СЕРВЕРА, а не одного репозитория.
+--
+-- Она общая для всех проектов, а лежала файлом в `.harness/` одного из них:
+-- сервер не поднимался без чужого репозитория, и «работаем только с сервером»
+-- было неправдой в первой же строке запуска. Файл остаётся способом ЗАВЕСТИ
+-- раскладку, но не местом, где она живёт.
+CREATE TABLE IF NOT EXISTS kind_layout (
+  name text PRIMARY KEY,
+  spec jsonb NOT NULL,
+  declared_at bigint NOT NULL DEFAULT 0,
+  declared_by text NOT NULL DEFAULT '');
+
+-- Одна проверка доказывает НЕСКОЛЬКО требований: гейт `criterion:agent-write-denied`
+-- назван и в FR-05, и в FR-22. Колонка `requirement_id` держит одно имя, и
+-- второе требование выглядело непокрытым при названном доказательстве.
+CREATE TABLE IF NOT EXISTS project_check_requirements (
+  project_id text NOT NULL,
+  check_id text NOT NULL,
+  requirement_id text NOT NULL,
+  PRIMARY KEY (project_id, check_id, requirement_id));
+
+CREATE TABLE IF NOT EXISTS project_story_screens (
+  project_id text NOT NULL,
+  story_id text NOT NULL,
+  screen_id text NOT NULL,
+  PRIMARY KEY (project_id, story_id, screen_id));
+
+CREATE TABLE IF NOT EXISTS project_feature_requirements (
+  project_id text NOT NULL,
+  feature_id text NOT NULL,
+  requirement_id text NOT NULL,
+  PRIMARY KEY (project_id, feature_id, requirement_id));
+
+CREATE TABLE IF NOT EXISTS project_feature_articles (
+  project_id text NOT NULL,
+  feature_id text NOT NULL,
+  article integer NOT NULL,
+  PRIMARY KEY (project_id, feature_id, article));
+
+CREATE TABLE IF NOT EXISTS project_acceptance (
+  project_id text NOT NULL,
+  id text NOT NULL,
+  story_id text NOT NULL DEFAULT '',
+  number integer NOT NULL DEFAULT 0,
+  title text NOT NULL,
+  preconditions text NOT NULL DEFAULT '',
+  steps text NOT NULL DEFAULT '',
+  observed text NOT NULL DEFAULT '',
+  fails_when text NOT NULL DEFAULT '',
+  origin text NOT NULL DEFAULT 'declared',
+  PRIMARY KEY (project_id, id));
+
+CREATE TABLE IF NOT EXISTS project_goal (
+  project_id text NOT NULL,
+  id text NOT NULL,
+  number integer NOT NULL DEFAULT 0,
+  level text NOT NULL DEFAULT '',
+  title text NOT NULL,
+  measured_by text NOT NULL DEFAULT '',
+  checked_when text NOT NULL DEFAULT '',
+  fails_when text NOT NULL DEFAULT '',
+  state_now text NOT NULL DEFAULT '',
+  origin text NOT NULL DEFAULT 'declared',
+  PRIMARY KEY (project_id, id));
+
+
+-- Словарь схемы: РОЛЬ, которую знает код, и ЗНАЧЕНИЕ, которым её зовёт набор.
+--
+-- Общий на все проекты, как гейты и фазы: разрабатываем по одной схеме, и
+-- «раздел доказательства» зовётся в ней одинаково везде. Но зовётся он словом,
+-- а слово — данные. Зашитое в бинарник, оно делает бинарник знающим один
+-- проект: другой набор, назвавший раздел иначе, получил бы молчаливый ноль.
+--
+-- Роль стабильна и на латинице — её пишет код. Значение меняется правкой
+-- строки, а не сборкой.
+CREATE TABLE IF NOT EXISTS scheme_term (
+  role text NOT NULL,
+  value text NOT NULL,
+  ord integer NOT NULL DEFAULT 0,
+  why text NOT NULL DEFAULT '',
+  PRIMARY KEY (role, value));
+
+CREATE TABLE IF NOT EXISTS gate_item (
+  phase text NOT NULL,
+  item text NOT NULL,
+  kind text NOT NULL CHECK (kind IN ('query','command','manual','unknown')),
+  query text,
+  owner text,
+  probe text NOT NULL DEFAULT '',
+  why text NOT NULL DEFAULT '',
+  PRIMARY KEY (phase, item));
+
+CREATE TABLE IF NOT EXISTS gate_head (
+  phase text PRIMARY KEY,
+  title text NOT NULL DEFAULT '');
+
+CREATE TABLE IF NOT EXISTS phase (
+  id text PRIMARY KEY,
+  ord integer NOT NULL,
+  title text NOT NULL,
+  gate text NOT NULL DEFAULT '',
+  plan_level text NOT NULL DEFAULT '',
+  task_kind text NOT NULL DEFAULT '');
+
+
+-- Снятые требования: имя, которого больше нет, и почему.
+--
+-- Устроено как `term_retired` у словаря. Решение, написанное когда требование
+-- ещё было, ссылается на него и после снятия — и это история, а не обрыв.
+-- Отличить историю от опечатки можно только объявлением: снятое названо, всё
+-- прочее остаётся находкой.
+CREATE TABLE IF NOT EXISTS requirement_retired (
+  project_id text NOT NULL,
+  id text NOT NULL,
+  why text NOT NULL DEFAULT '',
+  retired_by text NOT NULL DEFAULT '',
+  declared_at bigint NOT NULL,
+  declared_by text NOT NULL DEFAULT '',
+  PRIMARY KEY (project_id, id));
+
+-- Где мы на лестнице — СОХРАНЁННОЕ, а не посчитанное при вопросе.
+--
+-- Одиннадцать запросов на каждый «где мы» — та же цена, что была у гейтов, и с
+-- тем же изъяном: агент, спросивший дважды подряд, платил дважды, а между
+-- правкой документа и вопросом никто не считал вообще ничего.
+--
+-- Колонки названы, а не свалены в один свёрток: «на какой мы ступени» и «открыта
+-- ли фаза набора» спрашивают запросом, а не разбором json. Свёрток рядом держит
+-- то, у чего своей колонки быть не может, — списки найденного.
+CREATE TABLE IF NOT EXISTS process_position (
+  project_id text NOT NULL,
+  process text NOT NULL,
+  at_ord integer,
+  at_state text NOT NULL DEFAULT '',
+  at_question text NOT NULL DEFAULT '',
+  at_owner text NOT NULL DEFAULT '',
+  at_owner_kind text NOT NULL DEFAULT '',
+  at_touches text NOT NULL DEFAULT '',
+  passed integer NOT NULL DEFAULT 0,
+  skipped integer NOT NULL DEFAULT 0,
+  unanswerable integer NOT NULL DEFAULT 0,
+  corpus_phase_open boolean NOT NULL DEFAULT true,
+  result jsonb,
+  checked_at bigint,
+  PRIMARY KEY (project_id, process));
+
+-- Датчики репозитория: кто обязан подавать факты.
+--
+-- `fact_push` помнит, КТО подал. Кто подать обязан — не помнил никто, и оттого
+-- молчание датчика было неотличимо от его отсутствия. Пустой список тут врёт
+-- ровно так же, как врал он у сверки порождённого.
+--
+-- `stale_after_ms` пусто — проверяется только «подавал ли когда-нибудь». Срок
+-- годности объявляется отдельно и осознанно: выдумать его за проект нельзя.
+CREATE TABLE IF NOT EXISTS sensor (
+  project_id text NOT NULL,
+  fact text NOT NULL,
+  about text NOT NULL DEFAULT '',
+  stale_after_ms bigint,
+  declared_at bigint NOT NULL,
+  declared_by text NOT NULL DEFAULT '',
+  PRIMARY KEY (project_id, fact));
+
+CREATE TABLE IF NOT EXISTS version_state (
+  project_id text NOT NULL,
+  version text NOT NULL,
+  state text NOT NULL CHECK (state IN ('open','closed')),
+  changed_at bigint NOT NULL,
+  changed_by text NOT NULL DEFAULT '',
+  PRIMARY KEY (project_id, version));
+
+CREATE TABLE IF NOT EXISTS phase_state (
+  project_id text NOT NULL,
+  phase text NOT NULL,
+  ord integer NOT NULL,
+  title text NOT NULL DEFAULT '',
+  gate text NOT NULL DEFAULT '',
+  gate_state text NOT NULL DEFAULT '',
+  -- Пусто, если фаза документов не объявляет: ноль сказал бы «объявила и нет их».
+  documents_present integer,
+  documents_absent integer,
+  documents_declared integer,
+  tasks_closed integer,
+  tasks_open integer,
+  tasks_total integer,
+  checked_at bigint,
+  PRIMARY KEY (project_id, phase));
+
+
+-- Что изменилось и требует пересчёта. Одна строка на проект: пересчёт всё равно
+-- общий, а десять правок подряд обязаны стоить одного прогона, а не десяти.
+--
+-- Отметка лежит В БАЗЕ, а не в памяти процесса: пишут в набор двое — сервер по
+-- HTTP и `mh-server mcp`, запускаемый отдельным процессом. Флаг в памяти одного
+-- из них второй бы не увидел, и правка через MCP осталась бы непосчитанной.
+CREATE TABLE IF NOT EXISTS gate_dirty (
+  project_id text PRIMARY KEY,
+  dirty_at bigint NOT NULL,
+  reason text NOT NULL DEFAULT '',
+  ran_at bigint,
+  ran_ms integer);
+
+-- СЛЕД ПЕРЕГРУЗКИ ПЕРЕЖИВАЕТ ПЕРЕГРУЗКУ. Отказы «занято» и взятия второго
+-- соединения при живом первом жили счётчиком в памяти и строкой в журнале: от
+-- часа простоя 2026-09-17 не осталось ничего, что можно прочесть дверью и
+-- сравнить с другим днём. Сборщик кладёт сюда накопленное и обнуляет счёт.
+CREATE TABLE IF NOT EXISTS server_strain (
+  at bigint NOT NULL,
+  busy bigint NOT NULL DEFAULT 0,
+  nested bigint NOT NULL DEFAULT 0);
+-- ─── Таблицы, которых сервер не заводил ──────────────────────────────────────
+--
+-- ДВАДЦАТЬ СЕМЬ ТАБЛИЦ СЕРВЕР ТОЛЬКО ПРАВИЛ, а заводил их когда-то донор —
+-- среди них `project_documents`, `project_gates`, `project_plan_tasks`. Жили
+-- они с тех пор и существовали лишь потому, что однажды их кто-то создал.
+-- Значит, нового экземпляра харнеса не существовало: на чистой базе первый же
+-- `ALTER` несуществующей таблицы ронял всю схему, и проверить её было негде —
+-- ни в CI, ни на стенде. Класс ошибок «запрос зовёт снятую колонку» ловился
+-- поэтому только наборами и только на живом.
+--
+-- Определения взяты у донора (`legacy-qm/src/projects/*.ts`) КАК ЕСТЬ, вместе с
+-- колонкой `path` и старыми ограничениями. Это не небрежность: ниже по этой же
+-- пачке лежат переезды, которые `path` снимают, ограничения переписывают и
+-- добавляют нынешние колонки. Повторённая история приводит чистую базу ровно к
+-- тому, чем живая стала за год; «чистое» определение разошлось бы с переездами
+-- молча — и разошлось бы в ту же сторону, в какую уже разошёлся сам донор:
+-- у `project_gates` он объявляет колонки, снятые этой весной.
+CREATE TABLE IF NOT EXISTS project_articles(
+    project_id TEXT NOT NULL, number INTEGER NOT NULL,
+    title TEXT NOT NULL, path TEXT NOT NULL, anchor TEXT NOT NULL, body TEXT NOT NULL,
+    PRIMARY KEY (project_id, number)
+  );
+
+
+-- Летопись сущности. Две породы записей, и они не смешиваются:
+--
+--   `declared` — то, что документ говорит о себе сам (журнал внутри вопроса).
+--     Выводится из текста и пересобирается вместе с ним;
+ALTER TABLE entity_event ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'declared';
+DO $$ BEGIN
+  ALTER TABLE entity_event DROP CONSTRAINT entity_event_pkey;
+  ALTER TABLE entity_event ADD PRIMARY KEY (project_id, entity_kind, entity_id, source, ord);
+EXCEPTION WHEN others THEN NULL; END $$;
+
+-- Разрыв пути и требование, которым он закрыт.
+--
+-- Таблица заводится ПУСТОЙ и пустой остаётся. В `cjm.md` семь разрывов, и
+-- колонка «Чем закрываем» у всех семи — проза: «ведущий по восьми шагам»,
+-- «приёмка смены». Идентификатора требования нет ни у одного, вычислить его
+-- нельзя, и догадка здесь была бы связью, которой набор не объявлял.
+--
+-- Место держится, чтобы связь было куда записать, когда владелец её назовёт.
+-- Пустая таблица честнее заполненной догадками: по ней видно, что работа не
+-- сделана, а не что её сделали неверно.
+-- ПРОЕКТНОЙ КОПИИ ЦЕПОЧКИ ФАЗ ЗДЕСЬ БОЛЬШЕ НЕТ, и это не упущение.
+--
+-- `project_phase` объявляла то же, что общая `phase`, и однажды её засеяла. С
+-- тех пор читатели ходили в `phase`, а единственная дверь писала в
+-- `project_phase`: объявленное дверью не читал никто, и привязка гейта к фазе
+-- пропадала молча. Одна запись, одна дверь — `phase` и `phase-set`.
+DROP TABLE IF EXISTS project_phase;
+ALTER TABLE kind_status ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT '';
+-- Почему факта нет. Пустой статус без причины читается как «забыли»; с
+-- причиной — как решение, которое кто-то принял и записал.
+ALTER TABLE kind_status ADD COLUMN IF NOT EXISTS why text NOT NULL DEFAULT '';
+-- Переживает ли факт ступени её прохождение. У большинства ступеней факт
+-- накопительный: трейлер закрытия остаётся в истории навсегда. У «в работе»
+-- факт — текущее состояние: ветку заводят и сносят, и её отсутствие СЕГОДНЯ
+-- ничего не говорит о том, была ли задача в работе ВЧЕРА. Доска отличает одно
+-- от другого: пропуском считается только непройденная накопительная ступень.
+ALTER TABLE kind_status ADD COLUMN IF NOT EXISTS durable boolean NOT NULL DEFAULT true;
+
+-- Подача факта: кто и когда подал. Без этой записи пустая таблица деревьев
+-- значит и «никто не работает», и «никто ни разу не подавал» — а это разные
+-- ответы, и второй обязан быть «неизвестно».
+-- Наблюдение датчика о РЕПОЗИТОРИИ: таблицы миграций, операции контракта,
+-- крейты. Сервер репозитория не видит и видеть не будет; харнес видит и
+-- **молчит о выводах** — он подаёт факт, судит сервер.
+-- Расхождение порождённого файла с тем, что считает сервер. Пишется сборкой,
+-- читается гейтом: правило гейта — запрос, и вычисление на Rust должно оставить
+-- ему след в базе, а не проситься исключением в исполнитель.
+-- Родов у пункта четыре, а было три.
+--
+--   `manual` — проиграно человеком: онбординг на чистой установке — это
+--     ДЕЙСТВИЕ с исходом, а не утверждение о тексте. Назвав его подписью, мы
+--     получали гейт, которому будто нужны две подписи;
+--   `unknown` — пункт плана, машинного способа у которого пока нет. Он обязан
+--     существовать: отсутствие пункта нельзя ни показать, ни посчитать.
+--
+-- Стережёт их `gate_item`: род объявляется там, и там же стоит ограничение. У
+-- замера своего рода больше нет — он был копией.
+DO $$ BEGIN
+  ALTER TABLE project_gates DROP CONSTRAINT IF EXISTS project_gates_kind_check;
+  ALTER TABLE project_gates DROP CONSTRAINT IF EXISTS project_gates_check;
+  ALTER TABLE project_gates DROP CONSTRAINT IF EXISTS project_gates_check1;
+EXCEPTION WHEN others THEN NULL; END $$;
+
+-- Ответ вопроса — ПОЛЕ, а не догадка по заголовку раздела. Рядом флаг для
+-- быстрого поиска и сортировки: отвечен · искали и не нашли · не сказано.
+-- Третье состояние обязательно: «искали, набор молчит» зовёт владельца, а
+-- «не сказано» — автора вопроса, и это разные работы.
+ALTER TABLE project_questions ADD COLUMN IF NOT EXISTS answer text NOT NULL DEFAULT '';
+ALTER TABLE project_questions ADD COLUMN IF NOT EXISTS answer_state text NOT NULL DEFAULT 'unsaid';
+CREATE INDEX IF NOT EXISTS project_questions_by_answer
+  ON project_questions(project_id, answer_state);
+
+-- ПОДПИСИ ГЕЙТА БОЛЬШЕ НЕТ. Гейт автоматический: он закрыт, когда выполнены
+-- его условия, и человеку нечего добавить к машинному замеру. Подпись только
+-- откладывала закрытие — `G2` стоял с двадцатью пятью зелёными пунктами и
+-- ждал росчерка, — а однажды заставила меня написать правило на понятие,
+-- которого в наборе нет.
+--
+-- Таблицы `gate_signature` и `gate_signature_doc` НЕ СНОСЯТСЯ из базы: в них
+-- лежат две записи с формулировками владельца о принятом — свидетельство о
+-- дне, а не механизм. Снятие DDL их не трогает; решать их судьбу владельцу.
+
+-- Имя сущности — в самой таблице документов, рядом с путём.
+--
+-- Путь остаётся полем ПРОИСХОЖДЕНИЯ («откуда приехало»), но опознаётся документ
+-- видом и именем. Пока ключ был файловым, два `onboarding.md` были неразличимы
+-- не потому, что набор чего-то не сказал, а потому что спрашивали не о том.
+--
+-- Шаг добавляющий: ни одна из тридцати трёх колонок с путём не тронута, и
+-- ничего на него опирающееся не ломается. Ключ переносится следующим заходом,
+-- когда имя будет заполнено у всех и проверено.
+ALTER TABLE project_documents ADD COLUMN IF NOT EXISTS entity_kind text NOT NULL DEFAULT '';
+ALTER TABLE project_documents ADD COLUMN IF NOT EXISTS entity_name text NOT NULL DEFAULT '';
+CREATE UNIQUE INDEX IF NOT EXISTS project_documents_by_entity
+  ON project_documents(project_id, entity_kind, entity_name)
+  WHERE entity_kind <> '';
+DELETE FROM term_retired WHERE retired_by = '' AND declared_in = 'docs-lint RETIRED + Article 12';
+
+-- Объявленное отсутствие требований — факт, и у факта есть строка.
+--
+-- `M0-T12` пишет «нет собственных; исполняет решения Q-277 и Q-282 (ADR-0150)».
+-- Разбор вытащил оттуда Q-277 и Q-282 и записал их ТРЕБОВАНИЯМИ задачи — то
+-- есть ровно обратное написанному. Из объяснения отсутствия связи не
+-- добываются: имена в такой фразе суть упоминания.
+CREATE TABLE IF NOT EXISTS task_requirements_declared (
+  project_id text NOT NULL, task_id text NOT NULL,
+  has_own boolean,                       -- NULL: поле не заполнено вовсе, и это дефект документа
+  note text NOT NULL DEFAULT '',         -- фраза целиком, как написана
+  PRIMARY KEY (project_id, task_id));
+
+-- Числа, СКАЗАННЫЕ документом прослеживаемости. Правило сверяет их с
+-- измеренным; чтобы сверять равенством, сказанное обязано быть значением, а не
+-- ячейкой, из которой его вынимают на каждом прогоне.
+CREATE TABLE IF NOT EXISTS project_traceability_said (
+  project_id text NOT NULL, block_ord integer NOT NULL,
+  subject text NOT NULL, column_name text NOT NULL, said integer NOT NULL,
+  -- Строка итога — не предмет: сверять её с числом предмета значит требовать,
+  -- чтобы итог равнялся одному из слагаемых.
+  is_total boolean NOT NULL DEFAULT false,
+  PRIMARY KEY (project_id, block_ord, subject, column_name));
+
+-- Держатель инварианта: требование, которое не видно ни на одной поверхности,
+-- но названо МЕСТОМ В КОДЕ. Строка держателя без места — не держатель, а
+-- обещание; место, где стоит заглушка, — тоже не держатель.
+CREATE TABLE IF NOT EXISTS project_requirement_holder (
+  project_id text NOT NULL, requirement_id text NOT NULL, path text NOT NULL,
+  PRIMARY KEY (project_id, requirement_id, path));
 
 -- КАК ИСПОЛНИТЕЛЬ СОБИРАЕТСЯ ДЕЛАТЬ — записью, и записью РАНЬШЕ правки.
 --
@@ -944,43 +1711,6 @@ ALTER TABLE gate_item ADD COLUMN IF NOT EXISTS since bigint NOT NULL DEFAULT 0;
 -- их и подаёт. Ноль — «не сказано», и правило тогда падает обратно на `seen_at`:
 -- подающий старой сборки не должен ломаться молча.
 ALTER TABLE task_state ADD COLUMN IF NOT EXISTS closed_at bigint NOT NULL DEFAULT 0;
-
--- СДЕЛАННОЕ НЕ В СВОЙ ЧЕРЁД — ЭТО ДОЛГ, И ДОЛГ ЗАПИСЫВАЕТСЯ.
---
--- Задача, закрытая при закрытой фазе, нарушила порядок: гейт, который эту фазу
--- открывает, тогда не был пройден, и то, на что работа опиралась, ещё не стояло.
--- Границы фаз двигать нельзя — двигается способ выйти: делать то, что фазой
--- ниже, а сделанное раньше срока ПЕРЕДЕЛЫВАТЬ.
---
--- Считать это на лету нельзя: правило видит долг, пока фаза закрыта, и теряет
--- его в тот самый миг, когда гейт зеленеет, — то есть ровно тогда, когда
--- переделывать становится можно. Поэтому долг замечается и лежит.
---
--- Гасится он одним: задача закрыта ЗАНОВО, коммитом позже того, которым долг
--- замечен. Не словом, не побегом и не позеленевшим гейтом.
-CREATE TABLE IF NOT EXISTS task_redo (
-  project_id text NOT NULL,
-  task_id    text NOT NULL,
-  noticed_at bigint NOT NULL,
-  phase      text NOT NULL DEFAULT '',
-  gate       text NOT NULL DEFAULT '',
-  PRIMARY KEY (project_id, task_id)
-);
--- Закрытие судится ОДИН РАЗ — первым замером, начатым после того, как план его
--- увидел, и отмечается своим коммитом. Судить каждой пересборкой значило судить
--- давнее закрытие по нынешней фазе: гейт, покрасневший после, ставил долг
--- задачам, закрытым в свой черёд. А судить пересборкой — по замеру, сделанному
--- ДО закрытия.
---
--- Отметка — своей таблицей, а не колонкой `task_state`: подача полная и снимает
--- строки задач, которых в ней нет. Задача, выпавшая из одной подачи, теряла бы
--- отметку и судилась заново по нынешней фазе.
-CREATE TABLE IF NOT EXISTS task_closing_judged (
-  project_id     text NOT NULL,
-  task_id        text NOT NULL,
-  closing_commit text NOT NULL,
-  PRIMARY KEY (project_id, task_id, closing_commit)
-);
 DO $$ BEGIN
   IF EXISTS (SELECT 1 FROM information_schema.columns
               WHERE table_schema = 'public' AND table_name = 'task_state' AND column_name = 'judged_commit') THEN
@@ -997,45 +1727,6 @@ ALTER TABLE project_story_requirements ADD COLUMN IF NOT EXISTS origin text NOT 
 -- проекции стирались целиком.
 ALTER TABLE project_screen_references ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'projected';
 ALTER TABLE task_requirement ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'projected';
-
-CREATE TABLE IF NOT EXISTS task_plan (
-  project_id text NOT NULL,
-  task_id text NOT NULL,
-  at bigint NOT NULL,
-  task_revision bigint NOT NULL,
-  body text NOT NULL DEFAULT '',
-  declared_by text NOT NULL DEFAULT '',
-  PRIMARY KEY (project_id, task_id, at));
-
-CREATE TABLE IF NOT EXISTS preflight_verdict (
-  project_id text NOT NULL, task_id text NOT NULL, at bigint NOT NULL,
-  task_revision bigint NOT NULL,
-  verdict text NOT NULL CHECK (verdict IN ('ready','ready-with-risks','blocked')),
-  findings integer NOT NULL DEFAULT 0, body text NOT NULL DEFAULT '',
-  PRIMARY KEY (project_id, task_id, at));
-
--- Что именно считает заявленное число: запрос, дающий факт, и оговорка.
-CREATE TABLE IF NOT EXISTS claim_subject (
-  project_id text NOT NULL, name text NOT NULL, subject text NOT NULL,
-  counts text NOT NULL,
-  note text NOT NULL DEFAULT '',
-  PRIMARY KEY (project_id, name, subject));
-
-CREATE TABLE IF NOT EXISTS cjm_gap (
-  project_id text NOT NULL, ord integer NOT NULL,
-  gap text NOT NULL, phase text NOT NULL, closes_with text NOT NULL,
-  PRIMARY KEY (project_id, ord));
-
-CREATE TABLE IF NOT EXISTS cjm_gap_requirement (
-  project_id text NOT NULL, gap_ord integer NOT NULL,
-  gap text NOT NULL, phase text NOT NULL,
-  closed_by_requirement text NOT NULL,
-  PRIMARY KEY (project_id, gap_ord, closed_by_requirement));
-
-CREATE TABLE IF NOT EXISTS task_milestone_dep (
-  project_id text NOT NULL, task_id text NOT NULL, milestone_id text NOT NULL,
-  said text NOT NULL,
-  PRIMARY KEY (project_id, task_id, milestone_id));
 
 -- Имя сущности в структурных таблицах.
 --
@@ -1217,70 +1908,6 @@ UPDATE project_documents d SET author = r.written_by
   FROM project_document_revisions r
  WHERE r.project_id = d.project_id AND r.entity_kind = d.entity_kind
    AND r.entity_name = d.entity_name AND r.revision = 1 AND d.author = '';
-
--- ─── Кто может войти ─────────────────────────────────────────────────────────
---
--- Край (Caddy) утверждает личность двумя заголовками: общий секрет и имя
--- вошедшего. Секрет отвечает на вопрос «это точно край», но НЕ на вопрос «этому
--- человеку сюда можно» — имя край подставляет какое настроено, и сервер прежде
--- верил любому непустому. «Кто дотянулся до порта — владелец» было правдой.
---
--- Допущенные объявляются здесь. Список пуст — сервер пускает, но КАЖДЫЙ вход
--- записывает как незаявленный, и `principals` их называет. Список непуст —
--- незаявленному отказ. Пустой список не запирает свежую установку и при этом
--- не молчит о дыре.
-CREATE TABLE IF NOT EXISTS edge_principal (
-  principal text PRIMARY KEY,
-  note text NOT NULL DEFAULT '',
-  declared_at bigint NOT NULL,
-  declared_by text NOT NULL DEFAULT '');
-
--- Кто входил и когда. Не журнал запросов, а последний след на каждого: вопрос
--- «кто сюда ходит» обязан отвечаться и через неделю, а не жить в памяти
--- процесса, которую стирает каждая выкатка.
-CREATE TABLE IF NOT EXISTS edge_seen (
-  principal text PRIMARY KEY,
-  first_at bigint NOT NULL,
-  last_at bigint NOT NULL,
-  requests bigint NOT NULL DEFAULT 0,
-  refused bigint NOT NULL DEFAULT 0);
-
--- Заморозка набора на начало выпуска.
---
--- Скилл `godzy-version` делал её обходом файлов с `shasum` и складывал в
--- `freeze.md`. База знает то же самое сама: у каждого документа есть хеш и
--- ревизия. Заморозка — снимок этого, а разница выпуска — сравнение с ним.
---
--- `fate` заполняется сравнением, а не рукой: `unchanged` · `changed` ·
--- `removed` · `new`. Удалённый документ виден именно этой колонкой — прежде
--- пропущенная строка означала требование, исчезнувшее молча.
-CREATE TABLE IF NOT EXISTS version_freeze (
-  project_id text NOT NULL,
-  version text NOT NULL,
-  entity_kind text NOT NULL,
-  entity_name text NOT NULL,
-  content_hash text NOT NULL,
-  revision bigint NOT NULL,
-  frozen_at bigint NOT NULL,
-  frozen_by text NOT NULL DEFAULT '',
-  PRIMARY KEY (project_id, version, entity_kind, entity_name));
-
--- Область экрана — ОБЪЯВЛЕННАЯ величина, а не вывод.
---
--- `configure`, `mobile`, `shell` — раздел интерфейса, к которому принадлежит
--- экран. Набор о ней нигде не говорит: она была видна только по каталогу, в
--- котором лежал файл. Вывести её из имени (`SCR-CFG-01` → `configure`) можно —
--- соответствие взаимно однозначно на всех 68, — но такого правила набор не
--- объявлял, и завести его значило бы выдумать.
---
--- Поэтому она становится тем, чем и является: ДАННЫМИ. Своя таблица, потому что
--- `project_screens` пересборка удаляет и пишет заново, а объявленное переживает
--- пересборку — тем же устройством, что и состояния задач в `task_state`.
-CREATE TABLE IF NOT EXISTS screen_area (
-  project_id text NOT NULL,
-  screen_id text NOT NULL,
-  area text NOT NULL,
-  PRIMARY KEY (project_id, screen_id));
 
 -- Заполняется однажды из того, что каталог успел сказать, пока он был. Дальше
 -- меняется только ручкой `screen-area-set`.
@@ -1637,96 +2264,6 @@ CREATE TABLE IF NOT EXISTS project_release_artifact (
   installed_to text NOT NULL DEFAULT '',
   PRIMARY KEY (project_id, name));
 
-CREATE TABLE IF NOT EXISTS project_postmortem (
-  project_id text NOT NULL,
-  id text NOT NULL,
-  title text NOT NULL DEFAULT '',
-  summary text NOT NULL DEFAULT '',
-  timeline text NOT NULL DEFAULT '',
-  root_cause text NOT NULL DEFAULT '',
-  lesson text NOT NULL DEFAULT '',
-  PRIMARY KEY (project_id, id));
-
-CREATE TABLE IF NOT EXISTS project_token (
-  project_id text NOT NULL,
-  name text NOT NULL,
-  dark text NOT NULL DEFAULT '',
-  light text NOT NULL DEFAULT '',
-  purpose text NOT NULL DEFAULT '',
-  section text NOT NULL DEFAULT '',
-  PRIMARY KEY (project_id, name));
-
-CREATE TABLE IF NOT EXISTS project_reference_source (
-  project_id text NOT NULL,
-  entity_name text NOT NULL,
-  source text NOT NULL DEFAULT '',
-  note text NOT NULL DEFAULT '',
-  taken text NOT NULL DEFAULT '',
-  sha text NOT NULL DEFAULT '',
-  ref_type text NOT NULL DEFAULT '',
-  from_project text NOT NULL DEFAULT '',
-  repo text NOT NULL DEFAULT '',
-  PRIMARY KEY (project_id, entity_name));
-
-CREATE TABLE IF NOT EXISTS project_algorithm (
-  project_id text NOT NULL,
-  id text NOT NULL,
-  story_id text NOT NULL DEFAULT '',
-  title text NOT NULL DEFAULT '',
-  preconditions text NOT NULL DEFAULT '',
-  flow text NOT NULL DEFAULT '',
-  failure_branches text NOT NULL DEFAULT '',
-  not_covered text NOT NULL DEFAULT '',
-  PRIMARY KEY (project_id, id));
-
-CREATE TABLE IF NOT EXISTS project_algorithm_links (
-  project_id text NOT NULL,
-  algorithm_id text NOT NULL,
-  kind text NOT NULL,
-  target text NOT NULL,
-  PRIMARY KEY (project_id, algorithm_id, kind, target));
-
-CREATE TABLE IF NOT EXISTS project_stand (
-  project_id text NOT NULL,
-  section text NOT NULL,
-  name text NOT NULL,
-  value text NOT NULL DEFAULT '',
-  PRIMARY KEY (project_id, section, name));
-
-CREATE TABLE IF NOT EXISTS project_crate (
-  project_id text NOT NULL,
-  name text NOT NULL,
-  does text NOT NULL DEFAULT '',
-  does_not text NOT NULL DEFAULT '',
-  PRIMARY KEY (project_id, name));
-
-CREATE TABLE IF NOT EXISTS project_protocol_op (
-  project_id text NOT NULL,
-  op text NOT NULL,
-  op_group text NOT NULL DEFAULT '',
-  events text NOT NULL DEFAULT '',
-  PRIMARY KEY (project_id, op));
-
-CREATE TABLE IF NOT EXISTS project_protocol_requirements (
-  project_id text NOT NULL,
-  op_group text NOT NULL,
-  requirement_id text NOT NULL,
-  PRIMARY KEY (project_id, op_group, requirement_id));
-
-CREATE TABLE IF NOT EXISTS project_article_gates (
-  project_id text NOT NULL,
-  article integer NOT NULL,
-  gate text NOT NULL,
-  state text NOT NULL DEFAULT '',
-  PRIMARY KEY (project_id, article, gate));
-
-CREATE TABLE IF NOT EXISTS project_requirement_sources (
-  project_id text NOT NULL,
-  requirement_id text NOT NULL,
-  kind text NOT NULL,
-  target text NOT NULL,
-  PRIMARY KEY (project_id, requirement_id, kind, target));
-
 ALTER TABLE project_requirements ADD COLUMN IF NOT EXISTS out_of_version text NOT NULL DEFAULT '';
 ALTER TABLE project_requirements ADD COLUMN IF NOT EXISTS crosscutting text NOT NULL DEFAULT '';
 
@@ -1772,83 +2309,12 @@ DO $$ BEGIN
                     'closes','amends-article','touches'));
 END $$;
 
--- Прогон: что на самом деле произошло с задачей.
---
--- Документ прогона — единственное место, где записано, чем задача закончилась:
--- диапазон коммитов, даты, ревью и — главное — что осталось открытым. Последнее
--- терялось целиком: задача закрывалась, а её открытый хвост оставался прозой.
-CREATE TABLE IF NOT EXISTS project_run_record (
-  project_id text NOT NULL,
-  id text NOT NULL,
-  task_id text NOT NULL DEFAULT '',
-  milestone_id text NOT NULL DEFAULT '',
-  title text NOT NULL DEFAULT '',
-  commits text NOT NULL DEFAULT '',
-  dates text NOT NULL DEFAULT '',
-  review text NOT NULL DEFAULT '',
-  appeared text NOT NULL DEFAULT '',
-  left_open text NOT NULL DEFAULT '',
-  PRIMARY KEY (project_id, id));
-
-CREATE TABLE IF NOT EXISTS project_guarantee (
-  project_id text NOT NULL,
-  number integer NOT NULL,
-  title text NOT NULL,
-  held_by text NOT NULL DEFAULT '',
-  body text NOT NULL DEFAULT '',
-  PRIMARY KEY (project_id, number));
-
--- Правило внешнего заявления: что разрешено утверждать и чем это закрепляется.
-CREATE TABLE IF NOT EXISTS project_claim_rule (
-  project_id text NOT NULL,
-  number integer NOT NULL,
-  title text NOT NULL,
-  body text NOT NULL DEFAULT '',
-  PRIMARY KEY (project_id, number));
-
-CREATE TABLE IF NOT EXISTS project_stage (
-  project_id text NOT NULL,
-  ord integer NOT NULL,
-  name text NOT NULL,
-  produces text NOT NULL DEFAULT '',
-  closed_by text NOT NULL DEFAULT '',
-  PRIMARY KEY (project_id, name));
-
--- Раскладка набора по фазам: какой артефакт фазы есть, какой частично, какого
--- нет. Состояние объявлено самим документом, а не выведено из наличия файла:
--- документ может лежать и быть заглушкой.
-CREATE TABLE IF NOT EXISTS project_phase_artifact (
-  project_id text NOT NULL,
-  phase text NOT NULL,
-  artifact text NOT NULL,
-  we_have text NOT NULL DEFAULT '',
-  state text NOT NULL DEFAULT '',
-  PRIMARY KEY (project_id, phase, artifact));
-
 ALTER TABLE project_plan_milestones ADD COLUMN IF NOT EXISTS what text NOT NULL DEFAULT '';
 ALTER TABLE project_plan_milestones ADD COLUMN IF NOT EXISTS blocked_by text NOT NULL DEFAULT '';
 -- Закрытие вехи — дата, а не абзац. Веха `M0` закрылась до того, как завели
 -- дисциплину задач-документов, и потому не имеет ни одной: ступень «у каждого
 -- этапа есть задачи» спрашивала с неё разбивку через полгода после закрытия.
 ALTER TABLE project_plan_milestones ADD COLUMN IF NOT EXISTS closed text NOT NULL DEFAULT '';
-
-CREATE TABLE IF NOT EXISTS project_milestone_requirements (
-  project_id text NOT NULL,
-  milestone_id text NOT NULL,
-  requirement_id text NOT NULL,
-  PRIMARY KEY (project_id, milestone_id, requirement_id));
-
-CREATE TABLE IF NOT EXISTS project_milestone_gates (
-  project_id text NOT NULL,
-  milestone_id text NOT NULL,
-  gate text NOT NULL,
-  PRIMARY KEY (project_id, milestone_id, gate));
-
-CREATE TABLE IF NOT EXISTS project_screen_requirements (
-  project_id text NOT NULL,
-  screen_id text NOT NULL,
-  requirement_id text NOT NULL,
-  PRIMARY KEY (project_id, screen_id, requirement_id));
 
 ALTER TABLE project_screens ADD COLUMN IF NOT EXISTS opens_when text NOT NULL DEFAULT '';
 ALTER TABLE project_screens ADD COLUMN IF NOT EXISTS empty_and_broken text NOT NULL DEFAULT '';
@@ -1869,20 +2335,6 @@ ALTER TABLE project_plan_tasks ADD COLUMN IF NOT EXISTS preflight_at bigint;
 ALTER TABLE project_plan_tasks ADD COLUMN IF NOT EXISTS preflight_revision bigint;
 ALTER TABLE project_plan_tasks ADD COLUMN IF NOT EXISTS preflight_findings integer;
 ALTER TABLE project_plan_tasks ADD COLUMN IF NOT EXISTS preflight_fresh boolean;
-
--- Проект как сущность: у него есть имя и репозиторий.
---
--- Проектов не существовало таблицей — только строкой `project_id` в двух
--- десятках других, вперемешку с двенадцатью огрызками проб (`s1`…`p6`,
--- `mine`). Из-за этого клиент не мог спросить «чей это репозиторий» и держал
--- ответ файлом в самом репозитории: `.harness/mh.json`. Знание о том, какому
--- проекту принадлежит дерево, — знание сервера, а не дерева.
-CREATE TABLE IF NOT EXISTS project (
-  id text PRIMARY KEY,
-  name text NOT NULL DEFAULT '',
-  repo text NOT NULL DEFAULT '',
-  declared_at bigint NOT NULL DEFAULT 0,
-  declared_by text NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS project_by_repo ON project (repo);
 
 -- Чем сторож ловит: путь, содержимое, текст команды.
@@ -1894,21 +2346,6 @@ ALTER TABLE project_guard ADD COLUMN IF NOT EXISTS acts_on text NOT NULL DEFAULT
 ALTER TABLE project_guard ADD COLUMN IF NOT EXISTS path_re text NOT NULL DEFAULT '';
 ALTER TABLE project_guard ADD COLUMN IF NOT EXISTS content_re text NOT NULL DEFAULT '';
 ALTER TABLE project_guard ADD COLUMN IF NOT EXISTS command_re text NOT NULL DEFAULT '';
-
--- Чем датчик снимает факт с репозитория.
---
--- Пять датчиков жили пятью скриптами на другом языке: каждый ходил по своим
--- файлам своим образцом и подавал свой род факта. Общего у них ровно это —
--- «где искать, что вынимать, чем назвать», — и оно объявляется, а исполняет
--- клиент, у которого есть репозиторий.
-CREATE TABLE IF NOT EXISTS project_sensor_spec (
-  project_id text NOT NULL,
-  fact text NOT NULL,
-  reads text NOT NULL DEFAULT '',
-  extract_re text NOT NULL DEFAULT '',
-  note text NOT NULL DEFAULT '',
-  how text NOT NULL DEFAULT 'extract',
-  PRIMARY KEY (project_id, fact));
 -- Чем снимается факт, тремя способами, и третий — не выемка.
 --
 -- `extract` — образец по содержимому: имена требований в контракте, таблицы в
@@ -1931,41 +2368,6 @@ ALTER TABLE project_sensor_spec ADD COLUMN IF NOT EXISTS how text NOT NULL DEFAU
 -- пункт `id`.
 ALTER TABLE gate_item ADD COLUMN IF NOT EXISTS id text NOT NULL DEFAULT '';
 ALTER TABLE gate_item DROP COLUMN IF EXISTS probe_ok;
--- НАД ЧЕМ ПУНКТ МЕРЯЕТ. Правило, у которого предмет ИСЧЕЗ, отчитывалось
--- тишиной: строк нет — нарушений нет — пункт зелен и пропал из перечня
--- непройденных. Счёт при этом улучшался, и гейт зеленел от того, что мерить
--- стало нечего.
---
--- Ровно тот класс, против которого в наборе написано «пустой список вместо
--- ответа врёт», — и он сработал на самом харнесе: сто пятьдесят четыре нарушения
--- ушли молча, когда из плана пропали красные задачи.
--- ПРОГОН ВЕРСИИ. Прогоны раскладывались по имени: задачные и этапные, а всё
--- прочее уходило в `_ => continue` БЕЗ ЕДИНОГО СЛОВА. Документ `run` с именем
--- `v1` не появлялся в наборе, ошибки не было, счётчик не менялся — тот же род
--- молчания, который вычищен из подачи фактов.
--- ИСТОЧНИК И ЕГО КОПИИ. Нормативный перечень живёт в четырёх местах, и
--- равенство держит рука: три копии честно помечены производными, но пометка —
--- ПРОЗА. Двадцать первая настройка потребует пяти правок, и красной станет ноль.
---
--- Дверь одна на два решения владельца: там сверяется пара чисел, здесь — тело
--- названной функции (запрет восьмой копии помощника). Разница только в способе
--- сравнения, и он объявляется полем, а не второй дверью.
-CREATE TABLE IF NOT EXISTS derived_copy (
-  project_id text NOT NULL,
-  name text NOT NULL,
-  source_kind text NOT NULL,
-  source_name text NOT NULL,
-  copy_kind text NOT NULL,
-  copy_name text NOT NULL,
-  compare text NOT NULL CHECK (compare IN ('count', 'body')),
-  -- ОБРАЗЕЦ У КАЖДОЙ СТОРОНЫ СВОЙ. Источник и копия говорят одно и то же
-  -- РАЗНЫМИ словами — «`ADR-0020` называет девять» против «гейтятся девять», — и
-  -- один образец на обоих берёт из одного нужное, из другого соседнее слово.
-  source_pattern text NOT NULL DEFAULT '',
-  pattern text NOT NULL,
-  why text NOT NULL DEFAULT '',
-  decided_by text NOT NULL DEFAULT '',
-  PRIMARY KEY (project_id, name, copy_kind, copy_name));
 ALTER TABLE derived_copy ADD COLUMN IF NOT EXISTS source_pattern text NOT NULL DEFAULT '';
 ALTER TABLE project_runs_log ADD COLUMN IF NOT EXISTS is_version boolean NOT NULL DEFAULT false;
 ALTER TABLE gate_item ADD COLUMN IF NOT EXISTS subject_query text NOT NULL DEFAULT '';
@@ -2231,131 +2633,8 @@ END $$ LANGUAGE plpgsql;
 -- Снимается трёхдоводная: у неё не было слова о склейке, и склейку она делала
 -- всегда — молча и удалением.
 DROP FUNCTION IF EXISTS rename_in_columns(text, text, text);
--- Сама функция — `RENAME_IN_COLUMNS`: её заводит `ensure` следом за этой пачкой.
-
--- ДОМА ПРАВИЛУ КОДА И УТВЕРЖДЕНИЮ. У `tot-ade` под видом `check` лежали три
--- разные вещи: 56 критериев приёмки, 141 ИМЯ ПРАВИЛА В КОДЕ (11 из 12 найдены
--- в `crates/`) и 30 утверждений с пространством имён.
---
--- Пока дома нет, чинить извлечение нельзя: заработавшая пересборка снесла бы
--- 171 запись как «устаревшую проекцию» — и это была бы потеря, а не уборка.
-CREATE TABLE IF NOT EXISTS project_lint_rules (
-    project_id  text NOT NULL,
-    id          text NOT NULL,
-    area        text NOT NULL DEFAULT '',
-    entity_kind text NOT NULL DEFAULT '',
-    entity_name text NOT NULL DEFAULT '',
-    section_ord integer,
-    origin      text NOT NULL DEFAULT 'projected',
-    PRIMARY KEY (project_id, id)
-);
--- РАССУЖДЕНИЕ КАК СУЩНОСТЬ. В пяти документах `myack` 81 килобайт прозы не
--- держала ни одна колонка: разделы, которые ничего не объявляют, а объясняют —
--- «Инварианты и их держатели», «MON — мониторы», «Открытые вопросы». Померено
--- дверью `document-coverage`: из 41 раздела `srs` 14 только текст, 13 смешанных.
---
--- Своего имени у рассуждения нет, и потому сущностью оно стать не могло. Но
--- адрес есть: ЯКОРЬ раздела — он выведен из заголовка, уникален внутри
--- документа (7394 из 7394) и переживает правки выше по тексту, в отличие от
--- номера блока.
---
--- Тело хранится колонкой: рассуждение — это и есть его текст, и вынимать из
--- него «суть» значило бы пересказывать, а пересказ протухает.
--- Имя рассуждения — ЕГО АДРЕС: документ и якорь, склеенные решёткой
--- (`srs#3-20-invarianty`). Якорь уникален внутри документа, но не в наборе, а
--- отметки и связи ключуются парой «род, имя» — значит имя обязано быть
--- полным адресом, иначе рассуждения двух документов слились бы в одно.
-CREATE TABLE IF NOT EXISTS project_rationale (
-    project_id  text NOT NULL,
-    id          text NOT NULL,
-    entity_kind text NOT NULL,
-    entity_name text NOT NULL,
-    anchor      text NOT NULL,
-    section_ord integer,
-    title       text NOT NULL DEFAULT '',
-    body        text NOT NULL DEFAULT '',
-    origin      text NOT NULL DEFAULT 'projected',
-    PRIMARY KEY (project_id, id)
-);
-
--- ЧЕМ ДОКАЗАНО ТРЕБОВАНИЕ — одной таблицей на все роды доказательства.
---
--- Правило «у каждого требования есть проверка» знало ровно три источника, и
--- все три — про тест-кейс. А у `tot-ade` 122 требования доказываются ПРАВИЛОМ
--- КОДА: линт не пробует случай, он отказывается собирать нарушение. Считать
--- это «непокрытым» значит требовать сценарий там, где стоит запрет.
---
--- Годится ли род доказательством — ОБЪЯВЛЯЕТСЯ (`kind-proves`), а не решается
--- здесь: это суждение о том, чем в проекте принято доказывать.
-CREATE TABLE IF NOT EXISTS project_requirement_proof (
-    project_id     text NOT NULL,
-    requirement_id text NOT NULL,
-    proof_kind     text NOT NULL,
-    proof_id       text NOT NULL,
-    origin         text NOT NULL DEFAULT 'projected',
-    PRIMARY KEY (project_id, requirement_id, proof_kind, proof_id)
-);
-
-CREATE TABLE IF NOT EXISTS project_assertions (
-    project_id  text NOT NULL,
-    id          text NOT NULL,
-    area        text NOT NULL DEFAULT '',
-    entity_kind text NOT NULL DEFAULT '',
-    entity_name text NOT NULL DEFAULT '',
-    section_ord integer,
-    origin      text NOT NULL DEFAULT 'projected',
-    PRIMARY KEY (project_id, id)
-);
-
--- КОГДА СТРОКА СУЩНОСТИ МЕНЯЛАСЬ. Прежде это искалось по ревизиям: самая
--- ранняя запись документа, где текст стоит дословно. Стоило 5,5 секунды при
--- каждом замере гейта, требовало «различимого» текста и потому выбрасывало
--- истории с короткими заголовками.
---
--- Помнить проще, чем восстанавливать. Пересборка сверяет отпечаток текста с
--- прошлым: совпал — дата держится, разошёлся — ставится новая. Никакого
--- поиска по истории, и любой род сущности годится без разбора, различим его
--- текст или нет.
-CREATE TABLE IF NOT EXISTS entity_stamp (
-    project_id text   NOT NULL,
-    kind       text   NOT NULL,
-    id         text   NOT NULL,
-    text_hash  text   NOT NULL,
-    created_at bigint NOT NULL,
-    updated_at bigint NOT NULL,
-    PRIMARY KEY (project_id, kind, id)
-);
 ALTER TABLE entity_stamp ADD COLUMN IF NOT EXISTS body_version integer NOT NULL DEFAULT 1;
 ALTER TABLE entity_stamp ADD COLUMN IF NOT EXISTS confirmed_at bigint NOT NULL DEFAULT 0;
-CREATE TABLE IF NOT EXISTS entity_confirm (
-    project_id text   NOT NULL,
-    kind       text   NOT NULL,
-    id         text   NOT NULL,
-    at         bigint NOT NULL,
-    by_whom    text   NOT NULL DEFAULT '',
-    why        text   NOT NULL,
-    cause      text   NOT NULL DEFAULT '',
-    PRIMARY KEY (project_id, kind, id, at)
-);
-
--- ОЧЕРЕДЬ РЕШЕНИЙ ВЛАДЕЛЬЦА. Заявка сессии на изменение харнеса и просьба
--- подтвердить коммит лежат в одной очереди: человек открывает пульт с одним
--- вопросом — «что от меня ждут», — и два места для ответа означали бы, что
--- половина ожиданий не видна.
-CREATE TABLE IF NOT EXISTS owner_ask (
-  id          bigserial PRIMARY KEY,
-  project_id  text   NOT NULL DEFAULT '',
-  kind        text   NOT NULL,
-  title       text   NOT NULL,
-  body        text   NOT NULL DEFAULT '',
-  asked_by    text   NOT NULL DEFAULT '',
-  at          bigint NOT NULL,
-  run_id      text   NOT NULL DEFAULT '',
-  state       text   NOT NULL DEFAULT 'open',
-  why         text   NOT NULL DEFAULT '',
-  decided_by  text   NOT NULL DEFAULT '',
-  decided_at  bigint
-);
 CREATE INDEX IF NOT EXISTS owner_ask_open ON owner_ask (state, at DESC);
 ALTER TABLE owner_ask ADD COLUMN IF NOT EXISTS delivered_at bigint;
 -- Вопрос набора, отданный владельцу: его имя. Пометка «решает владелец» без
@@ -2383,43 +2662,7 @@ CREATE TABLE IF NOT EXISTS project_task_runs (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS project_task_runs_one_active ON project_task_runs (project_id, task_id)
   WHERE state <> ALL (ARRAY['done', 'failed', 'cancelled']);
-
--- Переход прогона из состояния в состояние: чем кончилась попытка и по чьей
--- воле. Таблица тоже от прежнего харнеса.
-CREATE TABLE IF NOT EXISTS project_task_run_events (
-  id          bigserial PRIMARY KEY,
-  task_run_id text   NOT NULL REFERENCES project_task_runs (id) ON DELETE CASCADE,
-  from_state  text,
-  to_state    text   NOT NULL,
-  reason      text   NOT NULL DEFAULT '',
-  actor       text   NOT NULL,
-  at          bigint NOT NULL
-);
-
--- ЧТО ПРОГОН УСПЕЛ: шаги, вопросы, отказы. Переход состояния лежит рядом, в
--- своей таблице, и о работе не говорит ничего: состояние сообщает, что прогон
--- жив, и молчит о том, дошёл ли он хоть до чего-нибудь.
-CREATE TABLE IF NOT EXISTS task_run_event (
-  id          bigserial PRIMARY KEY,
-  project_id  text   NOT NULL,
-  run_id      text   NOT NULL,
-  at          bigint NOT NULL,
-  kind        text   NOT NULL,
-  text        text   NOT NULL
-);
 CREATE INDEX IF NOT EXISTS task_run_event_by_run ON task_run_event (project_id, run_id, at DESC);
-
--- Слово человека прогону и ответ прогона. Доставленное помечается, иначе
--- агент читал бы одно и то же на каждом круге.
-CREATE TABLE IF NOT EXISTS task_run_message (
-  id           bigserial PRIMARY KEY,
-  project_id   text   NOT NULL,
-  run_id       text   NOT NULL,
-  at           bigint NOT NULL,
-  side         text   NOT NULL,
-  text         text   NOT NULL,
-  delivered_at bigint
-);
 CREATE INDEX IF NOT EXISTS task_run_message_by_run ON task_run_message (project_id, run_id, at);
 
 -- БЕСЕДА — не прогон. Прогон делает задачу и кончается; беседа думает вслух над
@@ -2435,42 +2678,10 @@ CREATE TABLE IF NOT EXISTS chat_thread (
   updated_at  bigint NOT NULL
 );
 CREATE INDEX IF NOT EXISTS chat_thread_by_project ON chat_thread (project_id, updated_at DESC);
-
-CREATE TABLE IF NOT EXISTS chat_message (
-  id           bigserial PRIMARY KEY,
-  project_id   text   NOT NULL,
-  thread_id    text   NOT NULL,
-  at           bigint NOT NULL,
-  side         text   NOT NULL,
-  text         text   NOT NULL,
-  delivered_at bigint
-);
 CREATE INDEX IF NOT EXISTS chat_message_by_thread ON chat_message (project_id, thread_id, at);
 
 ALTER TABLE project_questions ADD COLUMN IF NOT EXISTS created_at bigint;
 ALTER TABLE project_questions ADD COLUMN IF NOT EXISTS updated_at bigint;
-
--- ПЕРЕЧНИ ЭТАПА. Документ этапа несёт четыре списка — «Требования (6)»,
--- «Истории (6)», «Экраны (10)», «Проверки (27)» — и сам говорит рядом: «все
--- ссылки списками, потому что этап проверяется по ним». Дом был только у
--- первого: 372 имени проверок и 213 имён историй жили одним лишь разбором,
--- таблицы `milestone × check` не существовало вовсе.
---
--- Одна таблица, «что» — колонка. Три новые (`milestone_checks`,
--- `milestone_stories`, `milestone_screens`) разошлись бы между собой, а пар
--- «вид → вид» в наборе замерено 132: по таблице на пару набор не удержит.
---
--- `project_milestone_requirements` НЕ переносится сюда намеренно: её читают
--- правила, и у неё свой инвариант — требование принадлежит ровно одному
--- этапу. Переезд ради стройности стоил бы переписывания работающих правил.
-CREATE TABLE IF NOT EXISTS project_milestone_links (
-    project_id   text NOT NULL,
-    milestone_id text NOT NULL,
-    kind         text NOT NULL,
-    target       text NOT NULL,
-    origin       text NOT NULL DEFAULT 'projected',
-    PRIMARY KEY (project_id, milestone_id, kind, target)
-);
 
 -- РОЛЬ связи: определяет документ сущность или только называет её.
 --
@@ -2706,27 +2917,6 @@ CREATE TABLE IF NOT EXISTS project_guard (
   scope text NOT NULL DEFAULT '',
   refuses text NOT NULL DEFAULT '',
   PRIMARY KEY (project_id, name));
-
--- Раскладка видов — знание СЕРВЕРА, а не одного репозитория.
---
--- Она общая для всех проектов, а лежала файлом в `.harness/` одного из них:
--- сервер не поднимался без чужого репозитория, и «работаем только с сервером»
--- было неправдой в первой же строке запуска. Файл остаётся способом ЗАВЕСТИ
--- раскладку, но не местом, где она живёт.
-CREATE TABLE IF NOT EXISTS kind_layout (
-  name text PRIMARY KEY,
-  spec jsonb NOT NULL,
-  declared_at bigint NOT NULL DEFAULT 0,
-  declared_by text NOT NULL DEFAULT '');
-
--- Одна проверка доказывает НЕСКОЛЬКО требований: гейт `criterion:agent-write-denied`
--- назван и в FR-05, и в FR-22. Колонка `requirement_id` держит одно имя, и
--- второе требование выглядело непокрытым при названном доказательстве.
-CREATE TABLE IF NOT EXISTS project_check_requirements (
-  project_id text NOT NULL,
-  check_id text NOT NULL,
-  requirement_id text NOT NULL,
-  PRIMARY KEY (project_id, check_id, requirement_id));
 -- Своё у справки — откуда снята; чужое — что о себе говорил исходный документ.
 -- Эти пять повторяются у десятков справок и потому колонки, а не проза в шапке.
 ALTER TABLE project_reference_source ADD COLUMN IF NOT EXISTS written text NOT NULL DEFAULT '';
@@ -2734,89 +2924,6 @@ ALTER TABLE project_reference_source ADD COLUMN IF NOT EXISTS updated text NOT N
 ALTER TABLE project_reference_source ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT '';
 ALTER TABLE project_reference_source ADD COLUMN IF NOT EXISTS tags text NOT NULL DEFAULT '';
 ALTER TABLE project_reference_source ADD COLUMN IF NOT EXISTS role text NOT NULL DEFAULT '';
-
-CREATE TABLE IF NOT EXISTS project_story_screens (
-  project_id text NOT NULL,
-  story_id text NOT NULL,
-  screen_id text NOT NULL,
-  PRIMARY KEY (project_id, story_id, screen_id));
-
-CREATE TABLE IF NOT EXISTS project_feature_requirements (
-  project_id text NOT NULL,
-  feature_id text NOT NULL,
-  requirement_id text NOT NULL,
-  PRIMARY KEY (project_id, feature_id, requirement_id));
-
-CREATE TABLE IF NOT EXISTS project_feature_articles (
-  project_id text NOT NULL,
-  feature_id text NOT NULL,
-  article integer NOT NULL,
-  PRIMARY KEY (project_id, feature_id, article));
-
-CREATE TABLE IF NOT EXISTS project_acceptance (
-  project_id text NOT NULL,
-  id text NOT NULL,
-  story_id text NOT NULL DEFAULT '',
-  number integer NOT NULL DEFAULT 0,
-  title text NOT NULL,
-  preconditions text NOT NULL DEFAULT '',
-  steps text NOT NULL DEFAULT '',
-  observed text NOT NULL DEFAULT '',
-  fails_when text NOT NULL DEFAULT '',
-  origin text NOT NULL DEFAULT 'declared',
-  PRIMARY KEY (project_id, id));
-
-CREATE TABLE IF NOT EXISTS project_goal (
-  project_id text NOT NULL,
-  id text NOT NULL,
-  number integer NOT NULL DEFAULT 0,
-  level text NOT NULL DEFAULT '',
-  title text NOT NULL,
-  measured_by text NOT NULL DEFAULT '',
-  checked_when text NOT NULL DEFAULT '',
-  fails_when text NOT NULL DEFAULT '',
-  state_now text NOT NULL DEFAULT '',
-  origin text NOT NULL DEFAULT 'declared',
-  PRIMARY KEY (project_id, id));
-
-
--- Словарь схемы: РОЛЬ, которую знает код, и ЗНАЧЕНИЕ, которым её зовёт набор.
---
--- Общий на все проекты, как гейты и фазы: разрабатываем по одной схеме, и
--- «раздел доказательства» зовётся в ней одинаково везде. Но зовётся он словом,
--- а слово — данные. Зашитое в бинарник, оно делает бинарник знающим один
--- проект: другой набор, назвавший раздел иначе, получил бы молчаливый ноль.
---
--- Роль стабильна и на латинице — её пишет код. Значение меняется правкой
--- строки, а не сборкой.
-CREATE TABLE IF NOT EXISTS scheme_term (
-  role text NOT NULL,
-  value text NOT NULL,
-  ord integer NOT NULL DEFAULT 0,
-  why text NOT NULL DEFAULT '',
-  PRIMARY KEY (role, value));
-
-CREATE TABLE IF NOT EXISTS gate_item (
-  phase text NOT NULL,
-  item text NOT NULL,
-  kind text NOT NULL CHECK (kind IN ('query','command','manual','unknown')),
-  query text,
-  owner text,
-  probe text NOT NULL DEFAULT '',
-  why text NOT NULL DEFAULT '',
-  PRIMARY KEY (phase, item));
-
-CREATE TABLE IF NOT EXISTS gate_head (
-  phase text PRIMARY KEY,
-  title text NOT NULL DEFAULT '');
-
-CREATE TABLE IF NOT EXISTS phase (
-  id text PRIMARY KEY,
-  ord integer NOT NULL,
-  title text NOT NULL,
-  gate text NOT NULL DEFAULT '',
-  plan_level text NOT NULL DEFAULT '',
-  task_kind text NOT NULL DEFAULT '');
 
 -- Переноса объявлений из проектных таблиц здесь БОЛЬШЕ НЕТ, и это не упущение.
 -- Он был нужен однажды, когда объявление переезжало из проектных таблиц в
@@ -2857,48 +2964,6 @@ DO $$ BEGIN
   CREATE UNIQUE INDEX IF NOT EXISTS phase_by_ord ON phase (ord);
 EXCEPTION WHEN others THEN NULL; END $$;
 
-
--- Снятые требования: имя, которого больше нет, и почему.
---
--- Устроено как `term_retired` у словаря. Решение, написанное когда требование
--- ещё было, ссылается на него и после снятия — и это история, а не обрыв.
--- Отличить историю от опечатки можно только объявлением: снятое названо, всё
--- прочее остаётся находкой.
-CREATE TABLE IF NOT EXISTS requirement_retired (
-  project_id text NOT NULL,
-  id text NOT NULL,
-  why text NOT NULL DEFAULT '',
-  retired_by text NOT NULL DEFAULT '',
-  declared_at bigint NOT NULL,
-  declared_by text NOT NULL DEFAULT '',
-  PRIMARY KEY (project_id, id));
-
--- Где мы на лестнице — СОХРАНЁННОЕ, а не посчитанное при вопросе.
---
--- Одиннадцать запросов на каждый «где мы» — та же цена, что была у гейтов, и с
--- тем же изъяном: агент, спросивший дважды подряд, платил дважды, а между
--- правкой документа и вопросом никто не считал вообще ничего.
---
--- Колонки названы, а не свалены в один свёрток: «на какой мы ступени» и «открыта
--- ли фаза набора» спрашивают запросом, а не разбором json. Свёрток рядом держит
--- то, у чего своей колонки быть не может, — списки найденного.
-CREATE TABLE IF NOT EXISTS process_position (
-  project_id text NOT NULL,
-  process text NOT NULL,
-  at_ord integer,
-  at_state text NOT NULL DEFAULT '',
-  at_question text NOT NULL DEFAULT '',
-  at_owner text NOT NULL DEFAULT '',
-  at_owner_kind text NOT NULL DEFAULT '',
-  at_touches text NOT NULL DEFAULT '',
-  passed integer NOT NULL DEFAULT 0,
-  skipped integer NOT NULL DEFAULT 0,
-  unanswerable integer NOT NULL DEFAULT 0,
-  corpus_phase_open boolean NOT NULL DEFAULT true,
-  result jsonb,
-  checked_at bigint,
-  PRIMARY KEY (project_id, process));
-
 -- Фаза: сколько её документов написано, сколько её задач закрыто, что говорит
 -- её гейт. Всё числами в своих колонках — ими и спрашивают.
 -- Закрыт ли выпуск. Своя таблица, а не колонка в `project_plan_versions`: та —
@@ -2923,71 +2988,6 @@ DO $$ BEGIN
     REFERENCES harness_process_step(set_name, process, ord)
     ON DELETE CASCADE ON UPDATE CASCADE;
 END $$;
-
--- Датчики репозитория: кто обязан подавать факты.
---
--- `fact_push` помнит, КТО подал. Кто подать обязан — не помнил никто, и оттого
--- молчание датчика было неотличимо от его отсутствия. Пустой список тут врёт
--- ровно так же, как врал он у сверки порождённого.
---
--- `stale_after_ms` пусто — проверяется только «подавал ли когда-нибудь». Срок
--- годности объявляется отдельно и осознанно: выдумать его за проект нельзя.
-CREATE TABLE IF NOT EXISTS sensor (
-  project_id text NOT NULL,
-  fact text NOT NULL,
-  about text NOT NULL DEFAULT '',
-  stale_after_ms bigint,
-  declared_at bigint NOT NULL,
-  declared_by text NOT NULL DEFAULT '',
-  PRIMARY KEY (project_id, fact));
-
-CREATE TABLE IF NOT EXISTS version_state (
-  project_id text NOT NULL,
-  version text NOT NULL,
-  state text NOT NULL CHECK (state IN ('open','closed')),
-  changed_at bigint NOT NULL,
-  changed_by text NOT NULL DEFAULT '',
-  PRIMARY KEY (project_id, version));
-
-CREATE TABLE IF NOT EXISTS phase_state (
-  project_id text NOT NULL,
-  phase text NOT NULL,
-  ord integer NOT NULL,
-  title text NOT NULL DEFAULT '',
-  gate text NOT NULL DEFAULT '',
-  gate_state text NOT NULL DEFAULT '',
-  -- Пусто, если фаза документов не объявляет: ноль сказал бы «объявила и нет их».
-  documents_present integer,
-  documents_absent integer,
-  documents_declared integer,
-  tasks_closed integer,
-  tasks_open integer,
-  tasks_total integer,
-  checked_at bigint,
-  PRIMARY KEY (project_id, phase));
-
-
--- Что изменилось и требует пересчёта. Одна строка на проект: пересчёт всё равно
--- общий, а десять правок подряд обязаны стоить одного прогона, а не десяти.
---
--- Отметка лежит В БАЗЕ, а не в памяти процесса: пишут в набор двое — сервер по
--- HTTP и `mh-server mcp`, запускаемый отдельным процессом. Флаг в памяти одного
--- из них второй бы не увидел, и правка через MCP осталась бы непосчитанной.
-CREATE TABLE IF NOT EXISTS gate_dirty (
-  project_id text PRIMARY KEY,
-  dirty_at bigint NOT NULL,
-  reason text NOT NULL DEFAULT '',
-  ran_at bigint,
-  ran_ms integer);
-
--- СЛЕД ПЕРЕГРУЗКИ ПЕРЕЖИВАЕТ ПЕРЕГРУЗКУ. Отказы «занято» и взятия второго
--- соединения при живом первом жили счётчиком в памяти и строкой в журнале: от
--- часа простоя 2026-09-17 не осталось ничего, что можно прочесть дверью и
--- сравнить с другим днём. Сборщик кладёт сюда накопленное и обнуляет счёт.
-CREATE TABLE IF NOT EXISTS server_strain (
-  at bigint NOT NULL,
-  busy bigint NOT NULL DEFAULT 0,
-  nested bigint NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS server_strain_at ON server_strain (at DESC);
 
 -- ЗАМЕР БОЛЬШЕ НЕ ДЕРЖИТ КОПИЮ ПРАВИЛА. Запрос, проба, довод, подписант,
@@ -3034,8 +3034,7 @@ DO $$ BEGIN
     ALTER TABLE gate_item ADD PRIMARY KEY (phase, id);
   END IF;
   DROP INDEX IF EXISTS gate_item_by_id;
-END $$;
-"#;
+END $$;"#;
 
 /// Переименование внутри колонок. Отдельной пачкой, а не в `DDL`: её же заводит
 /// тест, и функция в нём та самая, что в базе.
