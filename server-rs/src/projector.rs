@@ -5886,25 +5886,70 @@ pub(crate) async fn push_worktrees(
 ///   `byText` — вопрос, чьё ЗАКРЫТИЕ обосновано фразой «держатель написан»,
 ///     при том что ни одна названная в тексте задача не закрыта. Это чтение
 ///     текста, а не связь, и оно так и подписано: находка для человека.
+/// Держатель вопроса — ОДНО МЕСТО, КОТОРОЕ ЕГО ЗНАЕТ. Отдаёт пары «вопрос ·
+/// держатель» и служит обоим счётам: перечню связей и числу тех, о ком судить
+/// нечем. Пока счёт жил своим запросом, он мог говорить «не заведено ни у
+/// одного» при заполненном реестре — и это было бы враньё в ту же секунду,
+/// когда набор сделает, что просили.
+const HOLDER: &str = "WITH сколько AS (
+               SELECT entity_kind, entity_name, count(*) AS вопросов
+                 FROM project_questions WHERE project_id = $1 GROUP BY 1, 2),
+             шапка AS (
+               SELECT c.entity_kind, c.entity_name, c.block_ord,
+                      max(CASE WHEN lower(btrim(c.value)) = 'держатель' THEN c.col END) AS кол,
+                      max(CASE WHEN lower(btrim(c.value)) = 'id' THEN c.col END) AS кол_id
+                 FROM project_document_cells c
+                WHERE c.project_id = $1 AND c.row_ord = 0
+                GROUP BY 1, 2, 3),
+             строкой AS (
+               SELECT btrim(replace(replace(и.value, '`', ''), '\u{00a0}', ' ')) AS вопрос,
+                      btrim(replace(replace(д.value, '`', ''), '\u{00a0}', ' ')) AS держатель
+                 FROM шапка ш
+                 JOIN project_document_cells и
+                   ON и.project_id = $1 AND и.entity_kind = ш.entity_kind AND и.entity_name = ш.entity_name
+                  AND и.block_ord = ш.block_ord AND и.col = ш.кол_id AND и.row_ord > 0
+                 JOIN project_document_cells д
+                   ON д.project_id = $1 AND д.entity_kind = ш.entity_kind AND д.entity_name = ш.entity_name
+                  AND д.block_ord = ш.block_ord AND д.col = ш.кол AND д.row_ord = и.row_ord
+                WHERE ш.кол IS NOT NULL AND ш.кол_id IS NOT NULL),
+             полем AS (
+               SELECT q.id AS вопрос,
+                      btrim(replace(replace(f.value, '`', ''), '\u{00a0}', ' ')) AS держатель
+                 FROM project_questions q
+                 JOIN сколько s ON s.entity_kind = q.entity_kind AND s.entity_name = q.entity_name
+                 JOIN project_document_fields f
+                   ON f.project_id = q.project_id AND f.entity_kind = q.entity_kind
+                  AND f.entity_name = q.entity_name AND f.name = 'Держатель'
+                WHERE q.project_id = $1 AND s.вопросов = 1),
+             держит AS (
+               SELECT вопрос, держатель FROM строкой WHERE держатель <> ''
+                UNION
+               SELECT вопрос, держатель FROM полем WHERE держатель <> '')";
+
 pub(crate) async fn question_holders(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
 
-    // 1. Объявленная связь — ПОЛЕ «Держатель» в шапке вопроса, и только оно.
-    //    Проза не разбирается: держатель, добытый регуляркой из абзаца, — это
-    //    угадывание с видом проверки, и один раз оно уже завело 86 ложных связей.
+    // 1. Объявленная связь — «Держатель», и только объявленный. Проза не
+    //    разбирается: держатель, добытый регуляркой из абзаца, — это угадывание
+    //    с видом проверки, и один раз оно уже завело 86 ложных связей.
+    //
+    //    ДВА МЕСТА, И ОНИ НЕ ВЗАИМОЗАМЕНИМЫ. Набор кладёт вопросы либо по
+    //    документу на вопрос — тогда держатель стоит ПОЛЕМ в шапке, — либо
+    //    строками одного реестра, и тогда поле выразить его не может: оно
+    //    принадлежит документу, а вопросов в документе сто шестнадцать. Так и
+    //    было: поле присоединялось ко ВСЕМ вопросам документа разом, и одна
+    //    запись дала бы сто шестнадцать ложных связей. Поэтому поле читается
+    //    только там, где вопрос в документе один, а реестр — колонкой
+    //    «Держатель», найденной по шапке и связанной с вопросом колонкой «ID».
     let declared = client
         .query(
-            "SELECT q.id, q.state, btrim(replace(replace(f.value, '`', ''), '\u{00a0}', ' ')) AS holder,
-                    coalesce(t.state, 'нет в плане')
+            &format!("{HOLDER}
+             SELECT q.id, q.state, h.держатель, coalesce(t.state, 'нет в плане')
                FROM project_questions q
-               JOIN project_document_fields f
-                 ON f.project_id = q.project_id AND f.entity_kind = q.entity_kind AND f.entity_name = q.entity_name AND f.name = 'Держатель'
-                AND btrim(f.value) <> ''
-               LEFT JOIN project_plan_tasks t
-                 ON t.project_id = q.project_id
-                AND t.id = btrim(replace(replace(f.value, '`', ''), '\u{00a0}', ' '))
+               JOIN держит h ON h.вопрос = q.id
+               LEFT JOIN project_plan_tasks t ON t.project_id = q.project_id AND t.id = h.держатель
               WHERE q.project_id = $1 AND q.state <> 'open'
-              ORDER BY q.id",
+              ORDER BY q.id"),
             &[&project],
         )
         .await?;
@@ -5982,13 +6027,12 @@ pub(crate) async fn question_holders(pool: &Pool, project: &str) -> Result<Value
     // не сто пять пропусков, и сказать надо именно так.
     let blind_row = client
         .query_one(
-            "SELECT count(*) FILTER (WHERE q.state <> 'open' AND NOT держит),
-                    count(*) FILTER (WHERE держит)
-               FROM (SELECT q.*, EXISTS (SELECT 1 FROM project_document_fields f
-                                          WHERE f.project_id = q.project_id AND f.entity_kind = q.entity_kind
-                                            AND f.entity_name = q.entity_name
-                                            AND f.name = 'Держатель' AND btrim(f.value) <> '') AS держит
-                       FROM project_questions q WHERE q.project_id = $1) q",
+            &format!("{HOLDER}
+             SELECT count(*) FILTER (WHERE q.state <> 'open' AND h.вопрос IS NULL),
+                    count(*) FILTER (WHERE h.вопрос IS NOT NULL)
+               FROM project_questions q
+               LEFT JOIN держит h ON h.вопрос = q.id
+              WHERE q.project_id = $1"),
             &[&project],
         )
         .await?;
@@ -6002,7 +6046,7 @@ pub(crate) async fn question_holders(pool: &Pool, project: &str) -> Result<Value
         "waitingForHolder": waiting.len(), "waiting": waiting,
         "unjudgeable": blind,
         "unjudgeableWhy": if with_holder == 0 && blind > 0 {
-            format!("поле «Держатель» не заведено НИ У ОДНОГО вопроса набора — значит держателя здесь пишут прозой, а дверь читает только поле. Это одно решение набора, а не {blind} пропусков")
+            format!("держатель не объявлен НИ У ОДНОГО вопроса набора — значит его здесь пишут прозой, а дверь читает только объявленное. Это одно решение набора, а не {blind} пропусков. Объявляется он колонкой «Держатель» в таблице реестра, рядом с колонкой «ID», либо полем «Держатель» в шапке — но поле только там, где вопрос в документе один")
         } else {
             String::new()
         },
@@ -11478,7 +11522,15 @@ pub(crate) async fn readiness_computed(
         items.push(json!({
             "ord": r.get::<_, i32>(0), "text": r.get::<_, String>(1),
             "declared": declared, "methodKind": method_kind,
+            // СПОСОБ ВИДЕН, А НЕ ТОЛЬКО ЕГО РОД. Ступень лестницы отдаёт
+            // `method` рядом с `methodKind`, а строка готовности отдавала один
+            // род: «command» без команды — объявлено, но не предъявлено, и
+            // проверить объявленное глазами нечем. Довод `why` здесь же: у
+            // рода «command» он и объясняет `unknown` — команду выполняет
+            // харнес, у сервера нет ни репозитория, ни оболочки.
+            "method": method,
             "computed": computed,
+            "why": v.why,
             "state": match computed {
                 Some(true) => "done",
                 Some(false) => "failed",
