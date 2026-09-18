@@ -11894,11 +11894,15 @@ pub(crate) async fn execute_method_upto(
                 },
                 why: String::new(),
             },
+            // ПОЧЕМУ не выполнился — словами базы, а не «db error». Ступень
+            // лестницы простояла сломанной полдня с этим самым «db error»:
+            // сообщение не называло ни колонки, ни таблицы, и прочесть его
+            // значило ровно ничего.
             Err(e) => Verdict {
                 state: "unknown",
                 violations: 0,
                 detail: vec![],
-                why: format!("запрос не выполнился: {e}"),
+                why: format!("запрос не выполнился: {}", crate::db::Says::says(&e)),
             },
         },
         "query" => Verdict {
