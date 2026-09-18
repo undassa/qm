@@ -274,13 +274,6 @@ ALTER TABLE kind_status ADD COLUMN IF NOT EXISTS durable boolean NOT NULL DEFAUL
 -- Расхождение порождённого файла с тем, что считает сервер. Пишется сборкой,
 -- читается гейтом: правило гейта — запрос, и вычисление на Rust должно оставить
 -- ему след в базе, а не проситься исключением в исполнитель.
--- Как подсадить нарушение этому пункту. Без этого самотест угадывал бы, чем
--- испортить набор под каждый запрос, — а угадывание с видом проверки хуже
--- отсутствующей проверки. Способ ОБЪЯВЛЕН, как и способ пункта готовности.
-ALTER TABLE project_gates ADD COLUMN IF NOT EXISTS probe text NOT NULL DEFAULT '';
--- Почему у пункта нет способа. «Требуется, но не проверяется» — состояние, и
--- пустотой его не выразить: пустой пункт читается как забытый.
-ALTER TABLE project_gates ADD COLUMN IF NOT EXISTS why text NOT NULL DEFAULT '';
 -- Родов у пункта четыре, а было три.
 --
 --   `manual` — проиграно человеком: онбординг на чистой установке — это
@@ -294,10 +287,6 @@ DO $$ BEGIN
   ALTER TABLE project_gates DROP CONSTRAINT IF EXISTS project_gates_check1;
   ALTER TABLE project_gates ADD CONSTRAINT project_gates_kind_check
     CHECK (kind IN ('query','command','manual','unknown'));
-  ALTER TABLE project_gates ADD CONSTRAINT project_gates_query_check
-    CHECK ((kind = 'query') = (query IS NOT NULL));
-  ALTER TABLE project_gates ADD CONSTRAINT project_gates_owner_check
-    CHECK (owner IS NULL);
 EXCEPTION WHEN others THEN NULL; END $$;
 
 -- Объявленный способ СТУПЕНИ живёт отдельно от самой ступени — ровно по тому
@@ -949,57 +938,17 @@ END $$;
 
 -- ─── Объявленные проверки переезжают вместе со схемой ────────────────────────
 --
--- Часть проверок живёт ЗАПРОСАМИ в самой базе: пункт гейта несёт `query`, чем
--- он меряет, и `probe`, чем его роняют; статус вида несёт `fact`; заявленное
--- число несёт `counts`. Это данные, а не код, и переписать их обязан тот же
--- переезд — иначе они молча начнут отвечать «запрос не выполнился», а гейт
--- покажет `unknown` там, где раньше мерил.
+-- Часть проверок живёт ЗАПРОСАМИ в самой базе: статус вида несёт `fact`,
+-- заявленное число несёт `counts`. Это данные, а не код, и переписать их обязан
+-- тот же переезд — иначе они молча начнут отвечать «запрос не выполнился», а
+-- гейт покажет `unknown` там, где раньше мерил.
+--
+-- Переписывание пунктов гейта отсюда снято вместе с копией правила в замере:
+-- те строки правили `project_gates`, а меряется `gate_item`, и поправленной
+-- копии не читал никто.
 --
 -- Проверяется это самотестом: `gate-selftest` роняет каждый запросный пункт
 -- своей пробой, и пункт, чей запрос сломан, там сразу виден.
-UPDATE project_gates SET query = replace(query,
-  'SELECT r.path || '' → Article ''',
-  'SELECT r.entity_kind || '' '' || r.entity_name || '' → Article ''')
- WHERE query LIKE '%r.path%';
-
-UPDATE project_gates SET query =
-  'SELECT ''проектных видов '' || count(*)::text || '' из 8'' AS detail
-     FROM project_documents WHERE project_id = $1
-      AND entity_kind IN (''design-view'', ''data-model'') HAVING count(*) <> 8'
- WHERE query LIKE '%30-design/[^/]+%' OR query LIKE '%^30-design%';
-
-UPDATE project_gates SET probe = replace(probe,
-  '(project_id, path, number) VALUES ($1,''00-frame/constitution.md'',999)',
-  '(project_id, entity_kind, entity_name, number) VALUES ($1,''constitution'','''',999)')
- WHERE probe LIKE '%00-frame/constitution.md%';
-UPDATE project_gates SET probe = replace(probe,
-  'text, path, satisfied) VALUES ($1,''FR-PROBE-01'',''FR'',''PROBE'',''проба самотеста'',''10-intent/srs.md'',false)',
-  'text, entity_kind, entity_name, satisfied) VALUES ($1,''FR-PROBE-01'',''FR'',''PROBE'',''проба самотеста'',''srs'','''',false)')
- WHERE probe LIKE '%FR-PROBE-01%';
-UPDATE project_gates SET probe = replace(probe,
-  'text, path, satisfied) VALUES ($1,''NFR-PROBE-02'',''NFR'','''',''проба самотеста'',''10-intent/srs.md'',false)',
-  'text, entity_kind, entity_name, satisfied) VALUES ($1,''NFR-PROBE-02'',''NFR'','''',''проба самотеста'',''srs'','''',false)')
- WHERE probe LIKE '%NFR-PROBE-02%';
-UPDATE project_gates SET probe =
-  'DELETE FROM project_documents WHERE project_id=$1 AND entity_kind=''design-view'' AND entity_name=''sdd'''
- WHERE probe LIKE '%30-design/sdd.md%';
-UPDATE project_gates SET probe = replace(probe,
-  'title, path, status) VALUES ($1,''ADR-9998'',9998,''проба'',''30-design/decisions/accepted/9998.md'',''accepted'')',
-  'title, entity_kind, entity_name, status) VALUES ($1,''ADR-9998'',9998,''проба'',''decision'',''ADR-9998'',''accepted'')')
- WHERE probe LIKE '%ADR-9998%';
-UPDATE project_gates SET probe = replace(probe,
-  'spec, path) VALUES ($1,''TC-PROBE-01'',''PROBE'',''FR-НЕТ-99'',''проба'',''40-proof/test-cases.md'')',
-  'spec, entity_kind, entity_name) VALUES ($1,''TC-PROBE-01'',''PROBE'',''FR-НЕТ-99'',''проба'',''test-cases'','''')')
- WHERE probe LIKE '%TC-PROBE-01%';
-UPDATE project_gates SET probe = replace(probe,
-  'columns, path) VALUES ($1,''проба_модели'','''','''','''',''30-design/data-model.md'')',
-  'columns, entity_kind, entity_name) VALUES ($1,''проба_модели'','''','''','''',''data-model'','''')')
- WHERE probe LIKE '%проба_модели%';
-UPDATE project_gates SET probe = replace(probe,
-  'title, path, area) VALUES ($1,''SCR-PROBE-01'',''проба самотеста'',''20-surface/probe.md'',''probe'')',
-  'title, entity_kind, entity_name, area) VALUES ($1,''SCR-PROBE-01'',''проба самотеста'',''screen'',''SCR-PROBE-01'',''probe'')')
- WHERE probe LIKE '%SCR-PROBE-01%';
-
 UPDATE kind_status SET fact = replace(fact,
   'JOIN project_documents d ON d.project_id=t.project_id AND d.path=t.path',
   'JOIN project_documents d ON d.project_id=t.project_id AND d.entity_kind=t.entity_kind AND d.entity_name=t.entity_name')
@@ -2802,6 +2751,18 @@ CREATE TABLE IF NOT EXISTS server_strain (
   busy bigint NOT NULL DEFAULT 0,
   nested bigint NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS server_strain_at ON server_strain (at DESC);
+
+-- ЗАМЕР БОЛЬШЕ НЕ ДЕРЖИТ КОПИЮ ПРАВИЛА. Запрос, проба, довод и подписант лежали
+-- и в объявлении, и в каждой строке замера — по числу наборов. Копию писал
+-- только круг замера, и пробу он не писал вовсе: её колонку заполняли переезды
+-- схемы, а дверь отдавала пустое у всех ста шестидесяти пунктов. Два описания
+-- одного правила расходятся молча; описание теперь одно, и дверь читает его.
+ALTER TABLE project_gates DROP CONSTRAINT IF EXISTS project_gates_query_check;
+ALTER TABLE project_gates DROP CONSTRAINT IF EXISTS project_gates_owner_check;
+ALTER TABLE project_gates DROP COLUMN IF EXISTS query;
+ALTER TABLE project_gates DROP COLUMN IF EXISTS probe;
+ALTER TABLE project_gates DROP COLUMN IF EXISTS why;
+ALTER TABLE project_gates DROP COLUMN IF EXISTS owner;
 "#;
 
 /// Переименование внутри колонок. Отдельной пачкой, а не в `DDL`: её же заводит
@@ -4087,11 +4048,10 @@ pub(crate) async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, c
             .map(|d| d.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join("\n"))
             .unwrap_or_default();
         // Строка замера заводится, если её ещё нет: у нового проекта её и не
-        // было. Объявление копируется рядом — им пользуются запросы ступеней,
-        // читающие состояние пункта.
-        let query_col: Option<String> = r.get(3);
-        let why_col: String = r.get(4);
-        let owner_col: Option<String> = r.get(5);
+        // было. ОБЪЯВЛЕНИЕ РЯДОМ НЕ КЛАДЁТСЯ: копия отставала от `gate_item`, а
+        // читал её только ответ двери — и отдавал пустую пробу, потому что её
+        // копию не переписывал никто. Запросы ступеней берут отсюда состояние,
+        // а правило — из объявления.
         // ЗАПИСЬ — ПОД СВОЕЙ ТОЧКОЙ ВОЗВРАТА, и это не та же точка, что у замера.
         //
         // Ограничения `project_gates` строже, чем `gate_item`: род пункта там
@@ -4103,21 +4063,16 @@ pub(crate) async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, c
         client.batch_execute("SAVEPOINT запись").await?;
         let written = client
             .execute(
-                // Подписант переносится вместе с родом: у подписного пункта
-                // ограничение таблицы требует имени, и замер без него падал —
-                // «new row violates check constraint», четыре пункта из сорока
-                // не мерились вовсе.
-                "INSERT INTO project_gates (project_id, phase, item, kind, query, why, owner,
+                "INSERT INTO project_gates (project_id, phase, item, kind,
                                             state, violations, detail, result, checked_at, id)
-                 VALUES ($1,$2,$3,$9,$10,$11,$12,$4,$5,$6,$7,$8,$13)
+                 VALUES ($1,$2,$3,$9,$4,$5,$6,$7,$8,$10)
                  ON CONFLICT (project_id, phase, id) DO UPDATE SET
-                   item = EXCLUDED.item, kind = EXCLUDED.kind, query = EXCLUDED.query, why = EXCLUDED.why,
-                   owner = EXCLUDED.owner, id = EXCLUDED.id,
+                   item = EXCLUDED.item, kind = EXCLUDED.kind, id = EXCLUDED.id,
                    state = EXCLUDED.state, violations = EXCLUDED.violations,
                    detail = EXCLUDED.detail, result = EXCLUDED.result,
                    checked_at = EXCLUDED.checked_at",
                 &[&project, &phase, &item, &flat, &violations, &detail, &entry, &now,
-                  &kind, &query_col, &why_col, &owner_col, &id],
+                  &kind, &id],
             )
             .await;
         match written {
@@ -4261,15 +4216,24 @@ pub(crate) async fn gate(pool: &Pool, project: &str, phase: Option<&str>) -> Res
     // когда он получен. Непосчитанный пункт называется непосчитанным.
     let rows = client
         .query(
-           // Правило отдаётся ЦЕЛИКОМ: имя, запрос, проба, владелец. Прежде ответ
-           // нёс только замер, и починить пункт, не имея прямого доступа к базе,
-           // было нельзя: имена восстанавливались сопоставлением заголовков
-           // вручную, а запросов не видел никто. Гейт, который нельзя прочесть,
-           // нельзя и проверить.
-            "SELECT phase, item, kind, result, checked_at, why, id, query, probe, owner, probe_ok
-               FROM project_gates
-              WHERE project_id = $1 AND ($2 = '' OR phase = $2)
-              ORDER BY phase, id, item",
+           // Правило отдаётся ЦЕЛИКОМ и ИЗ ОБЪЯВЛЕНИЯ, а не из замера. Прежде
+           // ответ нёс только замер, и починить пункт, не имея прямого доступа
+           // к базе, было нельзя: имена восстанавливались сопоставлением
+           // заголовков вручную, а запросов не видел никто.
+           //
+           // Потом замер завёл СВОЮ копию правила, и копия отстала: пробу он не
+           // переписывал ни разу — её колонку заполняли только переезды схемы, —
+           // и `mh call gate` отдавал пустую пробу у всех ста шестидесяти
+           // пунктов, говоря рядом `probeRuns: true`. Прочитанное вполовину
+           // хуже непрочитанного: оно выглядит полным. Предмет и граница `since`
+           // не отдавались вовсе, а именно они решают, когда пункт говорит
+           // «судить нечем».
+            "SELECT g.phase, g.item, g.kind, g.result, g.checked_at, i.why, g.id, i.query, i.probe,
+                    i.owner, g.probe_ok, i.subject_query, i.subject_why, i.since
+               FROM project_gates g
+               JOIN gate_item i ON i.phase = g.phase AND i.id = g.id
+              WHERE g.project_id = $1 AND ($2 = '' OR g.phase = $2)
+              ORDER BY g.phase, g.id, g.item",
                &[&project, &phase.unwrap_or("")],
         )
         .await?;
@@ -4324,15 +4288,13 @@ pub(crate) async fn gate(pool: &Pool, project: &str, phase: Option<&str>) -> Res
         // местом, где надо помнить имя пункта; здесь оно там же, где число.
 
         if let Some(m) = entry.as_object_mut() {
-
             m.insert("id".into(), json!(r.get::<_, Option<String>>(6).unwrap_or_default()));
-
             m.insert("query".into(), json!(r.get::<_, Option<String>>(7).unwrap_or_default()));
-
-            m.insert("probe".into(), json!(r.get::<_, Option<String>>(8).unwrap_or_default()));
-
+            m.insert("probe".into(), json!(r.get::<_, String>(8)));
             m.insert("owner".into(), json!(r.get::<_, Option<String>>(9).unwrap_or_default()));
-
+            m.insert("subject".into(), json!(r.get::<_, String>(11)));
+            m.insert("subjectWhy".into(), json!(r.get::<_, String>(12)));
+            m.insert("since".into(), json!(r.get::<_, i64>(13)));
             m.insert("phase".into(), json!(phase));
             // ВЕРДИКТ ОДНИМ СЛОВОМ. Состояние у пункта было — `computed`, — но
             // рядом лежало `violations`, и всякий подсчёт вида «красный, если
