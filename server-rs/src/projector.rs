@@ -820,6 +820,27 @@ CREATE TABLE IF NOT EXISTS task_milestone_dep (
 -- записывает как незаявленный, и `principals` их называет. Список непуст —
 -- незаявленному отказ. Пустой список не запирает свежую установку и при этом
 -- не молчит о дыре.
+-- КЛЮЧ СЕССИИ: имя входящего выводится ИЗ СЕКРЕТА, а не называется им самим.
+--
+-- Общий секрет края отвечал «это край», а кто именно пришёл — говорил заголовок
+-- `X-Mh-Principal`, то есть сам звонящий. Сессия набора могла назваться
+-- владельцем, исполнителем соседнего набора или кем угодно из допущенных: в
+-- летописи правок стояло бы это имя, и отличить его от настоящего было нечем
+-- (заявка #19, решение владельца).
+--
+-- Секрет здесь НЕ ЛЕЖИТ — лежит его отпечаток. База читается снимками и чинится
+-- восстановлением; секрет, попавший в снимок, живёт столько же, сколько снимок.
+CREATE TABLE IF NOT EXISTS session_key (
+  secret_sha text PRIMARY KEY,
+  principal text NOT NULL,
+  session text NOT NULL,
+  project text NOT NULL DEFAULT '',
+  made_at bigint NOT NULL,
+  made_by text NOT NULL DEFAULT '',
+  last_seen bigint,
+  dropped_at bigint,
+  why text NOT NULL DEFAULT '');
+
 CREATE TABLE IF NOT EXISTS edge_principal (
   principal text PRIMARY KEY,
   note text NOT NULL DEFAULT '',
@@ -6296,6 +6317,84 @@ pub(crate) async fn authors(pool: &Pool, project: &str) -> Result<Value, crate::
 ///
 /// Один вызов на запрос, и он же ведёт след: отдельный «журнал входов» рядом с
 /// проверкой разошёлся бы с ней в первый же отказ.
+/// Кто пришёл — по секрету, а не по его слову.
+///
+/// Секрет ищется отпечатком: в базе его нет и быть не должно. Снятый ключ
+/// (`dropped_at`) не пускает — иначе «снять доступ» значило бы только надеяться.
+/// Отметка последнего входа ставится тем же запросом: «кто сюда ходит» — вопрос,
+/// на который обязан быть ответ и через неделю.
+pub(crate) async fn key_admits(pool: &Pool, secret: &str) -> Result<Option<(String, String)>, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
+    let row = client
+        .query_opt(
+            "UPDATE session_key SET last_seen = $2
+              WHERE secret_sha = $1 AND dropped_at IS NULL
+              RETURNING principal, session",
+            &[&secret_sha(secret), &now_ms()],
+        )
+        .await?;
+    Ok(row.map(|r| (r.get(0), r.get(1))))
+}
+
+/// Отпечаток секрета. Один способ на запись и на чтение: два разошлись бы молча,
+/// и ключ перестал бы пускать ровно того, кому выдан.
+pub(crate) fn secret_sha(secret: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(secret.as_bytes());
+    hex::encode(h.finalize())
+}
+
+/// Выдать ключ сессии: возвращает секрет ОДИН раз, в базу кладёт отпечаток.
+pub async fn key_add(
+    pool: &Pool,
+    session: &str,
+    principal: &str,
+    project: &str,
+    by: &str,
+    why: &str,
+) -> Result<(String, Value), crate::db::Fail> {
+    // Секрет берётся у системы, а не собирается из времени и имени: собранный
+    // угадывается тем, кто знает, как его собирали.
+    let secret = {
+        let mut raw = [0u8; 32];
+        getrandom(&mut raw);
+        hex::encode(raw)
+    };
+    let client = crate::db::conn(pool).await?;
+    client
+        .execute(
+            "INSERT INTO session_key (secret_sha, principal, session, project, made_at, made_by, why)
+             VALUES ($1,$2,$3,$4,$5,$6,$7)",
+            &[&secret_sha(&secret), &principal, &session, &project, &now_ms(), &by, &why],
+        )
+        .await?;
+    Ok((secret.clone(), json!({ "session": session, "principal": principal, "project": project })))
+}
+
+#[cfg(test)]
+mod keys {
+    /// Отпечаток считается ОДНИМ способом на запись и на чтение. Разойдись они —
+    /// ключ перестал бы пускать ровно того, кому выдан, и понять почему было бы
+    /// нечем: в базе лежит отпечаток, сверить его глазами не с чем.
+    #[test]
+    fn the_print_is_the_same_on_both_sides() {
+        let secret = "0123456789abcdef";
+        assert_eq!(super::secret_sha(secret), super::secret_sha(secret));
+        assert_ne!(super::secret_sha(secret), super::secret_sha("0123456789abcdee"));
+        assert_eq!(super::secret_sha(secret).len(), 64, "sha256 шестнадцатеричной строкой");
+        assert!(!super::secret_sha(secret).contains(secret), "секрет в отпечатке не виден");
+    }
+}
+
+/// Случайные байты от системы. Своего источника у харнеса нет и не нужно.
+fn getrandom(into: &mut [u8; 32]) {
+    use std::io::Read;
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(into))
+        .expect("/dev/urandom: без случайности секрет не секрет");
+}
+
 pub(crate) async fn edge_admits(pool: &Pool, principal: &str) -> Result<bool, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let declared: i64 = client

@@ -106,6 +106,39 @@ async fn main() {
         edge: std::env::var("MH_EDGE_SECRET").ok().filter(|s| !s.trim().is_empty()).map(|secret| api::Edge { secret }),
     };
 
+    // Подкоманда `key-add`: выдать сессии её собственный секрет.
+    //
+    // ПОДКОМАНДОЙ, А НЕ ДВЕРЬЮ, и это существенно. Дверь стояла бы за общим
+    // секретом края — то есть всякая сессия выписывала бы себе ключ с любым
+    // именем, и смысл «имя из секрета» пропал бы в первый же день. Выдаёт тот,
+    // кто дотянулся до машины; после переезда сессий в контейнеры это будет
+    // только пускатель и владелец.
+    //
+    // Секрет печатается ОДИН раз: в базе лежит отпечаток, и повторить его
+    // нечем — это не потеря, а свойство.
+    if std::env::args().nth(1).as_deref() == Some("key-add") {
+        let mut rest = std::env::args().skip(2);
+        let (session, principal) = (rest.next().unwrap_or_default(), rest.next().unwrap_or_default());
+        let project = rest.next().unwrap_or_default();
+        let why = rest.collect::<Vec<_>>().join(" ");
+        if session.is_empty() || principal.is_empty() {
+            eprintln!("mh-server key-add <сессия> <принципал> [набор] [зачем]");
+            std::process::exit(2);
+        }
+        match projector::key_add(&app.pool, &session, &principal, &project, "key-add", &why).await {
+            Ok((secret, said)) => {
+                println!("{said}");
+                println!("MH_EDGE_SECRET={secret}");
+                eprintln!("mh-server: секрет показан один раз; в базе лежит только его отпечаток");
+            }
+            Err(e) => {
+                eprintln!("ключ не выдан: {}", e.says());
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     // Подкоманда `parse-check`: сверка порта разбора с тем, что в базе оставил
     // донор. Одноразовая по замыслу, но остаётся: порт, сошедшийся однажды,
     // может разойтись при первой же правке.

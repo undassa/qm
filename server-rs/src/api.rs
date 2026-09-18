@@ -214,6 +214,27 @@ async fn require_identity(State(app): State<App>, request: Request, next: Next) 
             // Секрет отвечает «это край», но не «этому человеку можно»: имя край
             // подставляет какое настроено. Допущенные объявлены в базе, и вход
             // записывается — как допущенный, так и отказанный.
+            // КЛЮЧ СЕССИИ ОТВЕЧАЕТ И НА «КТО». Имя выводится из секрета, а
+            // заголовок не спрашивается вовсе: пока спрашивали его, сессия
+            // называла себя сама и могла назваться кем угодно из допущенных
+            // (#19, решение владельца).
+            if !shown.is_empty() {
+                match crate::projector::key_admits(&app.pool, shown).await {
+                    Ok(Some((who, _session))) => {
+                        let mut request = request;
+                        request.extensions_mut().insert(Author(who));
+                        return next.run(request).await;
+                    }
+                    Ok(None) => {}
+                    Err(e) if e.busy() => return Failure::Busy(e.says()).into_response(),
+                    Err(e) => {
+                        return Failure::Upstream(format!("вход не проверен: {}", e.says())).into_response()
+                    }
+                }
+            }
+            // ОБЩИЙ СЕКРЕТ КРАЯ ПОКА ОСТАЁТСЯ, и это временно: он отвечает «это
+            // край», но не «этому человеку можно». Уйдёт вместе с переездом
+            // сессий в контейнеры, где секрет у каждой свой.
             if !shown.is_empty() && shown == edge.secret && !principal.is_empty() {
                 match crate::projector::edge_admits(&app.pool, &principal).await {
                     Ok(true) => {
