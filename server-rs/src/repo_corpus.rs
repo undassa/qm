@@ -562,6 +562,10 @@ pub(crate) struct Field {
     /// невозможного — правило захлебнулось бы своими же находками.
     pub composite: bool,
     pub stored_in: Option<String>,
+    /// Текст `x-derived` — правило вывода. Хранится, потому что пометка,
+    /// снимающая находку, обязана проверяться: правило, называющее колонку,
+    /// которой нет, — отговорка, а не объяснение.
+    pub derived: Option<String>,
 }
 
 impl Field {
@@ -1082,6 +1086,12 @@ pub(crate) fn contract_fields(doc: &Value) -> Vec<Field> {
                         .map(str::trim)
                         .filter(|s| !s.is_empty())
                         .map(str::to_owned),
+                    derived: p
+                        .get("x-derived")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned),
                 });
                 walk(p, &here, out);
             }
@@ -1187,9 +1197,56 @@ pub(crate) fn contract_vs_schema(
     }
     let mut out = Vec::new();
     let mut stored: Vec<(&str, &str)> = Vec::new();
+    // Схемы, которыми контракт ПИШЕТ: ими же проверяется и пометка «только вход»,
+    // и вход колонки ниже.
+    let bodies = request_body_schemas(doc);
+
+    // ПОМЕТКА, СНИМАЮЩАЯ НАХОДКУ, ПРОВЕРЯЕТСЯ — как проверяется `x-stored-in`.
+    //
+    // `x-derived` называет правило вывода, и если правило называет колонку, то
+    // колонка обязана существовать: «выводится из `status_pages.subdomain`» при
+    // отсутствии такой колонки — отговорка, а не объяснение, и снимать ею находку
+    // нельзя. `x-input-only` говорит «это входная директива»: значит схема поля
+    // обязана быть телом запроса, иначе поле не вход, а часть ответа.
+    // Решение владельца по заявке #21, вторая часть.
+    let named_column_missing = |rule: &str| -> Option<String> {
+        static NAMED: once_cell::sync::Lazy<regex::Regex> =
+            once_cell::sync::Lazy::new(|| regex::Regex::new(r"`?\b([a-z][a-z0-9_]*)\.([a-z][a-z0-9_]*)`?")
+                .expect("образец имени колонки"));
+        NAMED.captures_iter(rule).find_map(|c| {
+            let (table, column) = (&c[1], &c[2]);
+            let known = tables
+                .iter()
+                .find(|t| t.name == table)
+                .is_some_and(|t| t.cols.iter().any(|x| x.name == column));
+            (!known && tables.iter().any(|t| t.name == table || t.cols.iter().any(|x| x.name == column)))
+                .then(|| format!("{table}.{column}"))
+        })
+    };
 
     for f in &fields {
-        if !f.marks.is_empty() || f.composite {
+        if f.composite {
+            continue;
+        }
+        if let Some(rule) = &f.derived {
+            if let Some(missing) = named_column_missing(rule) {
+                out.push(Pair {
+                    name: f.at.clone(),
+                    detail: format!("поле контракта без колонки: правило вывода называет {missing},                                      а такой колонки нет — пометка находку не снимает"),
+                });
+            }
+            continue;
+        }
+        if f.marks.iter().any(|m| m == "x-input-only") {
+            if !bodies.contains(&f.schema) {
+                out.push(Pair {
+                    name: f.at.clone(),
+                    detail: format!("поле контракта без колонки: помечено «только вход», а схему {}                                      контракт телом запроса не принимает", f.schema),
+                });
+            }
+            continue;
+        }
+        if !f.marks.is_empty() {
             continue;
         }
         if let Some(target) = &f.stored_in {
@@ -1234,7 +1291,6 @@ pub(crate) fn contract_vs_schema(
     // `patch`, — и метки `x-stored-in`. Параметры адреса учтены отдельно ниже:
     // колонка, названная скобкой пути, вход имеет, просто пришла не телом.
     // Решение владельца по заявке #21, третья часть.
-    let bodies = request_body_schemas(doc);
     let family = |table: &str| -> Vec<String> {
         let owners: Vec<&String> = map.iter().filter(|(_, t)| t == table).map(|(s, _)| s).collect();
         fields
@@ -2071,7 +2127,11 @@ COMMENT ON TABLE tenants IS 'x-source: импорт конфигурации';
                                   "properties": { "from": { "type": "string", "x-stored-in": " absences.starts_at " } } },
                 "GapDismissal": { "properties": { "at": { "type": "string", "x-stored-in": "gap_dismissals.dismissed_at" } } },
                 "Tenant": { "properties": { "name": { "type": "string" } } },
-                "Monitor": { "properties": { "name": { "type": "string" } } },
+                "Monitor": { "properties": {
+                    "name": { "type": "string" },
+                    "lag": { "type": "string", "x-derived": "`monitors.checked_at` минус сейчас" },
+                    "shout": { "type": "string", "x-derived": "`monitors.name` заглавными" },
+                    "dry": { "type": "boolean", "x-input-only": true } } },
                 "Handoff": { "properties": { "to_shift_id": { "type": "string" } } },
                 "HandoffInput": { "properties": { "note": { "type": "string" } } }
             } }
@@ -2114,6 +2174,19 @@ COMMENT ON TABLE tenants IS 'x-source: импорт конфигурации';
         let i = inputs_of_table(&contract());
         assert!(i.contains(&("GapDismissal".into(), String::new(), "/gaps/{gap_key}/dismiss".into())), "{i:?}");
         assert!(i.contains(&("Absence".into(), "AbsenceInput".into(), "/absences".into())), "{i:?}");
+    }
+
+    /// Пометка, снимающая находку, обязана проверяться: правило вывода,
+    /// называющее колонку, которой нет, — отговорка. И «только вход» у поля
+    /// схемы, которой контракт не пишет, — тоже. Решение владельца по #21.
+    #[test]
+    fn a_mark_that_clears_a_finding_is_checked_itself() {
+        let p = compare(SQL);
+        assert!(note(&p, "Monitor.lag").is_some_and(|d| d.contains("monitors.checked_at")),
+                "правило зовёт колонку, которой нет — {:?}", note(&p, "Monitor.lag"));
+        assert!(note(&p, "Monitor.shout").is_none(), "правило зовёт существующую колонку");
+        assert!(note(&p, "Monitor.dry").is_some_and(|d| d.contains("телом запроса не принимает")),
+                "«только вход» у схемы ответа — {:?}", note(&p, "Monitor.dry"));
     }
 
     /// Поле схемы ОТВЕТА входом не считается: `Handoff` рассказывает, что лежит
@@ -2249,7 +2322,11 @@ CREATE TABLE webhooks (id text PRIMARY KEY, account_id text NOT NULL, user_id te
                 "/users/{user_id}/webhook-test": { "post": { "responses": { "201": link("WebhookTestResult") } } }
             },
             "components": { "schemas": {
-                "Monitor": { "properties": { "name": { "type": "string" } } },
+                "Monitor": { "properties": {
+                    "name": { "type": "string" },
+                    "lag": { "type": "string", "x-derived": "`monitors.checked_at` минус сейчас" },
+                    "shout": { "type": "string", "x-derived": "`monitors.name` заглавными" },
+                    "dry": { "type": "boolean", "x-input-only": true } } },
                 "MonitorInput": { "required": ["name"], "properties": { "name": { "type": "string" } } },
                 "MonitorTestRun": { "properties": { "ok": { "type": "boolean" } } },
                 "Team": { "properties": { "name": { "type": "string" } } },
@@ -2328,7 +2405,11 @@ CREATE TABLE postmortem_actions (id text PRIMARY KEY, postmortem_id text NOT NUL
             },
             "components": { "schemas": {
                 "Change": { "properties": { "id": { "type": "string" } } },
-                "Monitor": { "properties": { "name": { "type": "string" } } },
+                "Monitor": { "properties": {
+                    "name": { "type": "string" },
+                    "lag": { "type": "string", "x-derived": "`monitors.checked_at` минус сейчас" },
+                    "shout": { "type": "string", "x-derived": "`monitors.name` заглавными" },
+                    "dry": { "type": "boolean", "x-input-only": true } } },
                 "PostmortemAction": { "properties": { "note": { "type": "string" } } }
             } }
         });
