@@ -190,6 +190,16 @@ CREATE VIEW task_phase AS
 "#;
 
 const DDL: &str = r#"
+-- Реестр наборов. Объявления у него не было НИГДЕ — ни у сервера, ни в архиве
+-- донора: таблица досталась от системы, которой в этом дереве уже нет, и жила
+-- потому, что её однажды кто-то завёл. Здесь она объявлена по тому, как её
+-- читают: имя набора и его запись. Больше двух колонок из неё не спрашивает
+-- никто — ни список наборов, ни отметка «пересчитать», ни раскладка прибора.
+CREATE TABLE IF NOT EXISTS projects (
+  id text PRIMARY KEY,
+  json jsonb NOT NULL DEFAULT '{}'::jsonb
+);
+
 CREATE TABLE IF NOT EXISTS project_checks(
     project_id TEXT NOT NULL, id TEXT NOT NULL, area TEXT NOT NULL,
     requirement_id TEXT, spec TEXT NOT NULL, path TEXT NOT NULL,
@@ -14884,7 +14894,9 @@ mod rename {
         tx.batch_execute(previous).await.unwrap();
         tx.batch_execute(RENAME_IN_COLUMNS).await.unwrap();
         let functions: Vec<String> = tx
-            .query("SELECT proname::text FROM pg_proc WHERE proname LIKE 'rename%in_columns' ORDER BY 1", &[])
+            .query("SELECT proname::text FROM pg_proc
+                     WHERE proname LIKE 'rename%in_columns'
+                       AND pronamespace = current_schema()::regnamespace ORDER BY 1", &[])
             .await
             .unwrap()
             .iter()
