@@ -16,6 +16,7 @@ pub mod entities;
 pub mod identity;
 pub mod instrument;
 pub mod kinds;
+pub mod launcher;
 pub mod mcp;
 pub mod parse;
 pub mod projector;
