@@ -1223,12 +1223,23 @@ pub(crate) fn contract_vs_schema(
         });
     }
 
-    // Семья схем одной таблицы: `Monitor`, `MonitorCreate`, `MonitorPatch` пишут
-    // в одну и ту же. Колонка, названная любой из них, названа.
+    // ВХОД — ТОЛЬКО ТО, ЧЕМ ПИШУТ. Семья схем одной таблицы — `Monitor`,
+    // `MonitorCreate`, `MonitorPatch` — пишет в одну и ту же, и колонка, названная
+    // любой из них, считалась названной. Но `Monitor` — схема ОТВЕТА: она
+    // рассказывает, что лежит в строке, и положить туда ничего нельзя. Колонка,
+    // которую контракт только отдаёт, выглядела имеющей вход, и пункт «колонка
+    // схемы имеет вход» отвечал не на свой вопрос.
+    //
+    // Считаются схемы, которыми контракт ПИШЕТ — тела запросов `post`, `put`,
+    // `patch`, — и метки `x-stored-in`. Параметры адреса учтены отдельно ниже:
+    // колонка, названная скобкой пути, вход имеет, просто пришла не телом.
+    // Решение владельца по заявке #21, третья часть.
+    let bodies = request_body_schemas(doc);
     let family = |table: &str| -> Vec<String> {
         let owners: Vec<&String> = map.iter().filter(|(_, t)| t == table).map(|(s, _)| s).collect();
         fields
             .iter()
+            .filter(|f| bodies.iter().any(|b| *b == f.schema))
             .filter(|f| owners.iter().any(|o| f.schema == **o || f.schema.starts_with(o.as_str())))
             .map(|f| f.name.clone())
             .chain(stored.iter().filter(|(t, _)| *t == table).map(|(_, c)| (*c).to_owned()))
@@ -1605,23 +1616,49 @@ pub(crate) fn check_values_without_path(
 /// Вход таблицы: схема ТЕЛА ЗАПРОСА у операции, чей ответ 201 называет саму
 /// вещь. Таблицу называет ответ, а вход — запрос: искать таблицу по имени
 /// входной схемы бесполезно, `MonitorInput` таблицей не зовётся.
+/// Схемы, которыми контракт ПИШЕТ: тела запросов `post`, `put` и `patch`.
+///
+/// `inputs_of_table` берёт только операции с ответом `201` — «строка заведена»;
+/// правка существующей строки отвечает `200`, и её тело туда не попадает. Для
+/// вопроса «есть ли у колонки вход» годятся оба: положить значение можно и
+/// заведением, и правкой.
+pub(crate) fn request_body_schemas(doc: &Value) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let Some(paths) = doc.get("paths").and_then(|p| p.as_object()) else { return out };
+    for ops in paths.values() {
+        let Some(o) = ops.as_object() else { continue };
+        for (method, op) in o {
+            if !matches!(method.as_str(), "post" | "put" | "patch") {
+                continue;
+            }
+            if let Some(body) = op.get("requestBody") {
+                refs_in(body, &mut out);
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Имена схем, на которые ссылается узел, — вглубь: тело запроса прячет ссылку
+/// под `content` и media-типом, а перечень — ещё и под `items`.
+fn refs_in(node: &Value, out: &mut Vec<String>) {
+    match node {
+        Value::Array(a) => a.iter().for_each(|x| refs_in(x, out)),
+        Value::Object(o) => {
+            if let Some(name) = o.get("$ref").and_then(|r| r.as_str()).and_then(|r| r.rsplit('/').next()) {
+                out.push(name.to_owned());
+            }
+            o.values().for_each(|v| refs_in(v, out));
+        }
+        _ => {}
+    }
+}
+
 pub(crate) fn inputs_of_table(doc: &Value) -> Vec<(String, String, String)> {
     let mut out: Vec<(String, String, String)> = Vec::new();
     let Some(paths) = doc.get("paths").and_then(|p| p.as_object()) else { return out };
-    fn refs(node: &Value, out: &mut Vec<String>) {
-        match node {
-            Value::Array(a) => a.iter().for_each(|x| refs(x, out)),
-            Value::Object(o) => {
-                if let Some(r) = o.get("$ref").and_then(|r| r.as_str()) {
-                    if let Some(name) = r.rsplit('/').next() {
-                        out.push(name.to_owned());
-                    }
-                }
-                o.values().for_each(|v| refs(v, out));
-            }
-            _ => {}
-        }
-    }
     for (path, ops) in paths {
         let Some(o) = ops.as_object() else { continue };
         for (method, op) in o {
@@ -1651,7 +1688,7 @@ pub(crate) fn inputs_of_table(doc: &Value) -> Vec<(String, String, String)> {
             }
             let mut input = Vec::new();
             if let Some(b) = op.get("requestBody") {
-                refs(b, &mut input);
+                refs_in(b, &mut input);
             }
             if input.is_empty() {
                 input.push(String::new());
@@ -2077,6 +2114,23 @@ COMMENT ON TABLE tenants IS 'x-source: импорт конфигурации';
         let i = inputs_of_table(&contract());
         assert!(i.contains(&("GapDismissal".into(), String::new(), "/gaps/{gap_key}/dismiss".into())), "{i:?}");
         assert!(i.contains(&("Absence".into(), "AbsenceInput".into(), "/absences".into())), "{i:?}");
+    }
+
+    /// Поле схемы ОТВЕТА входом не считается: `Handoff` рассказывает, что лежит
+    /// в строке, и положить туда ничего нельзя. Пока считалось, пункт «колонка
+    /// схемы имеет вход» отвечал не на свой вопрос — решение владельца по #21.
+    #[test]
+    fn a_field_of_the_answer_schema_is_not_an_input() {
+        let p = compare(SQL);
+        assert!(note(&p, "handovers.to_shift_id").is_some_and(|d| d.starts_with("колонка без входа")),
+                "колонку называет только схема ответа: входа у неё нет — {:?}",
+                note(&p, "handovers.to_shift_id"));
+        // А то, что названо телом запроса, входом остаётся: `AbsenceInput.from`
+        // кладёт значение в `absences.starts_at` меткой `x-stored-in`.
+        assert!(note(&p, "absences.starts_at").is_none(), "названное телом запроса — вход");
+        assert!(request_body_schemas(&contract()).contains(&"HandoffInput".to_owned()));
+        assert!(!request_body_schemas(&contract()).contains(&"Handoff".to_owned()),
+                "схема ответа телом запроса не бывает");
     }
 
     #[test]
