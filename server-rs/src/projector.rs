@@ -3295,11 +3295,22 @@ SELECT e.project_id, e.kind, e.id, st.updated_at, st.created_at,
        ц.cause AS stale_link, ц.cause_at AS link_changed, ц.depth,
        CASE WHEN ц.cause IS NOT NULL THEN 'reopened' ELSE 'current' END AS live_state,
        CASE WHEN ц.cause IS NULL THEN ''
+            -- ДЕНЬ ГОДИТСЯ, ПОКА ДНИ РАЗНЫЕ. Правка и запись в один день давали
+            -- «обновлена 18-го, а стояла с 18-го» — предложение, читаемое как
+            -- ошибка правила: набор видит одну дату дважды и идёт проверять
+            -- харнес вместо своей работы. Сравнение всегда шло по мгновению, а
+            -- показывалось днём; теперь в один день показывается и время.
             WHEN ц.depth = 0
               THEN 'связь ' || ц.cause || ' обновлена '
-                   || to_char(to_timestamp(ц.cause_at/1000),'YYYY-MM-DD')
+                   || to_char(to_timestamp(ц.cause_at/1000),
+                              CASE WHEN to_char(to_timestamp(ц.cause_at/1000),'YYYY-MM-DD')
+                                      = to_char(to_timestamp(st.updated_at/1000),'YYYY-MM-DD')
+                                   THEN 'YYYY-MM-DD HH24:MI' ELSE 'YYYY-MM-DD' END)
                    || ', а сама запись стояла с '
-                   || to_char(to_timestamp(st.updated_at/1000),'YYYY-MM-DD')
+                   || to_char(to_timestamp(st.updated_at/1000),
+                              CASE WHEN to_char(to_timestamp(ц.cause_at/1000),'YYYY-MM-DD')
+                                      = to_char(to_timestamp(st.updated_at/1000),'YYYY-MM-DD')
+                                   THEN 'YYYY-MM-DD HH24:MI' ELSE 'YYYY-MM-DD' END)
             ELSE 'переоткрыто по цепочке: ' || ц.cause || ' обновлена '
                  || to_char(to_timestamp(ц.cause_at/1000),'YYYY-MM-DD')
                  || ', через ' || ц.depth || ' связь' END AS why
