@@ -83,7 +83,7 @@ pub(crate) const TABLES: &[(&str, &str, &str, &str)] = &[
     ("term", "project_terms", "id", "meaning"),
     ("article", "project_articles", "number::text", "title"),
     ("run", "project_runs_log", "id", "title"),
-    ("gate", "project_gates", "phase", "item"),
+    ("gate", "project_gates", "phase", "id"),
     // Виды, заведённые дверью `kind-add` в эту сессию. Перечень ЗАШИТ, а вид
     // уже объявил свою таблицу сам — `kind-projection … holds`, и дверь это
     // объявление проверила по живым строкам. Пока `table_of` читает список, а

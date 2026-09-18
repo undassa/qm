@@ -12082,9 +12082,10 @@ pub(crate) async fn measure_process(
         let client = crate::db::conn(pool).await?;
         let rows = client
             .query(
-                "SELECT ph.id, ph.title, ph.gate, g.id, g.item, g.violations
+                "SELECT ph.id, ph.title, ph.gate, g.id, i.item, g.violations
                    FROM phase ph
                    JOIN project_gates g ON g.project_id = $1 AND g.phase = ph.gate
+                   JOIN gate_item i ON i.phase = g.phase AND i.id = g.id
                   WHERE ph.ord = (SELECT min(p2.ord) FROM phase p2
                                    -- ЗДЕСЬ `p2.gate <> ''` НУЖЕН, и это не та же
                                    -- проверка, что у `phase_open`. Та спрашивает
