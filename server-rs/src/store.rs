@@ -302,13 +302,7 @@ pub(crate) async fn remove(pool: &Pool, project: &str, kind: &str, name: &str) -
             &[&project, &kind, &name],
         )
         .await?;
-    for table in [
-        "project_document_blocks",
-        "project_document_sections",
-        "project_document_cells",
-        "project_document_links",
-        "project_document_fields",
-    ] {
+    for table in DERIVED {
         tx.execute(
             &format!("DELETE FROM {table} WHERE project_id = $1 AND entity_kind = $2 AND entity_name = $3"),
             &[&project, &kind, &name],
@@ -322,18 +316,24 @@ pub(crate) async fn remove(pool: &Pool, project: &str, kind: &str, name: &str) -
     Ok(json!({ "status": if gone > 0 { "deleted" } else { "not_found" } }))
 }
 
+/// Производное ОДНОГО текста документа: разбор, который переписывается вместе с
+/// ним и снимается вместе с ним. Список стоял тремя копиями — при снятии
+/// документа, при подметании сирот и при перезаписи, — и шестая таблица попала
+/// бы в одну-две из них, а строки оставшейся протекли бы молча.
+const DERIVED: [&str; 5] = [
+    "project_document_blocks",
+    "project_document_sections",
+    "project_document_cells",
+    "project_document_links",
+    "project_document_fields",
+];
+
 /// Убрать разбор документов, которых больше нет.
 pub(crate) async fn sweep_orphans(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
     let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
     let mut swept = serde_json::Map::new();
-    for table in [
-        "project_document_blocks",
-        "project_document_sections",
-        "project_document_cells",
-        "project_document_links",
-        "project_document_fields",
-    ] {
+    for table in DERIVED {
         let n = tx
             .execute(
                 &format!(
@@ -460,13 +460,7 @@ async fn write_structure(
     name: &str,
     content: &str,
 ) -> Result<Vec<String>, crate::db::Fail> {
-    for table in [
-        "project_document_blocks",
-        "project_document_sections",
-        "project_document_cells",
-        "project_document_links",
-        "project_document_fields",
-    ] {
+    for table in DERIVED {
         tx.execute(
             &format!("DELETE FROM {table} WHERE project_id = $1 AND entity_kind = $2 AND entity_name = $3"),
             &[&project, &kind, &name],
