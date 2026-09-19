@@ -12479,6 +12479,43 @@ pub(crate) async fn progress(pool: &Pool, project: &str) -> Result<Value, crate:
     }))
 }
 
+/// Проход по ступеням задачи: докуда дошла, что достигнуто, есть ли разрыв.
+///
+/// Ступени идут по порядку, каждая — `(имя, состояние, накопительная)`.
+/// «Текущая» — самая дальняя из ПОДРЯД достигнутых; достигнутое после разрыва
+/// не двигает её, а поднимает аномалию: дальний статус есть, ближний нет.
+///
+/// Разрыв ставит только накопительная ступень. Ненакопительная гаснет ПО
+/// ЗАМЫСЛУ — «в работе» снятой веткой, «проанализирована» правкой задачи, — и
+/// звать это «ступенью через голову» значит показывать аномалию там, где нет
+/// проблемы. Доска это знала и фильтровала по `durable`; конвейер колонку не
+/// читал вовсе, и все шесть закрытых задач `tot-ade` числились аномалиями.
+/// Шум такой породы учит не смотреть на красное.
+///
+/// Неизвестная ступень (факта нет либо его никто не подаёт) прозрачна: она не
+/// разрыв и не достижение.
+fn walk(steps: &[(String, String, bool)]) -> (Option<String>, Vec<String>, bool) {
+    let mut current = None;
+    let mut reached = Vec::new();
+    let mut broken = false;
+    let mut anomaly = false;
+    for (name, state, durable) in steps {
+        match state.as_str() {
+            "reached" => {
+                reached.push(name.clone());
+                if broken {
+                    anomaly = true;
+                } else {
+                    current = Some(name.clone());
+                }
+            }
+            "not-reached" if *durable => broken = true,
+            _ => {}
+        }
+    }
+    (current, reached, anomaly)
+}
+
 /// Конвейер задачи: статус достигается ФАКТОМ, а не пометкой.
 ///
 /// Каждый статус считается независимо; «текущий» — самый дальний из подряд
@@ -12489,7 +12526,7 @@ pub(crate) async fn task_status(pool: &Pool, project: &str, task: Option<&str>) 
     let client = crate::db::conn(pool).await?;
     let statuses = client
         .query(
-            "SELECT ord, name, title, fact, terminal, source, why FROM kind_status WHERE kind = 'task' ORDER BY ord",
+            "SELECT ord, name, title, fact, terminal, source, why, durable FROM kind_status WHERE kind = 'task' ORDER BY ord",
             &[],
         )
         .await?;
@@ -12518,14 +12555,13 @@ pub(crate) async fn task_status(pool: &Pool, project: &str, task: Option<&str>) 
     let mut out = Vec::new();
     for t in &tasks {
         let id: String = t.get(0);
-        let mut reached = Vec::new();
-        let mut current: Option<String> = None;
-        let mut broken = false;
+        let mut walked: Vec<(String, String, bool)> = Vec::new();
         let mut unknown = Vec::new();
         for s in &statuses {
             let name: String = s.get(1);
             let fact: String = s.get(3);
             let why: String = s.get(6);
+            let durable: bool = s.get(7);
             let state = if fact.trim().is_empty() || !recorded.get(&name).copied().unwrap_or(true) {
                 // Факта нет — статус НЕИЗВЕСТЕН. Не «не достигнут»: это разные
                 // утверждения, и второе врёт в пользу «не начата». Причина, если
@@ -12548,17 +12584,9 @@ pub(crate) async fn task_status(pool: &Pool, project: &str, task: Option<&str>) 
                     }
                 }
             };
-            if state == "reached" {
-                reached.push(name.clone());
-                if !broken {
-                    current = Some(name.clone());
-                }
-            } else if state == "not-reached" {
-                broken = true;
-            }
+            walked.push((name, state, durable));
         }
-        // Достигнутое после разрыва — аномалия: дальний статус есть, ближний нет.
-        let anomaly = reached.len() > current.iter().count() && broken;
+        let (current, reached, anomaly) = walk(&walked);
         out.push(json!({
             "task": id, "current": current, "reached": reached,
             "unknown": unknown, "anomaly": anomaly,
@@ -13918,5 +13946,74 @@ mod reopened_why {
         assert!(super::DDL.contains(call), "находка больше не называет зов подтверждения");
         let door = call.trim_start_matches("mh call ").split(' ').next().unwrap();
         assert!(crate::mcp::Mcp::writes().contains(&door), "дверь «{door}» не объявлена пишущей");
+    }
+}
+
+#[cfg(test)]
+mod status_walk {
+    use super::walk;
+
+    fn step(name: &str, state: &str, durable: bool) -> (String, String, bool) {
+        (name.to_owned(), state.to_owned(), durable)
+    }
+
+    /// Закрытая задача `tot-ade`: ветки нет и предполёт устарел — обе ступени
+    /// ненакопительные и погасли по замыслу. Пока конвейер не читал `durable`,
+    /// он звал это разрывом, и все шесть закрытых задач набора висели
+    /// аномалиями, за которыми нет ни одной настоящей проблемы.
+    #[test]
+    fn a_non_durable_step_that_went_dark_is_not_a_tear() {
+        let steps = [
+            step("записана", "reached", true),
+            step("в работе", "not-reached", false),
+            step("проанализирована", "not-reached", false),
+            step("имплементирована", "unknown", true),
+            step("проверена", "reached", true),
+            step("закрыта", "reached", true),
+        ];
+        let (current, reached, anomaly) = walk(&steps);
+        assert_eq!(current.as_deref(), Some("закрыта"));
+        assert_eq!(reached.len(), 3);
+        assert!(!anomaly);
+    }
+
+    /// Та же лестница, но пропущена НАКОПИТЕЛЬНАЯ ступень: работа прошла мимо
+    /// проверки, и это надо уметь найти. Ступень через голову остаётся уликой.
+    #[test]
+    fn a_durable_step_skipped_before_a_reached_one_is_an_anomaly() {
+        let steps = [
+            step("записана", "reached", true),
+            step("проверена", "not-reached", true),
+            step("закрыта", "reached", true),
+        ];
+        let (current, _, anomaly) = walk(&steps);
+        assert!(anomaly);
+        assert_eq!(current.as_deref(), Some("записана"));
+    }
+
+    /// Разрыв без продолжения — не аномалия, а место, где работа стоит.
+    #[test]
+    fn a_tear_with_nothing_after_it_is_just_where_the_work_stands() {
+        let steps = [
+            step("записана", "reached", true),
+            step("проверена", "not-reached", true),
+            step("закрыта", "not-reached", true),
+        ];
+        let (current, _, anomaly) = walk(&steps);
+        assert!(!anomaly);
+        assert_eq!(current.as_deref(), Some("записана"));
+    }
+
+    /// Неизвестная ступень прозрачна: «факта нет» не достижение и не разрыв.
+    #[test]
+    fn an_unmeasured_step_is_transparent() {
+        let steps = [
+            step("записана", "reached", true),
+            step("имплементирована", "unknown", true),
+            step("закрыта", "reached", true),
+        ];
+        let (current, _, anomaly) = walk(&steps);
+        assert_eq!(current.as_deref(), Some("закрыта"));
+        assert!(!anomaly);
     }
 }
