@@ -438,6 +438,63 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize,
     Ok((versions.len(), milestones.len(), tasks.len(), written as usize))
 }
 
+/// Объявленные зависимости — ПОСЛЕДНИМ шагом сборки, и место здесь важнее шага.
+///
+/// Имя зависимости разрешается по списку задач. Пока это делалось при разборе
+/// плана, в списке стояли только задачи, разобранные тем же проходом, — то есть
+/// одни `dev`. Красные задачи попадают в `project_plan_tasks` ПОЗЖЕ, отдельным
+/// шагом, и ребро на зеркало отбрасывалось молча: `M3-T19` объявила «Зависит от
+/// `M3-T12` · `V3-T19`», а ждала одну `M3-T12`. Молча — потому что
+/// неразрешённое имя просто пропускалось, и разницы между «ссылка в никуда» и
+/// «ещё не вставлено» не было.
+///
+/// Теперь список берётся из самой таблицы задач, когда в ней уже все. Тот же
+/// разбор, то же место в конце, что и у волны, и по той же причине.
+pub(crate) async fn deps(pool: &Pool, project: &str) -> Result<usize, crate::db::Fail> {
+    let mut client = crate::db::conn(pool).await?;
+    let tx = client.transaction().await?;
+    let known: HashMap<String, String> = tx
+        .query("SELECT id FROM project_plan_tasks WHERE project_id = $1", &[&project])
+        .await?
+        .iter()
+        .map(|r| {
+            let id: String = r.get(0);
+            (id.to_lowercase(), id)
+        })
+        .collect();
+    let said = tx
+        .query(
+            "SELECT t.id, f.value FROM project_plan_tasks t
+               JOIN project_document_fields f
+                 ON f.project_id = t.project_id AND f.entity_kind = t.entity_kind
+                AND f.entity_name = t.entity_name AND f.name = 'Зависит от'
+              WHERE t.project_id = $1",
+            &[&project],
+        )
+        .await?;
+    tx.execute("DELETE FROM project_plan_task_deps WHERE project_id = $1 AND origin = 'projected'",
+               &[&project]).await?;
+    let mut written = 0;
+    for r in &said {
+        let (task, field): (String, String) = (r.get(0), r.get(1));
+        for d in IDENTIFIER.captures_iter(&field) {
+            let Some(on) = known.get(&d[1].to_lowercase()) else { continue };
+            if &task == on {
+                continue;
+            }
+            written += tx
+                .execute(
+                    "INSERT INTO project_plan_task_deps(project_id, task_id, depends_on) VALUES ($1,$2,$3)
+                     ON CONFLICT (project_id, task_id, depends_on) DO UPDATE SET origin = 'projected'",
+                    &[&project, &task, on],
+                )
+                .await?;
+        }
+    }
+    tx.commit().await?;
+    Ok(written as usize)
+}
+
 /// Глубина задачи по объявленным зависимостям: 1 у той, что никого не ждёт.
 ///
 /// КРУГ НЕ ПОЛУЧАЕТ НОМЕРА ВОВСЕ, и это не осторожность. Прежний счёт ходил

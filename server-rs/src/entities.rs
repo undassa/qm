@@ -528,10 +528,22 @@ async fn row_of(
     id: &str,
 ) -> Result<Option<Value>, Miss> {
     let Some((table, id_col, _)) = table_of(kind) else { return Ok(None) };
+    // СТРОКА ОТБИРАЕТСЯ И ПО ВИДУ, если таблица держит несколько видов.
+    // `project_plan_tasks` держит задачи и зеркала разом, а образец имени задачи
+    // подходит и зеркалу (`V3-T19`). Оттого `task id=V3-T19` находил строку
+    // плана, документа под видом `task` не находил — и отвечал ПУСТОЙ
+    // ОБОЛОЧКОЙ: ни вида, ни ревизии, ноль байт. Я сам прочитал это как
+    // «зеркало не написано» и сказал так набору; документ был, 2262 знака,
+    // просто достаётся дверью `red-task`.
+    let by_kind = if table == "project_plan_tasks" { " AND entity_kind = $3" } else { "" };
     let sql = format!(
-        "SELECT row_to_json(x)::text FROM (SELECT * FROM {table} WHERE project_id = $1 AND {id_col} = $2) x"
+        "SELECT row_to_json(x)::text FROM (SELECT * FROM {table} WHERE project_id = $1 AND {id_col} = $2{by_kind}) x"
     );
-    let rows = client.query(&sql, &[&project, &id]).await?;
+    let rows = if by_kind.is_empty() {
+        client.query(&sql, &[&project, &id]).await?
+    } else {
+        client.query(&sql, &[&project, &id, &kind]).await?
+    };
     let Some(r) = rows.first() else { return Ok(None) };
     let mut row: Value = serde_json::from_str(&r.get::<_, String>(0)).map_err(|e| Miss::Db(e.to_string()))?;
     if let Some(map) = row.as_object_mut() {
