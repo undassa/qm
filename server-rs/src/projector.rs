@@ -42,11 +42,17 @@ CREATE OR REPLACE VIEW corpus_progress AS
   -- рядом с `unknown`; плитка, у которой отвечаемого нет, показывает не «0 %»,
   -- а «пока не измеряется». Полоска, сложившая `unknown` в любую из сторон, —
   -- тот же дефект, что зелёный чек-лист, который ничего не мерит.
+  -- Только разработка. Зеркало (`kind = 'red'`) — пара задачи, а не работа:
+  -- своих ступеней оно не проходит и закрывается вместе с родителем. На
+  -- `tot-ade` плитка показывала «87 из 156» при девяти закрытых задачах из
+  -- семидесяти восьми: недостающие 78 были зеркалами, все со статусом
+  -- «закрыта». Доска и конвейер берут `dev`, и это третье место, где та же
+  -- линейка мерила не тот предмет.
   SELECT project_id, 'задачи' AS tile,
          count(*) FILTER (WHERE state = 'closed') AS done,
          count(*) FILTER (WHERE state <> 'closed') AS open,
          0::bigint AS unknown
-    FROM project_plan_tasks GROUP BY project_id
+    FROM project_plan_tasks WHERE kind = 'dev' GROUP BY project_id
   UNION ALL
   SELECT project_id, 'вопросы',
          count(*) FILTER (WHERE state = 'closed'),
