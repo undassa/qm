@@ -12931,6 +12931,10 @@ pub(crate) async fn waves(pool: &Pool, project: &str) -> Result<Value, crate::db
                     (SELECT v.verdict FROM preflight_verdict v
                       WHERE v.project_id = t.project_id AND v.task_id = t.id
                       ORDER BY v.at DESC LIMIT 1) AS preflight,
+                    t.preflight_fresh, t.preflight_revision,
+                    (SELECT d.revision FROM project_documents d
+                      WHERE d.project_id = t.project_id AND d.entity_kind = t.entity_kind
+                        AND d.entity_name = t.entity_name) AS revision,
                     -- ФАЗА — В КАРТОЧКЕ, потому что очередь строят отсюда.
                     -- Барьер стоит в `next-task`, а диспетчер этапа берёт волну
                     -- и раздаёт её по исполнителям: доска знала про фазу, а
@@ -12981,7 +12985,21 @@ pub(crate) async fn waves(pool: &Pool, project: &str) -> Result<Value, crate::db
             "id": ids[i], "milestone": r.get::<_, String>(1), "title": r.get::<_, String>(2),
             "kind": kind, "state": r.get::<_, String>(4),
             "checks": r.get::<_, i32>(6), "requirements": r.get::<_, i64>(7),
+            // ВЕРДИКТ БЕЗ СВЕЖЕСТИ ЧИТАЕТСЯ КАК ВЕРДИКТ. `M1-T2` стояла на доске
+            // как `ready`, а вердикт был снят на ревизии 20 при нынешней 33 —
+            // тринадцать правок назад. Очередь предполёта про это знала и
+            // говорила словами; карточка, по которой задачу берут в работу,
+            // молчала. Протухшее «готово» опаснее отсутствия: по нему идут.
             "preflight": r.get::<_, Option<String>>(8),
+            // ЧИСЛО РЯДОМ С ЧИСЛОМ. Одного признака «свежий» мало: он говорит
+            // «нет», но не говорит, насколько. «`ready` снят на 20, задача
+            // сейчас 33» — это тринадцать правок, и по ним видно, читать
+            // вердикт или выбросить. Просьба сессии `tot-ade`, её же доводом:
+            // «вердикт без ревизии — тот же класс, что подробный след проверки
+            // вместо доказательства проверки».
+            "preflightFresh": r.get::<_, Option<bool>>(12),
+            "preflightAtRevision": r.get::<_, Option<i64>>(13),
+            "revision": r.get::<_, Option<i64>>(14),
             "phase": r.get::<_, Option<String>>(9),
             // Пусто — вид задачи не отображён ни на одну фазу: «не объявлено», а
             // не «можно раздавать».
