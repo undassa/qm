@@ -12544,7 +12544,17 @@ pub(crate) async fn task_status(pool: &Pool, project: &str, task: Option<&str>) 
     }
     let tasks = client
         .query(
-            "SELECT id FROM project_plan_tasks WHERE project_id = $1 AND ($2 = '' OR id = $2) ORDER BY id",
+            // Зеркала (`kind = 'red'`) по ступеням разработки НЕ судятся. Лестница
+            // в `kind_status` — лестница задачи разработки: зеркало не пишут,
+            // не проверяют предполётом и не ведут на ветке, оно закрывается
+            // вместе с родителем. Доска это знала и брала только `dev`; конвейер
+            // мерил той же линейкой всех, и все 78 зеркал набора `tot-ade`
+            // выходили аномалиями — «записана, закрыта, проверена пропущена».
+            //
+            // Спросить про зеркало по имени можно: отказ звучит внятнее тишины.
+            "SELECT id FROM project_plan_tasks
+              WHERE project_id = $1 AND ($2 = '' OR id = $2) AND (kind = 'dev' OR id = $2)
+              ORDER BY id",
             &[&project, &task.unwrap_or("")],
         )
         .await?;
