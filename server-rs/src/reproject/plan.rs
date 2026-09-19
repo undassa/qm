@@ -25,43 +25,6 @@ static TASK_MILESTONE: Lazy<Regex> =
 /// разрешением по таблице, а не образцом.
 static IDENTIFIER: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"([A-Za-z]+\d*-[A-Za-z0-9-]+)").expect("образец идентификатора"));
-/// Этап целиком в поле «Зависит от»: «все задачи `M2`» и ссылка `[`M2`]`.
-///
-/// Обе формы значат «жду весь этап», и обе набор пишет: `myack` — первой
-/// (`M2-T22`, `M8-T10`). Проекция их теряла: образец идентификатора требует
-/// дефиса, а `M2` его не имеет. Терялись они МОЛЧА, и `task_milestone_dep`
-/// стояла объявленной и пустой — дверь `blockers` отвечала
-/// `waitsForMilestones: []` там, где ожидание объявлено словом.
-///
-/// ОБРАЗЦА ЗДЕСЬ НЕТ ВОВСЕ, и это лучше, чем взять его из раскладки. Ищутся
-/// НАСТОЯЩИЕ имена этапов, те, что уже прочитаны из плана: образец сказал бы
-/// «похоже на этап», а имя говорит «этот этап есть». Ссылка на несуществующий
-/// этап по образцу стала бы ожиданием, которого никто не объявлял.
-pub(crate) fn milestones_in(field: &str, known: &[String]) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for name in known {
-        if name.is_empty() {
-            continue;
-        }
-        for (at, _) in field.match_indices(name.as_str()) {
-            // Имя этапа целиком, а не начало имени задачи: `M2` внутри `M2-T1`
-            // этапом не является.
-            let after = field[at + name.len()..].chars().next();
-            if after.is_some_and(|c| c == '-' || c.is_alphanumeric()) {
-                continue;
-            }
-            // Кавычка кода снимается перед сверкой: обе формы набор пишет и с
-            // нею, и без, и различать их тут нечем и незачем.
-            let before = field[..at].trim_end().trim_end_matches('`').trim_end();
-            let all_of = before.to_lowercase().ends_with("все задачи");
-            if (all_of || before.ends_with('[')) && !out.contains(name) {
-                out.push(name.clone());
-            }
-        }
-    }
-    out
-}
-
 static COMMIT: Lazy<Regex> = Lazy::new(|| Regex::new(r"\b([0-9a-f]{7,40})\b").expect("образец коммита"));
 static TEST_WORDS: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)^\s*(тест|тесты|проверк|test)").expect("образец вида"));
 
@@ -244,10 +207,6 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize,
     let mut milestones: Vec<(String, String, i32, String, String, String)> = Vec::new();
     let mut tasks: Vec<PlanTaskRow> = Vec::new();
     let mut deps: Vec<(String, String)> = Vec::new();
-    let mut ms_deps: Vec<(String, String, String)> = Vec::new();
-    let mut waits_text: Vec<(String, String)> = Vec::new();
-    // Образец имени этапа — из раскладки набора, якоря снимаются: здесь имя
-    // ищут ВНУТРИ строки поля, а объявлен образец для сверки имени целиком.
 
     for e in &named {
         let key = format!("{} {}", e.0, e.1);
@@ -305,9 +264,6 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize,
         for d in IDENTIFIER.captures_iter(got("Зависит от")) {
             deps.push((id.clone(), d[1].to_owned()));
         }
-        // Этапы разбираются ПОСЛЕ обхода: имена этапов известны только когда
-        // собраны все, а задача может ждать этап, объявленный ниже неё.
-        waits_text.push((id.clone(), got("Зависит от").trim().to_owned()));
     }
 
     // Имя зависимости приводится к имени задачи, а не сравнивается с ним
@@ -331,11 +287,6 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize,
     let version_ids: Vec<String> = versions.iter().map(|v| v.0.clone()).collect();
     let milestone_ids: Vec<String> = milestones.iter().map(|m| m.0.clone()).collect();
     let task_ids: Vec<String> = tasks.iter().map(|t| t.0.clone()).collect();
-    for (task, said) in &waits_text {
-        for m in milestones_in(said, &milestone_ids) {
-            ms_deps.push((task.clone(), m, said.clone()));
-        }
-    }
     tx.execute("DELETE FROM project_plan_versions
                  WHERE project_id = $1 AND origin = 'projected' AND id <> ALL($2)",
                &[&project, &version_ids]).await?;
@@ -469,18 +420,6 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize,
     tx.execute("DELETE FROM project_plan_task_deps
                  WHERE project_id = $1 AND origin = 'projected' AND task_id = ANY($2)",
                &[&project, &task_ids]).await?;
-    // «Жду весь этап» — в свою таблицу, целиком заново: снятая строка поля
-    // должна снимать и зависимость, иначе ожидание переживёт своё объявление.
-    tx.execute("DELETE FROM task_milestone_dep WHERE project_id = $1 AND task_id = ANY($2)",
-               &[&project, &task_ids]).await?;
-    for (task, milestone, said) in &ms_deps {
-        tx.execute(
-            "INSERT INTO task_milestone_dep(project_id, task_id, milestone_id, said)
-             VALUES ($1,$2,$3,$4) ON CONFLICT (project_id, task_id, milestone_id) DO UPDATE SET said = EXCLUDED.said",
-            &[&project, task, milestone, said],
-        )
-        .await?;
-    }
     let mut written = 0;
     for (task, on) in &deps {
         let Some(on) = known.get(&on.to_lowercase()) else { continue };
@@ -623,40 +562,5 @@ mod waves_depth {
     fn a_self_edge_and_an_unknown_name_are_ignored() {
         let t = ids(&["A", "B"]);
         assert_eq!(depth(&t, &edges(&[("A", "A"), ("B", "нет-такой")])), vec![Some(1), Some(1)]);
-    }
-}
-
-#[cfg(test)]
-mod milestone_deps {
-    use super::milestones_in;
-
-    /// Этапы набора — настоящие имена, как их отдаёт план.
-    fn known() -> Vec<String> {
-        ["M2", "M8", "V3"].iter().map(|s| (*s).to_owned()).collect()
-    }
-
-    /// Принято сломом нарочно: снимите снятие кавычки — пропадёт форма
-    /// «все задачи `M2`»; снимите проверку хвоста — `M2` внутри `M2-T1` станет
-    /// ожиданием целого этапа. Обе формы живые: `myack` пишет первую
-    /// (`M2-T22`, `M8-T10`), и обе значат «жду весь этап».
-    #[test]
-    fn a_whole_milestone_is_taken_and_a_task_name_is_not() {
-        assert_eq!(milestones_in("все задачи `M2`", &known()), vec!["M2".to_owned()]);
-        assert_eq!(milestones_in("все задачи M2", &known()), vec!["M2".to_owned()], "без кавычек — та же форма");
-        assert_eq!(milestones_in("см. [`M2`] целиком", &known()), vec!["M2".to_owned()], "ссылка на этап");
-        assert_eq!(milestones_in("`M2-T1` · `M2-T5`", &known()), Vec::<String>::new(), "имена задач этапом не считаются");
-        assert_eq!(
-            milestones_in("все задачи `M2-T1`", &known()),
-            Vec::<String>::new(),
-            "«все задачи» перед ИМЕНЕМ ЗАДАЧИ не делает её этапом: иначе одна задача читалась бы как весь этап"
-        );
-        assert_eq!(milestones_in("", &known()), Vec::<String>::new(), "пусто — ничего");
-        assert_eq!(milestones_in("все задачи `V3`", &known()), vec!["V3".to_owned()], "этап с буквой V");
-        assert_eq!(milestones_in("все задачи `M9`", &known()), Vec::<String>::new(), "этапа нет в плане — и ожидания нет");
-        assert_eq!(
-            milestones_in("все задачи `M2` и все задачи `M2`", &known()),
-            vec!["M2".to_owned()],
-            "повтор не удваивает ожидание"
-        );
     }
 }
