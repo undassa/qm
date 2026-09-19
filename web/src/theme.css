@@ -5028,3 +5028,14 @@ tbody:first-of-type .co-grp th { padding-top: 8px; }
 .wk-flow .wk-arrow { opacity: 0.45; }
 .wk-flow .wk-end .num { font-weight: 700; }
 .wk-flow em { opacity: 0.6; font-style: italic; }
+
+/* Доска в привычном виде: равные колонки, прокрутка внутри колонки.
+   Высоту задаёт экран, а не самая длинная колонка: иначе «не начата» с
+   семьюдесятью карточками растягивает страницу, и шапки соседних колонок
+   уезжают из виду — а именно шапка отвечает «сколько где». */
+.wk-board .wk-cards {
+  overflow-y: auto;
+  max-height: calc(100vh - 320px);
+  padding-right: 4px;
+}
+.wk-board .wk-colh { position: sticky; top: 0; background: var(--bg); z-index: 1; }
