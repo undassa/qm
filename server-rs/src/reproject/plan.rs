@@ -25,6 +25,30 @@ static TASK_MILESTONE: Lazy<Regex> =
 /// разрешением по таблице, а не образцом.
 static IDENTIFIER: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"([A-Za-z]+\d*-[A-Za-z0-9-]+)").expect("образец идентификатора"));
+/// Этап целиком в поле «Зависит от»: «все задачи `M2`» и ссылка `[`M2`]`.
+///
+/// Обе формы значат «жду весь этап», и обе набор пишет: `myack` — первой
+/// (`M2-T22`), `tot-ade` — ни одной, но таблица общая. Проекция их теряла:
+/// образец идентификатора требует дефиса, а `M2` его не имеет. Терялись они
+/// МОЛЧА, и `task_milestone_dep` стояла объявленной и пустой — дверь `blockers`
+/// отвечала `waitsForMilestones: []` там, где ожидание объявлено словами.
+static ALL_OF_MILESTONE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)все задачи\s*`?([MV]\d+)`?").expect("образец «все задачи этапа»"));
+static MILESTONE_LINK: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\[`([MV]\d+)`\]").expect("образец ссылки на этап"));
+
+/// Этапы, которых задача ждёт целиком.
+pub(crate) fn milestones_in(field: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for m in ALL_OF_MILESTONE.captures_iter(field).chain(MILESTONE_LINK.captures_iter(field)) {
+        let name = m[1].to_uppercase();
+        if !out.contains(&name) {
+            out.push(name);
+        }
+    }
+    out
+}
+
 static COMMIT: Lazy<Regex> = Lazy::new(|| Regex::new(r"\b([0-9a-f]{7,40})\b").expect("образец коммита"));
 static TEST_WORDS: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)^\s*(тест|тесты|проверк|test)").expect("образец вида"));
 
@@ -207,6 +231,7 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize,
     let mut milestones: Vec<(String, String, i32, String, String, String)> = Vec::new();
     let mut tasks: Vec<PlanTaskRow> = Vec::new();
     let mut deps: Vec<(String, String)> = Vec::new();
+    let mut ms_deps: Vec<(String, String, String)> = Vec::new();
 
     for e in &named {
         let key = format!("{} {}", e.0, e.1);
@@ -263,6 +288,9 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize,
         ));
         for d in IDENTIFIER.captures_iter(got("Зависит от")) {
             deps.push((id.clone(), d[1].to_owned()));
+        }
+        for m in milestones_in(got("Зависит от")) {
+            ms_deps.push((id.clone(), m, got("Зависит от").trim().to_owned()));
         }
     }
 
@@ -420,6 +448,18 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize,
     tx.execute("DELETE FROM project_plan_task_deps
                  WHERE project_id = $1 AND origin = 'projected' AND task_id = ANY($2)",
                &[&project, &task_ids]).await?;
+    // «Жду весь этап» — в свою таблицу, целиком заново: снятая строка поля
+    // должна снимать и зависимость, иначе ожидание переживёт своё объявление.
+    tx.execute("DELETE FROM task_milestone_dep WHERE project_id = $1 AND task_id = ANY($2)",
+               &[&project, &task_ids]).await?;
+    for (task, milestone, said) in &ms_deps {
+        tx.execute(
+            "INSERT INTO task_milestone_dep(project_id, task_id, milestone_id, said)
+             VALUES ($1,$2,$3,$4) ON CONFLICT (project_id, task_id, milestone_id) DO UPDATE SET said = EXCLUDED.said",
+            &[&project, task, milestone, said],
+        )
+        .await?;
+    }
     let mut written = 0;
     for (task, on) in &deps {
         let Some(on) = known.get(&on.to_lowercase()) else { continue };
@@ -562,5 +602,28 @@ mod waves_depth {
     fn a_self_edge_and_an_unknown_name_are_ignored() {
         let t = ids(&["A", "B"]);
         assert_eq!(depth(&t, &edges(&[("A", "A"), ("B", "нет-такой")])), vec![Some(1), Some(1)]);
+    }
+}
+
+#[cfg(test)]
+mod milestone_deps {
+    use super::milestones_in;
+
+    /// Принято сломом нарочно: уберите «`?» из образца — пропадёт форма без
+    /// кавычек; уберите ссылку — пропадёт `[`M2`]`. Обе формы живые: `myack`
+    /// пишет первую (`M2-T22`), и обе значат «жду весь этап».
+    #[test]
+    fn a_whole_milestone_is_taken_and_a_task_name_is_not() {
+        assert_eq!(milestones_in("все задачи `M2`"), vec!["M2".to_owned()]);
+        assert_eq!(milestones_in("все задачи M2"), vec!["M2".to_owned()], "без кавычек — та же форма");
+        assert_eq!(milestones_in("см. [`M2`] целиком"), vec!["M2".to_owned()], "ссылка на этап");
+        assert_eq!(milestones_in("`M2-T1` · `M2-T5`"), Vec::<String>::new(), "имена задач этапом не считаются");
+        assert_eq!(milestones_in(""), Vec::<String>::new(), "пусто — ничего");
+        assert_eq!(milestones_in("все задачи `V3`"), vec!["V3".to_owned()], "этап с буквой V");
+        assert_eq!(
+            milestones_in("все задачи `M2` и все задачи `M2`"),
+            vec!["M2".to_owned()],
+            "повтор не удваивает ожидание"
+        );
     }
 }
