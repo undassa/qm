@@ -437,3 +437,130 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize,
     tx.commit().await?;
     Ok((versions.len(), milestones.len(), tasks.len(), written as usize))
 }
+
+/// Глубина задачи по объявленным зависимостям: 1 у той, что никого не ждёт.
+///
+/// КРУГ НЕ ПОЛУЧАЕТ НОМЕРА ВОВСЕ, и это не осторожность. Прежний счёт ходил
+/// проходами с пределом и утверждал в доводе, что «круг не углубляет» — проба
+/// показала обратное: два взаимно ждущих друг друга дошли до седьмой волны на
+/// трёх задачах. Число там было выдумано: задачу из круга не начать ни первой,
+/// ни седьмой. Пустая волна — честный ответ «порядка нет», а сам круг называет
+/// гейт правилом `task-dependency-points-back`.
+///
+/// Считается снятием слоёв: волну получает тот, у кого все ожидаемые её уже
+/// получили. Кто не получил ни за один проход — стоит в круге либо за ним.
+pub(crate) fn depth(ids: &[String], edges: &[(String, String)]) -> Vec<Option<i32>> {
+    let index: std::collections::HashMap<&str, usize> =
+        ids.iter().enumerate().map(|(i, s)| (s.as_str(), i)).collect();
+    let mut waits: Vec<Vec<usize>> = vec![Vec::new(); ids.len()];
+    for (from, to) in edges {
+        if let (Some(&a), Some(&b)) = (index.get(from.as_str()), index.get(to.as_str())) {
+            if a != b {
+                waits[a].push(b);
+            }
+        }
+    }
+    let mut wave: Vec<Option<i32>> = vec![None; ids.len()];
+    loop {
+        let mut moved = false;
+        for i in 0..ids.len() {
+            if wave[i].is_some() {
+                continue;
+            }
+            let mut deepest = 0;
+            let mut ready = true;
+            for &j in &waits[i] {
+                match wave[j] {
+                    Some(w) => deepest = deepest.max(w),
+                    None => {
+                        ready = false;
+                        break;
+                    }
+                }
+            }
+            if ready {
+                wave[i] = Some(deepest + 1);
+                moved = true;
+            }
+        }
+        if !moved {
+            break;
+        }
+    }
+    wave
+}
+
+/// Разложить задачи по волнам и положить волну на задачу.
+///
+/// Считается ПОСЛЕ связей: глубина берётся из `project_plan_task_deps` и из
+/// «жду весь этап», а они пишутся шагом выше и уже зафиксированы.
+pub(crate) async fn waves(pool: &Pool, project: &str) -> Result<usize, crate::db::Fail> {
+    let mut client = crate::db::conn(pool).await?;
+    let tx = client.transaction().await?;
+    let ids: Vec<String> = tx
+        .query("SELECT id FROM project_plan_tasks WHERE project_id = $1 ORDER BY milestone_id, ord, id",
+               &[&project])
+        .await?
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    let edges: Vec<(String, String)> = tx
+        .query(
+            "SELECT task_id, depends_on FROM project_plan_task_deps WHERE project_id = $1
+             UNION ALL
+             SELECT md.task_id, t.id FROM task_milestone_dep md
+               JOIN project_plan_tasks t
+                 ON t.project_id = md.project_id AND t.milestone_id = md.milestone_id
+              WHERE md.project_id = $1 AND t.id <> md.task_id",
+            &[&project],
+        )
+        .await?
+        .iter()
+        .map(|r| (r.get(0), r.get(1)))
+        .collect();
+    let wave = depth(&ids, &edges);
+    for (id, w) in ids.iter().zip(wave.iter()) {
+        tx.execute("UPDATE project_plan_tasks SET wave = $3 WHERE project_id = $1 AND id = $2",
+                   &[&project, id, w]).await?;
+    }
+    tx.commit().await?;
+    Ok(wave.iter().flatten().copied().max().unwrap_or(0) as usize)
+}
+
+#[cfg(test)]
+mod waves_depth {
+    use super::depth;
+
+    fn ids(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_owned()).collect()
+    }
+    fn edges(list: &[(&str, &str)]) -> Vec<(String, String)> {
+        list.iter().map(|(a, b)| ((*a).to_owned(), (*b).to_owned())).collect()
+    }
+
+    /// Принято сломом нарочно: уберите повторные проходы — цепочка соберётся
+    /// не до конца, и `M1-T3` останется во второй волне вместо третьей.
+    #[test]
+    fn a_task_waits_one_wave_longer_than_the_deepest_it_waits_for() {
+        let t = ids(&["M1-T1", "M1-T2", "M1-T3", "M2-T1"]);
+        // Порядок рёбер нарочно обратный цепочке: проход не должен зависеть от него.
+        let w = depth(&t, &edges(&[("M1-T3", "M1-T2"), ("M1-T2", "M1-T1"), ("M2-T1", "M1-T2")]));
+        assert_eq!(w, vec![Some(1), Some(2), Some(3), Some(3)], "глубина цепочки и ветки поперёк этапа");
+    }
+
+    /// Круг и всё, что стоит за ним, волны не получают: числа там нет.
+    #[test]
+    fn a_cycle_and_whatever_waits_behind_it_get_no_wave() {
+        let t = ids(&["A", "B", "C", "D"]);
+        // A и B ждут друг друга, C ждёт A, D не ждёт никого.
+        let w = depth(&t, &edges(&[("A", "B"), ("B", "A"), ("C", "A"), ("D", "нет-такой")]));
+        assert_eq!(w, vec![None, None, None, Some(1)], "круг и заложник круга без номера: {w:?}");
+    }
+
+    /// Задача, ждущая саму себя, и ребро в никуда не участвуют.
+    #[test]
+    fn a_self_edge_and_an_unknown_name_are_ignored() {
+        let t = ids(&["A", "B"]);
+        assert_eq!(depth(&t, &edges(&[("A", "A"), ("B", "нет-такой")])), vec![Some(1), Some(1)]);
+    }
+}

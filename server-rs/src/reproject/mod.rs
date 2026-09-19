@@ -78,6 +78,9 @@ pub async fn reproject(pool: &Pool, project: &str) -> Result<Value, crate::db::F
     done.insert("project_plan_milestones".into(), json!(m));
     done.insert("project_plan_tasks".into(), json!(t));
     done.insert("project_plan_task_deps".into(), json!(d));
+    // Волна кладётся сразу за связями: она из них и считается, и считать её
+    // второй раз где-либо ещё — это тот самый «второй порядок на один план».
+    done.insert("волн".into(), json!(plan::waves(pool, project).await?));
     done.insert("project_plan_status".into(), json!(plan_status::project(pool, project).await?));
     let (n, ns) = needs::project(pool, project).await?;
     done.insert("project_needs".into(), json!(n));

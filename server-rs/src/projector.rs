@@ -2811,6 +2811,24 @@ ALTER TABLE project_screens ADD COLUMN IF NOT EXISTS purpose text NOT NULL DEFAU
 -- должен. Без колонки он неотличим от забытого.
 ALTER TABLE project_screens ADD COLUMN IF NOT EXISTS out_of_version text NOT NULL DEFAULT '';
 
+-- ВОЛНА — ОДНО ЧИСЛО НА ВЕСЬ ХАРНЕС. Считалась она в двух местах: `order` слоил
+-- топологически ВНУТРИ этапа, `waves` — глобально по зависимостям, и на наборе
+-- `tot-ade` два счёта разошлись на 77 задачах из 78. Комментарий к `order` этот
+-- исход предсказывал дословно: «два порядка на один план, и однажды они
+-- разошлись бы, оба выглядя правыми».
+--
+-- Правда за глобальной глубиной, и это не вкус. Волна отвечает «что можно вести
+-- одновременно», а это свойство графа зависимостей. Деление по этапам добавляет
+-- ограничение, которого в графе нет: `M2-T1` ждёт `M1-T4`, а внутриэтапный счёт
+-- звал её первой волной. Если этап и правда закрывается целиком, набор скажет
+-- это объявлением `task_milestone_dep` — и глубина разложит работу по этапам
+-- сама. Зашивать в код то, что набор умеет объявить, здесь не принято.
+--
+-- Число кладётся на задачу, а не считается дверью: пока оно жило в памяти двери,
+-- ни одно правило гейта его не видело — и «задача стоит на том, что заводит
+-- более поздняя волна» выразить было нечем.
+ALTER TABLE project_plan_tasks ADD COLUMN IF NOT EXISTS wave integer;
+
 -- Предполёт у самой задачи, а не только отдельной таблицей вердиктов.
 --
 -- Вердикт — свойство задачи, и читатель плана обязан видеть его там же, где
@@ -12964,7 +12982,7 @@ pub(crate) async fn waves(pool: &Pool, project: &str) -> Result<Value, crate::db
                     -- и раздаёт её по исполнителям: доска знала про фазу, а
                     -- очередь — нет, и мимо барьера уходило ровно то, что он
                     -- держит.
-                    tp.phase, tp.open AS phase_open
+                    tp.phase, tp.open AS phase_open, t.wave
                FROM project_plan_tasks t
                LEFT JOIN red_task r ON r.project_id = t.project_id AND r.id = t.id
                LEFT JOIN task_phase tp ON tp.project_id = t.project_id AND tp.task_id = t.id
@@ -12985,6 +13003,12 @@ pub(crate) async fn waves(pool: &Pool, project: &str) -> Result<Value, crate::db
         )
         .await?;
 
+    // ВОЛНА НЕ СЧИТАЕТСЯ ЗДЕСЬ, а читается с задачи: её кладёт пересборка, и она
+    // одна на весь харнес. Пока счёт жил в этой двери, рядом стоял второй — в
+    // `order`, — и на наборе `tot-ade` они разошлись на 77 задачах из 78.
+    //
+    // Связи остаются: по ним считается `waits` — сколько незакрытых ждёт задача.
+    // Это другой вопрос и другой ответ.
     let ids: Vec<String> = tasks.iter().map(|r| r.get::<_, String>(0)).collect();
     let index: std::collections::HashMap<&str, usize> =
         ids.iter().enumerate().map(|(i, s)| (s.as_str(), i)).collect();
@@ -12993,24 +13017,6 @@ pub(crate) async fn waves(pool: &Pool, project: &str) -> Result<Value, crate::db
         let (from, to): (String, String) = (e.get(0), e.get(1));
         if let (Some(&a), Some(&b)) = (index.get(from.as_str()), index.get(to.as_str())) {
             depends[a].push(b);
-        }
-    }
-
-    // Глубина считается послаблением: волна задачи на единицу больше самой
-    // дальней из тех, что она ждёт. Круг в графе не углубляет — иначе счёт не
-    // сошёлся бы вовсе, а задачи в круге и правда не начать ни одну.
-    let mut wave = vec![1usize; ids.len()];
-    for _ in 0..ids.len().min(64) {
-        let mut moved = false;
-        for i in 0..ids.len() {
-            let deepest = depends[i].iter().map(|&j| wave[j]).max().unwrap_or(0);
-            if deepest + 1 > wave[i] {
-                wave[i] = deepest + 1;
-                moved = true;
-            }
-        }
-        if !moved {
-            break;
         }
     }
 
@@ -13026,7 +13032,7 @@ pub(crate) async fn waves(pool: &Pool, project: &str) -> Result<Value, crate::db
             // Пусто — вид задачи не отображён ни на одну фазу: «не объявлено», а
             // не «можно раздавать».
             "phaseOpen": r.get::<_, Option<bool>>(10),
-            "wave": wave[i],
+            "wave": r.get::<_, Option<i32>>(11),
             "waits": depends[i].iter().filter(|&&j| tasks[j].get::<_, String>(4) != "closed").count(),
         }));
     }
