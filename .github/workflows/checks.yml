@@ -11,18 +11,10 @@ jobs:
     defaults:
       run:
         working-directory: server-rs
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_HOST_AUTH_METHOD: trust
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
+    # База — в самом раннере, а не блоком `services:`. `services:` просит докер
+    # ВНУТРИ раннера, а дать его можно лишь пробросив сокет хоста — то есть
+    # отдав раннеру весь докер машины, где стоят `mh-web` и общая база. Адрес
+    # тот же, что давал контейнер службы.
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
