@@ -53,6 +53,19 @@ interface Task {
   torn: boolean;
   missed: string[];
 }
+/** Карточка волны: где задача стоит по порядку и что с ней сейчас. */
+interface WaveCard {
+  id: string;
+  title: string;
+  milestone: string | null;
+  kind: string;
+  state: string;
+  wave: number | null;
+  inFlight: string | null;
+}
+interface Waves {
+  cards: WaveCard[];
+}
 interface Board {
   total: number;
   mirrors: number;
@@ -82,6 +95,7 @@ function bare(title: string): string {
 
 export function Work({ projectId, lang }: { projectId: string; lang: Lang }): React.JSX.Element {
   const [queue, setQueue] = useState<Queue | null>(null);
+  const [waves, setWaves] = useState<Waves | null>(null);
   const [board, setBoard] = useState<Board | null>(null);
   const [view, setView] = useState<View>("list");
   const [open_, setOpen] = useState<string>("");
@@ -90,21 +104,9 @@ export function Work({ projectId, lang }: { projectId: string; lang: Lang }): Re
   useEffect(() => {
     if (!projectId) return;
     void tool<Queue>(projectId, "preflight-queue").then(setQueue);
+    void tool<Waves>(projectId, "waves").then(setWaves);
     void tool<Board>(projectId, "board").then(setBoard);
   }, [projectId]);
-
-  /** Волны очереди: задачи по этапу, с долей свежих вердиктов. */
-  const волны = useMemo(() => {
-    const m = new Map<string, { tasks: Card[]; ready: number }>();
-    for (const c of queue?.queue ?? []) {
-      const веха = /^([MmVv]\d+)-/.exec(c.task)?.[1]?.toUpperCase() ?? "—";
-      const было = m.get(веха) ?? { tasks: [], ready: 0 };
-      было.tasks.push(c);
-      if (c.ready) было.ready += 1;
-      m.set(веха, было);
-    }
-    return [...m].sort((a, b) => a[0].localeCompare(b[0]));
-  }, [queue]);
 
   const видно = useMemo(() => {
     const q = queue?.queue ?? [];
@@ -188,6 +190,23 @@ export function Work({ projectId, lang }: { projectId: string; lang: Lang }): Re
   // из объявления (`terminal`), а не по имени: набор волен звать её иначе.
   const незакрытых =
     board.total - (board.columns[board.columns.length - 1]?.at ?? 0);
+
+  // ВОЛНЫ — НАСТОЯЩИЕ, из порядка зависимостей. Прежде здесь группировалось по
+  // ВЕХАМ и звалось волнами, а показывалась свежесть предполёта: по такому
+  // экрану не узнать, где работа, а за этим на него и смотрят.
+  //
+  // Зеркала не показываются: у них свой трек и свой порядок, а смешанные в один
+  // ряд они удваивают каждую волну и прячут дев-задачи.
+  const поВолнам = useMemo(() => {
+    const m = new Map<number, WaveCard[]>();
+    for (const c of waves?.cards ?? []) {
+      if (c.kind === "red" || c.wave === null) continue;
+      const было = m.get(c.wave) ?? [];
+      было.push(c);
+      m.set(c.wave, было);
+    }
+    return [...m.entries()].sort((a, b) => a[0] - b[0]);
+  }, [waves]);
 
   const порядок = board.columns.map((c) => c.status);
   // Пропуск отмечается значком, а не строкой под каждой карточкой: колонка
@@ -434,28 +453,36 @@ export function Work({ projectId, lang }: { projectId: string; lang: Lang }): Re
               </span>
               <span className="wk-note">{say(lang, "wk.waveNote")}</span>
             </div>
-            <ul className="wk-tl">
-              {волны.map(([веха, w]) => {
-                const доля = Math.round((w.ready / w.tasks.length) * 100);
-                return (
-                  <li key={веха} className={lane === веха ? "on" : ""}>
-                    <button
-                      type="button"
-                      className="wk-lane"
-                      onClick={() => setLane(lane === веха ? "" : веха)}
-                    >
-                      {веха}
-                    </button>
-                    <span className="wk-track">
-                      <i className="fresh" style={{ width: `${доля}%` }} />
-                      <i className="stale" style={{ width: `${100 - доля}%` }} />
-                    </span>
-                    <span className="wk-cnt">
-                      {w.ready}/{w.tasks.length}
-                    </span>
-                  </li>
-                );
-              })}
+            {/* Ряд на волну, карточка на задачу. Цвет окантовки — состояние, и
+                оно берётся у двери, а не выводится из вида: синяя — ведётся
+                прямо сейчас (открыто рабочее дерево), зелёная — закрыта.
+                Клик открывает дровер задачи, тот же, что и на доске. */}
+            <ul className="wk-waves">
+              {поВолнам.map(([н, список]) => (
+                <li key={н}>
+                  <span className="wk-wn">
+                    {say(lang, "wk.wave")} {н}
+                    <i>{список.filter((c) => c.state === "closed").length}/{список.length}</i>
+                  </span>
+                  <ul className="wk-wcards">
+                    {список.map((c) => (
+                      <li
+                        key={c.id}
+                        className={c.inFlight ? "in" : c.state === "closed" ? "done" : ""}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => setOpen(c.id)}
+                          title={c.inFlight ? `${say(lang, "wk.onBranch")} ${c.inFlight}` : bare(c.title)}
+                        >
+                          <span className="wk-id">{c.id}</span>
+                          <span className="wk-bt">{bare(c.title)}</span>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </li>
+              ))}
             </ul>
             <p className="wk-gap">{say(lang, "wk.honest")}</p>
           </section>

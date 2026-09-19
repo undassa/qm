@@ -5039,3 +5039,23 @@ tbody:first-of-type .co-grp th { padding-top: 8px; }
   padding-right: 4px;
 }
 .wk-board .wk-colh { position: sticky; top: 0; background: var(--bg); z-index: 1; }
+
+/* Волны: ряд на волну, карточка на задачу.
+   Цвет окантовки — состояние, и он единственный носитель этого знания на
+   карточке: подпись под каждой повторялась бы семьдесят восемь раз и читалась
+   бы как фон. Синяя — ведётся сейчас, зелёная — закрыта. */
+.wk-waves { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.wk-waves > li { display: grid; grid-template-columns: 96px 1fr; gap: 10px; align-items: start; }
+.wk-wn { font-size: 12px; color: var(--muted); padding-top: 6px; }
+.wk-wn i { display: block; font-style: normal; font-size: 11px; opacity: 0.7; }
+.wk-wcards { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.wk-wcards > li { min-width: 0; }
+.wk-wcards button {
+  display: block; text-align: left; width: 210px; padding: 7px 9px;
+  border: 1px solid var(--line); border-left-width: 3px; border-radius: 6px;
+  background: var(--card, transparent); cursor: pointer;
+}
+.wk-wcards > li.in button { border-left-color: #3b82f6; }
+.wk-wcards > li.done button { border-left-color: #16a34a; }
+.wk-wcards .wk-id { display: block; font-size: 11px; color: var(--muted); }
+.wk-wcards .wk-bt { display: block; font-size: 12px; line-height: 1.3; }
