@@ -540,6 +540,43 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
                 .ok()
                 .and_then(|o| String::from_utf8(o.stdout).ok())
                 .unwrap_or_default();
+            // ЗАКРЫТО — ЗНАЧИТ В ПРОДУКТЕ, а не «где-то в ветке». `--all` выше
+            // берёт трейлеры отовсюду, и это правильно: иначе работу, ведомую
+            // на ветке, не видно вовсе. Но состояние `closed` по трейлеру с
+            // невлитой ветки — неправда: доска говорит «сделано», а в стволе
+            // этого нет.
+            //
+            // Померено 19 сентября: у `tot-ade` три коммита закрытия жили
+            // только в ветке — обе задачи волны 2, PR не влит. Доска
+            // показывала владельцу «закрыто 3», в стволе была одна.
+            //
+            // Трейлер с невлитой ветки даёт `claimed`: работа есть, в продукт
+            // не попала. Вольётся — станет `closed` следующей же подачей.
+            let mainline = ["origin/HEAD", "origin/main", "main", "origin/master", "master"]
+                .iter()
+                .find(|r| {
+                    std::process::Command::new("git")
+                        .args(["-C", &root, "rev-parse", "--verify", "--quiet", r])
+                        .output()
+                        .is_ok_and(|o| o.status.success())
+                })
+                .copied();
+            // Ствола нет — судить «в продукте ли» нечем, и молча считать всё
+            // закрытым нельзя: это ровно та ложь, от которой здесь уходим.
+            let Some(mainline) = mainline else {
+                return Err(format!(
+                    "{fact}: ствола не найдено ни под одним из имён origin/HEAD · main · master.                      Закрыта ли задача В ПРОДУКТЕ, судить нечем, а считать закрытым всё подряд —                      это доска, которая врёт вверх."
+                ));
+            };
+            let in_product: std::collections::HashSet<String> = std::process::Command::new("git")
+                .args(["-C", &root, "log", mainline, "--pretty=%H"])
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .unwrap_or_default()
+                .lines()
+                .map(|l| l.trim().to_owned())
+                .collect();
             let rex = regex::Regex::new(re).map_err(|e| format!("{fact}: образец трейлера не разбирается: {e}"))?;
             // Состояние берётся у САМОГО СВЕЖЕГО коммита, назвавшего задачу:
             // `git log` идёт от новых к старым, и первый ответ — последнее слово.
@@ -557,6 +594,11 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
                     if id.is_empty() || !seen.insert(id.clone()) {
                         continue;
                     }
+                    let state = if state == "closed" && !in_product.contains(&commit) {
+                        "claimed".to_owned()
+                    } else {
+                        state
+                    };
                     states.push(json!({ "id": id, "state": state, "commit": commit, "at": at }));
                 }
             }
