@@ -11,7 +11,22 @@ WITH свежий AS (
                             AND f.name = l.path) END AS на_диске
     FROM project_task_tree_leaf l
     JOIN project_plan_tasks t ON t.project_id = l.project_id AND t.id = l.task_id AND t.state <> 'closed'
-   WHERE l.project_id = $1 AND l.is_path AND NOT l.exempt AND l.path <> '' AND l.op <> ''),
+   WHERE l.project_id = $1 AND l.is_path AND NOT l.exempt AND l.path <> '' AND l.op <> ''
+     -- ЗАДАЧА В РАБОТЕ НЕ СУДИТСЯ. Её пометки описывают ПЕРЕХОД, а не
+     -- состояние: «+» значит «заведу», и заведённый файл делает пометку
+     -- «неверной» ровно в тот миг, когда работа пошла. «-» — то же зеркально.
+     --
+     -- Петля была замкнутой: этот пункт держит `G2`, `G2` открывает фазу, фаза
+     -- пускает работу — а работа красит пункт первым же созданным файлом.
+     -- Выходило «фаза открыта, только когда никто не работает», и единственный
+     -- выход из петли — закрыться при закрытой фазе, что пишет долг `task_redo`.
+     -- Так набор и получил 81 строку долга.
+     --
+     -- «В работе» берётся у открытого рабочего дерева — факта, а не намерения.
+     -- Задача в покое судится как прежде: «+» на существующий файл — настоящая
+     -- находка, кто-то уже построил обещанное.
+     AND NOT EXISTS (SELECT 1 FROM task_worktree w
+                      WHERE w.project_id = l.project_id AND w.task_id = l.task_id)),
 предок AS (
   WITH RECURSIVE до(task_id, dep) AS (
     SELECT d.task_id, d.depends_on FROM project_plan_task_deps d WHERE d.project_id = $1
