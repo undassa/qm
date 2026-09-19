@@ -4370,6 +4370,15 @@ pub(crate) async fn next_task(pool: &Pool, project: &str) -> Result<Value, crate
                LEFT JOIN task_phase tp ON tp.project_id = $1 AND tp.task_id = o.id
               WHERE o.id NOT IN (SELECT task_id FROM blocked_by_task)
                 AND o.id NOT IN (SELECT task_id FROM blocked_by_milestone)
+                -- ЗАНЯТУЮ НЕ ОТДАЁМ ВТОРОМУ. Открытое рабочее дерево значит,
+                -- что задачу уже ведут прямо сейчас. Диспетчер этого не знал и
+                -- мог выдать её второму исполнителю: двое пишут один файл,
+                -- один из них зря. Померено на `M1-T2`: дерево открыто, ветка
+                -- `m1t2-markup-layers`, а карточка и очередь молчали.
+                --
+                -- Пропуск, а не отказ: задача остаётся в плане и вернётся, как
+                -- только дерево снимут. Кто её ведёт — видно в `waves`.
+                AND o.id NOT IN (SELECT task_id FROM task_worktree WHERE project_id = $1)
               ORDER BY (tp.open IS NOT TRUE), o.milestone_id, o.ord
               LIMIT 1",
             &[&project],
@@ -12940,7 +12949,13 @@ pub(crate) async fn waves(pool: &Pool, project: &str) -> Result<Value, crate::db
                     -- и раздаёт её по исполнителям: доска знала про фазу, а
                     -- очередь — нет, и мимо барьера уходило ровно то, что он
                     -- держит.
-                    tp.phase, tp.open AS phase_open, t.wave
+                    tp.phase, tp.open AS phase_open, t.wave,
+                    -- «Не начата» по истории и «её пишут прямо сейчас» — разные
+                    -- вопросы, и карточка обязана отвечать на оба. `M1-T2`
+                    -- стояла `not_started`, пока её писали: состояние берётся
+                    -- из закрывающих трейлеров, а до закрытия их нет.
+                    (SELECT w.branch FROM task_worktree w
+                      WHERE w.project_id = t.project_id AND w.task_id = t.id) AS in_flight
                FROM project_plan_tasks t
                LEFT JOIN red_task r ON r.project_id = t.project_id AND r.id = t.id
                LEFT JOIN task_phase tp ON tp.project_id = t.project_id AND tp.task_id = t.id
@@ -12995,22 +13010,23 @@ pub(crate) async fn waves(pool: &Pool, project: &str) -> Result<Value, crate::db
             // тринадцать правок назад. Очередь предполёта про это знала и
             // говорила словами; карточка, по которой задачу берут в работу,
             // молчала. Протухшее «готово» опаснее отсутствия: по нему идут.
-            "preflight": r.get::<_, Option<String>>(8),
+            "preflight": r.get::<_, Option<String>>("preflight"),
             // ЧИСЛО РЯДОМ С ЧИСЛОМ. Одного признака «свежий» мало: он говорит
             // «нет», но не говорит, насколько. «`ready` снят на 20, задача
             // сейчас 33» — это тринадцать правок, и по ним видно, читать
             // вердикт или выбросить. Просьба сессии `tot-ade`, её же доводом:
             // «вердикт без ревизии — тот же класс, что подробный след проверки
             // вместо доказательства проверки».
-            "preflightFresh": r.get::<_, Option<bool>>(9),
-            "preflightAtRevision": r.get::<_, Option<i64>>(10),
-            "revision": r.get::<_, Option<i64>>(11),
-            "phase": r.get::<_, Option<String>>(12),
+            "preflightFresh": r.get::<_, Option<bool>>("preflight_fresh"),
+            "preflightAtRevision": r.get::<_, Option<i64>>("preflight_revision"),
+            "revision": r.get::<_, Option<i64>>("revision"),
+            "phase": r.get::<_, Option<String>>("phase"),
             // Пусто — вид задачи не отображён ни на одну фазу: «не объявлено», а
             // не «можно раздавать».
-            "phaseOpen": r.get::<_, Option<bool>>(13),
-            "wave": r.get::<_, Option<i32>>(14),
-            "waits": depends[i].iter().filter(|&&j| tasks[j].get::<_, String>(4) != "closed").count(),
+            "phaseOpen": r.get::<_, Option<bool>>("phase_open"),
+            "wave": r.get::<_, Option<i32>>("wave"),
+            "inFlight": r.get::<_, Option<String>>("in_flight"),
+            "waits": depends[i].iter().filter(|&&j| tasks[j].get::<_, String>("state") != "closed").count(),
         }));
     }
     let open_red = cards
