@@ -578,30 +578,7 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
                 .map(|l| l.trim().to_owned())
                 .collect();
             let rex = regex::Regex::new(re).map_err(|e| format!("{fact}: образец трейлера не разбирается: {e}"))?;
-            // Состояние берётся у САМОГО СВЕЖЕГО коммита, назвавшего задачу:
-            // `git log` идёт от новых к старым, и первый ответ — последнее слово.
-            let mut seen: std::collections::HashSet<String> = Default::default();
-            let mut states: Vec<Value> = Vec::new();
-            for entry in log.split('\u{1}') {
-                let mut parts = entry.splitn(3, '\u{0}');
-                let commit = parts.next().unwrap_or("").trim().to_owned();
-                let at: i64 = parts.next().unwrap_or("").trim().parse::<i64>().unwrap_or(0) * 1000;
-                let body = parts.next().unwrap_or("");
-                for c in rex.captures_iter(body) {
-                    let id = c.get(1).map(|m| m.as_str().trim().to_owned()).unwrap_or_default();
-                    let state = c.get(2).map(|m| m.as_str().trim().to_owned())
-                        .unwrap_or_else(|| "closed".to_owned());
-                    if id.is_empty() || !seen.insert(id.clone()) {
-                        continue;
-                    }
-                    let state = if state == "closed" && !in_product.contains(&commit) {
-                        "claimed".to_owned()
-                    } else {
-                        state
-                    };
-                    states.push(json!({ "id": id, "state": state, "commit": commit, "at": at }));
-                }
-            }
+            let states = trailer_states(&log, &in_product, &rex);
             if states.is_empty() {
                 return Err(format!(
                     "{fact}: закрывающих трейлеров в истории нет ни одного. Пустая подача \
@@ -1918,5 +1895,132 @@ pub(crate) fn stub() {
 ";
         let verdict = holder_verdict(Some(stub_body), "FR-X-04").expect("заглушка называется");
         assert!(verdict.contains("тело не написано"), "{verdict}");
+    }
+}
+
+/// Состояния задач из летописи: что сказал самый свежий коммит, назвавший её.
+///
+/// ЗАКРЫТА ЛИ ЗАДАЧА В СТВОЛЕ — вопрос о ЗАДАЧЕ, а не о коммите. Сначала здесь
+/// стояло «трейлер не в стволе — значит `claimed`», и это отвечало на другой
+/// вопрос: лежит ли в стволе ИМЕННО ЭТОТ коммит.
+///
+/// У набора `tot-ade` 19 сентября ветку по умолчанию на двадцать минут
+/// переключили на `night/gates-f4`, туда уехал PR, и его слияние стало самым
+/// свежим коммитом, назвавшим десять задач. Работа при этом давно лежала в
+/// стволе — `M1-T5` закрыт коммитом `82ec5f6` в 12:45, — но свежим оказался
+/// `ada913f` из чужой ветки, и все десять получили `claimed`. Отсюда же 78
+/// находок пункта `task-tree-op-matches-disk`: он судит НЕзакрытые задачи, а
+/// они перестали числиться закрытыми, и с ними встала фаза Ф4.
+///
+/// Поэтому `closed` понижается до `claimed` только тогда, когда задачу не
+/// закрывает НИ ОДИН коммит ствола.
+fn trailer_states(
+    log: &str,
+    in_product: &std::collections::HashSet<String>,
+    rex: &regex::Regex,
+) -> Vec<Value> {
+    let split = |e: &str| {
+        let mut parts = e.splitn(3, '\u{0}');
+        let commit = parts.next().unwrap_or("").trim().to_owned();
+        let at: i64 = parts.next().unwrap_or("").trim().parse::<i64>().unwrap_or(0) * 1000;
+        let body = parts.next().unwrap_or("").to_owned();
+        (commit, at, body)
+    };
+    let closed_in_product: std::collections::HashSet<String> = log
+        .split('\u{1}')
+        .map(&split)
+        .filter(|(commit, _, _)| in_product.contains(commit))
+        .flat_map(|(_, _, body)| {
+            rex.captures_iter(&body)
+                .filter_map(|c| {
+                    let id = c.get(1).map(|m| m.as_str().trim().to_owned())?;
+                    let state = c.get(2).map(|m| m.as_str().trim()).unwrap_or("closed");
+                    (state == "closed" && !id.is_empty()).then_some(id)
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    // Состояние берётся у САМОГО СВЕЖЕГО коммита, назвавшего задачу: `git log`
+    // идёт от новых к старым, и первый ответ — последнее слово.
+    let mut seen: std::collections::HashSet<String> = Default::default();
+    let mut states: Vec<Value> = Vec::new();
+    for e in log.split('\u{1}') {
+        let (commit, at, body) = split(e);
+        for c in rex.captures_iter(&body) {
+            let id = c.get(1).map(|m| m.as_str().trim().to_owned()).unwrap_or_default();
+            let state = c.get(2).map(|m| m.as_str().trim().to_owned())
+                .unwrap_or_else(|| "closed".to_owned());
+            if id.is_empty() || !seen.insert(id.clone()) {
+                continue;
+            }
+            let state = if state == "closed" && !closed_in_product.contains(&id) {
+                "claimed".to_owned()
+            } else {
+                state
+            };
+            states.push(json!({ "id": id, "state": state, "commit": commit, "at": at }));
+        }
+    }
+    states
+}
+
+#[cfg(test)]
+mod trailers {
+    use super::trailer_states;
+
+    /// Летопись в том же виде, в каком её отдаёт `git log`: записи через \u{1},
+    /// поля внутри записи через \u{0}.
+    fn log(rows: &[(&str, i64, &str)]) -> String {
+        rows.iter()
+            .map(|(commit, at, body)| format!("{commit}\u{0}{at}\u{0}{body}"))
+            .collect::<Vec<_>>()
+            .join("\u{1}")
+    }
+
+    fn rex() -> regex::Regex {
+        regex::Regex::new(r"Task:\s*([A-Za-z0-9-]+)\s+(\w+)").expect("образец трейлера")
+    }
+
+    fn state_of(states: &[serde_json::Value], id: &str) -> String {
+        states
+            .iter()
+            .find(|s| s["id"] == id)
+            .map(|s| s["state"].as_str().unwrap_or("").to_owned())
+            .unwrap_or_else(|| "нет".to_owned())
+    }
+
+    /// Случай `tot-ade` 19 сентября: работа лежит в стволе с обеда, а самым
+    /// свежим коммитом, назвавшим задачу, оказалось слияние в чужую ветку —
+    /// ветку по умолчанию на двадцать минут переключили. Задача закрыта, и
+    /// свежесть чужого коммита этого не отменяет.
+    #[test]
+    fn a_newer_commit_off_the_mainline_does_not_unclose_a_task() {
+        let l = log(&[
+            ("ada913f", 1789833840, "M1-T9 (#36)\n\nTask: M1-T5 closed"),
+            ("82ec5f6", 1789822716, "M1-T5 · блоки\n\nTask: M1-T5 closed"),
+        ]);
+        let product = ["82ec5f6".to_owned()].into_iter().collect();
+        assert_eq!(state_of(&trailer_states(&l, &product, &rex()), "M1-T5"), "closed");
+    }
+
+    /// Обратное держится: работы в стволе нет вовсе, и доска не имеет права
+    /// говорить «сделано». Это тот случай, ради которого `claimed` и заведён.
+    #[test]
+    fn a_task_closed_only_on_a_branch_stays_claimed() {
+        let l = log(&[("beefbee", 1789833840, "черновик\n\nTask: M3-T7 closed")]);
+        let product = ["82ec5f6".to_owned()].into_iter().collect();
+        assert_eq!(state_of(&trailer_states(&l, &product, &rex()), "M3-T7"), "claimed");
+    }
+
+    /// Последнее слово остаётся за самым свежим коммитом: переоткрытая задача
+    /// не становится закрытой оттого, что в стволе лежит её прежнее закрытие.
+    #[test]
+    fn the_newest_commit_still_has_the_last_word() {
+        let l = log(&[
+            ("cafe777", 1789833840, "вернули в работу\n\nTask: M1-T5 reopened"),
+            ("82ec5f6", 1789822716, "M1-T5 · блоки\n\nTask: M1-T5 closed"),
+        ]);
+        let product = ["82ec5f6".to_owned(), "cafe777".to_owned()].into_iter().collect();
+        assert_eq!(state_of(&trailer_states(&l, &product, &rex()), "M1-T5"), "reopened");
     }
 }
