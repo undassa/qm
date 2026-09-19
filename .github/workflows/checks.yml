@@ -7,7 +7,7 @@ on:
 
 jobs:
   rust:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     defaults:
       run:
         working-directory: server-rs
@@ -45,7 +45,7 @@ jobs:
       - run: cargo clippy --release --locked --all-targets -- -D warnings
 
   web:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     defaults:
       run:
         working-directory: web
@@ -69,7 +69,7 @@ jobs:
   # Без секретов работа пропускается, а не падает: молчаливо красная проверка,
   # которую все привыкли видеть красной, хуже отсутствующей.
   selftest:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     # Секрет в условии шага GitHub не принимает и отвергает из-за этого ВЕСЬ файл:
     # ни одна работа не запускалась. Условие читает признак работы — есть секрет
     # или нет, — а сам секрет в переменные каждого шага не попадает.
