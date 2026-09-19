@@ -4289,6 +4289,13 @@ pub async fn rebuild(pool: &Pool, project: &str) -> Result<Value, crate::db::Fai
     // кладёт эта сборка, и до неё их в плане нет. Связь, посчитанная раньше,
     // легла бы на пустоту и показала бы ноль как «сошлось».
     let relations = crate::reproject::relations::project(pool, project).await?;
+    // ВОЛНА КЛАДЁТСЯ ПОСЛЕДНЕЙ, и это не вкус. Красные задачи попадают в план
+    // ВЫШЕ по этой же сборке — удалением и вставкой заново, — и волну им никто
+    // не переносит: считай её раньше, и у каждого зеркала окажется пусто.
+    // Пустая волна значит «круг зависимостей», и `V3-T19` прочлась как стоящая
+    // в круге, которого нет. Место шага важнее самого шага: он обязан идти
+    // после ПОСЛЕДНЕГО, кто пишет `project_plan_tasks`.
+    let waves = crate::reproject::plan::waves(pool, project).await?;
 
     Ok(json!({
         "relations": relations,
@@ -4310,6 +4317,7 @@ pub async fn rebuild(pool: &Pool, project: &str) -> Result<Value, crate::db::Fai
         // Число сообщается, чтобы пустота была видна, а не подразумевалась.
         "cjm_gap_requirement": 0,
         "task_milestone_dep": milestone_deps,
+        "волн": waves,
     }))
 }
 
