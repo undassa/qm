@@ -4295,10 +4295,10 @@ pub async fn rebuild(pool: &Pool, project: &str) -> Result<Value, crate::db::Fai
     // Пустая волна значит «круг зависимостей», и `V3-T19` прочлась как стоящая
     // в круге, которого нет. Место шага важнее самого шага: он обязан идти
     // после ПОСЛЕДНЕГО, кто пишет `project_plan_tasks`.
-    // Зависимости разрешаются здесь же и перед волной: волна из них и считается,
-    // а список задач полон только теперь.
-    let deps_written = crate::reproject::plan::deps(pool, project).await?;
-    let waves = crate::reproject::plan::waves(pool, project).await?;
+    // ПОСЛЕПЛАНОВЫЙ ПРОХОД: разметка дерева, связи и волна — всё, чему нужен
+    // полный список задач. Красные задачи попадают в план выше по этой же
+    // сборке, и шаг, прочитавший список раньше, зеркал не видит.
+    let after_plan = crate::reproject::plan::after(pool, project).await?;
 
     Ok(json!({
         "relations": relations,
@@ -4320,8 +4320,7 @@ pub async fn rebuild(pool: &Pool, project: &str) -> Result<Value, crate::db::Fai
         // Число сообщается, чтобы пустота была видна, а не подразумевалась.
         "cjm_gap_requirement": 0,
         "task_milestone_dep": milestone_deps,
-        "волн": waves,
-        "project_plan_task_deps_resolved": deps_written,
+        "после плана": after_plan,
     }))
 }
 

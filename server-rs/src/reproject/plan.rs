@@ -84,8 +84,6 @@ pub(crate) async fn fields(
 /// Строка задачи плана: имя, этап, порядок, заголовок, вид, состояние.
 type PlanTaskRow = (String, String, i32, String, String, String, String, &'static str, &'static str, Option<String>);
 
-/// Строка листа дерева задачи: задача, порядок, каталог, лист, пометки и путь.
-type TreeLeafRow = (String, i32, String, String, bool, bool, String, String, String);
 
 /// Заголовок документа — первый его раздел; если разделов нет, донор берёт путь.
 pub(crate) async fn titles(pool: &Pool, project: &str) -> Result<HashMap<String, String>, crate::db::Fail> {
@@ -312,41 +310,10 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize,
     //
     // На ответ это не влияет: `project_plan_tasks` эта транзакция трогает
     // ниже, так что читается ровно то же зафиксированное состояние.
-    let tree_leaves: Vec<TreeLeafRow> = {
-        let rows = tx
-            .query(
-                "SELECT t.id, d.content FROM project_plan_tasks t
-                   JOIN project_documents d ON d.project_id = t.project_id
-                        AND d.entity_kind = 'task' AND d.entity_name = t.entity_name
-                  WHERE t.project_id = $1",
-                &[&project],
-            )
-            .await?;
-        let mut out = Vec::new();
-        for r in &rows {
-            let task: String = r.get(0);
-            let content: String = r.get(1);
-            for (i, l) in super::tree_leaf::leaves_of(&content, terms.one("section.tree").unwrap_or("")).into_iter().enumerate() {
-                out.push((task.clone(), i as i32, l.dir, l.leaf, l.is_path, l.exempt, l.target, l.op.to_string(), l.path));
-            }
-        }
-        out
-    };
-
     // Требования этапа: раскрытый перечень блока «Требования». Требование
     // принадлежит ровно ОДНОМУ этапу — без этой связи этапы становятся
     // тематическими заголовками, а не планом: новое требование не попадает
     // ни в один и молчит.
-    tx.execute("DELETE FROM project_task_tree_leaf WHERE project_id = $1", &[&project]).await?;
-    for (task, ord, dir, leaf, is_path, exempt, target, op, path) in &tree_leaves {
-        tx.execute(
-            "INSERT INTO project_task_tree_leaf(project_id, task_id, ord, dir, leaf, is_path,
-                                                exempt, target_dir, op, path)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
-            &[&project, task, ord, dir, leaf, is_path, exempt, target, op, path],
-        )
-        .await?;
-    }
     tx.execute("DELETE FROM project_milestone_links WHERE project_id = $1 AND origin = 'projected'",
                &[&project]).await?;
     for (milestone, row_kind, target) in &milestone_links {
@@ -436,6 +403,67 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize,
     }
     tx.commit().await?;
     Ok((versions.len(), milestones.len(), tasks.len(), written as usize))
+}
+
+/// Разметка дерева задачи — из ЕЁ ЖЕ документа, какого бы вида он ни был.
+///
+/// Читалось только из документов вида `task`, и зеркала не давали ни строки:
+/// `V3-T19` объявляла `+ crates/tot-config/…`, а правило
+/// `task-tree-op-matches-disk` отвечало «ни одна зависимость задачи его не
+/// создаёт» — и было право по своим данным.
+async fn tree_leaves(pool: &Pool, project: &str) -> Result<usize, crate::db::Fail> {
+    let mut client = crate::db::conn(pool).await?;
+    let tx = client.transaction().await?;
+    let terms = crate::scheme::Terms::load(pool, project).await?;
+    let rows = tx
+        .query(
+            "SELECT t.id, d.content FROM project_plan_tasks t
+               JOIN project_documents d ON d.project_id = t.project_id
+                    AND d.entity_kind = t.entity_kind AND d.entity_name = t.entity_name
+              WHERE t.project_id = $1",
+            &[&project],
+        )
+        .await?;
+    tx.execute("DELETE FROM project_task_tree_leaf WHERE project_id = $1", &[&project]).await?;
+    let mut written = 0usize;
+    for r in &rows {
+        let task: String = r.get(0);
+        let content: String = r.get(1);
+        for (i, l) in super::tree_leaf::leaves_of(&content, terms.one("section.tree").unwrap_or(""))
+            .into_iter()
+            .enumerate()
+        {
+            tx.execute(
+                "INSERT INTO project_task_tree_leaf(project_id, task_id, ord, dir, leaf, is_path,
+                                                    exempt, target_dir, op, path)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+                &[&project, &task, &(i as i32), &l.dir, &l.leaf, &l.is_path, &l.exempt, &l.target,
+                  &l.op.to_string(), &l.path],
+            )
+            .await?;
+            written += 1;
+        }
+    }
+    tx.commit().await?;
+    Ok(written)
+}
+
+/// ПОСЛЕПЛАНОВЫЙ ПРОХОД: всё, чему нужен ПОЛНЫЙ список задач.
+///
+/// Красные задачи попадают в `project_plan_tasks` отдельным шагом сборки, ПОЗЖЕ
+/// разбора плана. Всякий шаг, который читает список задач раньше, зеркала не
+/// видит — и молчит об этом. За одно утро это случилось четырежды: волна у
+/// зеркал выходила пустой и читалась как круг; ребро `M3-T19 → V3-T19`
+/// отбрасывалось; разметка дерева зеркал не попадала в таблицу вовсе.
+///
+/// Поэтому не четыре починки по месту, а одно место с именем: сюда переносится
+/// то, чему нужен полный план, и порядок внутри назван — листья, связи, волна.
+/// Волна последняя: она из связей и выводится.
+pub(crate) async fn after(pool: &Pool, project: &str) -> Result<serde_json::Value, crate::db::Fail> {
+    let leaves = tree_leaves(pool, project).await?;
+    let edges = deps(pool, project).await?;
+    let depth = waves(pool, project).await?;
+    Ok(serde_json::json!({ "project_task_tree_leaf": leaves, "project_plan_task_deps": edges, "волн": depth }))
 }
 
 /// Объявленные зависимости — ПОСЛЕДНИМ шагом сборки, и место здесь важнее шага.
