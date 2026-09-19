@@ -566,6 +566,22 @@ CREATE TABLE IF NOT EXISTS fact_push (
   at bigint NOT NULL, actor text NOT NULL DEFAULT '', rows integer NOT NULL DEFAULT 0,
   PRIMARY KEY (project_id, fact));
 
+-- ЧЕМ СНЯТ ФАКТ: коммит и чистота дерева.
+--
+-- Датчик читает рабочий каталог, а не `HEAD`. Пока след подачи об этом молчал,
+-- факт, снятый с незакоммиченной правки, был неотличим от снятого со ствола, и
+-- пункт зеленел от работы, которой в продукте нет. Набор `myack` принёс это
+-- заявкой 18 («правка пять дней лежала незакоммиченной, и G3 · domain-check
+-- зеленел от неё только в грязном дереве»), набор `tot-ade` наступил в то же
+-- место вечером 19 сентября, ЗНАЯ о нём: три датчика поверхности сняты из
+-- каталога с двадцатью двумя незакоммиченными файлами, два пункта позеленели
+-- не про ствол.
+--
+-- `dirty` — не срок и не свежесть: факт может быть свежим, полным и при этом
+-- рассказывать о другом состоянии мира.
+ALTER TABLE fact_push ADD COLUMN IF NOT EXISTS commit_sha text NOT NULL DEFAULT '';
+ALTER TABLE fact_push ADD COLUMN IF NOT EXISTS dirty boolean NOT NULL DEFAULT false;
+
 -- Снятый термин — строка, а не regexp внутри правила.
 --
 -- Список жил в `docs-lint.mjs` образцом `RETIRED`. Пока он там, списков два:
@@ -1373,13 +1389,29 @@ CREATE TABLE IF NOT EXISTS task_run_event (
 -- Слово человека прогону и ответ прогона. Доставленное помечается, иначе
 -- агент читал бы одно и то же на каждом круге.
 CREATE TABLE IF NOT EXISTS task_run_message (
-  id           bigserial PRIMARY KEY,
-  project_id   text   NOT NULL,
-  run_id       text   NOT NULL,
-  at           bigint NOT NULL,
-  side         text   NOT NULL,
-  text         text   NOT NULL,
-  delivered_at bigint
+  id          bigserial PRIMARY KEY,
+  project_id  text   NOT NULL,
+  run_id      text   NOT NULL,
+  at          bigint NOT NULL,
+  side        text   NOT NULL,
+  delivered_at bigint,
+  text        text   NOT NULL
+);
+
+-- АВТОМАТ ЗАДАЧИ: шаг, круг починки, RETHINK'и плана, остановки. Состояние
+-- живёт здесь, а не в воркере: воркер перезапускается, автомат — нет. Правила
+-- переходов — контракт харнеса, а не вкус воркера: RETHINK ×2 — расхождение,
+-- пятый круг — задача встала, DRIFT — конвейер целиком (HALT с префиксом
+-- «DRIFT: », по нему воркер останавливает ВСЕ прогоны, а не один).
+CREATE TABLE IF NOT EXISTS task_run_automaton (
+  project_id text    NOT NULL,
+  run_id     text    NOT NULL,
+  step       text    NOT NULL DEFAULT 'planning',
+  circle     integer NOT NULL DEFAULT 0,
+  rethinks   integer NOT NULL DEFAULT 0,
+  halt       text    NOT NULL DEFAULT '',
+  updated_at bigint  NOT NULL DEFAULT 0,
+  PRIMARY KEY (project_id, run_id)
 );
 
 CREATE TABLE IF NOT EXISTS chat_message (
@@ -5469,6 +5501,8 @@ pub(crate) async fn push_code_facts(
     kind: &str,
     facts: &[(String, String)],
     actor: &str,
+    commit: &str,
+    dirty: bool,
 ) -> Result<Value, crate::db::Fail> {
     let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
@@ -5486,9 +5520,11 @@ pub(crate) async fn push_code_facts(
         .await?;
     }
     tx.execute(
-        "INSERT INTO fact_push (project_id, fact, at, actor, rows) VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (project_id, fact) DO UPDATE SET at = EXCLUDED.at, actor = EXCLUDED.actor, rows = EXCLUDED.rows",
-        &[&project, &kind, &now_ms(), &actor, &(facts.len() as i32)],
+        "INSERT INTO fact_push (project_id, fact, at, actor, rows, commit_sha, dirty)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (project_id, fact) DO UPDATE SET at = EXCLUDED.at, actor = EXCLUDED.actor,
+           rows = EXCLUDED.rows, commit_sha = EXCLUDED.commit_sha, dirty = EXCLUDED.dirty",
+        &[&project, &kind, &now_ms(), &actor, &(facts.len() as i32), &commit, &dirty],
     )
     .await?;
     tx.commit().await?;
@@ -9519,6 +9555,139 @@ pub(crate) async fn add_run_event(
                  &[&project, &run, &now_ms()])
         .await?;
     Ok(json!({ "status": "written", "runId": run, "kind": kind }))
+}
+
+/// Переход автомата задачи по вердикту отчёта сессии. Чистая функция: правила
+/// контракта тестируются без базы, дверь только подставляет строку и пишет
+/// результат. Возвращает (step, circle, rethinks, halt); непустой halt —
+/// автомат встал. HALT с префиксом «DRIFT: » — расхождение: конвейер стоит
+/// целиком, а не на одной задаче, и воркер его различает по префиксу.
+pub(crate) fn automaton_advance(
+    step: &str, circle: i32, rethinks: i32, status: &str, note: &str,
+) -> Result<(String, i32, i32, String), String> {
+    const CAP: i32 = 5; // потолок кругов починки — правило харнеса
+    const RETHINK_CAP: i32 = 2; // второй RETHINK на задаче есть расхождение
+    let halt = |why: &str| format!("{why}: {}", note.trim());
+    match (step, status) {
+        (_, "DRIFT") => Ok((step.to_owned(), circle, rethinks, halt("DRIFT"))),
+        ("planning", "PLAN") => Ok(("plan-review".to_owned(), circle, rethinks, String::new())),
+        ("planning", "BLOCKED") | ("planning", "NEEDS CONTEXT")
+        | ("implementing", "BLOCKED") | ("implementing", "NEEDS CONTEXT")
+        | ("fixing", "BLOCKED") | ("fixing", "NEEDS CONTEXT") => {
+            Err(format!("{status} не двигает автомат из {step}: прогон ждёт владельца, состояние прежнее"))
+        }
+        ("planning", _) => Ok(("review".to_owned(), circle, rethinks, String::new())),
+        ("plan-review", "RETHINK") if rethinks + 1 >= RETHINK_CAP => {
+            Ok(("plan-review".to_owned(), circle, rethinks + 1, halt("второй RETHINK — расхождение задачи")))
+        }
+        ("plan-review", "RETHINK") => Ok(("planning".to_owned(), circle, rethinks + 1, String::new())),
+        ("plan-review", "GO") | ("plan-review", "") => Ok(("implementing".to_owned(), circle, rethinks, String::new())),
+        ("plan-review", _) => Err(format!("{status} не вердикт ревью плана: бывает GO, RETHINK или DRIFT")),
+        ("implementing", _) => Ok(("review".to_owned(), circle, rethinks, String::new())),
+        ("review", "NEEDS FIX") if circle + 1 >= CAP => {
+            Ok(("review".to_owned(), circle + 1, rethinks, halt("пятый круг — задача встала")))
+        }
+        ("review", "NEEDS FIX") => Ok(("fixing".to_owned(), circle + 1, rethinks, String::new())),
+        ("review", _) => Ok(("closing".to_owned(), circle, rethinks, String::new())),
+        ("fixing", _) => Ok(("review".to_owned(), circle, rethinks, String::new())),
+        ("closing", "CLOSED") => Ok(("closed".to_owned(), circle, rethinks, String::new())),
+        ("closing", _) => Err(format!("{status} не закрывает автомат: closing ждёт CLOSED")),
+        ("closed", _) => Err("автомат закрыт: переходов из closed нет".into()),
+        _ => Err(format!("шага {step} в автомате нет")),
+    }
+}
+
+/// Состояние автомата прогона: лениво заводится при первом чтении — воркер
+/// единственный читатель, и запись при каждом run-start не нужна.
+pub(crate) async fn automaton(
+    pool: &Pool, project: &str, run: &str, status: Option<&str>, note: &str, resume: bool,
+) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
+    if run.trim().is_empty() {
+        // Вопрос воркера про конвейер целиком: какие автоматы встали и по чьей.
+        let rows = client
+            .query(
+                "SELECT run_id, halt FROM task_run_automaton
+                  WHERE project_id = $1 AND halt <> '' ORDER BY updated_at DESC LIMIT 20",
+                &[&project],
+            )
+            .await?;
+        return Ok(json!({
+            "halts": rows.iter().map(|r| json!({
+                "runId": r.get::<_, String>(0), "halt": r.get::<_, String>(1),
+                "drift": r.get::<_, String>(1).starts_with("DRIFT:") })).collect::<Vec<_>>()
+        }));
+    }
+    let exists = client
+        .query_opt("SELECT 1 FROM project_task_runs WHERE project_id = $1 AND id = $2", &[&project, &run])
+        .await?;
+    if exists.is_none() {
+        return Ok(json!({ "status": "not_found", "runId": run }));
+    }
+    client
+        .execute(
+            "INSERT INTO task_run_automaton (project_id, run_id, updated_at) VALUES ($1, $2, $3)
+             ON CONFLICT DO NOTHING",
+            &[&project, &run, &now_ms()],
+        )
+        .await?;
+    if resume {
+        // Слово владельца: конвейер пущен вручную, довод остаётся в halt —
+        // стирается при следующей остановке.
+        client
+            .execute(
+                "UPDATE task_run_automaton SET halt = '', updated_at = $3 WHERE project_id = $1 AND run_id = $2",
+                &[&project, &run, &now_ms()],
+            )
+            .await?;
+    }
+    let row = client
+        .query_one(
+            "SELECT step, circle, rethinks, halt FROM task_run_automaton WHERE project_id = $1 AND run_id = $2",
+            &[&project, &run],
+        )
+        .await?;
+    let step: String = row.get(0);
+    let circle: i32 = row.get(1);
+    let rethinks: i32 = row.get(2);
+    let halt: String = row.get(3);
+    if let Some(status) = status {
+        if !halt.trim().is_empty() {
+            // Вставший автомат не двигает ни чьё слово, кроме владельца:
+            // иначе круговой потолок и расхождение — декорация, которую сессия
+            // перешагнёт следующим отчётом.
+            return Ok(json!({ "status": "halted", "why": halt,
+                "how": "resume=1 снимает остановку по слову владельца",
+                "step": step, "circle": circle, "rethinks": rethinks }));
+        }
+        // Пустой статус — тоже вердикт: чистый отчёт без маркера. Как и у
+        // прототипа, всё, что не RETHINK и не NEEDS FIX, — согласие: жёсткий
+        // разбор слов превращал бы каждый честный абзац в отказ.
+        let (next, circle, rethinks, new_halt) = match automaton_advance(&step, circle, rethinks, status, note) {
+            Ok(v) => v,
+            Err(why) => {
+                return Ok(json!({ "status": "refused", "why": why,
+                    "step": step, "circle": circle, "rethinks": rethinks, "halt": halt }))
+            }
+        };
+        client
+            .execute(
+                "UPDATE task_run_automaton SET step = $3, circle = $4, rethinks = $5, halt = $6, updated_at = $7
+                  WHERE project_id = $1 AND run_id = $2",
+                &[&project, &run, &next, &circle, &rethinks, &new_halt, &now_ms()],
+            )
+            .await?;
+        client
+            .execute(
+                "INSERT INTO task_run_event (project_id, run_id, at, kind, text) VALUES ($1, $2, $3, 'автомат', $4)",
+                &[&project, &run, &now_ms(),
+                 &format!("{step} → {next} по {status}: {}", note.trim())],
+            )
+            .await?;
+        return Ok(json!({ "status": "written", "runId": run,
+            "step": next, "circle": circle, "rethinks": rethinks, "halt": new_halt }));
+    }
+    Ok(json!({ "status": "seen", "runId": run, "step": step, "circle": circle, "rethinks": rethinks, "halt": halt }))
 }
 
 /// Слово человека прогону — и слово прогона в ответ.
@@ -14057,5 +14226,103 @@ mod status_walk {
         let (current, _, anomaly) = walk(&steps);
         assert_eq!(current.as_deref(), Some("закрыта"));
         assert!(!anomaly);
+    }
+}
+
+#[cfg(test)]
+mod automaton_rules {
+    use super::automaton_advance;
+
+    fn go(step: &str, circle: i32, rethinks: i32, status: &str) -> (String, i32, i32, String) {
+        automaton_advance(step, circle, rethinks, status, "для пробы").expect("переход должен быть законным")
+    }
+
+    /// Контракт харнеса (HARNESS.md §4), взятый у прототипа надзирателя:
+    /// заявка → план → ревью плана → код → ревью → круги → закрытие.
+    #[test]
+    fn the_happy_path_walks_the_contract() {
+        assert_eq!(go("planning", 0, 0, "PLAN").0, "plan-review");
+        assert_eq!(go("plan-review", 0, 0, "GO").0, "implementing");
+        assert_eq!(go("implementing", 0, 0, "готово").0, "review");
+        assert_eq!(go("review", 0, 0, "чисто").0, "closing");
+        assert_eq!(go("closing", 0, 0, "CLOSED").0, "closed");
+    }
+
+    /// Задача без плана не задерживается на ревью плана: исполнитель уже
+    /// сделал работу — сразу ревью задачи.
+    #[test]
+    fn a_clean_planning_answer_skips_plan_review() {
+        let (step, _, _, halt) = go("planning", 0, 0, "сделал без плана");
+        assert_eq!(step, "review");
+        assert!(halt.is_empty());
+    }
+
+    /// Первый RETHINK возвращает на перепись плана, второй — расхождение.
+    /// Счёт не сбрасывается между кругами: два RETHINKа на ЗАДАЧУ, не на шаг.
+    #[test]
+    fn the_second_rethink_is_a_divergence() {
+        let (step, _, rethinks, halt) = go("plan-review", 0, 0, "RETHINK");
+        assert_eq!((step.as_str(), rethinks), ("planning", 1));
+        assert!(halt.is_empty());
+        let (_, _, rethinks, halt) = go("plan-review", 0, 1, "RETHINK");
+        assert_eq!(rethinks, 2);
+        assert!(halt.starts_with("второй RETHINK"), "встала не с префиксом DRIFT — задача одна, конвейер жив");
+    }
+
+    /// Пятый круг останавливает задачу, но не конвейер: префикса DRIFT нет.
+    #[test]
+    fn the_fifth_circle_stops_the_task_not_the_conveyor() {
+        let (_, circle, _, halt) = go("review", 4, 0, "NEEDS FIX");
+        assert_eq!(circle, 5);
+        assert!(halt.starts_with("пятый круг"));
+        assert!(!halt.starts_with("DRIFT:"));
+        let (_, circle, _, halt) = go("review", 1, 0, "NEEDS FIX");
+        assert_eq!(circle, 2);
+        assert!(halt.is_empty());
+        assert_eq!(go("fixing", 2, 0, "починено").0, "review");
+    }
+
+    /// DRIFT где угодно встаёт с префиксом DRIFT: по нему воркер останавливает
+    /// конвейер целиком, а не одну задачу.
+    #[test]
+    fn drift_halts_with_the_prefix_anywhere() {
+        for (step, circle, rethinks) in [("planning", 0, 0), ("implementing", 0, 1), ("fixing", 3, 0)] {
+            let (s, c, r, halt) = go(step, circle, rethinks, "DRIFT");
+            assert_eq!((s.as_str(), c, r), (step, circle, rethinks), "шаг сам не меняется");
+            assert!(halt.starts_with("DRIFT: "), "префикс — граница между остановкой задачи и конвейера");
+        }
+    }
+
+    /// Чистый отчёт без маркера — тоже согласие, как у прототипа: всё, что не
+    /// RETHINK и не NEEDS FIX, читается как GO/CLEAN. Жёсткий разбор слов
+    /// превращал бы каждый честный абзац в отказ автомата.
+    #[test]
+    fn an_unmarked_clean_report_is_consent() {
+        assert_eq!(go("plan-review", 0, 0, "").0, "implementing");
+        assert_eq!(go("review", 2, 0, "принято").0, "closing");
+        assert!(automaton_advance("plan-review", 0, 0, "NEEDS FIX", "").is_err(),
+                "NEEDS FIX — вердикт ревью задачи, не плана");
+    }
+
+    /// BLOCKED и NEEDS CONTEXT — не переходы: прогон ждёт владельца на прежнем
+    /// шаге, и воркер не должен задвинуть автомат вперёд по такому слову.
+    #[test]
+    fn waiting_words_do_not_move_the_machine() {
+        for status in ["BLOCKED", "NEEDS CONTEXT"] {
+            for step in ["planning", "implementing", "fixing"] {
+                assert!(automaton_advance(step, 0, 0, status, "жду ответа").is_err(),
+                        "{status} из {step} не должно двигать автомат");
+            }
+        }
+    }
+
+    /// Из закрытого и неизвестного автомата переходов нет — тишина тут была бы
+    /// ложью: воркер обязан услышать отказ.
+    #[test]
+    fn closed_and_unknown_steps_have_no_way_out() {
+        assert!(automaton_advance("closed", 0, 0, "GO", "").is_err());
+        assert!(automaton_advance("нет-такого-шага", 0, 0, "GO", "").is_err());
+        assert!(automaton_advance("closing", 0, 0, "GO", "").is_err());
+        assert!(automaton_advance("plan-review", 0, 0, "NEEDS FIX", "").is_err());
     }
 }

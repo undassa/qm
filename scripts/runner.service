@@ -6,7 +6,10 @@ After=network.target
 User=undassa
 Environment=HOME=/home/undassa
 Environment=PATH=/home/undassa/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/bin/python3 /opt/src/github.com/undassa/mh/scripts/runner.py
+# Воркер на Rust говорит с базой сам, без сервера: адрес — из того же .env,
+# что у mh-web.service.
+EnvironmentFile=/opt/src/github.com/undassa/mh/server-rs/.env
+ExecStart=/opt/src/github.com/undassa/mh/server-rs/target/release/mh-worker /opt/src/github.com/undassa/mh/scripts/runner.json
 WorkingDirectory=/opt/src/github.com/undassa/mh
 Restart=always
 RestartSec=5

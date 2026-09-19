@@ -936,7 +936,7 @@ mod fresh {
         }
         crate::projector::ensure(&pool).await.expect("схема встаёт на пустой базе");
         let laid = super::apply(&pool).await.expect("прибор раскладывается");
-        assert_eq!(laid["пунктов"], serde_json::json!(164));
+        assert_eq!(laid["пунктов"], serde_json::json!(165));
         assert_eq!(laid["изменено"], laid["пунктов"], "на пустой базе объявляются все пункты");
         let client = pool.get().await.expect("соединение");
         let items: i64 = client
@@ -944,7 +944,7 @@ mod fresh {
             .await
             .expect("пункты на месте")
             .get(0);
-        assert_eq!(items, 164);
+        assert_eq!(items, 165);
         client
             .batch_execute("DROP SCHEMA IF EXISTS fresh CASCADE")
             .await

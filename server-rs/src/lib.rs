@@ -26,4 +26,5 @@ pub mod reproject;
 pub mod scheme;
 pub mod store;
 pub mod watch;
+pub mod worker;
 pub mod yaml;
