@@ -8,9 +8,5 @@ SELECT r.id || CASE WHEN EXISTS (SELECT 1 FROM code_fact f WHERE f.project_id = 
  WHERE r.project_id = $1 AND r.kind = 'FR'
    AND (EXISTS (SELECT 1 FROM project_requirement_proof WHERE project_id = $1)
         OR fact_fresh($1, 'requirement-test'))
-   AND NOT EXISTS (SELECT 1 FROM project_requirement_proof p JOIN kind_layout k ON k.name = p.proof_kind AND (k.spec->>'proves')::boolean IS TRUE
-                    WHERE p.project_id = r.project_id AND p.requirement_id = r.id)
-   AND NOT EXISTS (SELECT 1 FROM project_checks c WHERE c.project_id = r.project_id AND c.requirement_id = r.id)
-   AND NOT EXISTS (SELECT 1 FROM project_check_requirements cr WHERE cr.project_id = r.project_id AND cr.requirement_id = r.id)
-   AND NOT (fact_fresh($1, 'requirement-test') AND EXISTS (SELECT 1 FROM code_fact f WHERE f.project_id = r.project_id AND f.kind = 'requirement-test' AND f.name = r.id))
+   AND NOT requirement_proved($1, r.id)
  ORDER BY 1

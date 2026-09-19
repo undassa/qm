@@ -29,12 +29,38 @@ CREATE OR REPLACE VIEW task_ready AS
          AS ready
     FROM project_plan_tasks t;
 
+-- Чем требование доказано — ОДИН ответ на всех, а не по ответу на дверь.
+--
+-- Годным доказательством набор зовёт четыре вещи: запись доказательства рода,
+-- объявленного годным дверью `kind-proves`; проверку, названную требованием;
+-- требование, названное проверкой; и тест в коде, названный по требованию, о
+-- котором подаёт свежий датчик.
+--
+-- Пункт `requirement-has-test` это уже знал. Плитка «требования покрыты» —
+-- нет: её вью спрашивал ОДНИ `project_checks` и на `tot-ade` показывал «45 из
+-- 204» там, где гейт держал ноль нарушений. Ровно та же ошибка стояла раньше и
+-- в самом пункте — её разбор записан в `why` пункта `every-requirement-tested`:
+-- «правило видело один род из трёх и держало 155 нарушений». Починили правило,
+-- вью забыли, и разошлись они молча.
+CREATE OR REPLACE FUNCTION requirement_proved(p text, r text) RETURNS boolean AS $д$
+  SELECT EXISTS (SELECT 1 FROM project_requirement_proof pr
+                   JOIN kind_layout k ON k.name = pr.proof_kind
+                                     AND (k.spec->>'proves')::boolean IS TRUE
+                  WHERE pr.project_id = p AND pr.requirement_id = r)
+      OR EXISTS (SELECT 1 FROM project_checks c
+                  WHERE c.project_id = p AND c.requirement_id = r)
+      OR EXISTS (SELECT 1 FROM project_check_requirements cr
+                  WHERE cr.project_id = p AND cr.requirement_id = r)
+      OR (fact_fresh(p, 'requirement-test')
+          AND EXISTS (SELECT 1 FROM code_fact f
+                       WHERE f.project_id = p AND f.kind = 'requirement-test' AND f.name = r))
+$д$ LANGUAGE sql STABLE;
+
 CREATE OR REPLACE VIEW requirement_covered AS
   SELECT q.project_id, q.id AS requirement_id, q.kind, q.area, q.satisfied,
          (SELECT count(*) FROM project_checks c
            WHERE c.project_id = q.project_id AND c.requirement_id = q.id) AS checks,
-         EXISTS (SELECT 1 FROM project_checks c
-                  WHERE c.project_id = q.project_id AND c.requirement_id = q.id) AS covered
+         requirement_proved(q.project_id, q.id) AS covered
     FROM project_requirements q;
 
 CREATE OR REPLACE VIEW corpus_progress AS
