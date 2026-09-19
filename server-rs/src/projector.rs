@@ -12978,13 +12978,18 @@ pub(crate) async fn waves(pool: &Pool, project: &str) -> Result<Value, crate::db
         }
     }
 
+    // КОЛОНКИ ЧИТАЮТСЯ ПО ИМЕНИ, а не по номеру. Я добавил три колонки в
+    // середину запроса — и все следующие сдвинулись молча: `waves` упала на
+    // живом у обоих наборов словами «error deserializing column 12».
+    // Компилятор такого не ловит, проба бы поймала только с базой. Имя не
+    // сдвигается.
     let mut cards = Vec::new();
     for (i, r) in tasks.iter().enumerate() {
         let kind: String = r.get(3);
         cards.push(json!({
-            "id": ids[i], "milestone": r.get::<_, String>(1), "title": r.get::<_, String>(2),
-            "kind": kind, "state": r.get::<_, String>(4),
-            "checks": r.get::<_, i32>(6), "requirements": r.get::<_, i64>(7),
+            "id": ids[i], "milestone": r.get::<_, String>("milestone_id"), "title": r.get::<_, String>("title"),
+            "kind": kind, "state": r.get::<_, String>("state"),
+            "checks": r.get::<_, i32>("checks"), "requirements": r.get::<_, i64>("requirements"),
             // ВЕРДИКТ БЕЗ СВЕЖЕСТИ ЧИТАЕТСЯ КАК ВЕРДИКТ. `M1-T2` стояла на доске
             // как `ready`, а вердикт был снят на ревизии 20 при нынешней 33 —
             // тринадцать правок назад. Очередь предполёта про это знала и
@@ -12997,14 +13002,14 @@ pub(crate) async fn waves(pool: &Pool, project: &str) -> Result<Value, crate::db
             // вердикт или выбросить. Просьба сессии `tot-ade`, её же доводом:
             // «вердикт без ревизии — тот же класс, что подробный след проверки
             // вместо доказательства проверки».
-            "preflightFresh": r.get::<_, Option<bool>>(12),
-            "preflightAtRevision": r.get::<_, Option<i64>>(13),
-            "revision": r.get::<_, Option<i64>>(14),
-            "phase": r.get::<_, Option<String>>(9),
+            "preflightFresh": r.get::<_, Option<bool>>(9),
+            "preflightAtRevision": r.get::<_, Option<i64>>(10),
+            "revision": r.get::<_, Option<i64>>(11),
+            "phase": r.get::<_, Option<String>>(12),
             // Пусто — вид задачи не отображён ни на одну фазу: «не объявлено», а
             // не «можно раздавать».
-            "phaseOpen": r.get::<_, Option<bool>>(10),
-            "wave": r.get::<_, Option<i32>>(11),
+            "phaseOpen": r.get::<_, Option<bool>>(13),
+            "wave": r.get::<_, Option<i32>>(14),
             "waits": depends[i].iter().filter(|&&j| tasks[j].get::<_, String>(4) != "closed").count(),
         }));
     }
