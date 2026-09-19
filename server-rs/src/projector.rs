@@ -11078,142 +11078,84 @@ pub(crate) async fn gate_selftest(pool: &Pool, project: &str, under: &str) -> Re
 
 /// Порядок выполнения задач — вывод, и делает его сервер.
 ///
-/// **Почему не харнес.** Порядок считается из строк «Зависит от», а они лежат в
-/// наборе; репозиторий для этого не нужен вовсе. Пока порядок считал скрипт,
-/// его вычисление жило рядом с серверным (`waves`, `next-task`) — два порядка на
-/// один план, и однажды они разошлись бы, оба выглядя правыми.
+/// **Почему не харнес.** Порядок считается из объявленных зависимостей, а они
+/// лежат в наборе; репозиторий для этого не нужен вовсе.
 ///
 /// **Файл при этом остаётся.** Исполнителю нужен список, который открывают и по
-/// которому ведут работу; вычисление в голове проверяющего таким списком не
-/// является. Но файл теперь ПРОИЗВОДНОЕ: сервер считает, файл порождается,
-/// гейт сверяет.
+/// которому ведут работу. Но файл ПРОИЗВОДНОЕ: сервер считает, файл
+/// порождается, гейт сверяет.
 ///
-/// Волна здесь — топологический слой внутри этапа: задачи слоя не зависят друг
-/// от друга, и это всё, что она утверждает. Параллельного хода она не обещает —
-/// этап закрывается целиком.
+/// **Волна здесь — та же, что везде**: глубина по зависимостям, положенная на
+/// задачу пересборкой. Прежде эта дверь считала СВОЙ порядок и по-своему: она
+/// разбирала поле «Зависит от» заново образцом, требующим обратных кавычек, а
+/// половина набора пишет имя без них. Цена померена на живом `tot-ade`: `M1-T2`
+/// ждёт `M1-T1` — обе стояли в первой волне; `M2-T1` ждёт `M1-T4` — ждущая
+/// стояла в первой волне, ожидаемая во второй. Гейт при этом был зелён: он
+/// сверяет файл с вычислением, а ошибались они одинаково.
+///
+/// Зависимости больше не разбираются здесь вовсе — ни в одной форме. Их читает
+/// проекция, и «жду весь этап» тоже: две записи об одном разошлись бы, как
+/// разошлись волны.
 pub(crate) async fn order(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
-    // Задачи и их зависимости — из плана, а не из файлов: связь уже разобрана
-    // при записи набора.
-    let tasks = client
+    let rows = client
         .query(
-            "SELECT t.id, t.milestone_id FROM project_plan_tasks t
+            "SELECT t.id, t.milestone_id, t.wave FROM project_plan_tasks t
               WHERE t.project_id = $1 AND t.kind <> 'red' AND t.entity_kind <> ''
-              ORDER BY t.milestone_id, t.id",
+              ORDER BY t.wave NULLS LAST, t.milestone_id, t.ord, t.id",
             &[&project],
         )
         .await?;
-    // Зависимости берутся из СЫРОГО поля, а не из готовой таблицы связей.
-    //
-    // Таблица держит только те имена, что стоят в обратных кавычках; поле умеет
-    // ещё две формы — «все задачи `M2`» и ссылку на этап целиком, — и обе
-    // значат «все задачи этого этапа». Потеряв их, порядок разошёлся бы с
-    // планом на две волны, а выглядел бы правым.
-    let dep_fields = client
-        .query(
-            "SELECT t.id, f.value_raw FROM project_plan_tasks t
-               JOIN project_document_fields f
-                 ON f.project_id = t.project_id AND f.entity_kind = t.entity_kind AND f.entity_name = t.entity_name AND f.name = 'Зависит от'
-              WHERE t.project_id = $1 AND t.kind <> 'red'",
-            &[&project],
-        )
-        .await?;
-    static TASK_REF: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| regex::Regex::new(r"`(M\d-T\d+[a-z]?)`").expect("образец задачи"));
-    static ALL_OF: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| regex::Regex::new(r"все задачи `?(M\d)`?").expect("образец этапа"));
-    static MS_LINK: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| regex::Regex::new(r"\[`(M\d)`\]").expect("образец ссылки на этап"));
-    let of_milestone = |m: &str| -> Vec<String> {
-        tasks
-            .iter()
-            .filter(|r| r.get::<_, String>(1) == m)
-            .map(|r| r.get::<_, String>(0))
-            .collect()
-    };
-    let mut deps: std::collections::HashMap<String, std::collections::HashSet<String>> = Default::default();
-    for r in &dep_fields {
-        let id: String = r.get(0);
-        let raw: String = r.get(1);
-        let set = deps.entry(id.clone()).or_default();
-        for m in TASK_REF.captures_iter(&raw) {
-            set.insert(m[1].to_owned());
-        }
-        for m in ALL_OF.captures_iter(&raw).chain(MS_LINK.captures_iter(&raw)) {
-            for t in of_milestone(&m[1]) {
-                set.insert(t);
-            }
-        }
-        set.remove(&id);
-    }
-    /// Номер задачи: `M0-T12` → 12. Внутри слоя порядок числовой, а не строковый:
-    /// «T10» после «T9», а не между «T1» и «T2».
-    fn num(id: &str) -> i64 {
-        id.rsplit("-T").next().and_then(|t| t.trim_end_matches(|c: char| c.is_alphabetic()).parse().ok()).unwrap_or(0)
-    }
-
-    let mut milestones: Vec<String> = tasks.iter().map(|r| r.get::<_, String>(1)).collect();
-    milestones.sort();
-    milestones.dedup();
-
-    let mut waves: Vec<(String, Vec<String>)> = Vec::new();
-    for m in &milestones {
-        let mut pend: Vec<String> = tasks
-            .iter()
-            .filter(|r| &r.get::<_, String>(1) == m)
-            .map(|r| r.get::<_, String>(0))
-            .collect();
-        while !pend.is_empty() {
-            let inside: std::collections::HashSet<&String> = pend.iter().collect();
-            let empty = Default::default();
-            let mut ready: Vec<String> = pend
-                .iter()
-                .filter(|t| !deps.get(*t).unwrap_or(&empty).iter().any(|d| inside.contains(d)))
-                .cloned()
-                .collect();
-            // Цикл — дефект плана, а не повод остановиться: слой берётся по
-            // номеру, и это видно тем, что волна вышла шире ожидаемой.
-            if ready.is_empty() {
-                ready = pend.clone();
-            }
-            ready.sort_by_key(|t| num(t));
-            pend.retain(|t| !ready.contains(t));
-            waves.push((m.clone(), ready));
+    let mut waves: std::collections::BTreeMap<i32, Vec<(String, String)>> = Default::default();
+    // Задача без волны стоит в круге зависимостей либо за ним. Её не прячут в
+    // первую волну и не выдумывают ей номер: круг — дефект плана, и он назван
+    // отдельным разделом, а правилом — `task-dependency-points-back`.
+    let mut ringed: Vec<(String, String)> = Vec::new();
+    for r in &rows {
+        let pair = (r.get::<_, String>(0), r.get::<_, String>(1));
+        match r.get::<_, Option<i32>>(2) {
+            Some(w) => waves.entry(w).or_default().push(pair),
+            None => ringed.push(pair),
         }
     }
+    let total: usize = rows.len();
 
-    let total: usize = waves.iter().map(|(_, t)| t.len()).sum();
     let mut body: Vec<String> = Vec::new();
-    let mut seen: std::collections::HashMap<&str, usize> = Default::default();
-    for (m, list) in &waves {
-        let n = seen.entry(m.as_str()).or_insert(0);
-        *n += 1;
+    for (n, list) in &waves {
         body.push(String::new());
-        body.push(format!("## {m} · волна {n}"));
+        body.push(format!("## Волна {n}"));
         body.push(String::new());
-        for t in list {
-            body.push(format!("- [ ] `{t}`"));
+        for (id, milestone) in list {
+            body.push(format!("- [ ] `{id}` · {milestone}"));
+        }
+    }
+    if !ringed.is_empty() {
+        body.push(String::new());
+        body.push("## Без волны — круг зависимостей".to_owned());
+        body.push(String::new());
+        body.push("Эти задачи ждут друг друга, и начать их нельзя ни одной. Волны у них нет:".to_owned());
+        body.push("номер здесь был бы выдумкой. Разрывает круг набор, называет — `task-dependency-points-back`.".to_owned());
+        body.push(String::new());
+        for (id, milestone) in &ringed {
+            body.push(format!("- [ ] `{id}` · {milestone}"));
         }
     }
 
     let head = vec![
         "# Порядок выполнения задач".to_owned(),
         String::new(),
-        "**Вычислен из зависимостей**, а не написан рукой: порядок считает сервер набора"
-            .to_owned(),
-        "(ручка `order`) из строк «Зависит от» и сверяет с этим файлом. Расхождение роняет гейт —".to_owned(),
+        "**Вычислен из зависимостей**, а не написан рукой: порядок считает сервер набора".to_owned(),
+        "(ручка `order`) из объявленных связей и сверяет с этим файлом. Расхождение роняет гейт —".to_owned(),
         "иначе список отстанет от плана молча (правило «сгенерированный артефакт расходится громко»)."
             .to_owned(),
         String::new(),
-        "Порядок двухуровневый: **этапы идут по номеру**, внутри этапа — топологически по".to_owned(),
-        "зависимостям. Этап закрывается целиком, «частично» не существует".to_owned(),
+        "**Волна — слой по зависимостям**: задачи одной волны не ждут друг друга, и это всё, что".to_owned(),
+        "она утверждает. Параллельного хода она не обещает. Волна сквозная, а не внутри этапа:".to_owned(),
+        "задача ждёт то, что объявлено, и объявленное ходит через границы этапов — `M3-T1` ждёт".to_owned(),
+        "`M1-T8` и `M2-T2`. Нужно закрыть этап целиком — это говорится полем «Зависит от»".to_owned(),
         // Ссылка адресует СУЩНОСТЬ, а не файл. Порождатель писал путь и потому
-        // расходился с набором, который на имена уже перешёл: сверка порождённого
-        // краснела на семнадцати знаках, и виноват был он, а не набор.
-        "([`acceptance.md`](acceptance:) §1).".to_owned(),
-        String::new(),
-        "**Волна — слой этого топологического порядка**: задачи внутри неё не зависят друг от".to_owned(),
-        "друга. Это всё, что она говорит: последовательность работы от неё не меняется, и".to_owned(),
-        "параллельного хода она не обещает. У красной фазы (`red/order.md`) волна значит больше —".to_owned(),
-        "там она ещё и раздвинута по общим файлам, потому что те задачи действительно садятся".to_owned(),
-        "рядом, каждая в своём дереве.".to_owned(),
+        // расходился с набором, который на имена уже перешёл.
+        "(«все задачи `M2`»), и тогда волна разложит работу по этапам сама ([`acceptance.md`](acceptance:) §1).".to_owned(),
         String::new(),
         format!("Волн — **{}**, задач — **{}**.", waves.len(), total),
         String::new(),
