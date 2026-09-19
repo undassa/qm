@@ -5021,3 +5021,10 @@ tbody:first-of-type .co-grp th { padding-top: 8px; }
 .pu-line.owner { border-left-color: var(--key, #2f6f4f); }
 .pu-line .pu-text { white-space: pre-wrap; }
 .pu-body { white-space: pre-wrap; max-height: 30vh; overflow: auto; margin: 0 0 8px; font-size: 0.9em; }
+
+/* Ход работы в шапке: ступени цепочкой, число перед именем.
+   Стрелка бледнее имени — она разделитель, а не содержание; последняя
+   ступень выделена, потому что именно её число отвечает «сколько сделано». */
+.wk-flow .wk-arrow { opacity: 0.45; }
+.wk-flow .wk-end .num { font-weight: 700; }
+.wk-flow em { opacity: 0.6; font-style: italic; }

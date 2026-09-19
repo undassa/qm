@@ -224,12 +224,38 @@ export function Work({ projectId, lang }: { projectId: string; lang: Lang }): Re
             </button>
           )}
         </div>
-        <p className="wk-say">
-          <span className="num">{board.total}</span> {say(lang, "wk.devTasks")} ·{" "}
-          <span className="num">{board.mirrors}</span> {say(lang, "wk.mirrors")} ·{" "}
-          <span className="bad">
-            <span className="num">{board.torn}</span> {say(lang, "wk.torn")}
-          </span>
+        {/* ХОД РАБОТЫ СТОИТ В ШАПКЕ, а не на одной из вкладок.
+            Прежде здесь были только «78 задач · 78 зеркал · 0 рваных» — три
+            числа, из которых ни одно не отвечает «как идут дела». Владелец
+            смотрел в список, видел «60 в очереди предполёта» и читал это как
+            «не готово ничего», хотя три задачи уже закрыты, а две пишутся
+            прямо сейчас.
+            Ступени берутся из объявления и в его порядке: набор волен звать их
+            по-своему и завести седьмую — строка её покажет без правки здесь.
+            Ступень, которой никто не достиг, не прячется: ноль — это ответ.
+            «Неизвестно» отличается от нуля и написано словом. */}
+        <p className="wk-say wk-flow">
+          {board.columns.map((c, i) => (
+            <span key={c.status} className={i === board.columns.length - 1 ? "wk-end" : ""}>
+              {i > 0 && <span className="wk-arrow"> → </span>}
+              {c.reached === null ? (
+                <em title={c.title}>{say(lang, "wk.unmeasured")}</em>
+              ) : (
+                <span className="num">{c.reached}</span>
+              )}{" "}
+              <span title={c.title}>{c.status}</span>
+            </span>
+          ))}
+          {" · "}
+          <span className="num">{board.total}</span> {say(lang, "wk.devTasks")}
+          {board.torn > 0 && (
+            <>
+              {" · "}
+              <span className="bad">
+                <span className="num">{board.torn}</span> {say(lang, "wk.torn")}
+              </span>
+            </>
+          )}
         </p>
       </header>
 
