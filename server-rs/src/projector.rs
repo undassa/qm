@@ -780,6 +780,29 @@ CREATE TABLE IF NOT EXISTS task_worktree (
 --
 -- Гасится он одним: задача закрыта ЗАНОВО, коммитом позже того, которым долг
 -- замечен. Не словом, не побегом и не позеленевшим гейтом.
+-- ЗАПИСЬ О ЗАКРЫТИИ НЕ В СВОЙ ЧЕРЁД. Долг снимался одним способом — новым
+-- закрывающим коммитом, — и это верно, пока переделка возможна. Но у задачи,
+-- сделанной целиком и правильно, переделывать нечего: коммит пришлось бы
+-- выдумать, а выдуманный коммит — это ложь в летописи ради зелёного.
+--
+-- Померено 19 сентября: 82 задачи `tot-ade` числятся закрытыми при закрытой
+-- фазе. Фаза была закрыта, потому что гейт был красен, а красен он в тот день
+-- был в том числе по дефектам харнеса — файл порядка врал, зеркала
+-- проваливались сквозь четыре шага, два правила требовали противоположного.
+-- Этого долга набор не заработал, а заплатить его мог только обрядом.
+--
+-- Решение владельца: записать. Запись — не прощение: она несёт ПРИЧИНУ, имя
+-- записавшего и время, живёт рядом с долгом и читается вместе с ним. Довод
+-- «больше долг не уходит ничем» писался против ТИХОГО снятия — снять задачу и
+-- вернуть; запись с причиной тихой не бывает.
+CREATE TABLE IF NOT EXISTS task_redo_settled (
+  project_id text   NOT NULL,
+  task_id    text   NOT NULL,
+  at         bigint NOT NULL,
+  by_whom    text   NOT NULL DEFAULT '',
+  why        text   NOT NULL,
+  PRIMARY KEY (project_id, task_id));
+
 CREATE TABLE IF NOT EXISTS task_redo (
   project_id text NOT NULL,
   task_id    text NOT NULL,
@@ -3653,6 +3676,57 @@ pub async fn rebuild_before(pool: &Pool, project: &str) -> Result<Value, crate::
         .await?;
     tx.commit().await?;
     Ok(json!({ "task_requirements_declared": declared, "task_requirement": links }))
+}
+
+/// Записать, почему задача закрыта не в свой черёд, и тем снять долг.
+///
+/// НЕ ПРОЩЕНИЕ, А ЗАПИСЬ. Долг гасится переделкой — пока переделка возможна. У
+/// задачи, сделанной целиком, переделывать нечего, и коммит пришлось бы
+/// выдумать. Запись говорит то, что было: закрыто тогда-то, при закрытой фазе,
+/// вот почему это приемлемо, вот кто это сказал.
+///
+/// Без причины дверь отказывает: отметка без довода — это то же тихое снятие,
+/// от которого долг и защищали.
+pub(crate) async fn settle_redo(
+    pool: &Pool,
+    project: &str,
+    task: &str,
+    why: &str,
+    by: &str,
+) -> Result<Value, crate::db::Fail> {
+    if task.trim().is_empty() {
+        return Ok(json!({ "status": "nameless", "why": "долг снимается у задачи, а она не названа" }));
+    }
+    if why.trim().is_empty() {
+        return Ok(json!({ "status": "no_why",
+            "why": "запись без причины — это тихое снятие долга, а не запись: скажите, почему закрытие не в свой черёд приемлемо" }));
+    }
+    let mut client = crate::db::conn(pool).await?;
+    let tx = client.transaction().await?;
+    let owed = tx
+        .query_opt("SELECT noticed_at, phase, gate FROM task_redo WHERE project_id = $1 AND task_id = $2",
+                   &[&project, &task])
+        .await?;
+    let Some(owed) = owed else {
+        return Ok(json!({ "status": "no_debt", "task": task,
+                          "why": "за этой задачей долга нет: снимать нечего" }));
+    };
+    let at = now_ms();
+    tx.execute(
+        "INSERT INTO task_redo_settled (project_id, task_id, at, by_whom, why)
+         VALUES ($1,$2,$3,$4,$5)
+         ON CONFLICT (project_id, task_id) DO UPDATE SET at = EXCLUDED.at,
+           by_whom = EXCLUDED.by_whom, why = EXCLUDED.why",
+        &[&project, &task, &at, &by, &why],
+    )
+    .await?;
+    tx.execute("DELETE FROM task_redo WHERE project_id = $1 AND task_id = $2", &[&project, &task])
+        .await?;
+    crate::watch::mark(&tx, project, "долг закрытия записан").await?;
+    tx.commit().await?;
+    Ok(json!({ "status": "settled", "task": task, "at": at, "by": by,
+               "noticedAt": owed.get::<_, i64>(0), "phase": owed.get::<_, String>(1),
+               "gate": owed.get::<_, String>(2) }))
 }
 
 /// Снять переделанное: задача закрыта заново, коммитом позже замеченного долга.
