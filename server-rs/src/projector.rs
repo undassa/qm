@@ -63,17 +63,27 @@ CREATE OR REPLACE VIEW corpus_progress AS
          count(*) FILTER (WHERE state NOT IN ('passed','failed'))
     FROM project_gates GROUP BY project_id
   UNION ALL
-  SELECT i.project_id, 'пункты готовности',
-         count(*) FILTER (WHERE i.method_kind <> 'unknown' AND NOT EXISTS (
-            SELECT 1 FROM readiness_item x WHERE false)),
-         0,
-         count(*) FILTER (WHERE i.method_kind = 'unknown')
+  -- Вердикта пункта готовности не лежит нигде: `query` дверь считает на лету,
+  -- `command` серверу не выполнить — у него нет ни репозитория, ни оболочки.
+  -- Плитка считала ОБЪЯВЛЕННЫЙ СПОСОБ и звала это «отвечено»: на `tot-ade`
+  -- выходило «588 из 588 · 100 %» при том, что из 1701 пункта не был вычислен
+  -- ни один, а те самые 588 — ровно те, про которые дверь честно говорит
+  -- «команду выполняет харнес». Отвечаемых пока нет, и плитка так и скажет.
+  SELECT i.project_id, 'пункты готовности', 0, 0, count(*)
     FROM readiness_item i GROUP BY i.project_id
   UNION ALL
-  SELECT $$__ladder__$$, 'ступени лестницы',
-         count(*) FILTER (WHERE method_kind <> 'unknown'), 0,
-         count(*) FILTER (WHERE method_kind = 'unknown')
-    FROM harness_process_step GROUP BY 1;
+  -- Ступень отвечает вердиктом, и вердикт ЛЕЖИТ — в `process_run`. Считать
+  -- вместо него объявленный способ значило показывать «13 из 13 · 100 %» на
+  -- лестнице, которая в этот момент стояла на красной ступени. Берём последний
+  -- прогон: прежние состояния той же ступени — история, а не сегодняшний счёт.
+  SELECT r.project_id, 'ступени лестницы',
+         count(*) FILTER (WHERE r.state = 'passed'),
+         count(*) FILTER (WHERE r.state = 'failed'),
+         count(*) FILTER (WHERE r.state NOT IN ('passed','failed'))
+    FROM process_run r
+    JOIN (SELECT project_id, process, max(at) AS at FROM process_run GROUP BY 1, 2) п
+      ON п.project_id = r.project_id AND п.process = r.process AND п.at = r.at
+   GROUP BY r.project_id;
 
 CREATE OR REPLACE VIEW process_state AS
   SELECT s.set_name, s.process, s.ord, s.question, s.method_kind, s.owner_kind, s.owner, s.touches,
@@ -12441,7 +12451,7 @@ pub(crate) async fn progress(pool: &Pool, project: &str) -> Result<Value, crate:
     let rows = client
         .query(
             "SELECT tile, done, open, unknown FROM corpus_progress
-              WHERE project_id = $1 OR project_id = '__ladder__' ORDER BY tile",
+              WHERE project_id = $1 ORDER BY tile",
             &[&project],
         )
         .await?;
