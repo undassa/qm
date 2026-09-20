@@ -420,6 +420,27 @@ pub fn guard(door: &Door) -> i32 {
 /// Что снимать, объявлено в базе: где искать, чем вынимать, как назвать. Пять
 /// датчиков жили пятью скриптами на другом языке — общего у них ровно это, а
 /// различались они только тремя строками объявления.
+/// Подача фактов одного вида — одной строкой на все одиннадцать датчиков.
+///
+/// Прежде каждый датчик собирал этот `json!` сам, и одиннадцать одинаковых
+/// строк жили порознь. Пока их было три, это читалось; на одиннадцати любая
+/// новая часть отпечатка («чем снято») заезжала бы в десять мест и забывалась
+/// в одиннадцатом — ровно тот дефект, который прибор ловит у наборов.
+fn push_facts(
+    door: &Door,
+    fact: &str,
+    facts: &[Value],
+    head: &str,
+    dirty: bool,
+    read: usize,
+) -> Result<Value, String> {
+    let (out, _) = door.call(
+        "code-facts-push",
+        &json!({ "kind": fact, "facts": facts, "commit": head, "dirty": dirty, "read": read }),
+    )?;
+    Ok(out)
+}
+
 pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
     let root = std::process::Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
@@ -541,7 +562,7 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
                 }
             }
             let read_n = declared["holders"].as_array().map(|a| a.len()).unwrap_or(0);
-            let (out, _) = door.call("code-facts-push", &json!({ "kind": fact, "facts": facts, "commit": head, "dirty": dirty, "read": read_n }))?;
+            let out = push_facts(door, fact, &facts, &head, dirty, read_n)?;
             done.push(json!({ "fact": fact, "files": declared["holders"].as_array().map(|a| a.len()).unwrap_or(0),
                               "found": facts.len(), "was": out["was"], "now": out["now"] }));
             continue;
@@ -652,7 +673,7 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
                 .map(|(n, d)| json!({ "name": n, "detail": d }))
                 .collect();
             let read_n = facts.len();
-            let (out, _) = door.call("code-facts-push", &json!({ "kind": fact, "facts": facts, "commit": head, "dirty": dirty, "read": read_n }))?;
+            let out = push_facts(door, fact, &facts, &head, dirty, read_n)?;
             done.push(json!({ "fact": fact, "files": facts.len(), "found": facts.len(),
                               "was": out["was"], "now": out["now"] }));
             continue;
@@ -698,7 +719,7 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
                 .map(|(n, d)| json!({ "name": n, "detail": d }))
                 .collect();
             let read_n = facts.len();
-            let (out, _) = door.call("code-facts-push", &json!({ "kind": fact, "facts": facts, "commit": head, "dirty": dirty, "read": read_n }))?;
+            let out = push_facts(door, fact, &facts, &head, dirty, read_n)?;
             done.push(json!({ "fact": fact, "files": facts.len(), "found": facts.len(),
                               "was": out["was"], "now": out["now"] }));
             continue;
@@ -721,7 +742,7 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
                 .map(|(n, note)| json!({ "name": n, "detail": note }))
                 .collect();
             let read_n = facts.len();
-            let (out, _) = door.call("code-facts-push", &json!({ "kind": fact, "facts": facts, "commit": head, "dirty": dirty, "read": read_n }))?;
+            let out = push_facts(door, fact, &facts, &head, dirty, read_n)?;
             done.push(json!({ "fact": fact, "files": facts.len(), "found": facts.len(),
                               "was": out["was"], "now": out["now"] }));
             continue;
@@ -756,7 +777,7 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
                 .map(|p| json!({ "name": p.name, "detail": p.detail }))
                 .collect();
             let read_n = files.len();
-            let (out, _) = door.call("code-facts-push", &json!({ "kind": fact, "facts": facts, "commit": head, "dirty": dirty, "read": read_n }))?;
+            let out = push_facts(door, fact, &facts, &head, dirty, read_n)?;
             done.push(json!({ "fact": fact, "files": files.len(), "found": facts.len(),
                               "was": out["was"], "now": out["now"] }));
             continue;
@@ -771,7 +792,7 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
                 .map(|p| json!({ "name": p.name, "detail": p.detail }))
                 .collect();
             let read_n = files.len();
-            let (out, _) = door.call("code-facts-push", &json!({ "kind": fact, "facts": facts, "commit": head, "dirty": dirty, "read": read_n }))?;
+            let out = push_facts(door, fact, &facts, &head, dirty, read_n)?;
             done.push(json!({ "fact": fact, "files": files.len(), "found": facts.len(),
                               "was": out["was"], "now": out["now"] }));
             continue;
@@ -791,7 +812,7 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
                 .map(|p| json!({ "name": p.name, "detail": p.detail }))
                 .collect();
             let read_n = files.len();
-            let (out, _) = door.call("code-facts-push", &json!({ "kind": fact, "facts": facts, "commit": head, "dirty": dirty, "read": read_n }))?;
+            let out = push_facts(door, fact, &facts, &head, dirty, read_n)?;
             done.push(json!({ "fact": fact, "files": files.len(), "found": facts.len(),
                               "was": out["was"], "now": out["now"] }));
             continue;
@@ -813,7 +834,7 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
                 .map(|p| json!({ "name": p.name, "detail": p.detail }))
                 .collect();
             let read_n = files.len();
-            let (out, _) = door.call("code-facts-push", &json!({ "kind": fact, "facts": facts, "commit": head, "dirty": dirty, "read": read_n }))?;
+            let out = push_facts(door, fact, &facts, &head, dirty, read_n)?;
             done.push(json!({ "fact": fact, "files": files.len(), "found": facts.len(),
                               "was": out["was"], "now": out["now"] }));
             continue;
@@ -857,7 +878,7 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
                 .collect();
             let facts = facts_of(&crate::repo_corpus::contract_vs_schema(&doc, &tables, &forced));
             let read_n = files.len();
-            let (out, _) = door.call("code-facts-push", &json!({ "kind": fact, "facts": facts, "commit": head, "dirty": dirty, "read": read_n }))?;
+            let out = push_facts(door, fact, &facts, &head, dirty, read_n)?;
             done.push(json!({ "fact": fact, "files": files.len(), "found": facts.len(),
                               "was": out["was"], "now": out["now"] }));
             continue;
@@ -924,7 +945,7 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
                 &enums, &checks, &contract_enums, &forced, &checks_tables));
             let facts = facts_of(&pairs);
             let read_n = files.len();
-            let (out, _) = door.call("code-facts-push", &json!({ "kind": fact, "facts": facts, "commit": head, "dirty": dirty, "read": read_n }))?;
+            let out = push_facts(door, fact, &facts, &head, dirty, read_n)?;
             done.push(json!({ "fact": fact, "files": files.len(), "found": facts.len(),
                               "was": out["was"], "now": out["now"] }));
             continue;
@@ -1020,7 +1041,7 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
             .map(|(n, note)| json!({ "name": n, "detail": note }))
             .collect();
         let read_n = files.len();
-        let (out, _) = door.call("code-facts-push", &json!({ "kind": fact, "facts": facts, "commit": head, "dirty": dirty, "read": read_n }))?;
+        let out = push_facts(door, fact, &facts, &head, dirty, read_n)?;
         done.push(json!({ "fact": fact, "files": files.len(), "found": facts.len(),
                           "was": out["was"], "now": out["now"] }));
     }
