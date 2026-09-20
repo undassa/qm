@@ -5614,6 +5614,18 @@ pub(crate) async fn push_code_facts(
         .query_one("SELECT count(*) FROM code_fact WHERE project_id = $1 AND kind = $2", &[&project, &kind])
         .await?
         .get::<_, i64>(0);
+    // ПУСТАЯ ПОДАЧА, СТИРАЮЩАЯ НАЙДЕННОЕ, — подозрение; пустая поверх пустого
+    // — ответ. Набор `myack` показал цену первого: `domain-check` обнулился
+    // одним вызовом и унёс 46 находок G3. Набор `tot-ade` показал цену запрета
+    // без различения: у проекта без HTTP-контракта глоб не находит файлов,
+    // отказ не записывает подачу, отметка не двигается — и пункт краснеет
+    // вечно, сколько ни пересаживай датчик.
+    if facts.is_empty() && reads <= 0 && before > 0 {
+        return Ok(json!({ "status": "empty_push_over_rows", "kind": kind, "was": before,
+            "why": "было записано больше нуля, подано ноль, и прочитано ноль файлов: \
+                    «ничего не нашёл» здесь неотличимо от «не смотрел». Назовите read=N — \
+                    сколько файлов датчик прочёл. Ничего не записано" }));
+    }
     tx.execute("DELETE FROM code_fact WHERE project_id = $1 AND kind = $2", &[&project, &kind]).await?;
     for (name, detail) in facts {
         tx.execute(
