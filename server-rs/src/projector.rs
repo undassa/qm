@@ -9654,11 +9654,14 @@ pub(crate) async fn record_test_runs(
 ) -> Result<Value, crate::db::Fail> {
     let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
+    // Одно время на ПАРТИЮ: иначе пятьсот вставок растянутся на миллисекунды,
+    // и «последний прогон» по max(at) увидит лишь хвост партии.
+    let at = now_ms();
     for (check, verdict) in rows {
         tx.execute(
             "INSERT INTO test_run (project_id, check_name, commit_sha, dirty, verdict, at, actor)
              VALUES ($1,$2,$3,false,$4,$5,$6)",
-            &[&project, check, &commit, verdict, &now_ms(), &actor],
+            &[&project, check, &commit, verdict, &at, &actor],
         )
         .await?;
     }
