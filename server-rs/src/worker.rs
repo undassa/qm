@@ -819,9 +819,8 @@ impl Worker {
                 return;
             }
             let step = am["step"].as_str().unwrap_or("");
-            let adv;
-            if step == "closed" {
-                adv = am.clone(); // автомат закрыт: вердиктов не ждёт, судит конвейер
+            let adv = if step == "closed" {
+                am.clone() // автомат закрыт: вердиктов не ждёт, судит конвейер
             } else {
                 let verdict = verdict_of(&answer_full);
                 if matches!(verdict.as_str(), "BLOCKED" | "NEEDS CONTEXT") {
@@ -841,7 +840,7 @@ impl Worker {
                     let _ = self.door(project, "run-event",
                         json!({ "runId": rid, "kind": "находки", "text": answer })).await;
                 }
-                adv = match self.door(project, "run-automaton",
+                match self.door(project, "run-automaton",
                     json!({ "runId": rid, "status": verdict, "note": cut(&answer_full, 300) })).await
                 {
                     Ok(v) => v,
@@ -849,8 +848,8 @@ impl Worker {
                         println!("{0}: {e}", bundle.name);
                         return;
                     }
-                };
-            }
+                }
+            };
             if matches!(adv["status"].as_str(), Some("refused") | Some("halted")) {
                 let why = adv["why"].as_str().unwrap_or("отказ автомата");
                 let _ = self.door(project, "run-event",
