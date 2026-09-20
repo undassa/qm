@@ -581,6 +581,11 @@ CREATE TABLE IF NOT EXISTS fact_push (
 -- рассказывать о другом состоянии мира.
 ALTER TABLE fact_push ADD COLUMN IF NOT EXISTS commit_sha text NOT NULL DEFAULT '';
 ALTER TABLE fact_push ADD COLUMN IF NOT EXISTS dirty boolean NOT NULL DEFAULT false;
+-- Сколько файлов датчик прочёл, прежде чем назвать находки. Пустая подача
+-- честна только при честном прочтённом объёме: «прочёл 20, нашёл 0» — «чисто»;
+-- «прочёл 0» — отказ, а не ноль (заявка 18: пустая подача рукой гасила 46
+-- находок G3 одним вызовом).
+ALTER TABLE fact_push ADD COLUMN IF NOT EXISTS reads integer NOT NULL DEFAULT 0;
 
 -- Снятый термин — строка, а не regexp внутри правила.
 --
@@ -2681,10 +2686,26 @@ CREATE OR REPLACE FUNCTION fact_gap(p text, f text) RETURNS text AS $г$
               ELSE 'ни разу не подавал' END
 $г$ LANGUAGE sql STABLE;
 
+-- СВЕЖЕСТЬ — НЕ «БЫЛА ПОДАЧА». Три отдельных ответа, и складывать их в один
+-- — та же ложь, что зелёный ноль:
+--   не подавал вовсе            → не свеж (молчание датчика);
+--   подал с грязного дерева
+--   или не назвав коммита      → не свеж (факт о другом состоянии мира,
+--                                 заявка 18: «снятый с незакоммиченной правки
+--                                 держал гейт зелёным»);
+--   срок не объявлен            → не свеж (не «свеж навсегда»: необъявленный
+--                                 датчик читается как «неизвестно», и ветка
+--                                 «проверить нечем» гейта загорается честно).
+-- Снять «неизвестно» может только объявление срока (дверь `sensor-declare`,
+-- работа набора) и подача со ствола чистого дерева.
 CREATE OR REPLACE FUNCTION fact_fresh(p text, f text) RETURNS boolean AS $ф$
   SELECT CASE
     WHEN NOT EXISTS (SELECT 1 FROM fact_push WHERE project_id = p AND fact = f) THEN false
-    WHEN (SELECT s.stale_after_ms FROM sensor s WHERE s.project_id = p AND s.fact = f) IS NULL THEN true
+    WHEN (SELECT fp.dirty OR fp.commit_sha = ''
+            FROM fact_push fp
+           WHERE fp.project_id = p AND fp.fact = f
+           ORDER BY fp.at DESC LIMIT 1) THEN false
+    WHEN (SELECT s.stale_after_ms FROM sensor s WHERE s.project_id = p AND s.fact = f) IS NULL THEN false
     ELSE (SELECT max(fp.at) FROM fact_push fp WHERE fp.project_id = p AND fp.fact = f)
          > (extract(epoch from now()) * 1000)::bigint
            - (SELECT s.stale_after_ms FROM sensor s WHERE s.project_id = p AND s.fact = f)
@@ -5542,6 +5563,7 @@ pub(crate) async fn push_code_facts(
     actor: &str,
     commit: &str,
     dirty: bool,
+    reads: i64,
 ) -> Result<Value, crate::db::Fail> {
     let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
@@ -5559,11 +5581,12 @@ pub(crate) async fn push_code_facts(
         .await?;
     }
     tx.execute(
-        "INSERT INTO fact_push (project_id, fact, at, actor, rows, commit_sha, dirty)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
+        "INSERT INTO fact_push (project_id, fact, at, actor, rows, commit_sha, dirty, reads)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
          ON CONFLICT (project_id, fact) DO UPDATE SET at = EXCLUDED.at, actor = EXCLUDED.actor,
-           rows = EXCLUDED.rows, commit_sha = EXCLUDED.commit_sha, dirty = EXCLUDED.dirty",
-        &[&project, &kind, &now_ms(), &actor, &(facts.len() as i32), &commit, &dirty],
+           rows = EXCLUDED.rows, commit_sha = EXCLUDED.commit_sha, dirty = EXCLUDED.dirty,
+           reads = EXCLUDED.reads",
+        &[&project, &kind, &now_ms(), &actor, &(facts.len() as i32), &commit, &dirty, &(reads as i32)],
     )
     .await?;
     tx.commit().await?;
@@ -10919,6 +10942,28 @@ pub(crate) async fn step_selftest(
         }
         let tx = client.transaction().await?;
         force_gates(&tx, project, under).await?;
+        // Свежесть внутри пробы — настоящая, как в gate_selftest: ступень,
+        // чей род факта ждёт sense, иначе на подсадке не роняется.
+        tx.execute(
+            "UPDATE fact_push SET at = $2, commit_sha = 'probe', dirty = false WHERE project_id = $1",
+            &[&project, &now_ms()],
+        )
+        .await?;
+        // Срок — тоже: необъявленный датчик после заявки 18 читается как
+        // «неизвестно» при любом времени подачи, и ступень/пункт с таким родом
+        // пробой не ронялись бы никогда. Внутри пробы срок объявлен самой
+        // пробой: откатывается вместе с подсадкой, на живой словарь не ложится.
+        tx.execute(
+            "INSERT INTO sensor (project_id, fact, about, stale_after_ms, declared_at, declared_by)
+             SELECT fp.project_id, fp.fact, coalesce(s.about, ''), 86400000, $2, 'probe'
+               FROM fact_push fp
+               LEFT JOIN sensor s ON s.project_id = fp.project_id AND s.fact = fp.fact
+              WHERE fp.project_id = $1
+             ON CONFLICT (project_id, fact) DO UPDATE SET
+               stale_after_ms = CASE WHEN sensor.stale_after_ms IS NULL THEN 86400000 ELSE sensor.stale_after_ms END",
+            &[&project, &now_ms()],
+        )
+        .await?;
         let saw = match answer_of(&tx, &method, project, 0).await {
             Err(e) => Err(format!("запрос ступени не исполнился: {e}")),
             Ok(before) => match tx.execute(probe.as_str(), &[&project]).await {
@@ -11079,6 +11124,31 @@ pub(crate) async fn gate_selftest(pool: &Pool, project: &str, under: &str) -> Re
         // самотеста обязан остаться тем же, чем был.
         let tx = client.transaction().await?;
         force_gates(&tx, project, under).await?;
+        // СВЕЖЕСТЬ ВНУТРИ ПРОБЫ — НАСТОЯЩАЯ: подача, снятая со ствола чистого
+        // дерева. Иначе пункт, чей род факта ждёт следующего sense, на подсадке
+        // судить отказался бы — самотест мерил бы часы, а не зрение правила.
+        // Правка заявки 18 сделала необъявленный срок честным («неизвестно»),
+        // и без этой строчки половина G3-G4 перестала бы роняться пробой.
+        tx.execute(
+            "UPDATE fact_push SET at = $2, commit_sha = 'probe', dirty = false WHERE project_id = $1",
+            &[&project, &now_ms()],
+        )
+        .await?;
+        // Срок — тоже: необъявленный датчик после заявки 18 читается как
+        // «неизвестно» при любом времени подачи, и ступень/пункт с таким родом
+        // пробой не ронялись бы никогда. Внутри пробы срок объявлен самой
+        // пробой: откатывается вместе с подсадкой, на живой словарь не ложится.
+        tx.execute(
+            "INSERT INTO sensor (project_id, fact, about, stale_after_ms, declared_at, declared_by)
+             SELECT fp.project_id, fp.fact, coalesce(s.about, ''), 86400000, $2, 'probe'
+               FROM fact_push fp
+               LEFT JOIN sensor s ON s.project_id = fp.project_id AND s.fact = fp.fact
+              WHERE fp.project_id = $1
+             ON CONFLICT (project_id, fact) DO UPDATE SET
+               stale_after_ms = CASE WHEN sensor.stale_after_ms IS NULL THEN 86400000 ELSE sensor.stale_after_ms END",
+            &[&project, &now_ms()],
+        )
+        .await?;
         // Запрос исполняется ДВАЖДЫ, до подсадки и после, и живым считается
         // пункт, у которого число выросло.
         //

@@ -634,8 +634,9 @@ impl Mcp {
         tools.push(json!({ "name": "code-facts-push", "description": "принять наблюдение датчика о репозитории: таблицы миграций, операции контракта; подача полная в пределах вида",
             "inputSchema": { "type": "object", "properties": { "kind": s("вид факта, например migration-table"),
                 "facts": { "type": "array", "description": "[{name, detail}]", "items": { "type": "object" } },
-                "commit": s("коммит рабочего каталога, которым снят факт"),
-                "dirty": json!({"type":"boolean","description":"дерево было грязным: факт рассказывает не про ствол"}) },
+                "commit": s("коммит рабочего каталога, которым снят факт: без него подача читается как «неизвестно»"),
+                "dirty": json!({"type":"boolean","description":"дерево было грязным: факт рассказывает не про ствол, гейт отвечает «неизвестно»"}),
+                "read": json!({"type":"integer","description":"сколько файлов датчик прочёл: пустая подача без read>0 отказ"}) },
                 "required": ["kind", "facts"] } }));
         tools.push(json!({ "name": "code-facts", "description": "что датчик подал о репозитории",
             "inputSchema": { "type": "object", "properties": {} } }));
@@ -1606,14 +1607,15 @@ impl Mcp {
                         it.get("detail").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
                     ))).collect())
                     .unwrap_or_default();
-                // Пустая подача ЗАКОННА, если вид факта назван: датчик, ничего
-                // не нашедший, говорит «чисто», а не «не смотрел». Это разные
-                // ответы, и складывать их в один — та же ложь, что зелёный ноль.
-                //
-                // Молчание сломанного датчика видно иначе: `fact_push` держит
-                // время последней подачи, и оно перестаёт двигаться. Отказ на
-                // пустоте это не ловил — он ловил только исправного датчика на
-                // чистом дереве.
+                // Пустая подача ЗАКОННА только с названным объёмом прочтения.
+                // Датчик, прочитавший двадцать файлов и ничего не нашедший,
+                // говорит «чисто», а не «не смотрел» — это разные ответы, и
+                // складывать их в один — та же ложь, что зелёный ноль. Но
+                // подача, не назвавшая, сколько прочитано, неотличима от
+                // пустой подачи рукой: она гасила 46 находок G3 одним вызовом
+                // (заявка 18). «Прочитано 0» — отказ, а не ноль; молчание
+                // сломанного датчика видно по остановившемуся времени подачи
+                // и по объявленному сроку свежести.
                 if fact_kind.is_empty() {
                     return json!({ "content": [{ "type": "text",
                         "text": "подача без вида факта: неизвестно, что именно наблюдали" }],
@@ -1624,13 +1626,19 @@ impl Mcp {
                         "text": "подача без перечня: пустой перечень — это «ничего не нашёл», а отсутствие перечня — «не подали»" }],
                         "isError": true });
                 }
+                let read = num(args, "read").unwrap_or(0);
+                if list.is_empty() && read <= 0 {
+                    return json!({ "content": [{ "type": "text",
+                        "text": "пустая подача без числа прочитанных файлов: назовите read=N, иначе «ничего не нашёл» неотличимо от «не смотрел»" }],
+                        "isError": true });
+                }
                 // Чем снят факт: коммит рабочего каталога и его чистота. Датчик
                 // читает каталог, а не `HEAD`, и молчащий об этом след делал
                 // факт с незакоммиченной правки неотличимым от фактa со ствола.
                 let commit = args.get("commit").and_then(|v| v.as_str()).unwrap_or("").to_owned();
                 let dirty = args.get("dirty").and_then(|v| v.as_bool()).unwrap_or(false);
                 match crate::projector::push_code_facts(
-                    &self.pool, p, &fact_kind, &list, &self.author, &commit, dirty).await {
+                    &self.pool, p, &fact_kind, &list, &self.author, &commit, dirty, read).await {
                     Ok(mut v) => {
                         if crate::reproject::relations::FACT_KINDS.contains(&fact_kind.as_str()) {
                             match crate::reproject::relations::project(&self.pool, p).await {

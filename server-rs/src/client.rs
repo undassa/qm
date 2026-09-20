@@ -429,6 +429,24 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
         .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty())
         .ok_or("не в репозитории: датчику нечего читать")?;
+    // Чем снят факт: голова и чистота дерева (заявка 18). Датчик читает
+    // рабочий каталог, а не `HEAD`, и подача обязана сказать, с какого
+    // состояния мира она рассказывает: грязное дерево читается гейтом как
+    // «неизвестно», а не как «пройдено».
+    let head = std::process::Command::new("git")
+        .args(["-C", &root, "rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_owned())
+        .unwrap_or_default();
+    let dirty = std::process::Command::new("git")
+        .args(["-C", &root, "status", "--porcelain"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(true);
     let (specs, _) = door.call("sensor-specs", &json!({}))?;
     let empty = vec![];
     let mut done = Vec::new();
@@ -522,7 +540,8 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
                         "detail": format!("держатель — заглушка: {form}") }));
                 }
             }
-            let (out, _) = door.call("code-facts-push", &json!({ "kind": fact, "facts": facts }))?;
+            let read_n = declared["holders"].as_array().map(|a| a.len()).unwrap_or(0);
+            let (out, _) = door.call("code-facts-push", &json!({ "kind": fact, "facts": facts, "commit": head, "dirty": dirty, "read": read_n }))?;
             done.push(json!({ "fact": fact, "files": declared["holders"].as_array().map(|a| a.len()).unwrap_or(0),
                               "found": facts.len(), "was": out["was"], "now": out["now"] }));
             continue;
@@ -608,7 +627,10 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
                     .and_then(|o| String::from_utf8(o.stdout).ok())
                     .map(|s| s.trim().to_owned())
                     .unwrap_or_default();
-                let dirty = std::process::Command::new("git")
+                // Локальное имя не `dirty`: флаг чистоты дерева целиком
+                // объявлен выше (head/dirty подаются с фактом), и тень здесь
+                // подставила бы строку вместо признака.
+                let uncommitted = std::process::Command::new("git")
                     .args(["-C", &root, "status", "--porcelain", "--", &path])
                     .output()
                     .ok()
@@ -619,8 +641,8 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
                     "каталога нет в дереве git".to_owned()
                 } else if !want.is_empty() && now != want {
                     format!("хэш дерева {now}, а заморожен {want}")
-                } else if !dirty.is_empty() {
-                    format!("незакоммиченные правки: {}", dirty.lines().count())
+                } else if !uncommitted.is_empty() {
+                    format!("незакоммиченные правки: {}", uncommitted.lines().count())
                 } else {
                     format!("стоит на {now}")
                 };
@@ -629,7 +651,8 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
             let facts: Vec<Value> = names.iter()
                 .map(|(n, d)| json!({ "name": n, "detail": d }))
                 .collect();
-            let (out, _) = door.call("code-facts-push", &json!({ "kind": fact, "facts": facts }))?;
+            let read_n = facts.len();
+            let (out, _) = door.call("code-facts-push", &json!({ "kind": fact, "facts": facts, "commit": head, "dirty": dirty, "read": read_n }))?;
             done.push(json!({ "fact": fact, "files": facts.len(), "found": facts.len(),
                               "was": out["was"], "now": out["now"] }));
             continue;
@@ -674,7 +697,8 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
             let facts: Vec<Value> = names.iter()
                 .map(|(n, d)| json!({ "name": n, "detail": d }))
                 .collect();
-            let (out, _) = door.call("code-facts-push", &json!({ "kind": fact, "facts": facts }))?;
+            let read_n = facts.len();
+            let (out, _) = door.call("code-facts-push", &json!({ "kind": fact, "facts": facts, "commit": head, "dirty": dirty, "read": read_n }))?;
             done.push(json!({ "fact": fact, "files": facts.len(), "found": facts.len(),
                               "was": out["was"], "now": out["now"] }));
             continue;
@@ -696,7 +720,8 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
             let facts: Vec<Value> = names.iter()
                 .map(|(n, note)| json!({ "name": n, "detail": note }))
                 .collect();
-            let (out, _) = door.call("code-facts-push", &json!({ "kind": fact, "facts": facts }))?;
+            let read_n = facts.len();
+            let (out, _) = door.call("code-facts-push", &json!({ "kind": fact, "facts": facts, "commit": head, "dirty": dirty, "read": read_n }))?;
             done.push(json!({ "fact": fact, "files": facts.len(), "found": facts.len(),
                               "was": out["was"], "now": out["now"] }));
             continue;
@@ -730,7 +755,8 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
             let facts: Vec<Value> = pairs.iter()
                 .map(|p| json!({ "name": p.name, "detail": p.detail }))
                 .collect();
-            let (out, _) = door.call("code-facts-push", &json!({ "kind": fact, "facts": facts }))?;
+            let read_n = files.len();
+            let (out, _) = door.call("code-facts-push", &json!({ "kind": fact, "facts": facts, "commit": head, "dirty": dirty, "read": read_n }))?;
             done.push(json!({ "fact": fact, "files": files.len(), "found": facts.len(),
                               "was": out["was"], "now": out["now"] }));
             continue;
@@ -744,7 +770,8 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
             let facts: Vec<Value> = pairs.iter()
                 .map(|p| json!({ "name": p.name, "detail": p.detail }))
                 .collect();
-            let (out, _) = door.call("code-facts-push", &json!({ "kind": fact, "facts": facts }))?;
+            let read_n = files.len();
+            let (out, _) = door.call("code-facts-push", &json!({ "kind": fact, "facts": facts, "commit": head, "dirty": dirty, "read": read_n }))?;
             done.push(json!({ "fact": fact, "files": files.len(), "found": facts.len(),
                               "was": out["was"], "now": out["now"] }));
             continue;
@@ -763,7 +790,8 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
             let facts: Vec<Value> = pairs.iter()
                 .map(|p| json!({ "name": p.name, "detail": p.detail }))
                 .collect();
-            let (out, _) = door.call("code-facts-push", &json!({ "kind": fact, "facts": facts }))?;
+            let read_n = files.len();
+            let (out, _) = door.call("code-facts-push", &json!({ "kind": fact, "facts": facts, "commit": head, "dirty": dirty, "read": read_n }))?;
             done.push(json!({ "fact": fact, "files": files.len(), "found": facts.len(),
                               "was": out["was"], "now": out["now"] }));
             continue;
@@ -784,7 +812,8 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
                 .iter()
                 .map(|p| json!({ "name": p.name, "detail": p.detail }))
                 .collect();
-            let (out, _) = door.call("code-facts-push", &json!({ "kind": fact, "facts": facts }))?;
+            let read_n = files.len();
+            let (out, _) = door.call("code-facts-push", &json!({ "kind": fact, "facts": facts, "commit": head, "dirty": dirty, "read": read_n }))?;
             done.push(json!({ "fact": fact, "files": files.len(), "found": facts.len(),
                               "was": out["was"], "now": out["now"] }));
             continue;
@@ -827,7 +856,8 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
                 .map(|(a, b)| (a.trim(), b.trim()))
                 .collect();
             let facts = facts_of(&crate::repo_corpus::contract_vs_schema(&doc, &tables, &forced));
-            let (out, _) = door.call("code-facts-push", &json!({ "kind": fact, "facts": facts }))?;
+            let read_n = files.len();
+            let (out, _) = door.call("code-facts-push", &json!({ "kind": fact, "facts": facts, "commit": head, "dirty": dirty, "read": read_n }))?;
             done.push(json!({ "fact": fact, "files": files.len(), "found": facts.len(),
                               "was": out["was"], "now": out["now"] }));
             continue;
@@ -893,7 +923,8 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
             pairs.extend(crate::repo_corpus::check_values_without_path(
                 &enums, &checks, &contract_enums, &forced, &checks_tables));
             let facts = facts_of(&pairs);
-            let (out, _) = door.call("code-facts-push", &json!({ "kind": fact, "facts": facts }))?;
+            let read_n = files.len();
+            let (out, _) = door.call("code-facts-push", &json!({ "kind": fact, "facts": facts, "commit": head, "dirty": dirty, "read": read_n }))?;
             done.push(json!({ "fact": fact, "files": files.len(), "found": facts.len(),
                               "was": out["was"], "now": out["now"] }));
             continue;
@@ -988,7 +1019,8 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
         let facts: Vec<Value> = names.iter()
             .map(|(n, note)| json!({ "name": n, "detail": note }))
             .collect();
-        let (out, _) = door.call("code-facts-push", &json!({ "kind": fact, "facts": facts }))?;
+        let read_n = files.len();
+        let (out, _) = door.call("code-facts-push", &json!({ "kind": fact, "facts": facts, "commit": head, "dirty": dirty, "read": read_n }))?;
         done.push(json!({ "fact": fact, "files": files.len(), "found": facts.len(),
                           "was": out["was"], "now": out["now"] }));
     }
