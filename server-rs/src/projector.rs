@@ -1414,6 +1414,20 @@ CREATE TABLE IF NOT EXISTS task_run_automaton (
   PRIMARY KEY (project_id, run_id)
 );
 
+-- ПУНКТЫ ПРИЁМКИ ЗАДАЧИ: чек-лист «Признак готовности» из документа задачи,
+-- одна строка на пункт `- [ ]`/`- [x]`. Источник истины — документ: таблица
+-- выведена для гейта, пульта и закрытия прогона, и правится только пересборкой.
+CREATE TABLE IF NOT EXISTS task_ready_item (
+  project_id text    NOT NULL,
+  task_id    text    NOT NULL,
+  ord        integer NOT NULL,
+  check_id   text    NOT NULL DEFAULT '',
+  text       text    NOT NULL DEFAULT '',
+  done       boolean NOT NULL DEFAULT false,
+  origin     text    NOT NULL DEFAULT 'выведено',
+  PRIMARY KEY (project_id, task_id, ord)
+);
+
 CREATE TABLE IF NOT EXISTS chat_message (
   id           bigserial PRIMARY KEY,
   project_id   text   NOT NULL,
@@ -3899,6 +3913,31 @@ pub async fn rebuild(pool: &Pool, project: &str) -> Result<Value, crate::db::Fai
             &[&project],
         )
         .await?;
+
+    // ── Пункты приёмки задач: чек-лист «Признак готовности» одной строкой на
+    // пункт. Источник истины — документ (`- [ ]`/`- [x]`); таблица выведена,
+    // как всё выведенное: снос и вставка вплотную, в той же транзакции.
+    // Строка на ПУНКТ, не на блок: список живёт одним блоком из нескольких
+    // строк, и поснострочность — сама форма чек-листа.
+    tx.execute("DELETE FROM task_ready_item WHERE project_id = $1", &[&project]).await?;
+    tx.execute(
+        "INSERT INTO task_ready_item (project_id, task_id, ord, check_id, text, done, origin)
+         SELECT $1, d.entity_name, b.ord * 1000 + x.n,
+                coalesce(substring(x.line from '`([^`]+)`'), ''),
+                left(btrim(x.line), 400),
+                left(lower(x.line), 5) = '- [x]',
+                'выведено'
+           FROM project_documents d
+           JOIN project_document_blocks b
+             ON b.project_id = d.project_id AND b.entity_kind = d.entity_kind
+                AND b.entity_name = d.entity_name
+           CROSS JOIN LATERAL regexp_split_to_table(b.raw, '\\n') WITH ORDINALITY AS x(line, n)
+          WHERE d.project_id = $1 AND d.entity_kind = 'task'
+            AND left(lower(x.line), 5) IN ('- [ ]', '- [x]')
+         ON CONFLICT DO NOTHING",
+        &[&project],
+    )
+    .await?;
 
     // ── Красные задачи — в ту же таблицу, что и остальные ────────────────────
     //
@@ -9555,6 +9594,33 @@ pub(crate) async fn add_run_event(
                  &[&project, &run, &now_ms()])
         .await?;
     Ok(json!({ "status": "written", "runId": run, "kind": kind }))
+}
+
+/// Пункты приёмки задачи — чек-лист из документа, выведенный строками.
+/// Без задачи — по всем задачам набора, что пульту и разбору долгов.
+pub(crate) async fn ready_items(pool: &Pool, project: &str, task: &str) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
+    let rows = client
+        .query(
+            "SELECT r.task_id, r.ord, r.check_id, r.text, r.done
+               FROM task_ready_item r
+              WHERE r.project_id = $1 AND ($2 = '' OR r.task_id = $2)
+              ORDER BY r.task_id, r.ord",
+            &[&project, &task],
+        )
+        .await?;
+    let items: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            json!({
+                "task": r.get::<_, String>(0), "ord": r.get::<_, i32>(1),
+                "check": r.get::<_, String>(2), "text": r.get::<_, String>(3),
+                "done": r.get::<_, bool>(4),
+            })
+        })
+        .collect();
+    let open = items.iter().filter(|i| !i["done"].as_bool().unwrap_or(true)).count();
+    Ok(json!({ "count": items.len(), "open": open, "items": items }))
 }
 
 /// Переход автомата задачи по вердикту отчёта сессии. Чистая функция: правила

@@ -43,6 +43,24 @@ async fn main() {
         }
     };
     let claude = std::env::var("MH_WORKER_CLAUDE").unwrap_or_else(|_| "claude".into());
+    // Взаимное исключение экземпляров: два воркера вели бы один прогон двумя
+    // сессиями в одном дереве. Замок — advisory, держит выделенное соединение
+    // всю жизнь процесса; кончилось соединение — замок снял сам Postgres.
+    let hold = pool.get().await.unwrap_or_else(|e| {
+        eprintln!("mh-worker: соединение под замок не выдаётся: {e}");
+        std::process::exit(2);
+    });
+    let mine: bool = match hold.query_one("SELECT pg_try_advisory_lock(727272)", &[]).await {
+        Ok(r) => r.get(0),
+        Err(e) => {
+            eprintln!("mh-worker: замок не ставится: {e}");
+            std::process::exit(2);
+        }
+    };
+    if !mine {
+        eprintln!("mh-worker: другой воркер уже держит замок — не поднимаюсь");
+        std::process::exit(3);
+    }
     let worker = mh_server::worker::Worker::new(pool, kinds, claude);
     println!("воркер пульта: наборов {}, круг {} с", config.projects.len(), mh_server::worker::TICK_S);
     loop {

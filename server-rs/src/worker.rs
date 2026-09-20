@@ -46,6 +46,34 @@ static MARKER: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"\b(DRIFT|NEEDS FIX|RETHINK|PLAN|BLOCKED|NEEDS CONTEXT|CLOSED)\b").unwrap()
 });
 
+
+/// Голова дерева из события «одобрение» — к какому состоянию дерева привязано
+/// одобрение владельца. Чистая функция: привязку проверяют тесты без базы.
+pub fn approval_head(events: &[Value]) -> Option<String> {
+    for e in events {
+        if e["kind"].as_str() == Some("одобрение") {
+            if let Some(rest) = e["text"].as_str().and_then(|t| t.strip_prefix("head ")) {
+                return Some(rest.trim().to_owned());
+            }
+        }
+    }
+    None
+}
+
+/// Обрезка по границе символа: срез по байтам падает на кириллице, а ответы
+/// сессий и заметки — кириллические. Паника здесь уносила бы воркера на
+/// первом же длинном отчёте.
+pub fn cut(s: &str, n: usize) -> &str {
+    if s.len() <= n {
+        return s;
+    }
+    let mut end = n;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 #[derive(Clone, Deserialize)]
 pub struct Bundle {
     pub name: String,
@@ -88,11 +116,11 @@ impl Worker {
         .await;
         if out.get("isError").and_then(Value::as_bool).unwrap_or(false) || out.get("error").is_some() {
             let why = out["content"][0]["text"].as_str().unwrap_or("дверь отказала без слов");
-            return Err(format!("{name}: {}", &why[..why.len().min(400)]));
+            return Err(format!("{name}: {}", cut(why, 400)));
         }
         let text = out["content"][0]["text"].as_str().unwrap_or("");
         serde_json::from_str(text)
-            .map_err(|e| format!("{name}: ответ не разбирается: {e}: {}", &text[..text.len().min(200)]))
+            .map_err(|e| format!("{name}: ответ не разбирается: {e}: {}", cut(text, 200)))
     }
 
     /// Ответ сессии и флаг молчания: таймаут, отказ, неразобранный или пустой
@@ -123,26 +151,57 @@ impl Worker {
                 return ("сессия не приняла ввод".into(), session.to_owned(), true);
             }
         }
-        match tokio::time::timeout(std::time::Duration::from_secs(LIMIT_S), child.wait_with_output()).await {
-            Err(_) => (format!("сессия не уложилась в {LIMIT_S} с"), session.to_owned(), true),
-            Ok(Err(e)) => (format!("сессия не ответила: {e}"), session.to_owned(), true),
-            Ok(Ok(out)) => {
-                let text = String::from_utf8_lossy(&out.stdout);
-                let err_tail = String::from_utf8_lossy(&out.stderr);
-                if !out.status.success() {
-                    let tail = format!("{text}{err_tail}");
-                    return (format!("сессия не ответила: {}", &tail[..tail.len().min(600)]), session.to_owned(), true);
-                }
-                match serde_json::from_str::<Value>(&text) {
-                    Err(_) => (format!("ответ не разобран: {}", &text[..text.len().min(600)]), session.to_owned(), true),
-                    Ok(d) => {
-                        let session = d["session_id"].as_str().unwrap_or(session).to_owned();
-                        let result = d["result"].as_str().unwrap_or("").trim().to_owned();
-                        if result.is_empty() {
-                            ("сессия закончилась без последнего слова".into(), session, true)
-                        } else {
-                            (result, session, false)
-                        }
+        // Ждём вручную, а не wait_with_output: таймаут обязан убить процесс,
+        // иначе осиротевший claude продолжил бы править дерево, а воркер
+        // завёл бы вторую сессию рядом. Вывод читаем параллельно ожиданием.
+        let mut stdout = child.stdout.take();
+        let mut stderr = child.stderr.take();
+        let out_task = tokio::spawn(async move {
+            let mut b = Vec::new();
+            if let Some(mut s) = stdout {
+                tokio::io::AsyncReadExt::read_to_end(&mut s, &mut b).await.ok();
+            }
+            b
+        });
+        let err_task = tokio::spawn(async move {
+            let mut b = Vec::new();
+            if let Some(mut s) = stderr {
+                tokio::io::AsyncReadExt::read_to_end(&mut s, &mut b).await.ok();
+            }
+            b
+        });
+        let out = match tokio::time::timeout(std::time::Duration::from_secs(LIMIT_S), child.wait()).await {
+            Err(_) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                let _ = out_task.await;
+                let _ = err_task.await;
+                return (format!("сессия не уложилась в {LIMIT_S} с"), session.to_owned(), true);
+            }
+            Ok(Err(e)) => return (format!("сессия не ответила: {e}"), session.to_owned(), true),
+            Ok(Ok(status)) => {
+                let stdout = out_task.await.unwrap_or_default();
+                let stderr = err_task.await.unwrap_or_default();
+                (status, stdout, stderr)
+            }
+        };
+        let (status, stdout, stderr) = out;
+        {
+            let text = String::from_utf8_lossy(&stdout);
+            let err_tail = String::from_utf8_lossy(&stderr);
+            if !status.success() {
+                let tail = format!("{text}{err_tail}");
+                return (format!("сессия не ответила: {}", cut(&tail, 600)), session.to_owned(), true);
+            }
+            match serde_json::from_str::<Value>(&text) {
+                Err(_) => (format!("ответ не разобран: {}", cut(&text, 600)), session.to_owned(), true),
+                Ok(d) => {
+                    let session = d["session_id"].as_str().unwrap_or(session).to_owned();
+                    let result = d["result"].as_str().unwrap_or("").trim().to_owned();
+                    if result.is_empty() {
+                        ("сессия закончилась без последнего слова".into(), session, true)
+                    } else {
+                        (result, session, false)
                     }
                 }
             }
@@ -368,8 +427,19 @@ impl Worker {
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-            let tail = if step == "closing" {
+            // Хвост про коммит — только при реальном одобрении: отклонённый
+            // approval с хвостом «Одобрено» закрыл бы задачу без коммита,
+            // прямо следуя приказу, которому противоречит решение владельца.
+            let approved = decisions
+                .iter()
+                .any(|d| d["kind"].as_str() == Some("approval") && d["state"].as_str() == Some("approved"));
+            let rejected = decisions
+                .iter()
+                .any(|d| d["state"].as_str() == Some("rejected") || d["state"].as_str() == Some("declined"));
+            let tail = if step == "closing" && approved {
                 "\n\nОдобрено: коммить с трейлерами закрытия задачи и закончи ответ словом CLOSED."
+            } else if step == "closing" && rejected {
+                "\n\nВладелец отклонил. Переделай правки с учётом довода и позови approval-ask снова."
             } else {
                 "\n\nПродолжай прогон с учётом этого."
             };
@@ -411,7 +481,22 @@ impl Worker {
                     Stage::Work,
                 )
             }
-            "closing" => (Some(fill(CLOSING, &[])), session, Stage::Work),
+            "closing" => {
+                // Чек-лист приёмки — прогон по пунктам: закрытие обязано
+                // пройти каждый открытый пункт и отметить его в документе.
+                let ready = self.door(project, "ready", json!({ "task": task })).await.unwrap_or(json!({}));
+                let mut lines: Vec<String> = ready["items"].as_array().cloned().unwrap_or_default()
+                    .iter().filter(|i| !i["done"].as_bool().unwrap_or(true))
+                    .map(|i| format!("- [ ] {} {}", i["check"].as_str().unwrap_or(""), i["text"].as_str().unwrap_or("")))
+                    .collect();
+                lines.dedup();
+                let list = if lines.is_empty() {
+                    "открытых пунктов приёмки нет".to_owned()
+                } else {
+                    lines.join("\n")
+                };
+                (Some(fill(CLOSING, &[("{ready}", &list)])), session, Stage::Work)
+            }
             _ => (None, session, Stage::Work),
         }
     }
@@ -465,6 +550,8 @@ impl Worker {
                             card["phase"].as_str().unwrap_or("")
                         );
                         if run["note"].as_str() != Some(&note) {
+                            println!("{0} · прогон {task} ({1}) — полоса закрыта, ждёт фазы «{band_name}»",
+                                bundle.name, run["state"].as_str().unwrap_or(""));
                             let _ = self
                                 .door(project, "run-state",
                                     json!({ "runId": rid, "state": run["state"].as_str().unwrap_or("running"), "note": note, "session": run["sessionId"].as_str().unwrap_or("") }))
@@ -477,14 +564,30 @@ impl Worker {
             let am = match self.door(project, "run-automaton", json!({ "runId": rid })).await {
                 Ok(v) => v,
                 Err(e) => {
+                    // ask-inbox уже пометил слово владельца прочитанным: молча
+                    // continue потеряло бы его. Слово называем, владелец
+                    // повторит.
                     println!("{0}: {e}", bundle.name);
+                    if !decisions.is_empty() {
+                        let _ = self.door(project, "run-state", json!({
+                            "runId": rid, "state": "waiting",
+                            "note": format!("слово владельца получено, но не прочитано ({e}); повторите решение"),
+                            "session": run["sessionId"].as_str().unwrap_or("") })).await;
+                    }
                     continue;
                 }
             };
             if let Some(halt) = am["halt"].as_str().filter(|h| !h.is_empty()) {
                 // Вставший автомат ждёт слова владельца (resume=1), а не круга.
-                let note = format!("автомат встал: {halt}");
+                // Слово, пришедшее без resume, не двигает автомат — но и не
+                // должно молча исчезать: называем, что оно ждёт своего часа.
+                let note = if decisions.is_empty() {
+                    format!("автомат встал: {halt}")
+                } else {
+                    format!("автомат встал: {halt}; слово владельца есть — снимите остановку resume=1")
+                };
                 if run["note"].as_str() != Some(&note) {
+                    println!("{0} · прогон {task} — {note}", bundle.name);
                     let _ = self
                         .door(project, "run-state",
                             json!({ "runId": rid, "state": run["state"].as_str().unwrap_or("running"), "note": note, "session": run["sessionId"].as_str().unwrap_or("") }))
@@ -495,6 +598,25 @@ impl Worker {
             let approved = decisions
                 .iter()
                 .any(|d| d["kind"].as_str() == Some("approval") && d["state"].as_str() == Some("approved"));
+            if approved {
+                // Одобрение привязано к дереву: коммитить разрешается только то,
+                // что владелец видел. Голова на момент одобрения лежит в событии
+                // «одобрение»; дерево, изменившееся после, требует нового слова.
+                let recorded = approval_head(&run["events"].as_array().cloned().unwrap_or_default());
+                let now = Self::git(&bundle.repo, &["rev-parse", "HEAD"]).trim().to_owned();
+                if let Some(was) = recorded {
+                    if !was.is_empty() && was != now {
+                        let note = format!("дерево изменилось после одобрения ({was} → {now}) — повторите approval");
+                        let _ = self.door(project, "question-ask", json!({
+                            "runId": rid, "title": format!("{task}: дерево уехало после одобрения"),
+                            "body": note })).await;
+                        let _ = self.door(project, "run-state", json!({
+                            "runId": rid, "state": "waiting", "note": note,
+                            "session": run["sessionId"].as_str().unwrap_or("") })).await;
+                        continue;
+                    }
+                }
+            }
             let (prompt, session, stage) =
                 self.step_prompt(project, bundle, &run, &am, &band_name, &decisions).await;
             println!(
@@ -508,6 +630,12 @@ impl Worker {
                 Ok(v) => v,
                 Err(e) => {
                     println!("{0}: {e}", bundle.name);
+                    if !decisions.is_empty() {
+                        let _ = self.door(project, "run-state", json!({
+                            "runId": rid, "state": "waiting",
+                            "note": format!("слово владельца получено, но гейт не прочитан ({e}); повторите решение"),
+                            "session": run["sessionId"].as_str().unwrap_or("") })).await;
+                    }
                     continue;
                 }
             };
@@ -530,24 +658,26 @@ impl Worker {
             if silent {
                 // Молчание ждёт, а не закрывает: done по обрыву превращал
                 // прогон, ничего не сделавший, в закрытый, и задача терялась
-                // молча. Число молчаний — по событиям прогона в базе, поэтому
-                // переживает перезапуск воркера; окно в последние события
-                // занижает счёт — на исход уже не влияет.
+                // молча. Прогон остаётся running — следующий круг зовёт ту же
+                // сессию снова; счёт молчаний в событиях базы переживает
+                // перезапуск воркера, и третье подряд падает. Состояние
+                // waiting здесь было бы ловушкой: воркер пропускает waiting
+                // без слова владельца, и повтор никогда бы не случился.
                 let n = 1 + run["events"].as_array().cloned().unwrap_or_default()
                     .iter().filter(|e| e["kind"].as_str() == Some("молчание")).count() as i32;
                 let _ = self.door(project, "run-event",
-                    json!({ "runId": rid, "kind": "молчание", "text": &answer[..answer.len().min(4000)] })).await;
+                    json!({ "runId": rid, "kind": "молчание", "text": cut(&answer, 4000) })).await;
                 let (state, note) = if n >= SILENCE_LIMIT {
-                    note_if("failed", format!("сессия молчит {n} раза подряд: {}", &answer[..answer.len().min(200)]))
+                    note_if("failed", format!("сессия молчит {n} раза подряд: {}", cut(&answer, 200)))
                 } else {
-                    note_if("waiting", format!("сессия молчит, попытка {n}: {}", &answer[..answer.len().min(200)]))
+                    note_if("running", format!("сессия молчит, попытка {n}: {}", cut(&answer, 200)))
                 };
                 let _ = self.door(project, "run-state",
                     json!({ "runId": rid, "state": state, "note": note, "session": kept_session })).await;
                 return;
             }
             let answer_full = answer.clone();
-            let answer = &answer_full[..answer_full.len().min(4000)];
+            let answer = cut(&answer_full, 4000);
             let _ = self.door(project, "run-event",
                 json!({ "runId": rid, "kind": "итог", "text": answer })).await;
             let touched = Self::instrument_touched(&bundle.repo, &snapshot);
@@ -575,21 +705,22 @@ impl Worker {
                 if matches!(verdict.as_str(), "BLOCKED" | "NEEDS CONTEXT") {
                     let _ = self.door(project, "question-ask", json!({
                         "runId": rid, "title": format!("{task}: {verdict}"),
-                        "body": &answer_full[..answer_full.len().min(2000)] })).await;
+                        "body": cut(&answer_full, 2000) })).await;
                     let _ = self.door(project, "run-state", json!({
                         "runId": rid, "state": "waiting",
-                        "note": format!("ждёт владельца: {verdict} — {}", &answer_full[..answer_full.len().min(150)]),
+                        "note": format!("ждёт владельца: {verdict} — {}", cut(&answer_full, 150)),
                         "session": kept_session })).await;
                     return;
                 }
-                if matches!(step, "plan-review" | "review") {
+                if matches!(verdict.as_str(), "RETHINK" | "NEEDS FIX") {
                     // Довод ревью — в событиях: следующий шаг читает его оттуда
-                    // и переживает перезапуск воркера.
+                    // и переживает перезапуск воркера. Пустые события не пишутся:
+                    // они вытесняли бы «план» из окна в последние события.
                     let _ = self.door(project, "run-event",
                         json!({ "runId": rid, "kind": "находки", "text": answer })).await;
                 }
                 adv = match self.door(project, "run-automaton",
-                    json!({ "runId": rid, "status": verdict, "note": &answer_full[..answer_full.len().min(300)] })).await
+                    json!({ "runId": rid, "status": verdict, "note": cut(&answer_full, 300) })).await
                 {
                     Ok(v) => v,
                     Err(e) => {
@@ -619,7 +750,7 @@ impl Worker {
                     json!({ "runId": rid, "kind": "отказ", "text": &note })).await;
                 let _ = self.door(project, "question-ask", json!({
                     "runId": rid, "title": format!("{task}: автомат встал"),
-                    "body": format!("Прогон {rid} задачи {task}: {halt}.\n\nСнять остановку может владелец: mh call run-automaton runId=… resume=1") })).await;
+                    "body": format!("Прогон {rid} задачи {task}: {halt}.\n\nСнять остановку конвейера может владелец: mh call run-automaton runId=… resume=1; задачу вести дальше — новым прогоном (run-start): этот уже failed.") })).await;
                 let state = if halt.starts_with("DRIFT:") { "failed" } else { "waiting" };
                 let _ = self.door(project, "run-state",
                     json!({ "runId": rid, "state": state, "note": note, "session": kept_session })).await;
@@ -632,12 +763,18 @@ impl Worker {
                 .into_iter()
                 .filter(|a| a["runId"].as_str() == Some(rid))
                 .collect();
+            if open_asks.iter().any(|a| a["kind"].as_str() == Some("approval")) {
+                // Голова дерева на момент просьбы об одобрении: одобрение ниже
+                // привяжется к этому состоянию, и коммит чужого дерева откажет.
+                let _ = self.door(project, "run-event", json!({
+                    "runId": rid, "kind": "одобрение", "text": format!("head {}", snapshot.0) })).await;
+            }
             let now_gate = self.gate_items(project).await.unwrap_or_default();
             // Покраснение — поимённо: пункт, который был зелёным и перестал,
             // плюс пункт, объявившийся красным посреди прогона.
             let regression = regression(&was_gate, &now_gate);
             let (status_after, now_reached) = self.task_conveyor(project, task, &ladder).await.unwrap_or((json!({}), Vec::new()));
-            let terminal_hit = !terminal.is_empty() && terminal.iter().all(|t| now_reached.contains(t));
+            let terminal_hit = terminal.iter().any(|t| now_reached.contains(t));
             let adv_step = adv["step"].as_str().unwrap_or("").to_owned();
             let adv_circle = adv["circle"].as_i64().unwrap_or(0);
             let current = status_after["current"].as_str().unwrap_or("");
@@ -646,7 +783,7 @@ impl Worker {
             } else if !regression.is_empty() {
                 let names: Vec<String> = regression.iter().take(4).map(|i| {
                     let title = now_gate.get(i).map(|(_, t)| t.as_str()).unwrap_or("");
-                    format!("{} ({})", i, &title[..title.len().min(60)])
+                    format!("{} ({})", i, cut(title, 60))
                 }).collect();
                 let names = names.join("; ");
                 let _ = self.door(project, "question-ask", json!({
@@ -754,11 +891,14 @@ const FIXING: &str = r#"Круг починки {circle}/5 по задаче {ta
 
 Почини. Отчёт — одним абзацем."#;
 
-const CLOSING: &str = r#"Ревью задачи {task} чистое. Осталось закрыть: позови `mh call approval-ask runId={run} title="что коммитим" body="дифф коротко"` и остановись. Коммит с трейлерами закрытия — после одобрения владельца."#;
+const CLOSING: &str = r#"Ревью задачи {task} чистое. Осталось закрыть, и это прогон по чек-листу приёмки — каждый открытый пункт проверяется исполнением, а не глазами:
+{ready}
+
+Прогони каждый пункт (запусти проверку, покажи, что работает), пройденные отметь `- [x]` в документе дверью `put-section` на раздел «Признак готовности». Если пункт не проходит — чини и не закрывай. Когда чек-лист пуст — позови `mh call approval-ask runId={run} title="что коммитим" body="дифф коротко"` и остановись. Коммит с трейлерами закрытия — после одобрения владельца."#;
 
 #[cfg(test)]
 mod tests {
-    use super::{regression, verdict_of};
+    use super::{cut, regression, verdict_of};
     use std::collections::HashMap;
 
     fn items(pairs: &[(&str, Option<&str>)]) -> HashMap<String, (Option<String>, String)> {
@@ -777,6 +917,21 @@ mod tests {
         assert_eq!(verdict_of("план простой, сделал без маркера"), "");
         assert_eq!(verdict_of("planner сказал"), "");
         assert_eq!(verdict_of(""), "");
+    }
+
+    /// Обрезка по границе символа: срез по байтам падает на кириллице, а
+    /// ответы сессий длинные и кириллические. Падение тут вешало бы воркера
+    /// в цикле перезапусков на первом же длинном отчёте.
+    #[test]
+    fn cut_never_splits_a_multibyte_char() {
+        let s = "абвгд".repeat(500); // 5000 байт, 2500 символов
+        for n in [200, 4000, 4095, 4096, 4097] {
+            let c = cut(&s, n);
+            assert!(s.starts_with(c), "префикс не порчен");
+            assert!(c.len() <= n, "не длиннее просимого");
+        }
+        assert_eq!(cut("коротко", 4000), "коротко");
+        assert_eq!(cut("", 10), "");
     }
 
     /// Покраснение — поимённо: был зелёным и перестал, плюс объявившийся
