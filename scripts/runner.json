@@ -1,6 +1,18 @@
 {
   "projects": [
-    { "name": "myack", "project": "308ed7a2-d18f-4a76-a9c4-c792ce7de0d3", "repo": "/opt/src/github.com/myack-dev/myack" },
-    { "name": "tot-ade", "project": "ae7ec7fa-62d3-4664-89d2-18f35a25eb3a", "repo": "/opt/src/github.com/tot-space/tot-ade" }
+    {
+      "name": "myack",
+      "project": "308ed7a2-d18f-4a76-a9c4-c792ce7de0d3",
+      "repo": "/opt/src/github.com/myack-dev/myack"
+    },
+    {
+      "name": "tot-ade",
+      "project": "ae7ec7fa-62d3-4664-89d2-18f35a25eb3a",
+      "repo": "/opt/src/github.com/tot-space/tot-ade",
+      "test": {
+        "cmd": "cargo test --workspace --no-fail-fast",
+        "dir": ""
+      }
+    }
   ]
 }

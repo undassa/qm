@@ -738,6 +738,8 @@ impl Mcp {
             "inputSchema": { "type": "object", "properties": { "limit": json!({"type":"integer","description":"сколько прогонов, по умолчанию 10"}) } } }));
         tools.push(json!({ "name": "ready", "description": "пункты приёмки задачи из «Признак готовности»: что открыто, что проверено; без задачи — по всему набору",
             "inputSchema": { "type": "object", "properties": { "task": s("задача; пусто — весь набор") } } }));
+        tools.push(json!({ "name": "test-run", "description": "прогоны тестов, снятые харнесом: когда последний раз, что упало на чистом дереве",
+            "inputSchema": { "type": "object", "properties": {} } }));
         tools.push(json!({ "name": "chat-start", "description": "завести беседу над набором: место, где думают вслух и спрашивают по ходу",
             "inputSchema": { "type": "object", "properties": { "title": s("о чём беседа") } } }));
         tools.push(json!({ "name": "chat-say", "description": "сказать в беседе: side owner — человек с пульта, agent — ответ",
@@ -938,7 +940,7 @@ impl Mcp {
         const RESERVED: &[&str] = &[
             "documents",
             "method-set", "question-holders", "preflight-push", "worktree-push",
-            "sensor-specs", "scheme-terms", "scheme-roles", "frozen-trees", "addresses-declared", "tree-declared", "donors", "skills-push", "skills", "agents", "code-facts-push", "code-facts", "summary", "links-of", "retired-terms", "term-retire", "entity-confirm", "request-add", "approval-ask", "question-ask", "asks", "ask-decide", "ask-inbox", "chat-start", "chat-say", "chat-inbox", "chat", "run-start", "run-state", "run-event", "run-automaton", "run-say", "run-inbox", "runs", "ready", "order", "gate-measure", "gate-selftest", "links-rewrite", "links-retarget", "reparse", "screen-area-set", "skill-set", "skills-paths", "version-freeze", "version-delta", "generated-check", "principal-allow", "principals", "author-set", "authors", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "version-close", "gate-selftest", "next-step", "process-state", "statuses", "task-status", "status-anomaly", "pipeline", "board", "waves", "phases", "coverage", "blocks", "history", "at-revision", "process-history", "progress",
+            "sensor-specs", "scheme-terms", "scheme-roles", "frozen-trees", "addresses-declared", "tree-declared", "donors", "skills-push", "skills", "agents", "code-facts-push", "code-facts", "summary", "links-of", "retired-terms", "term-retire", "entity-confirm", "request-add", "approval-ask", "question-ask", "asks", "ask-decide", "ask-inbox", "chat-start", "chat-say", "chat-inbox", "chat", "run-start", "run-state", "run-event", "run-automaton", "run-say", "run-inbox", "runs", "ready", "test-run", "order", "gate-measure", "gate-selftest", "links-rewrite", "links-retarget", "reparse", "screen-area-set", "skill-set", "skills-paths", "version-freeze", "version-delta", "generated-check", "principal-allow", "principals", "author-set", "authors", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "version-close", "gate-selftest", "next-step", "process-state", "statuses", "task-status", "status-anomaly", "pipeline", "board", "waves", "phases", "coverage", "blocks", "history", "at-revision", "process-history", "progress",
             "kinds", "kinds-due", "readiness-gaps", "declared-unwritten", "blame-set", "doors", "derived-copy-set", "holders", "counts-sync", "tree", "document-coverage", "sections", "section", "backlinks", "search", "put",
             "put-section", "rm", "document-add", "reproject", "sweep", "gate", "next-task", "what-if", "blockers", "events", "task-plan-push",
             "norm-versions", "measurements", "plan", "readiness", "requirements-of",
@@ -1413,6 +1415,10 @@ impl Mcp {
                     Err(e) => refusal(e.into()),
                 }
             }
+            "test-run" => match crate::projector::test_status(&self.pool, p).await {
+                Ok(v) => ok(v),
+                Err(e) => refusal(e.into()),
+            },
             "console" => match crate::projector::console(&self.pool, p).await {
                 Ok(v) => ok(v),
                 Err(e) => refusal(e.into()),
@@ -1637,8 +1643,9 @@ impl Mcp {
                 // факт с незакоммиченной правки неотличимым от фактa со ствола.
                 let commit = args.get("commit").and_then(|v| v.as_str()).unwrap_or("").to_owned();
                 let dirty = args.get("dirty").and_then(|v| v.as_bool()).unwrap_or(false);
+                let snapshot = crate::projector::Snapshot { commit: &commit, dirty, reads: read };
                 match crate::projector::push_code_facts(
-                    &self.pool, p, &fact_kind, &list, &self.author, &commit, dirty, read).await {
+                    &self.pool, p, &fact_kind, &list, &self.author, snapshot).await {
                     Ok(mut v) => {
                         if crate::reproject::relations::FACT_KINDS.contains(&fact_kind.as_str()) {
                             match crate::reproject::relations::project(&self.pool, p).await {

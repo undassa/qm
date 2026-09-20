@@ -36,6 +36,9 @@ const VETO: &str = "Bash(git commit:*),Bash(git push:*)";
 const GUARD_TOOLS: &str = "Edit(instrument/**),Write(instrument/**),MultiEdit(instrument/**)";
 const INSTRUMENT_PREFIXES: &[&str] = &["instrument/"];
 pub const TICK_S: u64 = 5;
+/// Как часто харнес сам гоняет тесты набора (заявка 20).
+pub const TEST_TICK_S: u64 = 3600;
+const TEST_TIMEOUT_S: u64 = 1800;
 const LIMIT_S: u64 = 1800;
 const SILENCE_LIMIT: i32 = 3;
 const CIRCLES: i32 = 5; // потолок кругов починки — правило харнеса
@@ -74,11 +77,24 @@ pub fn cut(s: &str, n: usize) -> &str {
     &s[..end]
 }
 
+#[derive(Clone, Deserialize, Default)]
+pub struct TestSpec {
+    #[serde(default)]
+    pub cmd: String,
+    #[serde(default)]
+    pub dir: String,
+}
+
 #[derive(Clone, Deserialize)]
 pub struct Bundle {
     pub name: String,
     pub project: String,
     pub repo: String,
+    /// Чем харнес гоняет тесты набора (заявка 20): команда — из конфигурации
+    /// набора, а не из угла сессии. Без команды прогонов нет — и пункты
+    /// про ствол честно отвечают «неизвестно».
+    #[serde(default)]
+    pub test: Option<TestSpec>,
 }
 
 #[derive(Deserialize)]
@@ -154,8 +170,8 @@ impl Worker {
         // Ждём вручную, а не wait_with_output: таймаут обязан убить процесс,
         // иначе осиротевший claude продолжил бы править дерево, а воркер
         // завёл бы вторую сессию рядом. Вывод читаем параллельно ожиданием.
-        let mut stdout = child.stdout.take();
-        let mut stderr = child.stderr.take();
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
         let out_task = tokio::spawn(async move {
             let mut b = Vec::new();
             if let Some(mut s) = stdout {
@@ -206,6 +222,112 @@ impl Worker {
                 }
             }
         }
+    }
+
+    /// Статус прогонов тестов: когда последний, что упало на чистом дереве.
+    async fn test_status(&self, project: &str) -> Value {
+        crate::projector::test_status(&self.pool, project).await.unwrap_or(json!({ "runs": 0 }))
+    }
+
+    /// Наблюдатель прогонов (заявка 20): раз в TEST_TICK гоняет тесты набора,
+    /// но только с чистого дерева и подписывая коммит. Грязное дерево — не
+    /// «подождать», а «не снимать»: факт о другом состоянии мира харнес не
+    /// пишет (заявка 18 научила, чем это кончается).
+    pub async fn test_watch(self: std::sync::Arc<Self>, bundle: Bundle) {
+        let Some(spec) = bundle.test.clone() else { return };
+        loop {
+            match self.run_tests_once(&bundle, &spec).await {
+                Ok(Some(v)) => println!(
+                    "{} · тесты: {} проверок, упало {} · {}",
+                    bundle.name,
+                    v["runs"], v["failed"].as_array().map(|a| a.len()).unwrap_or(0),
+                    v["cleanAt"].as_i64().map(|t| format!("{t}")).unwrap_or_default(),
+                ),
+                Ok(None) => {}
+                Err(e) => println!("{} · тесты: {e}", bundle.name),
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(TEST_TICK_S)).await;
+        }
+    }
+
+    async fn run_tests_once(&self, bundle: &Bundle, spec: &TestSpec) -> Result<Option<Value>, String> {
+        let cwd = if spec.dir.is_empty() { bundle.repo.clone() } else { format!("{}/{}", bundle.repo, spec.dir) };
+        if !std::path::Path::new(&cwd).is_dir() {
+            return Err(format!("каталог прогона {cwd} нет"));
+        }
+        let dirty = !Self::git(&cwd, &["status", "--porcelain"]).trim().is_empty();
+        if dirty {
+            println!("{} · тесты: дерево грязное — прогон не снимается", bundle.name);
+            return Ok(None);
+        }
+        let head = Self::git(&cwd, &["rev-parse", "HEAD"]).trim().to_owned();
+        if head.is_empty() {
+            return Err("HEAD не читается".into());
+        }
+        // Перепрогон той же головы не нужен: свежий замер есть.
+        let fresh = match crate::db::conn(&self.pool).await {
+            Ok(c) => c
+                .query_one(
+                    "SELECT count(*) FROM test_run WHERE project_id = $1 AND commit_sha = $2 AND NOT dirty AND at > $3",
+                    &[&bundle.project, &head, &(crate::projector::now_ms() - (TEST_TICK_S as i64) * 1000)],
+                )
+                .await
+                .map(|r| r.get::<_, i64>(0) > 0)
+                .unwrap_or(false),
+            Err(_) => false,
+        };
+        if fresh {
+            return Ok(None);
+        }
+        println!("{} · тесты: прогон на {head}", bundle.name);
+        let run = tokio::process::Command::new("bash")
+            .args(["-c", &spec.cmd])
+            .current_dir(&cwd)
+            .env("CARGO_TERM_COLOR", "never")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output();
+        let out = match tokio::time::timeout(std::time::Duration::from_secs(TEST_TIMEOUT_S), run).await {
+            Err(_) => return Err(format!("прогон не уложился в {TEST_TIMEOUT_S} с")),
+            Ok(Err(e)) => return Err(format!("прогон не завёлся: {e}")),
+            Ok(Ok(o)) => o,
+        };
+        let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        let mut rows: Vec<(String, String)> = Vec::new();
+        for line in text.lines() {
+            let rest = line.strip_prefix("test ").unwrap_or("");
+            let Some((name, tail)) = rest.split_once(" ... ") else { continue };
+            let name = name.trim();
+            if name.is_empty() || name == "result:" {
+                continue;
+            }
+            let verdict = if tail.starts_with("ok") {
+                "passed"
+            } else if tail.starts_with("FAILED") {
+                "failed"
+            } else if tail.starts_with("ignored") {
+                "ignored"
+            } else {
+                continue;
+            };
+            rows.push((name.to_owned(), verdict.to_owned()));
+        }
+        if rows.is_empty() && !out.status.success() {
+            // Не собралось: ни одной проверки не увидели — факт об этом тоже
+            // факт, иначе красное сборки неотличимо от «не гоняли».
+            rows.push(("(build)".to_owned(), "build-failed".to_owned()));
+        }
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        let recorded = rows.len() as i64;
+        crate::projector::record_test_runs(&self.pool, &bundle.project, &head, &rows, "mh-runner")
+            .await
+            .map_err(|e| format!("итог прогона не записан: {e:?}"))?;
+        let mut v = self.test_status(&bundle.project).await;
+        v["recorded"] = json!(recorded);
+        v["commit"] = json!(head);
+        Ok(Some(v))
     }
 
     pub async fn chats(&self, bundle: &Bundle) {

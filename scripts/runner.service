@@ -5,7 +5,7 @@ After=network.target
 [Service]
 User=undassa
 Environment=HOME=/home/undassa
-Environment=PATH=/home/undassa/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=/home/undassa/.cargo/bin:/home/undassa/.local/bin:/usr/local/bin:/usr/bin:/bin
 # Воркер на Rust говорит с базой сам, без сервера: адрес — из того же .env,
 # что у mh-web.service.
 EnvironmentFile=/opt/src/github.com/undassa/mh/server-rs/.env

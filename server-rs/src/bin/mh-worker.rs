@@ -61,7 +61,13 @@ async fn main() {
         eprintln!("mh-worker: другой воркер уже держит замок — не поднимаюсь");
         std::process::exit(3);
     }
-    let worker = mh_server::worker::Worker::new(pool, kinds, claude);
+    let worker = std::sync::Arc::new(mh_server::worker::Worker::new(pool, kinds, claude));
+    // Наблюдатели прогонов — по набору с объявленной командой тестов (заявка 20).
+    for bundle in &config.projects {
+        if bundle.test.is_some() {
+            tokio::spawn(worker.clone().test_watch(bundle.clone()));
+        }
+    }
     println!("воркер пульта: наборов {}, круг {} с", config.projects.len(), mh_server::worker::TICK_S);
     loop {
         for bundle in &config.projects {

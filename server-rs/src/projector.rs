@@ -1433,6 +1433,23 @@ CREATE TABLE IF NOT EXISTS task_ready_item (
   PRIMARY KEY (project_id, task_id, ord)
 );
 
+-- ПРОГОНЫ ТЕСТОВ, СНЯТЫЕ ХАРНЕСОМ (заявка 20): по строке на проверку — какая,
+-- на каком коммите, в каком дереве, чем кончилась. Харнес снимает прогон сам
+-- и только с чистого дерева, подписывая коммит: «проверка наблюдалась
+-- красной» становится фактом, а не прозой коммита. Подача рукой видна в
+-- летописи по автору (ключ сессии, заявка 19).
+CREATE TABLE IF NOT EXISTS test_run (
+  id         serial  PRIMARY KEY,
+  project_id text    NOT NULL,
+  check_name text    NOT NULL,
+  commit_sha text    NOT NULL DEFAULT '',
+  dirty      boolean NOT NULL DEFAULT true,
+  verdict    text    NOT NULL,
+  at         bigint  NOT NULL,
+  actor      text    NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS test_run_by_check ON test_run (project_id, check_name, at DESC);
+
 CREATE TABLE IF NOT EXISTS chat_message (
   id           bigserial PRIMARY KEY,
   project_id   text   NOT NULL,
@@ -5555,16 +5572,26 @@ pub(crate) async fn record_edit(
 /// Датчик подаёт то, что видит: «такие таблицы есть в миграциях», «в контракте
 /// столько операций». Ни одного вывода: сошлось ли это с набором — вопрос к
 /// серверу, у которого лежит и то и другое.
+/// Чем снят факт: дерево, из которого читал датчик.
+///
+/// Три поля ездят вместе и порознь не значат ничего: коммит без признака
+/// чистоты не говорит, что читали именно его, а число прочитанных файлов без
+/// обоих не отличает «смотрел и не нашёл» от «смотреть было нечего».
+pub(crate) struct Snapshot<'a> {
+    pub commit: &'a str,
+    pub dirty: bool,
+    pub reads: i64,
+}
+
 pub(crate) async fn push_code_facts(
     pool: &Pool,
     project: &str,
     kind: &str,
     facts: &[(String, String)],
     actor: &str,
-    commit: &str,
-    dirty: bool,
-    reads: i64,
+    snapshot: Snapshot<'_>,
 ) -> Result<Value, crate::db::Fail> {
+    let Snapshot { commit, dirty, reads } = snapshot;
     let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
     let before = tx
@@ -9617,6 +9644,67 @@ pub(crate) async fn add_run_event(
                  &[&project, &run, &now_ms()])
         .await?;
     Ok(json!({ "status": "written", "runId": run, "kind": kind }))
+}
+
+/// Прогоны тестов, снятые харнесом: по строке на проверку. История обрезается
+/// по двадцати последним на проверку — «наблюдалась красной до кода» требует
+/// прошлого, но не вечного.
+pub(crate) async fn record_test_runs(
+    pool: &Pool, project: &str, commit: &str, rows: &[(String, String)], actor: &str,
+) -> Result<Value, crate::db::Fail> {
+    let mut client = crate::db::conn(pool).await?;
+    let tx = client.transaction().await?;
+    for (check, verdict) in rows {
+        tx.execute(
+            "INSERT INTO test_run (project_id, check_name, commit_sha, dirty, verdict, at, actor)
+             VALUES ($1,$2,$3,false,$4,$5,$6)",
+            &[&project, check, &commit, verdict, &now_ms(), &actor],
+        )
+        .await?;
+    }
+    tx.execute(
+        "DELETE FROM test_run t
+          WHERE t.project_id = $1
+            AND (SELECT count(*) FROM test_run k
+                  WHERE k.project_id = t.project_id AND k.check_name = t.check_name
+                    AND k.at >= t.at) > 20",
+        &[&project],
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(json!({ "kind": "test-run", "recorded": rows.len() }))
+}
+
+/// Статус прогонов для пульта: когда последний раз, сколько чем кончилось,
+/// что падает на чистом дереве.
+pub(crate) async fn test_status(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
+    let last = client
+        .query_opt("SELECT max(at), max(at) FILTER (WHERE NOT dirty) FROM test_run WHERE project_id = $1", &[&project])
+        .await?;
+    let counts = client
+        .query(
+            "SELECT verdict, count(*) FROM test_run
+              WHERE project_id = $1 AND at = (SELECT max(at) FROM test_run WHERE project_id = $1)
+              GROUP BY verdict",
+            &[&project],
+        )
+        .await?;
+    let failed = client
+        .query(
+            "SELECT DISTINCT check_name FROM test_run
+              WHERE project_id = $1 AND NOT dirty AND verdict = 'failed'
+                AND at = (SELECT max(at) FROM test_run WHERE project_id = $1 AND NOT dirty)",
+            &[&project],
+        )
+        .await?;
+    let (at, clean_at): (Option<i64>, Option<i64>) = (last.as_ref().and_then(|r| r.get(0)), last.as_ref().and_then(|r| r.get(1)));
+    Ok(json!({
+        "at": at.unwrap_or(0), "cleanAt": clean_at.unwrap_or(0),
+        "counts": counts.iter().map(|r| (r.get::<_, String>(0), r.get::<_, i64>(1))).collect::<std::collections::BTreeMap<_, _>>(),
+        "failed": failed.iter().map(|r| r.get::<_, String>(0)).collect::<Vec<_>>(),
+        "runs": counts.iter().map(|r| r.get::<_, i64>(1)).sum::<i64>(),
+    }))
 }
 
 /// Пункты приёмки задачи — чек-лист из документа, выведенный строками.
