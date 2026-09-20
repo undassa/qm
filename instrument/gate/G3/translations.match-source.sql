@@ -28,8 +28,19 @@ WITH строки AS (
          'UTF8')), 'hex'), 8) AS отп
     FROM пшапки п),
 ключи AS (
+  -- Ключ сценария — И СОБСТВЕННОЕ ИМЯ ТОЖЕ, а не только собранное из истории.
+  --
+  -- Правило знало один вид ключа, `S<n>-AC-<m>`, и резолвило штамп только по
+  -- нему. Набор `tot-ade` переименовал сценарии в `TC-<ОБЛАСТЬ>-<n>`, и десять
+  -- объявлений отпечатка от восьми таких имён перестали проверяться ничем:
+  -- правило искало их среди требований, не находило, а до ветки приёмки они не
+  -- доходили. Отпечаток при этом выглядит измеренным — ровно та ложь, ради
+  -- которой пункт и заведён. Цена всплыла на PR: два числа пересчитали неверно,
+  -- и поймал это человек, а не прибор.
   SELECT 'S' || substring(a.story_id from '\d+') || '-AC-' || a.number AS ключ, a.id AS ид
-    FROM project_acceptance a WHERE a.project_id = $1),
+    FROM project_acceptance a WHERE a.project_id = $1
+  UNION ALL
+  SELECT a.id, a.id FROM project_acceptance a WHERE a.project_id = $1),
 штампы AS (
   SELECT substring(f.name from '^([A-Z]+(?:-[A-Z]+)?-\d+|S\d+-AC-\d+) · ') AS ид,
          substring(f.name from '`([0-9a-f]{8})`') AS отп,
@@ -37,7 +48,8 @@ WITH строки AS (
     FROM code_fact f WHERE f.project_id = $1 AND f.kind = 'translation-stamp')
 SELECT 'датчик «translation-stamp» ' || fact_gap($1, 'translation-stamp') || ': сверять отпечатки переводов нечем' AS detail WHERE NOT fact_fresh($1, 'translation-stamp')
 UNION ALL
-SELECT ш.файл || ' — ' || ш.ид || ': отпечаток снят с имени, которого в наборе нет' || CASE WHEN EXISTS (SELECT 1 FROM треб т WHERE т.ид = 'FR-' || ш.ид) THEN '; требование зовётся FR-' || ш.ид ELSE '' END FROM штампы ш WHERE ш.ид !~ '^S\d+-AC-' AND NOT EXISTS (SELECT 1 FROM треб т WHERE т.ид = ш.ид)
+SELECT ш.файл || ' — ' || ш.ид || ': отпечаток снят с имени, которого в наборе нет' || CASE WHEN EXISTS (SELECT 1 FROM треб т WHERE т.ид = 'FR-' || ш.ид) THEN '; требование зовётся FR-' || ш.ид ELSE '' END FROM штампы ш WHERE NOT EXISTS (SELECT 1 FROM треб т WHERE т.ид = ш.ид)
+   AND NOT EXISTS (SELECT 1 FROM ключи к WHERE к.ключ = ш.ид)
 UNION ALL
 SELECT ш.файл || ' — ' || ш.ид || ' переписан: отпечаток ' || ш.отп || ', текст даёт ' || т.отп || ' — перевод сделан с прежней редакции' FROM штампы ш JOIN треб т ON т.ид = ш.ид WHERE т.отп <> ш.отп
 UNION ALL
