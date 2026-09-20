@@ -5,6 +5,7 @@ import { chooseProject } from "./project-address";
 import { ProjectPicker } from "./Projects";
 import { Depends } from "./Depends";
 import { Console } from "./Console";
+import { Machine } from "./Machine";
 import { Corpus } from "./Corpus";
 import { Work } from "./Work";
 import { type Lang, langNow, setLang, say } from "./say";
@@ -49,6 +50,7 @@ import { Unknown } from "./Unknown";
  */
 const PAGES: { page: string; key: string; view: (id: string, ctx: Ctx) => React.JSX.Element }[] = [
   { page: "pult", key: "nav.pult", view: (id, ctx) => <Console projectId={id} lang={ctx.lang} onGo={ctx.onGo} /> },
+  { page: "machine", key: "nav.machine", view: (id, ctx) => <Machine projectId={id} lang={ctx.lang} /> },
   { page: "where", key: "nav.where", view: (id, ctx) => <Readiness projectId={id} lang={ctx.lang} onFind={ctx.onFind} /> },
   { page: "tasks", key: "nav.tasks", view: (id, ctx) => <Work projectId={id} lang={ctx.lang} /> },
   { page: "unknown", key: "nav.unknown", view: (id, ctx) => <Unknown projectId={id} lang={ctx.lang} onFind={ctx.onFind} /> },
