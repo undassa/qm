@@ -4,3 +4,7 @@ UNION ALL
 SELECT 'строка реестра constitution: ' || a.article || '  ' || a.gate
   FROM project_article_gates a
  WHERE a.project_id = $1 AND a.gate = 'ui:keyboard-complete'
+UNION ALL
+SELECT 'факты грамматики · ' || f.kind || ' · ' || f.name
+  FROM code_fact f
+ WHERE f.project_id = $1 AND f.kind IN ('grammar-action', 'grammar-binding', 'grammar-type')
