@@ -9,6 +9,10 @@ Environment=PATH=/home/undassa/.local/bin:/usr/local/bin:/usr/bin:/bin
 # Воркер на Rust говорит с базой сам, без сервера: адрес — из того же .env,
 # что у mh-web.service.
 EnvironmentFile=/opt/src/github.com/undassa/mh/server-rs/.env
+# Собственный ключ воркера (#19): имя в летописи выводится из секрета, а не из
+# заголовка, который сессия называет сама. Секрет живёт в /etc/mh (root:undassa
+# 640) — не мир и не репозиторий; выдаётся `mh-server key-add mh-runner …`.
+EnvironmentFile=/etc/mh/mh-runner.env
 ExecStart=/opt/src/github.com/undassa/mh/server-rs/target/release/mh-worker /opt/src/github.com/undassa/mh/scripts/runner.json
 WorkingDirectory=/opt/src/github.com/undassa/mh
 Restart=always
