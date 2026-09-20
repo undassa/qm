@@ -936,7 +936,13 @@ mod fresh {
         }
         crate::projector::ensure(&pool).await.expect("схема встаёт на пустой базе");
         let laid = super::apply(&pool).await.expect("прибор раскладывается");
-        assert_eq!(laid["пунктов"], serde_json::json!(165));
+        // Число берётся У ОБЪЯВЛЕНИЯ, а не вписывается сюда литералом. Литерал
+        // приходилось двигать рукой при каждом новом пункте, и сегодня он
+        // разошёлся: в дереве стало 168, в проверке осталось 165, и упало это
+        // в CI, где база есть, — то есть после выкладки, а не при правке.
+        let declared = super::declared().expect("объявление прибора цело").rules.len();
+        assert_eq!(laid["пунктов"], serde_json::json!(declared as i64),
+                   "разложено не всё, что объявлено");
         assert_eq!(laid["изменено"], laid["пунктов"], "на пустой базе объявляются все пункты");
         let client = pool.get().await.expect("соединение");
         let items: i64 = client
@@ -944,7 +950,7 @@ mod fresh {
             .await
             .expect("пункты на месте")
             .get(0);
-        assert_eq!(items, 165);
+        assert_eq!(items as usize, declared, "в базе столько пунктов, сколько объявлено");
         client
             .batch_execute("DROP SCHEMA IF EXISTS fresh CASCADE")
             .await
