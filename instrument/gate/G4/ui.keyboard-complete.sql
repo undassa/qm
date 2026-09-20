@@ -12,7 +12,13 @@ WITH границы AS (
              AND г.н < substring(v.name from ':(\d+)$')::int AND г.тип IS NOT NULL
            ORDER BY г.н DESC LIMIT 1) = 'Action'),
 строки AS (
-  SELECT DISTINCT substring(b.detail from '^([A-Z][A-Za-z]*)') AS действие,
+  -- Имя действия берётся ПЕРЕД стрелкой, а не с начала строки. Рукав таблицы
+  -- пишут `Self::Copy => "y",`, и образец «с начала» вынимал из него `Self` —
+  -- один и тот же для всех одиннадцати. Ни одно действие не находило своей
+  -- строки, и пункт сообщал, что до всей поверхности не дойти с клавиатуры.
+  -- Набор `tot-ade` принёс это заявкой 200 и правильно не стал подгонять
+  -- датчик под запрос: датчик снимал ровно то, что просили.
+  SELECT DISTINCT substring(b.detail from '([A-Za-z0-9_]+)\s*=>') AS действие,
          substring(b.detail from '=> *"([^"]+)"') AS клавиша
     FROM code_fact b
    WHERE b.project_id = $1 AND b.kind = 'grammar-binding')
