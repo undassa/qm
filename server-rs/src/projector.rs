@@ -2697,10 +2697,26 @@ ALTER TABLE project_gates ADD COLUMN IF NOT EXISTS result jsonb;
 -- разные беды и чинятся разным — завести кормильца либо вернуть умолкшего, — а
 -- пункт называл первую в обоих случаях. Слово, называющее не тот случай, шлёт
 -- читателя не туда.
+-- ПОЧЕМУ НЕ СВЕЖ — ТРИ РАЗНЫХ ОТВЕТА, И ЧИНЯТСЯ ОНИ РАЗНЫМ.
+--
+-- Пока их складывали в «подавал и ПРОТУХ», набор `tot-ade` потратил заход на
+-- неверный диагноз (заявка 201): решил, что молчанием считается честный ноль
+-- строк, и принёс доказательство, что датчики отвечают. Отвечали они правда, и
+-- отметка подачи стояла четырьмя часами ранее при сроке в неделю — а несвежими
+-- они были оттого, что сняты с ГРЯЗНОГО дерева. Слово было одно, состояния три.
 CREATE OR REPLACE FUNCTION fact_gap(p text, f text) RETURNS text AS $г$
-  SELECT CASE WHEN EXISTS (SELECT 1 FROM fact_push WHERE project_id = p AND fact = f)
-              THEN 'подавал и ПРОТУХ'
-              ELSE 'ни разу не подавал' END
+  SELECT CASE
+    WHEN NOT EXISTS (SELECT 1 FROM fact_push WHERE project_id = p AND fact = f)
+         THEN 'ни разу не подавал'
+    WHEN (SELECT fp.dirty FROM fact_push fp
+           WHERE fp.project_id = p AND fp.fact = f ORDER BY fp.at DESC LIMIT 1)
+         THEN 'снят с ГРЯЗНОГО дерева: рассказывает не про ствол — переснять из чистого'
+    WHEN (SELECT fp.commit_sha = '' FROM fact_push fp
+           WHERE fp.project_id = p AND fp.fact = f ORDER BY fp.at DESC LIMIT 1)
+         THEN 'снят БЕЗ КОММИТА: с какого дерева — неизвестно'
+    WHEN (SELECT s.stale_after_ms FROM sensor s WHERE s.project_id = p AND s.fact = f) IS NULL
+         THEN 'подавал, а датчика не объявлено: срока нет, протухнуть не может — объявите `sensor-declare`'
+    ELSE 'подавал и ПРОТУХ' END
 $г$ LANGUAGE sql STABLE;
 
 -- СВЕЖЕСТЬ — НЕ «БЫЛА ПОДАЧА». Три отдельных ответа, и складывать их в один
