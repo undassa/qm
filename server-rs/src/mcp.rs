@@ -2948,17 +2948,24 @@ impl Mcp {
                 // строк ради семнадцати адресов — не измерение, а склад.
                 let rows = client
                     .query(
+                        // ЧИТАЕТСЯ ПРОЕКЦИЯ, А НЕ ДОКУМЕНТЫ ЗАНОВО. Дверь держала
+                        // свой образец адреса рядом с образцом проекции, и они
+                        // отличались: образец проекции знает ЯКОРЬ — цитату
+                        // строки после адреса, — а образец двери нет. Оттого
+                        // якорь не показывался вовсе, и увидеть, что у всех
+                        // пятидесяти девяти адресов `tot-ade` он пуст, было
+                        // нечем: пункт `code-address-resolves` при пустом якоре
+                        // сверяет лишь существование строки, то есть зелен там,
+                        // где сверять нечего.
+                        //
                         // КТО НАЗВАЛ АДРЕС — в ответе. Без этого свой адрес не
                         // отличить от чужого: у `tot-ade` 40 адресов из 112
                         // пришли из справки о соседнем продукте, гейт это
                         // видел, а дверь не отвечала.
-                        "SELECT DISTINCT x[1] AS path, x[3] AS line,
-                                d.entity_kind, d.entity_name
-                           FROM project_documents d
-                           CROSS JOIN LATERAL regexp_matches(d.content,
-                             '`([A-Za-z0-9_./-]+[.](rs|sql|ts|tsx|yaml|toml)):([0-9]+)`', 'g') AS x
-                          WHERE d.project_id = $1
-                          ORDER BY 1, 2",
+                        "SELECT path, line::text, entity_kind, entity_name, anchor
+                           FROM project_code_address
+                          WHERE project_id = $1
+                          ORDER BY path, line",
                         &[p],
                     )
                     .await
@@ -2966,11 +2973,17 @@ impl Mcp {
                 let out: Vec<Value> = rows
                     .iter()
                     .map(|r| json!({ "path": r.get::<_, String>(0), "line": r.get::<_, String>(1),
-                                     "kind": r.get::<_, String>(2), "name": r.get::<_, String>(3) }))
+                                     "kind": r.get::<_, String>(2), "name": r.get::<_, String>(3),
+                                     "anchor": r.get::<_, String>(4) }))
                     .collect();
-                Ok(json!({ "count": out.len(), "addresses": out,
+                let bare = out.iter().filter(|a| a["anchor"].as_str().unwrap_or("").is_empty()).count();
+                Ok(json!({ "count": out.len(), "bare": bare, "addresses": out,
                            "means": "`kind`/`name` — кто адрес назвал: адрес внутри справки \
-                                     о соседнем продукте указывает в ЕГО дерево, а не в наше" }))
+                                     о соседнем продукте указывает в ЕГО дерево, а не в наше. \
+                                     `anchor` — цитата строки, которую адрес называет; пустой \
+                                     якорь значит, что сверяется только существование строки, \
+                                     а не то, что в ней написано. Якорь объявляется в тексте \
+                                     так: `путь.rs:123` — `цитата строки`" }))
             }
             "tree-declared" => {
                 let paths: Vec<Value> = crate::projector::declared_tree(&*client, p)
