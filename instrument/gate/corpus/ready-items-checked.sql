@@ -26,13 +26,22 @@ UNION ALL
 SELECT t.id || ' — проверка пункта приёмки не написана: ' || r.check_id
   FROM project_plan_tasks t
   JOIN task_ready_item r ON r.project_id = t.project_id AND r.task_id = t.id
- WHERE t.project_id = $1 AND fact_fresh($1, 'test-name')
+ WHERE t.project_id = $1 AND fact_fresh($1, 'test-name') AND fact_fresh($1, 'written-tc')
    AND t.kind = 'dev' AND t.state = 'closed' AND NOT r.done
    AND r.check_id <> ''
+   -- «НАПИСАНА» СПРАШИВАЕТСЯ ТАМ ЖЕ, ГДЕ СПРАШИВАЕТ `G4 · closed-unwritten`.
+   --
+   -- Имён здесь два рода, и проверялись они одним способом. Функция находится
+   -- по имени среди фактов `test-name`; СЦЕНАРИЙ `TC-…` функцией не бывает
+   -- вовсе — его переводят проверки, а связь «сценарий переведён» уже сведена
+   -- в `project_written_check`. Прежнее условие искало в тексте комментария
+   -- подстроку `fn TC-INDEX-01(`, которой не бывает ни в одном дереве: все
+   -- 24 находки про `TC-…` были о несуществующем предмете.
    AND NOT EXISTS (SELECT 1 FROM code_fact c
                     WHERE c.project_id = t.project_id
-                      AND ((c.kind = 'test-name' AND c.name = r.check_id)
-                        OR (c.kind = 'written-tc' AND position('fn ' || r.check_id || '(' in c.detail) > 0)))
+                      AND c.kind = 'test-name' AND c.name = r.check_id)
+   AND NOT EXISTS (SELECT 1 FROM project_written_check w
+                    WHERE w.project_id = t.project_id AND w.check_id = r.check_id)
 UNION ALL
 -- ПРОВЕРКА НАПИСАНА — ЕЩЁ НЕ ЗНАЧИТ «ПРОШЛА».
 --
