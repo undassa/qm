@@ -3885,10 +3885,23 @@ fn shaped_as(shapes: &[regex::Regex]) -> Vec<regex::Regex> {
 /// `incremental_parse` и тип `IndexProgress`, а пункт про ненаписанную
 /// проверку начал бы требовать написать бенч.
 ///
-/// Снятое имя не считается — ни зачёркнутое `~~`имя`~~`, ни строка со словом
-/// оговорки. Ровно так же читает строку `relations::checks_in`; расходиться
-/// этим двум нельзя, потому что `G3 · test-trunk-green` соединяет в одном
-/// запросе обе таблицы, которые они наполняют.
+/// Зачёркнутое имя не считается: `~~`имя`~~` помянуто как убранное.
+///
+/// СЛОВА ОГОВОРКИ ЗДЕСЬ НЕ ПРИМЕНЯЮТСЯ, И ЭТО РАЗНИЦА ВОПРОСА, А НЕ НЕДОСМОТР.
+///
+/// `relations::checks_in` спрашивает «какие имена строка УПОМИНАЕТ», и слово
+/// оговорки там законно: помянутое рядом со словом «удалён» помянуто как
+/// убранное. Здесь вопрос другой — «какую проверку пункт НАЗЫВАЕТ», а имя
+/// стоит в голове пункта, и проза после него говорит о предмете, а не об
+/// имени.
+///
+/// Я поставил сюда тот же список «ради единства» и получил ровно то, от чего
+/// сам же предостерегал: один предикат на два противоположных вопроса.
+/// `word.caveat` у `tot-ade` — основы русских слов, и «удал» стоит в
+/// «удаление индекса и полная пересборка дают побайтово тот же результат».
+/// Замер 21.09: 52 пункта из 1024 теряли названную проверку об обычную прозу,
+/// и каждый становился находкой «пункт не называет проверки» — о пункте,
+/// который её называет первым же словом.
 ///
 /// `shapes` — образцы, УЖЕ ПРИВЯЗАННЫЕ К КОНЦАМ (`shaped_as`): образец
 /// `id.check` объявлен для поиска имени в строке, а здесь вопрос другой —
@@ -3896,10 +3909,8 @@ fn shaped_as(shapes: &[regex::Regex]) -> Vec<regex::Regex> {
 /// внутри `TC-INDEX-01-черновик`.
 fn check_named(
     line: &str, shapes: &[regex::Regex], written: &std::collections::HashSet<String>,
-    caveats: &[String],
 ) -> String {
-    let low = line.to_lowercase();
-    if line.contains("~~") || caveats.iter().any(|c| low.contains(&c.to_lowercase())) {
+    if line.contains("~~") {
         return String::new();
     }
     line.split('`')
@@ -4095,7 +4106,6 @@ pub async fn rebuild(pool: &Pool, project: &str) -> Result<Value, crate::db::Fai
     // принималось, а не переводом образца в чужой диалект.
     let terms = crate::scheme::Terms::load_at(&tx, project).await?;
     let shapes = shaped_as(&crate::reproject::relations::check_ids(&terms));
-    let caveats: Vec<String> = terms.all("word.caveat").to_vec();
     let written: std::collections::HashSet<String> = tx
         .query("SELECT name FROM code_fact WHERE project_id = $1 AND kind = 'test-name'", &[&project])
         .await?
@@ -4157,7 +4167,7 @@ pub async fn rebuild(pool: &Pool, project: &str) -> Result<Value, crate::db::Fai
         }
         tasks.push(task.clone());
         ords.push(*ord);
-        checks.push(check_named(&item, &shapes, &written, &caveats));
+        checks.push(check_named(&item, &shapes, &written));
         texts.push(item.chars().take(400).collect::<String>());
         dones.push(head.starts_with("- [x]"));
     }
@@ -14914,10 +14924,6 @@ mod ready_item_names {
         (shapes, ["undo_redo_frame".to_owned()].into_iter().collect())
     }
 
-    fn caveats() -> Vec<String> {
-        vec!["снят".to_owned(), "удал".to_owned()]
-    }
-
     /// Пункт приёмки называет проверку — либо образцом, либо тем, что она
     /// написана. Всё прочее в кавычках проверкой не является: до 21.09 первый
     /// токен в кавычках брался за имя, и `corpus · ready-items-checked`
@@ -14925,8 +14931,7 @@ mod ready_item_names {
     #[test]
     fn a_ready_item_names_a_check_or_nothing() {
         let (shapes, written) = ade();
-        let caveats = caveats();
-        let name = |line: &str| check_named(line, &shapes, &written, &caveats);
+        let name = |line: &str| check_named(line, &shapes, &written);
 
         assert_eq!(name("- [ ] `fr_01_rebuild_is_byte_identical`: пересборка побайтово та же"),
                    "fr_01_rebuild_is_byte_identical");
@@ -14943,8 +14948,11 @@ mod ready_item_names {
                    "page_11_rail_lists_top_dirs");
         // Снятое имя не считается — так же читает строку `relations::checks_in`.
         assert_eq!(name("- [ ] ~~`fr_01_rebuild_is_byte_identical`~~ снята"), "");
-        assert_eq!(name("- [ ] `TC-INDEX-01` — проверка снята, осталась в истории"), "",
-                   "слово оговорки снимает имя так же, как зачёркивание");
+        // Слово оговорки здесь НЕ снимает имя: вопрос другой, чем у
+        // `checks_in`. «удаление индекса» — проза о предмете, а не о том, что
+        // имя убрано; 52 пункта теряли так названную проверку.
+        assert_eq!(name("- [ ] `fr_01_rebuild_is_byte_identical`: удаление индекса и пересборка"),
+                   "fr_01_rebuild_is_byte_identical");
         // Пробелы внутри кавычек Markdown не показывает — имя не теряется.
         assert_eq!(name("- [ ] ` TC-INDEX-01 ` проходит"), "TC-INDEX-01");
         // Пустые кавычки не съедают имя, стоящее дальше.
