@@ -47,4 +47,26 @@ SELECT л.task_id || ' — «' || л.op || ' ' || л.path || '»: файла н�
                      JOIN project_plan_tasks pt ON pt.project_id = $1 AND pt.id = п.dep AND pt.state <> 'closed'
                      JOIN project_task_tree_leaf pl ON pl.project_id = $1 AND pl.task_id = п.dep AND pl.op = '+' AND pl.path = л.path
                     WHERE п.task_id = л.task_id)
+   -- ЗЕРКАЛО СОЗДАЁТ ТО, ЧТО ПАРА УБИРАЕТ, И ЗАВИСИМОСТЬЮ ОНО НЕ БЫВАЕТ.
+   --
+   -- Пара пишет «- mirror_X.rs»: зеркало заведёт файл, пара напишет тело и
+   -- переименует. Прощение выше ищет создателя среди ЗАВИСИМОСТЕЙ, а зеркало
+   -- задачи — не зависимость: связь идёт полем «Пара», и объявить её
+   -- зависимостью дверь отказывает — строка красной задачи пересобирается из
+   -- документа.
+   --
+   -- Цена была не в лишней строке, а в остановке: пункт держит `G2`, `G2`
+   -- открывает фазу Ф4, а в ней идёт вся работа. Значит ЗАВЕДЕНИЕ НОВОЙ ПАРЫ
+   -- останавливало очередь задач — от заведения до посадки зеркала. Замер
+   -- 21.09: так вышло дважды за день, у `M5-T33` и у `M4-T9`, и оба раза
+   -- очередь стояла, пока зеркало не село.
+   --
+   -- Зеркало прощает на тех же условиях, что зависимость: оно не закрыто (а
+   -- закрытое обязано было файл оставить) и объявляет этот самый путь «+».
+   AND NOT EXISTS (SELECT 1 FROM red_task r
+                     JOIN project_plan_tasks rt
+                       ON rt.project_id = $1 AND rt.id = r.id AND rt.state <> 'closed'
+                     JOIN project_task_tree_leaf rl
+                       ON rl.project_id = $1 AND rl.task_id = r.id AND rl.op = '+' AND rl.path = л.path
+                    WHERE r.project_id = $1 AND lower(r.parent_task) = lower(л.task_id))
  ORDER BY 1
