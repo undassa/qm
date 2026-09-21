@@ -9692,6 +9692,7 @@ pub(crate) async fn add_run_event(
 /// прошлого, но не вечного.
 pub(crate) async fn record_test_runs(
     pool: &Pool, project: &str, commit: &str, rows: &[(String, String, String)], actor: &str,
+    dirty: bool,
 ) -> Result<Value, crate::db::Fail> {
     let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
@@ -9701,8 +9702,8 @@ pub(crate) async fn record_test_runs(
     for (check, verdict, binary) in rows {
         tx.execute(
             "INSERT INTO test_run (project_id, check_name, commit_sha, dirty, verdict, at, actor, ran_in)
-             VALUES ($1,$2,$3,false,$4,$5,$6,$7)",
-            &[&project, check, &commit, verdict, &at, &actor, binary],
+             VALUES ($1,$2,$3,$8,$4,$5,$6,$7)",
+            &[&project, check, &commit, verdict, &at, &actor, binary, &dirty],
         )
         .await?;
     }
