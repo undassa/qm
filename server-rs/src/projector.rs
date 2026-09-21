@@ -736,6 +736,22 @@ CREATE TABLE IF NOT EXISTS readiness_method (
   method_kind text NOT NULL CHECK (method_kind IN ('query','command','unknown')),
   method text NOT NULL DEFAULT '',
   declared_by text NOT NULL DEFAULT '',
+  -- ТЕКСТ ПУНКТА НА МИГ ОБЪЯВЛЕНИЯ — ЯКОРЬ, КОТОРОГО НЕ БЫЛО.
+  --
+  -- `ord` есть НОМЕР СТРОКИ в документе задачи. Значит всякая правка выше
+  -- чек-листа сдвигает номера всех пунктов ниже, а объявленный способ остаётся
+  -- на старом номере и молча переезжает на чужой пункт.
+  --
+  -- Замерено 21.09 по всем 82 задачам: из 166 способов, называющих имя теста,
+  -- 63 стоят на своём пункте, 94 — на соседнем, 9 не рядом ни с чем. У 14
+  -- задач ВСЕ способы смещены на одну и ту же величину — у `M3-T3` на +3, у
+  -- `M3-T11` на −5. Одинаковый сдвиг по всей задаче случайным не бывает.
+  -- Набор подтвердил живьём: правка внутри признака готовности сдвинула
+  -- `118 → 121 → 124 → 127`, а способы выше правки уцелели.
+  --
+  -- Пустой текст значит «объявлено до якоря»: такой способ работает как
+  -- прежде и доверия не получает. Заново объявленный — получает.
+  item_text text NOT NULL DEFAULT '',
   PRIMARY KEY (project_id, owner_kind, owner_id, ord));
 
 -- Связи, вынутые из фактов и полей документов. Каждая — своя таблица, потому
@@ -2791,6 +2807,7 @@ $ф$ LANGUAGE sql STABLE;
 -- Ключ, который ничего не значит, врёт читающему: по нему пойдут искать файл.
 UPDATE kind_layout SET spec = spec - 'at' - 'under' - 'not-under' - 'file'
  WHERE spec ?| array['at', 'under', 'not-under', 'file'];
+ALTER TABLE readiness_method ADD COLUMN IF NOT EXISTS item_text text NOT NULL DEFAULT '';
 ALTER TABLE scheme_term ADD COLUMN IF NOT EXISTS project_id text NOT NULL DEFAULT '';
 ALTER TABLE scheme_term DROP CONSTRAINT IF EXISTS scheme_term_pkey;
 ALTER TABLE scheme_term ADD PRIMARY KEY (project_id, role, value);
@@ -4461,10 +4478,19 @@ pub async fn rebuild(pool: &Pool, project: &str) -> Result<Value, crate::db::Fai
     // Объявленные способы возвращаются на пересобранные пункты.
     let methods = tx
         .execute(
+            // ЯКОРЬ СИЛЬНЕЕ НОМЕРА. Способ с запомненным текстом возвращается
+            // только на пункт с ТЕМ ЖЕ текстом; уехал номер — способ не
+            // встаёт никуда, и пункт честно остаётся без способа. Прежде он
+            // вставал на чужой пункт и судил не то.
+            //
+            // Объявленные до якоря (`item_text = ''`) ходят по номеру, как
+            // ходили: менять им поведение молча нельзя, а доверия им это не
+            // добавляет — дверь `readiness` называет их неприкреплёнными.
             "UPDATE readiness_item i SET method_kind = m.method_kind, method = m.method
                FROM readiness_method m
               WHERE m.project_id = i.project_id AND m.owner_kind = i.owner_kind
-                AND m.owner_id = i.owner_id AND m.ord = i.ord AND i.project_id = $1",
+                AND m.owner_id = i.owner_id AND m.ord = i.ord AND i.project_id = $1
+                AND (m.item_text = '' OR m.item_text = i.text)",
             &[&project],
         )
         .await?;
@@ -5782,14 +5808,35 @@ pub(crate) async fn set_method(pool: &Pool, project: &str, fields: Method<'_>) -
     // пересборки, и без имени объявившего его нельзя ни спросить, ни убрать
     // выборочно. Проверка, снимающая чужие объявления заодно со своими, уже
     // стёрла один настоящий способ.
+    // СПОСОБ ОБЪЯВЛЯЕТСЯ СУЩЕСТВУЮЩЕМУ ПУНКТУ, И ЕГО ТЕКСТ ЗАПОМИНАЕТСЯ.
+    //
+    // Прежде дверь принимала любой номер: строка ложилась в таблицу, ответ
+    // говорил «updated: 0», и объявление оставалось навсегда — способ,
+    // который никогда ничего не судит и о котором никто не узнает.
+    //
+    // Текст пункта — якорь против сдвига номеров (довод у таблицы). Берётся
+    // здесь, а не выводится потом: после правки документа прежнего текста уже
+    // не узнать ни у кого.
+    let item_text: Option<String> = client
+        .query_opt(
+            "SELECT text FROM readiness_item
+              WHERE project_id = $1 AND owner_kind = $2 AND owner_id = $3 AND ord = $4",
+            &[&project, &kind, &id, &ord],
+        )
+        .await?
+        .map(|r| r.get(0));
+    let Some(item_text) = item_text else {
+        return Ok(json!({ "status": "no_item",
+                          "why": format!("пункта {ord} у {kind} {id} нет: способ объявлять нечему —                                           `mh call ready task={id}` называет номера") }));
+    };
     client
         .execute(
-            "INSERT INTO readiness_method (project_id, owner_kind, owner_id, ord, method_kind, method, declared_by)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
+            "INSERT INTO readiness_method (project_id, owner_kind, owner_id, ord, method_kind, method, declared_by, item_text)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
              ON CONFLICT (project_id, owner_kind, owner_id, ord)
                DO UPDATE SET method_kind = EXCLUDED.method_kind, method = EXCLUDED.method,
-                             declared_by = EXCLUDED.declared_by",
-            &[&project, &kind, &id, &ord, &method_kind, &method, &declared_by],
+                             declared_by = EXCLUDED.declared_by, item_text = EXCLUDED.item_text",
+            &[&project, &kind, &id, &ord, &method_kind, &method, &declared_by, &item_text],
         )
         .await?;
     let n = client
