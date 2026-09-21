@@ -363,7 +363,9 @@ impl Mcp {
             "inputSchema": { "type": "object", "properties": { "drop": json!({"type":"boolean","description":"снять объявленное этой же дверью"}),
                 "kind": s("вид владельца"), "id": s("имя владельца; у одиночки пусто"),
                 "ord": json!({"type":"integer"}), "methodKind": s("query · command · unknown"),
-                "method": s("запрос либо команда") }, "required": ["kind", "ord", "methodKind"] } }));
+                "method": s("запрос либо команда"),
+                "probe": s("подсадка: правка, после которой объявленный запрос ОБЯЗАН дать строки. Сервер применяет её в откатываемой точке и откатывает. Без неё пункт этим способом не закрывается: тавтология вроде `SELECT 1 WHERE false` проходит любой вердикт и отсеивается только подсадкой") },
+                "required": ["kind", "ord", "methodKind"] } }));
         tools.push(json!({ "name": "links-of", "description": "чем доказано и с чем связано: связи сущности по видам: проверки, истории, задачи, решения — то, что показывает панель раздела",
             "inputSchema": { "type": "object", "properties": { "kind": s("requirement · story · decision"), "id": s("имя") }, "required": ["kind", "id"] } }));
         tools.push(json!({ "name": "entity-confirm", "description": "перечитал переоткрытую запись — закрытие в силе: с доводом и автором; правка опоры снова её переоткроет",
@@ -2633,7 +2635,8 @@ impl Mcp {
                 let mk = args.get("methodKind").and_then(|v| v.as_str()).unwrap_or("unknown");
                 let method = args.get("method").and_then(|v| v.as_str()).unwrap_or("");
                 let drop = flag(args, "drop");
-                match crate::projector::set_method(&self.pool, p, crate::projector::Method { kind: kind_arg, id: id.unwrap_or(""), ord, method_kind: mk, method, declared_by: &self.author, drop }).await {
+                let probe = args.get("probe").and_then(|v| v.as_str()).unwrap_or("");
+                match crate::projector::set_method(&self.pool, p, crate::projector::Method { kind: kind_arg, id: id.unwrap_or(""), ord, method_kind: mk, method, declared_by: &self.author, probe, drop }).await {
                     // ОТКАЗ ОСТАЁТСЯ ОТКАЗОМ И В ОБОЛОЧКЕ. Успех с полем
                     // `status` уходит с кодом 0, и цикл на `set -e`,
                     // объявляющий полтораста способов несуществующим номерам,
