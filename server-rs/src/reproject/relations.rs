@@ -62,7 +62,21 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<usize, crate::
     // считается, и её отсутствие видно перечнем ниже.
     let terms = crate::scheme::Terms::load_at(client, project).await?;
     let check_res = check_ids(&terms);
-    let caveats: Vec<String> = terms.all("word.caveat").to_vec();
+    // СЛОВО ОТКАЗА СНИМАЕТ ИМЯ ТАК ЖЕ, КАК СЛОВО ОГОВОРКИ.
+    //
+    // `word.caveat` снимает снятое — «удалён», «отвергнут». `word.elsewhere`
+    // снимает переадресованное — «здесь не закрывается: закрывает `Y`». Для
+    // связи это одно и то же: строка называет имя, ничего им не обещая, и
+    // считать её объявлением значит объявить сделанным чужое.
+    //
+    // Датчик `written-tc` берёт ЛЮБУЮ строку комментария с ключом `TC-…`.
+    // Значит строка «сценарий `TC-X` здесь не закрывается» объявляла бы
+    // сценарий написанным — и гасила бы находку о нём. Замер 21.09: таких
+    // строк в наборе ноль, то есть сторож ничего не двигает сегодня и
+    // закрывает класс наперёд. Поставлен он потому, что правка, которая такую
+    // строку заводит, уже написана и лежит в очереди на слияние.
+    let mut caveats: Vec<String> = terms.all("word.caveat").to_vec();
+    caveats.extend(terms.all("word.elsewhere").iter().cloned());
     let missing = terms.missing(&[
         "field.task-contract-ops", "field.red-parent", "field.red-checks",
         "section.proof", "word.not-a-subject", "path.crate-home",
