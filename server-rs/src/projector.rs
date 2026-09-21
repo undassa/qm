@@ -4073,9 +4073,9 @@ pub async fn rebuild(pool: &Pool, project: &str) -> Result<Value, crate::db::Fai
             // пункт, у которого объявлен способ, перестаёт быть «пунктом без
             // названной проверки» — проверять его есть чем.
             "SELECT d.entity_name, l.n::int, l.line
-               FROM project_documents d,
-                    LATERAL (SELECT line, row_number() OVER () AS n
-                               FROM regexp_split_to_table(d.content, E'\n') line) l
+               FROM project_documents d
+               CROSS JOIN LATERAL regexp_split_to_table(d.content, E'\n')
+                    WITH ORDINALITY AS l(line, n)
               WHERE d.project_id = $1 AND d.entity_kind = 'task'
                 AND left(lower(l.line), 5) IN ('- [ ]', '- [x]')",
             &[&project],
@@ -4247,10 +4247,19 @@ pub async fn rebuild(pool: &Pool, project: &str) -> Result<Value, crate::db::Fai
                -- могут по устройству. Вида у доски набор не объявляет; завести
                -- его значило бы узаконить полторы сотни пунктов, которые никто
                -- никогда не отметит.
+               -- НОМЕР СТРОКИ — `WITH ORDINALITY`, А НЕ `row_number()`.
+               --
+               -- Первое обещано стандартом: нумерует в том порядке, в каком
+               -- функция отдала строки. Второе без `ORDER BY` определено над
+               -- неуказанным порядком и совпадает лишь потому, что так сегодня
+               -- устроен план. Таблиц, нумерующих ОДИН предмет, две, и
+               -- наполняются они двумя отдельными запросами: разойдись планы —
+               -- разойдётся и нумерация, то есть ровно то, ради устранения
+               -- чего номер и сводили к одному.
                FROM (SELECT d.entity_kind, d.entity_name, l.line, l.n
-                       FROM project_documents d,
-                            LATERAL (SELECT line, row_number() OVER () AS n
-                                       FROM regexp_split_to_table(d.content, E'\n') line) l
+                       FROM project_documents d
+                       CROSS JOIN LATERAL regexp_split_to_table(d.content, E'\n')
+                            WITH ORDINALITY AS l(line, n)
                       WHERE d.project_id = $1 AND l.line ~ '^\\s*[-*]\\s+\\[[ xX]\\]') x
                JOIN LATERAL (
                      SELECT 'task' AS kind, t.id FROM project_plan_tasks t
