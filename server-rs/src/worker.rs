@@ -429,7 +429,11 @@ impl Worker {
         let recorded = rows.len() as i64;
         crate::projector::record_test_runs(&self.pool, &bundle.project, &head, &rows, "mh-runner")
             .await
-            .map_err(|e| format!("итог прогона не записан: {e:?}"))?;
+            // Отказ здесь значит ЛИБО незаписанный прогон, ЛИБО записанный без
+            // отметки «пересчитать»; различать их сообщением было бы враньём в
+            // одну из двух сторон. Названо обоими: у обоих исходов одно
+            // следствие — пульт показывает прежний замер.
+            .map_err(|e| format!("прогон не дошёл до пульта (запись или отметка): {e:?}"))?;
         let mut v = self.test_status(&bundle.project).await;
         v["recorded"] = json!(recorded);
         v["commit"] = json!(head);
