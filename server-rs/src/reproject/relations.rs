@@ -21,7 +21,7 @@ static CHECK_ID: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"TC-[A-Z]+-[0-9]+[a-z]?").expect("образец проверки"));
 
 /// Образцы имени проверки этого набора: объявленные либо один зашитый.
-fn check_ids(terms: &crate::scheme::Terms) -> Vec<Regex> {
+pub(crate) fn check_ids(terms: &crate::scheme::Terms) -> Vec<Regex> {
     let own: Vec<Regex> = terms
         .all("id.check")
         .iter()

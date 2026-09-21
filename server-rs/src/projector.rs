@@ -3820,6 +3820,45 @@ pub async fn rebuild_before(pool: &Pool, project: &str) -> Result<Value, crate::
 
 
 
+/// Образцы имени, привязанные к концам токена.
+fn shaped_as(shapes: &[regex::Regex]) -> Vec<regex::Regex> {
+    shapes.iter().filter_map(|re| regex::Regex::new(&format!("^(?:{})$", re.as_str())).ok()).collect()
+}
+
+/// Имя проверки, названное пунктом приёмки, — или пусто, если пункт её не
+/// называет.
+///
+/// ДВА ОСНОВАНИЯ, И ОБА — ДАННЫЕ НАБОРА. Токен в обратных кавычках считается
+/// именем проверки, если он целиком совпадает с объявленным образцом
+/// `id.check` — проверка может быть ещё не написана, на этом стоит красная
+/// фаза, — ЛИБО если функция ровно с таким именем в наборе уже написана.
+///
+/// Второе основание нужно потому, что часть проверок названа свободно:
+/// `undo_redo_frame`, `the_door_is_the_only_place_a_process_is_born`. Образец
+/// «любое слово из подчёркиваний» их бы накрыл — и вместе с ними бенч
+/// `incremental_parse` и тип `IndexProgress`, а пункт про ненаписанную
+/// проверку начал бы требовать написать бенч.
+///
+/// Зачёркнутое имя не считается: `~~`имя`~~` помянуто как убранное. Так же
+/// читает строку `relations::checks_in`, и расходиться этим двум нельзя.
+/// `shapes` — образцы, УЖЕ ПРИВЯЗАННЫЕ К КОНЦАМ (`shaped_as`): образец
+/// `id.check` объявлен для поиска имени в строке, а здесь вопрос другой —
+/// «этот токен целиком и есть имя». Непривязанный `TC-[A-Z]+-[0-9]+` совпал бы
+/// внутри `TC-INDEX-01-черновик`.
+fn check_named(
+    line: &str, shapes: &[regex::Regex], written: &std::collections::HashSet<String>,
+) -> String {
+    if line.contains("~~") {
+        return String::new();
+    }
+    line.split('`')
+        .skip(1)
+        .step_by(2)
+        .find(|tok| written.contains(*tok) || shapes.iter().any(|re| re.is_match(tok)))
+        .unwrap_or("")
+        .to_owned()
+}
+
 /// Закрытия без коммита в подаче. Закрытие опознаётся коммитом: без него суд
 /// порядка не отличит новое закрытие от прежнего, и такая подача не принимается.
 pub(crate) fn closings_without_commit(states: &[(String, String, String, i64)]) -> Vec<String> {
@@ -3986,23 +4025,58 @@ pub async fn rebuild(pool: &Pool, project: &str) -> Result<Value, crate::db::Fai
     // как всё выведенное: снос и вставка вплотную, в той же транзакции.
     // Строка на ПУНКТ, не на блок: список живёт одним блоком из нескольких
     // строк, и поснострочность — сама форма чек-листа.
+    //
+    // ИМЯ ПРОВЕРКИ СЧИТАЕТСЯ ЗДЕСЬ, А НЕ РЕГУЛЯРКОЙ В ЗАПРОСЕ.
+    //
+    // Прежде за имя бралcя первый токен строки в обратных кавычках. Замер
+    // 2026-09-21: из 963 выведенных имён 82 — `just gate`, 13 — `just test`,
+    // остальное `#[ignore]`, `PROTOCOL_VERSION`, `ADR-0109`, пути файлов.
+    // Пункт `corpus · ready-items-checked` требовал написать проверку с таким
+    // именем и держал 487 находок, почти все — о несуществующем предмете.
+    //
+    // Образцы `id.check` объявлены набором на языке Rust-регулярок — на нём их
+    // проверяет дверь `scheme-term-set`, и `\b` в Postgres значит не границу
+    // слова, а забой. Поэтому разбор идёт тем же движком, которым объявление
+    // принималось, а не переводом образца в чужой диалект.
+    let terms = crate::scheme::Terms::load_at(&tx, project).await?;
+    let shapes = shaped_as(&crate::reproject::relations::check_ids(&terms));
+    let written: std::collections::HashSet<String> = tx
+        .query("SELECT name FROM code_fact WHERE project_id = $1 AND kind = 'test-name'", &[&project])
+        .await?
+        .iter()
+        .map(|r| r.get::<_, String>(0))
+        .collect();
+    let lines = tx
+        .query(
+            "SELECT d.entity_name, (b.ord * 1000 + x.n)::int, x.line
+               FROM project_documents d
+               JOIN project_document_blocks b
+                 ON b.project_id = d.project_id AND b.entity_kind = d.entity_kind
+                    AND b.entity_name = d.entity_name
+               CROSS JOIN LATERAL regexp_split_to_table(b.raw, '\\n') WITH ORDINALITY AS x(line, n)
+              WHERE d.project_id = $1 AND d.entity_kind = 'task'
+                AND left(lower(x.line), 5) IN ('- [ ]', '- [x]')",
+            &[&project],
+        )
+        .await?;
+    let (mut tasks, mut ords, mut checks, mut texts, mut dones) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for r in &lines {
+        let line: String = r.get(2);
+        tasks.push(r.get::<_, String>(0));
+        ords.push(r.get::<_, i32>(1));
+        checks.push(check_named(&line, &shapes, &written));
+        texts.push(line.trim().chars().take(400).collect::<String>());
+        dones.push(line.trim_start().to_lowercase().starts_with("- [x]"));
+    }
     tx.execute("DELETE FROM task_ready_item WHERE project_id = $1", &[&project]).await?;
     tx.execute(
         "INSERT INTO task_ready_item (project_id, task_id, ord, check_id, text, done, origin)
-         SELECT $1, d.entity_name, b.ord * 1000 + x.n,
-                coalesce(substring(x.line from '`([^`]+)`'), ''),
-                left(btrim(x.line), 400),
-                left(lower(x.line), 5) = '- [x]',
-                'выведено'
-           FROM project_documents d
-           JOIN project_document_blocks b
-             ON b.project_id = d.project_id AND b.entity_kind = d.entity_kind
-                AND b.entity_name = d.entity_name
-           CROSS JOIN LATERAL regexp_split_to_table(b.raw, '\\n') WITH ORDINALITY AS x(line, n)
-          WHERE d.project_id = $1 AND d.entity_kind = 'task'
-            AND left(lower(x.line), 5) IN ('- [ ]', '- [x]')
+         SELECT $1, u.task, u.ord, u.check_id, u.text, u.done, 'выведено'
+           FROM unnest($2::text[], $3::int4[], $4::text[], $5::text[], $6::bool[])
+                AS u(task, ord, check_id, text, done)
          ON CONFLICT DO NOTHING",
-        &[&project],
+        &[&project, &tasks, &ords, &checks, &texts, &dones],
     )
     .await?;
 
@@ -14606,5 +14680,50 @@ mod automaton_rules {
         assert!(automaton_advance("нет-такого-шага", 0, 0, "GO", "").is_err());
         assert!(automaton_advance("closing", 0, 0, "GO", "").is_err());
         assert!(automaton_advance("plan-review", 0, 0, "NEEDS FIX", "").is_err());
+    }
+}
+
+#[cfg(test)]
+mod ready_item_names {
+    use super::{check_named, shaped_as};
+    use std::collections::HashSet;
+
+    fn ade() -> (Vec<regex::Regex>, HashSet<String>) {
+        // Образцы — дословно из схемы `tot-ade`, роль `id.check`.
+        let shapes = shaped_as(
+            &["TC-[A-Z]+-[0-9]+[a-z]?", r"\b(?:fr|nfr|ui)_[0-9]+[a-z]?_[a-z0-9_]+\b", r"\bpage_[0-9]+_[a-z0-9_]+\b"]
+                .iter()
+                .map(|p| regex::Regex::new(p).expect("образец разбирается"))
+                .collect::<Vec<_>>(),
+        );
+        (shapes, ["undo_redo_frame".to_owned()].into_iter().collect())
+    }
+
+    /// Пункт приёмки называет проверку — либо образцом, либо тем, что она
+    /// написана. Всё прочее в кавычках проверкой не является: до 21.09 первый
+    /// токен в кавычках брался за имя, и `corpus · ready-items-checked`
+    /// требовал написать проверку `just gate` — восемьдесят два раза.
+    #[test]
+    fn a_ready_item_names_a_check_or_nothing() {
+        let (shapes, written) = ade();
+        let name = |line: &str| check_named(line, &shapes, &written);
+
+        assert_eq!(name("- [ ] `fr_01_rebuild_is_byte_identical`: пересборка побайтово та же"),
+                   "fr_01_rebuild_is_byte_identical");
+        assert_eq!(name("- [ ] **индексная половина** `TC-INDEX-01` проходит"), "TC-INDEX-01");
+        assert_eq!(name("- [x] `undo_redo_frame` — имя свободное, но функция написана"), "undo_redo_frame");
+
+        assert_eq!(name("- [ ] `just gate` зелён"), "", "команда — не проверка");
+        assert_eq!(name("- [ ] бенч `incremental_parse` укладывается в 200 мс"), "", "бенч — не проверка");
+        assert_eq!(name("- [ ] `#[ignore]` не встречается в `crates/tot-page/src/lib.rs`"), "", "атрибут и путь — не проверка");
+        assert_eq!(name("- [ ] версия поднята: `PROTOCOL_VERSION` = 17"), "", "константа — не проверка");
+
+        // Кавычек несколько — берётся первая, которая проверка, а не первая вообще.
+        assert_eq!(name("- [ ] пуст вывод `rg -n 'Заглушка' crates`, и `page_11_rail_lists_top_dirs` зелена"),
+                   "page_11_rail_lists_top_dirs");
+        // Снятое имя не считается — так же читает строку `relations::checks_in`.
+        assert_eq!(name("- [ ] ~~`fr_01_rebuild_is_byte_identical`~~ снята"), "");
+        // Привязка к концам: имя внутри более длинного токена — не имя.
+        assert_eq!(name("- [ ] `TC-INDEX-01-черновик` лежит рядом"), "");
     }
 }
