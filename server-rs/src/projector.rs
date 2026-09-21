@@ -673,7 +673,7 @@ CREATE TABLE IF NOT EXISTS harness_process_step (
   -- набора приходит только предмет. `checks-green` — первый такой род: список
   -- имён проверок, которые обязаны быть зелены на последнем чистом прогоне
   -- ствола.
-  method_kind text NOT NULL CHECK (method_kind IN ('query','command','checks-green','unknown')),
+  method_kind text NOT NULL CHECK (method_kind IN ('query','command','unknown')),
   method text NOT NULL DEFAULT '',
   -- Когда ступень вообще в игре. Пусто — всегда. Условная ступень объявляется,
   -- а не подразумевается: пропуск обязан быть виден с причиной.
@@ -746,9 +746,21 @@ CREATE TABLE IF NOT EXISTS readiness_item (
 -- переживать пересчёт обязан.
 CREATE TABLE IF NOT EXISTS readiness_method (
   project_id text NOT NULL, owner_kind text NOT NULL, owner_id text NOT NULL, ord integer NOT NULL,
-  method_kind text NOT NULL CHECK (method_kind IN ('query','command','unknown')),
+  -- РОД `query` — СВОБОДНЫЙ SQL ОТ НАБОРА — ПУНКТАМ ПРИЁМКИ ОТОЗВАН.
+  --
+  -- Подсадка рядом с ним доказывала согласованность пары «запрос плюс
+  -- подсадка» и никогда — относимость к пункту: запрос, ложный в сессии
+  -- замера и истинный под `SET application_name`, закрывал ЛЮБОЙ пункт, не
+  -- измеряя ничего. Класс дыры — «условие, ложное в сессии замера».
+  --
+  -- Вместо языка — словарь. `checks-green` несёт СПИСОК ИМЁН проверок;
+  -- предикат написан в исполнителе и проходит ревью.
+  method_kind text NOT NULL CHECK (method_kind IN ('query','command','checks-green','unknown')),
   method text NOT NULL DEFAULT '',
   declared_by text NOT NULL DEFAULT '',
+  -- Вердикт заявления в последнем круге замера гейта.
+  verdict text NOT NULL DEFAULT '',
+  verdict_at bigint NOT NULL DEFAULT 0,
   -- Вердикт заявления: что оно показало в последнем круге замера гейта.
   -- Считает его один исполнитель — тот же, что у двери `readiness`.
   verdict text NOT NULL DEFAULT '',
@@ -2841,6 +2853,11 @@ $ф$ LANGUAGE sql STABLE;
 UPDATE kind_layout SET spec = spec - 'at' - 'under' - 'not-under' - 'file'
  WHERE spec ?| array['at', 'under', 'not-under', 'file'];
 ALTER TABLE readiness_method ADD COLUMN IF NOT EXISTS item_text text NOT NULL DEFAULT '';
+ALTER TABLE readiness_method ADD COLUMN IF NOT EXISTS verdict text NOT NULL DEFAULT '';
+ALTER TABLE readiness_method ADD COLUMN IF NOT EXISTS verdict_at bigint NOT NULL DEFAULT 0;
+ALTER TABLE readiness_method DROP CONSTRAINT IF EXISTS readiness_method_method_kind_check;
+ALTER TABLE readiness_method ADD CONSTRAINT readiness_method_method_kind_check
+  CHECK (method_kind IN ('query','command','checks-green','unknown'));
 ALTER TABLE scheme_term ADD COLUMN IF NOT EXISTS project_id text NOT NULL DEFAULT '';
 ALTER TABLE scheme_term DROP CONSTRAINT IF EXISTS scheme_term_pkey;
 ALTER TABLE scheme_term ADD PRIMARY KEY (project_id, role, value);
