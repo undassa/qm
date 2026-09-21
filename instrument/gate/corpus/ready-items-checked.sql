@@ -4,6 +4,12 @@ WITH прогон AS (
   SELECT r.check_name, bool_or(r.verdict = 'passed') AS зелена
     FROM test_run r, прогон п
    WHERE r.project_id = $1 AND NOT r.dirty AND r.at = п.at
+     -- ЗЕРКАЛО ОБЯЗАНО ПАДАТЬ, И ЭТО НЕ ПОЛОМКА. Граница та же, по которой
+     -- отсеивает `G3 · test-trunk-green`, — имя бинаря, а не связь через
+     -- задачу. Замер 21.09: единственная находка ветки «упала на стволе»,
+     -- `M2-T3 · s10_ac_1_finding_reaches_its_delta_in_three_transitions`,
+     -- жила в `mirror_finding_to_delta.rs` и падала по построению.
+     AND r.ran_in NOT LIKE 'mirror\_%'
    GROUP BY r.check_name)
 -- ИМЯ ПРОВЕРКИ ВЫВОДИТСЯ ИЗ ДАТЧИКА, И БЕЗ НЕГО ЭТО «НЕИЗВЕСТНО».
 --
@@ -56,6 +62,7 @@ SELECT t.id || ' — проверка пункта приёмки упала н�
   JOIN ответ о ON о.check_name = r.check_id
  WHERE t.project_id = $1 AND t.kind = 'dev' AND t.state = 'closed' AND NOT r.done
    AND r.check_id <> '' AND NOT о.зелена
+   -- Зеркала в `ответ` не входят вовсе — см. довод там.
 UNION ALL
 -- Прогона нет вовсе — это «неизвестно», а не «сошлось»: пункт говорит об этом
 -- одной строкой, а не молчит по каждому пункту приёмки набора.
