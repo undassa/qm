@@ -359,10 +359,10 @@ impl Mcp {
             "inputSchema": { "type": "object", "properties": { "process": s("имя процесса") } } }));
         tools.push(json!({ "name": "progress", "description": "плитки прогресса тремя числами: сделано · открыто · не отвечается",
             "inputSchema": { "type": "object", "properties": {} } }));
-        tools.push(json!({ "name": "method-set", "description": "объявить способ проверки пункта готовности: query считает сервер, command выполняет харнес",
+        tools.push(json!({ "name": "method-set", "description": "объявить, чем судится пункт готовности. `checks-green`: в `method` — имена проверок через пробел, и пункт закрывается, когда все они зелены на последнем чистом прогоне ствола. Имя, которого в прогоне нет, даёт красное наравне с упавшим",
             "inputSchema": { "type": "object", "properties": { "drop": json!({"type":"boolean","description":"снять объявленное этой же дверью"}),
                 "kind": s("вид владельца"), "id": s("имя владельца; у одиночки пусто"),
-                "ord": json!({"type":"integer"}), "methodKind": s("query · command · unknown"),
+                "ord": json!({"type":"integer"}), "methodKind": s("checks-green — список имён проверок, зелёных на последнем чистом прогоне ствола; command — выполняет харнес; query — только пунктам гейта, пунктам приёмки отозван"),
                 "method": s("запрос либо команда") }, "required": ["kind", "ord", "methodKind"] } }));
         tools.push(json!({ "name": "links-of", "description": "чем доказано и с чем связано: связи сущности по видам: проверки, истории, задачи, решения — то, что показывает панель раздела",
             "inputSchema": { "type": "object", "properties": { "kind": s("requirement · story · decision"), "id": s("имя") }, "required": ["kind", "id"] } }));

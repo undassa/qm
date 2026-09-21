@@ -55,6 +55,30 @@ WITH прогон AS (
                   FROM scheme($1) WHERE role = 'id.task')
             || ')(?![A-Za-z0-9_-])'))[1] AS кому
     FROM переадресован п) я WHERE я.кому IS NOT NULL),
+-- ЗАЯВЛЕНИЕ, ПРЕДЪЯВИВШЕЕ ВЕРДИКТ. Только вид `checks-green`, и это граница, а
+-- не выборка по вкусу.
+--
+-- Род `query` — свободный SQL от набора — для пунктов приёмки отозван.
+-- Подсадка рядом с ним доказывала согласованность пары «запрос плюс
+-- подсадка» и никогда — относимость к пункту: запрос, ложный в сессии замера
+-- и истинный под `SET application_name`, закрывал ЛЮБОЙ пункт навсегда, не
+-- измеряя ничего. Класс дыры — «условие, ложное в сессии замера», и
+-- перечислять его формы бесполезно.
+--
+-- `checks-green` устроен иначе: из набора приходит СПИСОК ИМЁН, предикат
+-- написан в исполнителе и проходит ревью. Имя, которого в прогоне нет, даёт
+-- красное наравне с упавшим — значит заявление само проверяет, что называет
+-- живую проверку.
+--
+-- Берётся только `passed`. `unknown` — заявление, которое НЕ ПОСЧИТАЛОСЬ, и
+-- закрывать им пункт значило бы повторить ровно то, что три ветки ниже и
+-- осуждают: «написанная и никогда не запущенная проверка закрывала пункт так
+-- же, как зелёная». Оно остаётся в честной куче «судить нечем».
+заявление AS (
+  SELECT m.owner_id AS task_id, m.ord
+    FROM readiness_method m
+   WHERE m.project_id = $1 AND m.owner_kind = 'task'
+     AND m.method_kind = 'checks-green' AND m.verdict = 'passed'),
 ответ AS (
   SELECT r.check_name, bool_or(r.verdict = 'passed') AS зелена
     FROM test_run r, прогон п
@@ -115,6 +139,28 @@ SELECT t.id || ' — закрыта, а ' || count(*) || ' из ' || (
        || ' — `mh call ready task=' || t.id || '`'
   FROM project_plan_tasks t
   JOIN task_ready_item r ON r.project_id = t.project_id AND r.task_id = t.id
+ WHERE t.project_id = $1 AND fact_fresh($1, 'test-name')
+   AND t.kind = 'dev' AND t.state = 'closed' AND NOT r.done AND r.check_id = ''
+   -- Пункт, чьё заявление посчитано и прошло, судить ЕСТЬ ЧЕМ: он и судится.
+   -- Не прошедшее заявление пункт отсюда не убирает — его называет ветка ниже
+   -- своими словами, а не этим «не называет проверки».
+   AND NOT EXISTS (SELECT 1 FROM заявление з
+                    WHERE з.task_id = r.task_id AND з.ord = r.ord)
+ GROUP BY t.project_id, t.id
+UNION ALL
+-- ЗАЯВИЛ И НЕ ПРОШЁЛ — НАХОДКА, И ЭТО ПЛАТА ЗА ПОСЛАБЛЕНИЕ ВЫШЕ.
+--
+-- Строка НА ЗАДАЧУ, как и ветка выше: десять не прошедших заявлений одной
+-- задачи — это по-прежнему один предмет, и десять строк о нём читать никто не
+-- станет. Довод тот же, что записан двумя ветками выше.
+SELECT t.id || ' — заявлений «проверки зелены» не прошло: ' || count(*)
+       || ' — `mh call readiness kind=task id=' || t.id || '`'
+  FROM project_plan_tasks t
+  JOIN task_ready_item r ON r.project_id = t.project_id AND r.task_id = t.id
+  JOIN readiness_method m
+    ON m.project_id = t.project_id AND m.owner_kind = 'task'
+   AND m.owner_id = r.task_id AND m.ord = r.ord
+   AND m.method_kind = 'checks-green' AND m.verdict = 'failed'
  WHERE t.project_id = $1 AND fact_fresh($1, 'test-name')
    AND t.kind = 'dev' AND t.state = 'closed' AND NOT r.done AND r.check_id = ''
  GROUP BY t.project_id, t.id
