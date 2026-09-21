@@ -625,7 +625,14 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
                      стёрла бы состояния, выведенные прежде, — это отказ, а не ноль."
                 ));
             }
-            let (out, _) = door.call("task-state-push", &json!({ "states": states }))?;
+            // ЧЕМ СНЯТ ФАКТ — коммитом и чистотой дерева, как у всякой другой
+            // подачи. Без них `fact_fresh` отвечает «снят БЕЗ КОММИТА», и
+            // `G4 · task-state-matches-history` держит находку, которую набору
+            // не снять: писал-то харнес.
+            let (out, _) = door.call(
+                "task-state-push",
+                &json!({ "states": states, "commit": head, "dirty": dirty }),
+            )?;
             done.push(json!({ "fact": fact, "files": 0, "found": states.len(),
                               "was": out["was"], "now": out["now"] }));
             continue;

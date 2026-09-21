@@ -316,6 +316,8 @@ impl Mcp {
             "inputSchema": { "type": "object", "properties": { "deferProjection": json!({"type":"boolean","description":"не пересобирать проекции сейчас; позвать `reproject` после серии правок"}), "kind": s("вид"), "id": s("имя") }, "required": ["kind"] } }));
         tools.push(json!({ "name": "task-state-push", "description": "принять состояния задач, выведенные харнесом из закрывающих трейлеров; подача полная. `at` — время коммита в мс: без него харнес знает лишь «когда увидел», а этим порядок не судится",
             "inputSchema": { "type": "object", "properties": {
+                "commit": s("коммит дерева, с которого сняты состояния: без него подача читается как «неизвестно»"),
+                "dirty": json!({"type":"boolean","description":"дерево было грязным: состояния выведены не из ствола"}),
                 "states": { "type": "array", "description": "[{id, state, commit, at}]",
                             "items": { "type": "object", "properties": {
                               "id": s("имя задачи"), "state": s("not_started · claimed · closed"), "commit": s("закрывающий коммит") },
@@ -1195,7 +1197,12 @@ impl Mcp {
                         "text": "подача пуста: полная подача без задач стёрла бы все состояния, и это надо сказать явно" }],
                         "isError": true });
                 }
-                match crate::projector::push_task_state(&self.pool, p, &states, now).await {
+                let commit = args.get("commit").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+                match crate::projector::push_task_state(
+                    &self.pool, p, &states, now, &commit, flag(args, "dirty"),
+                )
+                .await
+                {
                     Ok(v) if v.get("status").is_some() => json!({ "content": [{ "type": "text",
                         "text": serde_json::to_string_pretty(&v).unwrap_or_default() }], "isError": true }),
                     Ok(mut v) => {

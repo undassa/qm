@@ -5603,6 +5603,8 @@ pub(crate) async fn push_task_state(
     project: &str,
     states: &[(String, String, String, i64)],
     seen_at: i64,
+    commit: &str,
+    dirty: bool,
 ) -> Result<Value, crate::db::Fail> {
     let bare = closings_without_commit(states);
     if !bare.is_empty() {
@@ -5654,10 +5656,23 @@ pub(crate) async fn push_task_state(
     // месяц» было нечем. Всякий вывод о состоянии задач при этом выглядел
     // свежим. Отметка о проходе — то же лекарство, что у сверки порождённого.
     tx.execute(
-        "INSERT INTO fact_push (project_id, fact, at, actor, rows) VALUES ($1,$2,$3,$4,$5)
+        // ЧЕМ СНЯТ ФАКТ — КОММИТОМ И ЧИСТОТОЙ ДЕРЕВА, как у всякой другой подачи.
+        //
+        // Эта подача их не писала, и `fact_fresh` честно отвечал «снят БЕЗ
+        // КОММИТА»: с какого дерева выведены состояния — неизвестно, а
+        // неизвестное не «сходится». Пункт `G4 ·
+        // task-state-matches-history` держал одну находку об этом, и снять её
+        // работой набора было нельзя — писал-то харнес.
+        //
+        // Замер 21.09: подача шла без коммита с самого заведения. Заявка 39
+        // назвала это у четырёх подач из пяти; эта — последняя.
+        "INSERT INTO fact_push (project_id, fact, at, actor, rows, commit_sha, dirty, reads)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$5)
          ON CONFLICT (project_id, fact) DO UPDATE SET at = EXCLUDED.at,
-           actor = EXCLUDED.actor, rows = EXCLUDED.rows",
-        &[&project, &"task-state", &seen_at, &"харнес", &(states.len() as i32)],
+           actor = EXCLUDED.actor, rows = EXCLUDED.rows,
+           commit_sha = EXCLUDED.commit_sha, dirty = EXCLUDED.dirty, reads = EXCLUDED.reads",
+        &[&project, &"task-state", &seen_at, &"харнес", &(states.len() as i32),
+          &commit.to_owned(), &dirty],
     )
     .await?;
     tx.commit().await?;
