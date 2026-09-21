@@ -1,5 +1,35 @@
 WITH прогон AS (
   SELECT max(at) AS at FROM test_run WHERE project_id = $1 AND NOT dirty),
+-- ПЕРЕАДРЕСОВАННЫЙ ПУНКТ НЕ ОБЕЩАЕТ, А ОТКАЗЫВАЕТ.
+--
+-- «Сценарий `TC-SANDBOX-02` здесь не закрывается: совершённое необратимое
+-- перечисляет в `receipt` `M3-T13`» — это не обещание доказать сценарий, а
+-- отказ с адресом. Правило видело в строке имя сценария и требовало
+-- доказательства; предмет строки — ровно противоположное. Пять находок из
+-- одиннадцати были такими.
+--
+-- Слово отказа объявлено набором (`word.elsewhere`), а не угадано здесь:
+-- «здесь не закрыва», «пройденными не отмеча». Глагол «закрывает» в роль не
+-- положен намеренно — он даёт двести попаданий по набору и стоит в
+-- положительном случае тоже; адресата вернее брать образцом `id.task`.
+переадресован AS (
+  SELECT r.task_id, r.ord, r.check_id, r.text
+    FROM task_ready_item r
+   WHERE r.project_id = $1
+     AND EXISTS (SELECT 1 FROM scheme($1) w
+                  WHERE w.role = 'word.elsewhere'
+                    AND lower(r.text) LIKE '%' || lower(w.value) || '%')),
+-- Адресат — имя задачи В ТОМ ЖЕ ПУНКТЕ. Пункт собирается из перенесённых
+-- строк проекцией: построчный счёт объявил бы безадресными десять пунктов из
+-- тридцати девяти, у которых адресат стоит во второй половине.
+адресат AS (
+  SELECT DISTINCT п.task_id, п.ord, п.check_id, п.text, m[1] AS кому
+    FROM переадресован п
+    CROSS JOIN LATERAL regexp_matches(п.text,
+         '(?:^|[^A-Za-z0-9_-])('
+         || (SELECT string_agg(regexp_replace(value, '^\^|\$$', '', 'g'), '|')
+               FROM scheme($1) WHERE role = 'id.task')
+         || ')(?![A-Za-z0-9_-])', 'g') m),
 ответ AS (
   SELECT r.check_name, bool_or(r.verdict = 'passed') AS зелена
     FROM test_run r, прогон п
@@ -68,6 +98,38 @@ SELECT t.id || ' — проверка пункта приёмки не напи�
                       AND c.kind = 'test-name' AND c.name = r.check_id)
    AND NOT EXISTS (SELECT 1 FROM project_written_check w
                     WHERE w.project_id = t.project_id AND w.check_id = r.check_id)
+   -- Переадресованный пункт судится своей веткой ниже, а не этой.
+   AND NOT EXISTS (SELECT 1 FROM переадресован п
+                    WHERE п.task_id = r.task_id AND п.ord = r.ord)
+UNION ALL
+-- ПЕРЕАДРЕСАЦИЯ ПРОВЕРЯЕМА, И ПРОВЕРЯЕТСЯ СТРОЖЕ ПРЕЖНЕГО.
+--
+-- Пункт сказал «закрывает `Y`». Значит `Y` обязана существовать, а если `Y`
+-- уже закрыта — предмет обязан быть доказан: закрытая задача, которая
+-- названного не взяла, и есть долг, который прежде прятался за требованием
+-- невозможного.
+--
+-- ПОТОЛОК НАЗВАН: пункт, переадресованный БЕЗ адресата, здесь не судится.
+-- Таких сегодня три, и у всех трёх довод в самой строке — «на вехе нет»,
+-- «ждёт ответа владельца», «предмет — треть сценария». Отличить довод от
+-- молчания прибору нечем, и требовать адресата от всех значило бы завести
+-- три находки на исправном наборе.
+SELECT а.task_id || ' — пункт переадресован к ' || а.кому || ', а такой задачи в наборе нет: '
+       || left(а.text, 160)
+  FROM адресат а
+ WHERE NOT EXISTS (SELECT 1 FROM project_plan_tasks x
+                    WHERE x.project_id = $1 AND lower(x.id) = lower(а.кому))
+UNION ALL
+SELECT а.task_id || ' — переадресован к ' || а.кому || ', та закрыта, а ' || а.check_id
+       || ' так и не доказан'
+  FROM адресат а
+  JOIN project_plan_tasks y ON y.project_id = $1 AND lower(y.id) = lower(а.кому)
+ WHERE fact_fresh($1, 'written-tc')
+   AND y.state = 'closed' AND а.check_id <> ''
+   AND NOT EXISTS (SELECT 1 FROM project_written_check w
+                    WHERE w.project_id = $1 AND w.check_id = а.check_id)
+   AND NOT EXISTS (SELECT 1 FROM code_fact c
+                    WHERE c.project_id = $1 AND c.kind = 'test-name' AND c.name = а.check_id)
 UNION ALL
 -- ПРОВЕРКА НАПИСАНА — ЕЩЁ НЕ ЗНАЧИТ «ПРОШЛА».
 --

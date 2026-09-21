@@ -3820,6 +3820,28 @@ pub async fn rebuild_before(pool: &Pool, project: &str) -> Result<Value, crate::
 
 
 
+/// Продолжает ли строка предыдущий пункт списка.
+///
+/// Продолжение — это то, что НЕ начинает ничего своего: не пустая строка, не
+/// новый пункт списка, не заголовок, не строка таблицы, не цитата, не забор
+/// кода. Перечень закрытый и короткий нарочно: всякое сомнительное считается
+/// началом нового, потому что склеить чужое хуже, чем потерять хвост, —
+/// склеенное приписывает пункту слова, которых автор в нём не писал.
+fn continues_an_item(line: &str) -> bool {
+    let t = line.trim_start();
+    if t.is_empty() {
+        return false;
+    }
+    let starts_a_list = t.starts_with("- ")
+        || t.starts_with("* ")
+        || t.starts_with("+ ")
+        || t.chars().next().is_some_and(|c| c.is_ascii_digit())
+            && t.split_once(['.', ')']).is_some_and(|(n, rest)| {
+                n.chars().all(|c| c.is_ascii_digit()) && rest.starts_with(' ')
+            });
+    !(starts_a_list || t.starts_with('#') || t.starts_with('|') || t.starts_with('>') || t.starts_with("```"))
+}
+
 /// Образцы имени, привязанные к концам токена.
 fn shaped_as(shapes: &[regex::Regex]) -> Vec<regex::Regex> {
     shapes.iter().filter_map(|re| regex::Regex::new(&format!("^(?:{})$", re.as_str())).ok()).collect()
@@ -4072,24 +4094,48 @@ pub async fn rebuild(pool: &Pool, project: &str) -> Result<Value, crate::db::Fai
             // Один предмет — один номер. Отсюда же соединение двух таблиц:
             // пункт, у которого объявлен способ, перестаёт быть «пунктом без
             // названной проверки» — проверять его есть чем.
+            // СТРОКИ БЕРУТСЯ ВСЕ, ПОТОМУ ЧТО ПУНКТ ПЕРЕНОСИТСЯ.
+            //
+            // Пункт чек-листа — не строка: автор переносит длинный пункт, и
+            // продолжение уходит на следующую строку. Отбирая здесь только
+            // строки, начинающиеся с `- [ ]`, проекция теряла хвост — а имя
+            // проверки, адресат «закрывает `M5-T21`» и половина довода живут
+            // как раз в хвосте. Набор померил это у себя: из тридцати девяти
+            // пунктов десять несли адресата во второй половине, и построчный
+            // счёт объявил их безадресными.
+            //
+            // Поэтому сюда едет весь документ, а пункт собирается ниже.
             "SELECT d.entity_name, l.n::int, l.line
                FROM project_documents d
                CROSS JOIN LATERAL regexp_split_to_table(d.content, E'\n')
                     WITH ORDINALITY AS l(line, n)
               WHERE d.project_id = $1 AND d.entity_kind = 'task'
-                AND left(lower(l.line), 5) IN ('- [ ]', '- [x]')",
+              ORDER BY d.entity_name, l.n",
             &[&project],
         )
         .await?;
+    let rows: Vec<(String, i32, String)> =
+        lines.iter().map(|r| (r.get(0), r.get(1), r.get(2))).collect();
     let (mut tasks, mut ords, mut checks, mut texts, mut dones) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    for r in &lines {
-        let line: String = r.get(2);
-        tasks.push(r.get::<_, String>(0));
-        ords.push(r.get::<_, i32>(1));
-        checks.push(check_named(&line, &shapes, &written, &caveats));
-        texts.push(line.trim().chars().take(400).collect::<String>());
-        dones.push(line.trim_start().to_lowercase().starts_with("- [x]"));
+    for (i, (task, ord, line)) in rows.iter().enumerate() {
+        let head = line.to_lowercase();
+        if !(head.starts_with("- [ ]") || head.starts_with("- [x]")) {
+            continue;
+        }
+        let mut item = line.trim().to_owned();
+        for (next_task, _, next) in rows[i + 1..].iter() {
+            if next_task != task || !continues_an_item(next) {
+                break;
+            }
+            item.push(' ');
+            item.push_str(next.trim());
+        }
+        tasks.push(task.clone());
+        ords.push(*ord);
+        checks.push(check_named(&item, &shapes, &written, &caveats));
+        texts.push(item.chars().take(400).collect::<String>());
+        dones.push(head.starts_with("- [x]"));
     }
     tx.execute("DELETE FROM task_ready_item WHERE project_id = $1", &[&project]).await?;
     tx.execute(
@@ -14749,7 +14795,7 @@ mod automaton_rules {
 
 #[cfg(test)]
 mod ready_item_names {
-    use super::{check_named, shaped_as};
+    use super::{check_named, continues_an_item, shaped_as};
     use std::collections::HashSet;
 
     fn ade() -> (Vec<regex::Regex>, HashSet<String>) {
@@ -14800,5 +14846,23 @@ mod ready_item_names {
         assert_eq!(name("- [ ] `` пусто, а проверка `TC-INDEX-01`"), "TC-INDEX-01");
         // Привязка к концам: имя внутри более длинного токена — не имя.
         assert_eq!(name("- [ ] `TC-INDEX-01-черновик` лежит рядом"), "");
+    }
+
+    /// Пункт чек-листа собирается из перенесённых строк. Разбор по одной
+    /// строке терял хвост, а в хвосте живут имя проверки и адресат
+    /// «закрывает `M5-T21`»: набор померил у себя десять безадресных пунктов
+    /// из тридцати девяти, и все десять адресата несли — на второй строке.
+    #[test]
+    fn a_wrapped_item_continues_and_a_new_block_does_not() {
+        for tail in ["  просто хвост", "хвост без отступа", "  `page_11_rail` зелена"] {
+            assert!(continues_an_item(tail), "{tail:?} — продолжение пункта");
+        }
+        for own in ["", "   ", "- [ ] следующий пункт", "* другой список", "+ и этот",
+                    "1. нумерованный", "2) и такой", "## заголовок", "| ячейка |",
+                    "> цитата", "```rust"] {
+            assert!(!continues_an_item(own), "{own:?} начинает своё, а не продолжает");
+        }
+        // Число без разделителя списком не является: «200 мс укладывается» — хвост.
+        assert!(continues_an_item("200 мс укладывается в бюджет"));
     }
 }
