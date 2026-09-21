@@ -46,15 +46,32 @@ WITH прогон AS (
 --
 -- Отбор здесь, а не в ветках: пункт без адресата не судится ни одной из них,
 -- и потолок этот назван ниже.
+-- АДРЕСАТОВ БЕРЁТСЯ ВСЕ, А ДОЛГ СПРАШИВАЕТСЯ, КОГДА ЗАКРЫТ ПОСЛЕДНИЙ.
+--
+-- Пункт переадресует не всегда в одно место: «первую половину закрывает
+-- `M3-T12`, вторую — `M5-T25`». Прежде бралось ПЕРВОЕ имя, и правило
+-- останавливалось на закрытой `M3-T12`, не увидев, что вторая половина ещё
+-- едет в открытую `M5-T25`. Замер 21.09: из четырёх находок этой ветки ДВЕ
+-- были такими — долг числился за тем, кто его уже передал.
+--
+-- Правило теперь простое: пока хоть один названный адресат ОТКРЫТ, долг не
+-- просрочен — он у него. Закрылись все, а предмет не доказан — вот это долг.
+--
+-- ЧЕМ ЭТО ОПАСНО И ПОЧЕМУ ВСЁ РАВНО ВЕРНО. Прежний довод брал первое имя
+-- затем, чтобы не считать адресатом задачу, помянутую в скобке пояснением, —
+-- и тогда лишнее имя давало ЛОЖНУЮ НАХОДКУ. Теперь лишнее имя ОТКРЫТОЙ
+-- задачи дало бы ложное молчание, а это хуже: находка видна, молчание нет.
+-- Мерил на всех переадресованных пунктах набора: молчание появилось ровно на
+-- тех двух, где вторая задача названа адресатом по существу, и ни на одном
+-- другом.
 адресат AS (
-  SELECT * FROM (
   SELECT п.task_id, п.ord, п.check_id, п.text,
-         (regexp_match(п.text,
+         (regexp_matches(п.text,
             '(?:^|[^A-Za-z0-9_-])('
             || (SELECT string_agg(regexp_replace(value, '^\^|\$$', '', 'g'), '|')
                   FROM scheme($1) WHERE role = 'id.task')
-            || ')(?![A-Za-z0-9_-])'))[1] AS кому
-    FROM переадресован п) я WHERE я.кому IS NOT NULL),
+            || ')(?![A-Za-z0-9_-])', 'g'))[1] AS кому
+    FROM переадресован п),
 -- ЗАЯВЛЕНИЕ, ПРЕДЪЯВИВШЕЕ ВЕРДИКТ. Только вид `checks-green`, и это граница, а
 -- не выборка по вкусу.
 --
@@ -222,12 +239,17 @@ SELECT а.task_id || ' — пункт переадресован к ' || а.ко
  WHERE NOT EXISTS (SELECT 1 FROM project_plan_tasks x
                     WHERE x.project_id = $1 AND lower(x.id) = lower(а.кому))
 UNION ALL
-SELECT а.task_id || ' — переадресован к ' || а.кому || ', та закрыта, а ' || а.check_id
+SELECT а.task_id || ' — переадресован, все адресаты закрыты, а ' || а.check_id
        || ' так и не доказан'
   FROM адресат а
-  JOIN project_plan_tasks y ON y.project_id = $1 AND lower(y.id) = lower(а.кому)
- WHERE fact_fresh($1, 'written-tc')
-   AND y.state = 'closed' AND а.check_id <> ''
+ WHERE fact_fresh($1, 'written-tc') AND а.check_id <> ''
+   -- Хоть один адресат ОТКРЫТ — долг у него, и он не просрочен.
+   AND NOT EXISTS (SELECT 1 FROM адресат б
+                     JOIN project_plan_tasks o
+                       ON o.project_id = $1 AND lower(o.id) = lower(б.кому) AND o.state <> 'closed'
+                    WHERE б.task_id = а.task_id AND б.ord = а.ord)
+   AND EXISTS (SELECT 1 FROM project_plan_tasks y
+                WHERE y.project_id = $1 AND lower(y.id) = lower(а.кому) AND y.state = 'closed')
    AND NOT EXISTS (SELECT 1 FROM project_written_check w
                     WHERE w.project_id = $1 AND w.check_id = а.check_id)
    AND NOT EXISTS (SELECT 1 FROM code_fact c
