@@ -765,10 +765,6 @@ CREATE TABLE IF NOT EXISTS readiness_method (
   -- Вердикт заявления в последнем круге замера гейта.
   verdict text NOT NULL DEFAULT '',
   verdict_at bigint NOT NULL DEFAULT 0,
-  -- Вердикт заявления: что оно показало в последнем круге замера гейта.
-  -- Считает его один исполнитель — тот же, что у двери `readiness`.
-  verdict text NOT NULL DEFAULT '',
-  verdict_at bigint NOT NULL DEFAULT 0,
   -- ТЕКСТ ПУНКТА НА МИГ ОБЪЯВЛЕНИЯ — ЯКОРЬ, КОТОРОГО НЕ БЫЛО.
   --
   -- `ord` есть НОМЕР СТРОКИ в документе задачи. Значит всякая правка выше
