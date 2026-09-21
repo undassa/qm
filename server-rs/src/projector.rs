@@ -6319,10 +6319,25 @@ pub(crate) async fn push_preflight(
             )
             .await?;
     }
+    // ЧЕМ СНЯТ ФАКТ — той же вершиной, и по той же причине, что у сверки
+    // порождённого: `fact_fresh` требует коммита у любого факта, а разбор
+    // предполёта идёт по корпусу в базе и своего дерева не имеет. Без имени
+    // коммита подача числилась протухшей навсегда и держала ступень лестницы.
+    let head: String = tx
+        .query_one(
+            "SELECT coalesce(max(commit_sha), '') FROM test_run
+              WHERE project_id = $1 AND NOT dirty
+                AND at = (SELECT max(at) FROM test_run WHERE project_id = $1 AND NOT dirty)",
+            &[&project],
+        )
+        .await
+        .map(|r| r.get(0))
+        .unwrap_or_default();
     tx.execute(
-        "INSERT INTO fact_push (project_id, fact, at, actor, rows) VALUES ($1, 'preflight', $2, $3, $4)
-         ON CONFLICT (project_id, fact) DO UPDATE SET at = EXCLUDED.at, actor = EXCLUDED.actor, rows = EXCLUDED.rows",
-        &[&project, &now_ms(), &actor, &(written as i32)],
+        "INSERT INTO fact_push (project_id, fact, at, actor, rows, commit_sha, dirty) VALUES ($1, 'preflight', $2, $3, $4, $5, false)
+         ON CONFLICT (project_id, fact) DO UPDATE SET at = EXCLUDED.at, actor = EXCLUDED.actor,
+           rows = EXCLUDED.rows, commit_sha = EXCLUDED.commit_sha, dirty = EXCLUDED.dirty",
+        &[&project, &now_ms(), &actor, &(written as i32), &head],
     )
     .await?;
     // Итог считается ДО фиксации, той же транзакцией: после неё соединение уже
@@ -7466,13 +7481,34 @@ pub(crate) async fn check_generated(pool: &Pool, project: &str) -> Result<Value,
     // Пустая `generated_drift` значила две вещи разом: «сверили, и совпало» и
     // «ни разу не сверяли». Пункт гейта читал её и зеленел на второй так же, как
     // на первой. Отметка о проходе разделяет их: нет отметки — «неизвестно».
+    // ЧЕМ СНЯТ ФАКТ — ВЕРШИНОЙ, КОТОРУЮ ЗНАЕТ ПРИБОР.
+    //
+    // Сверка идёт по корпусу в базе, дерева у неё нет вовсе, и своего коммита
+    // она назвать не может. Но `fact_fresh` требует имени коммита у ЛЮБОГО
+    // факта — и без него сверка числилась протухшей навсегда, сколько бы раз
+    // ни проходила. Ступень лестницы стояла на этом.
+    //
+    // Берётся вершина последнего ЧИСТОГО прогона: это то состояние мира, про
+    // которое прибор вообще что-либо знает. Прогонов не было — имени нет, и
+    // факт честно остаётся несвежим: тогда о состоянии мира неизвестно ничего.
+    let head: String = client
+        .query_one(
+            "SELECT coalesce(max(commit_sha), '') FROM test_run
+              WHERE project_id = $1 AND NOT dirty
+                AND at = (SELECT max(at) FROM test_run WHERE project_id = $1 AND NOT dirty)",
+            &[&project],
+        )
+        .await
+        .map(|r| r.get(0))
+        .unwrap_or_default();
     client
         .execute(
-            "INSERT INTO fact_push (project_id, fact, at, actor, rows) VALUES ($1,$2,$3,$4,$5)
+            "INSERT INTO fact_push (project_id, fact, at, actor, rows, commit_sha, dirty) VALUES ($1,$2,$3,$4,$5,$6,false)
              ON CONFLICT (project_id, fact) DO UPDATE SET at = EXCLUDED.at,
-               actor = EXCLUDED.actor, rows = EXCLUDED.rows",
+               actor = EXCLUDED.actor, rows = EXCLUDED.rows,
+               commit_sha = EXCLUDED.commit_sha, dirty = EXCLUDED.dirty",
             &[&project, &"generated-order", &now_ms(), &"сверка порождённого",
-              &(if same { 0i32 } else { 1i32 })],
+              &(if same { 0i32 } else { 1i32 }), &head],
         )
         .await?;
     Ok(json!({ "name": "board order", "matches": same,
