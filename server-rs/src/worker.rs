@@ -326,8 +326,14 @@ impl Worker {
             return Ok(None);
         }
         println!("{} · тесты: прогон на {head}", bundle.name);
+        // ОДИН ПОТОК, А НЕ ДВА СКЛЕЕННЫХ. `cargo` печатает `Running tests/<файл>`
+        // в stderr, а `test <имя> ... ok` — в stdout. Прежде оба читались
+        // порознь и склеивались подряд: все имена бинарей оказывались ПОСЛЕ
+        // всех имён проверок, и разбор, ведущий текущий бинарь, не видел ни
+        // одного вовремя. Порядок здесь и есть связь, и рвался он склейкой.
+        let joined = format!("( {} ) 2>&1", spec.cmd);
         let run = tokio::process::Command::new("bash")
-            .args(["-c", &spec.cmd])
+            .args(["-c", &joined])
             .current_dir(&cwd)
             .env("CARGO_TERM_COLOR", "never")
             .stdout(Stdio::piped())
