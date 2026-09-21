@@ -676,6 +676,57 @@ fn door_answer(out: Value) -> Result<Json<Value>, Failure> {
 }
 
 /// Пропускной порог: запрос либо входит, либо получает «занято» сразу.
+/// Набор из адреса `/api/projects/<набор>/…`.
+///
+/// Четвёртый отрезок обязателен: он отличает обращение К набору от
+/// `POST /api/projects`, которым набор и заводят, — иначе слой отказал бы
+/// заведению нового набора на том основании, что его ещё нет.
+fn project_of_path(path: &str) -> Option<&str> {
+    let mut seg = path.split('/').skip(1);
+    match (seg.next(), seg.next(), seg.next(), seg.next()) {
+        (Some("api"), Some("projects"), Some(p), Some(_)) if !p.is_empty() => Some(p),
+        _ => None,
+    }
+}
+
+/// НЕИЗВЕСТНЫЙ НАБОР ОТКАЗЫВАЕТСЯ СЛОВОМ, А НЕ ПУСТЫМ ОТВЕТОМ.
+///
+/// Идентификатор набора приходит строкой в адресе, и до этого слоя любая
+/// опечатка в нём давала не отказ, а ПУСТОТУ: `documents` отвечал `count: 0`,
+/// `progress` — `tiles: []`, `waves` — `total: 0`, фазы — «ни разу не считали».
+/// Каждый ответ верен по отдельности и каждый неотличим от «в наборе ничего
+/// нет». Замер 2026-09-21: на этом попался сам харнес — имя `tot-ade` из
+/// `runner.json` ушло туда, где ключ `ae7ec7fa-…`, и пустые ответы были
+/// прочитаны как состояние набора, вплоть до сообщения об этом набору.
+///
+/// СЛОЙ, А НЕ ПРОВЕРКА В РУЧКАХ: набор приходит четырнадцати маршрутам, и две
+/// закрытые из четырнадцати — это не починка, а обещание. Стоит слой ВНУТРИ
+/// `require_identity`: существование набора — сведение о наборе, и звать его
+/// до утверждения личности незачем.
+///
+/// И СТОИТ ОН НА КРАЮ, А НЕ В `Mcp::call`. Мимо него ходят внутренние вызовы —
+/// работник, самотест, и главное примерка `what-if`: она считает на КОПИИ, а
+/// копия строкой в `projects` не является по устройству. Проверка в коридоре
+/// сломала бы примерку ради опечатки в адресе.
+async fn known_project(State(app): State<App>, request: Request, next: Next) -> Response {
+    let Some(project) = project_of_path(request.uri().path()).map(str::to_owned) else {
+        return next.run(request).await;
+    };
+    let known = match crate::db::conn(&app.pool).await {
+        Ok(client) => client.query_opt("SELECT 1 FROM projects WHERE id = $1", &[&project]).await,
+        Err(why) => return Failure::Upstream(format!("база не ответила: {why}")).into_response(),
+    };
+    match known {
+        Ok(Some(_)) => next.run(request).await,
+        Ok(None) => Failure::Upstream(format!(
+            "набора «{project}» нет: пустой ответ значил бы «в наборе ничего нет», \
+             а здесь спрашивали не там. Ключ набора — не его имя"
+        ))
+        .into_response(),
+        Err(why) => Failure::Upstream(format!("база не ответила: {why}")).into_response(),
+    }
+}
+
 async fn admit(State(app): State<App>, request: Request, next: Next) -> Response {
     let Ok(_permit) = app.admit.clone().try_acquire_owned() else {
         crate::db::BUSY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -709,6 +760,7 @@ pub fn routes(app: App) -> Router {
         .route("/api/projects/:project/entity/section", axum::routing::patch(put_entity_section))
         .route("/api/projects/:project/entity/backlinks", get(entity_backlinks))
         .route("/api/projects/:project/mockup/*name", get(mockup))
+        .layer(middleware::from_fn_with_state(app.clone(), known_project))
         .layer(middleware::from_fn_with_state(app.clone(), require_identity))
         .layer(middleware::from_fn_with_state(app.clone(), admit))
         .layer(tower_http::catch_panic::CatchPanicLayer::custom(panic_response))
@@ -730,6 +782,20 @@ fn panic_response(panic: Box<dyn std::any::Any + Send + 'static>) -> Response {
 #[cfg(test)]
 mod tests {
     use super::token_of;
+
+    #[test]
+    fn project_is_taken_from_the_address() {
+        use super::project_of_path;
+        assert_eq!(project_of_path("/api/projects/ae7ec7fa/tool/gate"), Some("ae7ec7fa"));
+        assert_eq!(project_of_path("/api/projects/ae7ec7fa/mockup/a/b"), Some("ae7ec7fa"));
+        assert_eq!(project_of_path("/api/projects/ae7ec7fa/"), Some("ae7ec7fa"));
+        // Заведение набора идёт мимо слоя: набора ещё нет, и это законно.
+        assert_eq!(project_of_path("/api/projects"), None);
+        assert_eq!(project_of_path("/api/projects/ae7ec7fa"), None);
+        // Чужие адреса слой не трогает вовсе.
+        assert_eq!(project_of_path("/api/contexts"), None);
+        assert_eq!(project_of_path("/api/projects//tool/gate"), None);
+    }
 
     #[test]
     fn title_outranks_cookie() {
