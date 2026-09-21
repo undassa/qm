@@ -11,7 +11,8 @@
       "repo": "/opt/src/github.com/tot-space/tot-ade",
       "test": {
         "cmd": "just test",
-        "dir": ""
+        "dir": "",
+        "red": "just red"
       }
     }
   ]

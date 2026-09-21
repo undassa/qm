@@ -83,6 +83,10 @@ pub struct TestSpec {
     pub cmd: String,
     #[serde(default)]
     pub dir: String,
+    /// Красный профиль: команда, которой набор гонит зеркала. Пусто — прежнее
+    /// поведение, один обычный прогон.
+    #[serde(default)]
+    pub red: String,
 }
 
 #[derive(Clone, Deserialize)]
@@ -292,46 +296,27 @@ impl Worker {
         Ok(tree)
     }
 
-    async fn run_tests_once(&self, bundle: &Bundle, spec: &TestSpec) -> Result<Option<Value>, String> {
-        let root = Self::prepare_runner_tree(&bundle.repo)?;
-        let cwd = if spec.dir.is_empty() { root.clone() } else { format!("{root}/{}", spec.dir) };
-        if !std::path::Path::new(&cwd).is_dir() {
-            return Err(format!("каталог прогона {cwd} нет"));
-        }
-        // Дерево своё и только что сброшено — грязным ему быть неоткуда. Но
-        // проверка остаётся: она стережёт не сессию, а нас самих, и её молчание
-        // — единственное, чем «прогон снят со ствола» отличается от обещания.
-        let dirty = !Self::git(&cwd, &["status", "--porcelain"]).trim().is_empty();
-        if dirty {
-            println!("{} · тесты: дерево грязное — прогон не снимается", bundle.name);
-            return Ok(None);
-        }
-        let head = Self::git(&cwd, &["rev-parse", "HEAD"]).trim().to_owned();
-        if head.is_empty() {
-            return Err("HEAD не читается".into());
-        }
-        // Перепрогон той же головы не нужен: свежий замер есть.
-        let fresh = match crate::db::conn(&self.pool).await {
-            Ok(c) => c
-                .query_one(
-                    "SELECT count(*) FROM test_run WHERE project_id = $1 AND commit_sha = $2 AND NOT dirty AND at > $3",
-                    &[&bundle.project, &head, &(crate::projector::now_ms() - (TEST_TICK_S as i64) * 1000)],
-                )
-                .await
-                .map(|r| r.get::<_, i64>(0) > 0)
-                .unwrap_or(false),
-            Err(_) => false,
-        };
-        if fresh {
-            return Ok(None);
-        }
-        println!("{} · тесты: прогон на {head}", bundle.name);
+    /// Один профиль прогона: команда, её вывод и разобранные строки.
+    ///
+    /// ПРОФИЛЕЙ ДВА, И ВТОРОЙ ОБЯЗАТЕЛЕН. `just test` исключает зеркала, поэтому
+    /// у проверок красной фазы НИКОГДА не появлялось записи с вердиктом
+    /// `failed` — а `corpus · red-observed-failing` требует ровно её: у каждой
+    /// проверки ЗАКРЫТОЙ красной задачи обязан найтись хотя бы один упавший
+    /// прогон. Замер 2026-09-21: пункт держал 201 находку, и ни одна из них не
+    /// была долгом набора — это прибор не снимал того, чего сам же требует.
+    /// Набор принёс это заявкой 239.
+    ///
+    /// Ненулевой код выхода у красного профиля — норма: `just red` обязан
+    /// упасть. Поэтому «не собралось» здесь распознаётся по ПУСТОМУ разбору, а
+    /// не по коду выхода.
+    async fn profile(cwd: &str, cmd: &str) -> Result<(Vec<(String, String, String)>, bool), String> {
+        let mut rows: Vec<(String, String, String)> = Vec::new();
         // ОДИН ПОТОК, А НЕ ДВА СКЛЕЕННЫХ. `cargo` печатает `Running tests/<файл>`
         // в stderr, а `test <имя> ... ok` — в stdout. Прежде оба читались
         // порознь и склеивались подряд: все имена бинарей оказывались ПОСЛЕ
         // всех имён проверок, и разбор, ведущий текущий бинарь, не видел ни
         // одного вовремя. Порядок здесь и есть связь, и рвался он склейкой.
-        let joined = format!("( {} ) 2>&1", spec.cmd);
+        let joined = format!("( {} ) 2>&1", cmd);
         let run = tokio::process::Command::new("bash")
             .args(["-c", &joined])
             .current_dir(&cwd)
@@ -345,7 +330,6 @@ impl Worker {
             Ok(Ok(o)) => o,
         };
         let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-        let mut rows: Vec<(String, String, String)> = Vec::new();
         // ДВА ФОРМАТА, И ГЛАВНЫЙ — NEXTEST.
         //
         // «Упало на стволе» определяет не харнес, а сам набор своим рецептом:
@@ -418,10 +402,68 @@ impl Worker {
             };
             rows.push((name.to_owned(), verdict.to_owned(), binary.clone()));
         }
-        if rows.is_empty() && !out.status.success() {
+        Ok((rows, out.status.success()))
+    }
+
+    async fn run_tests_once(&self, bundle: &Bundle, spec: &TestSpec) -> Result<Option<Value>, String> {
+        let root = Self::prepare_runner_tree(&bundle.repo)?;
+        let cwd = if spec.dir.is_empty() { root.clone() } else { format!("{root}/{}", spec.dir) };
+        if !std::path::Path::new(&cwd).is_dir() {
+            return Err(format!("каталог прогона {cwd} нет"));
+        }
+        // Дерево своё и только что сброшено — грязным ему быть неоткуда. Но
+        // проверка остаётся: она стережёт не сессию, а нас самих, и её молчание
+        // — единственное, чем «прогон снят со ствола» отличается от обещания.
+        let dirty = !Self::git(&cwd, &["status", "--porcelain"]).trim().is_empty();
+        if dirty {
+            println!("{} · тесты: дерево грязное — прогон не снимается", bundle.name);
+            return Ok(None);
+        }
+        let head = Self::git(&cwd, &["rev-parse", "HEAD"]).trim().to_owned();
+        if head.is_empty() {
+            return Err("HEAD не читается".into());
+        }
+        // Перепрогон той же головы не нужен: свежий замер есть.
+        let fresh = match crate::db::conn(&self.pool).await {
+            Ok(c) => c
+                .query_one(
+                    "SELECT count(*) FROM test_run WHERE project_id = $1 AND commit_sha = $2 AND NOT dirty AND at > $3",
+                    &[&bundle.project, &head, &(crate::projector::now_ms() - (TEST_TICK_S as i64) * 1000)],
+                )
+                .await
+                .map(|r| r.get::<_, i64>(0) > 0)
+                .unwrap_or(false),
+            Err(_) => false,
+        };
+        if fresh {
+            return Ok(None);
+        }
+        println!("{} · тесты: прогон на {head}", bundle.name);
+        let (mut rows, ok) = Self::profile(&cwd, &spec.cmd).await?;
+        if rows.is_empty() && !ok {
             // Не собралось: ни одной проверки не увидели — факт об этом тоже
             // факт, иначе красное сборки неотличимо от «не гоняли».
             rows.push(("(build)".to_owned(), "build-failed".to_owned(), String::new()));
+        }
+        // Красный профиль идёт ТОЙ ЖЕ ПАРТИЕЙ: у записи одно время, и «последний
+        // прогон» по max(at) видит оба. Пункт про ствол зеркала отсеивает сам —
+        // по имени бинаря, а не по принадлежности партии.
+        if !spec.red.trim().is_empty() {
+            match Self::profile(&cwd, &spec.red).await {
+                // СКОЛЬКО СНЯЛОСЬ — В ЖУРНАЛ, И ЭТО НЕ УКРАШЕНИЕ. Разбор, не
+                // узнавший формата, отдаёт пустой перечень, и запись молча
+                // остаётся прежней: пункт про красную фазу как держал свои
+                // находки, так и держит, а причина выглядит как «набор не
+                // сделал». Число рядом с именем профиля отличает «снято ноль»
+                // от «не звали».
+                Ok((red, _)) => {
+                    println!("{} · красный профиль: {} проверок", bundle.name, red.len());
+                    rows.extend(red);
+                }
+                // Красный профиль не роняет запись обычного: половина замера
+                // лучше, чем ни одной, и молчание о ней хуже обеих.
+                Err(why) => println!("{} · красный профиль не снят: {why}", bundle.name),
+            }
         }
         if rows.is_empty() {
             return Ok(None);
