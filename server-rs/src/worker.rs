@@ -276,7 +276,17 @@ impl Worker {
     /// и не собирается заново каждый час.
     fn prepare_runner_tree(repo: &str) -> Result<String, String> {
         let tree = Self::runner_tree(repo);
-        Self::git(repo, &["fetch", "origin", "--quiet"])?;
+        // ОТКАЗ `fetch` НЕ ОТМЕНЯЕТ ЗАМЕР, а отказ `reset` — отменяет.
+        //
+        // Разница в том, чем кончается каждый. Не докачав ствол, мы померим
+        // известный коммит — на один позади, и он записан в партии; не
+        // сбросив дерево, мы померим НЕИЗВЕСТНО ЧТО. Отказать здесь значило бы
+        // терять целый час замера из-за замка в общем чекауте, где весь день
+        // работают чужие сессии, — а пункты гейта продолжали бы отвечать по
+        // позавчерашней партии, ничем не показывая пропуск.
+        if let Err(why) = Self::git(repo, &["fetch", "origin", "--quiet"]) {
+            println!("ствол не докачан, мерим известную вершину: {why}");
+        }
         if !std::path::Path::new(&tree).is_dir() {
             let out = std::process::Command::new("git")
                 .arg("-C")
@@ -480,9 +490,11 @@ impl Worker {
         // Грязный прогон не выбрасывается: он факт о том, что мерили. Он лишь
         // перестаёт выдавать себя за ствол — отметкой `dirty`, которую все
         // читатели уже спрашивают.
-        let dirty_after = Self::git(&cwd, &["status", "--porcelain"])
-            .map(|out| !out.trim().is_empty())
-            .unwrap_or(true);
+        // Сверяется и ГОЛОВА: чужой `checkout` посреди прогона оставляет дерево
+        // чистым, но на другом коммите, и строки легли бы под прежний `head`.
+        let moved = Self::git(&cwd, &["rev-parse", "HEAD"]).map_or(true, |now| now.trim() != head);
+        let dirty_after = moved
+            || Self::git(&cwd, &["status", "--porcelain"]).map_or(true, |out| !out.trim().is_empty());
         if dirty_after {
             println!("{} · тесты: дерево испачкали во время прогона — запись помечена грязной", bundle.name);
         }
@@ -911,22 +923,34 @@ impl Worker {
                 // что владелец видел. Голова на момент одобрения лежит в событии
                 // «одобрение»; дерево, изменившееся после, требует нового слова.
                 let recorded = approval_head(&run["events"].as_array().cloned().unwrap_or_default());
-                // Непрочитанная голова — НЕ «другая голова». Отказ `rev-parse`
-                // давал пустую строку, она не равна записанной, и сессия
-                // получала «дерево уехало после одобрения» на неподвижном
-                // дереве — вопрос владельцу о том, чего не было.
-                let now = Self::git(&bundle.repo, &["rev-parse", "HEAD"]).unwrap_or_default().trim().to_owned();
-                if let (Some(was), false) = (recorded, now.is_empty()) {
-                    if !was.is_empty() && was != now {
-                        let note = format!("дерево изменилось после одобрения ({was} → {now}) — повторите approval");
-                        let _ = self.door(project, "question-ask", json!({
-                            "runId": rid, "title": format!("{task}: дерево уехало после одобрения"),
-                            "body": note })).await;
-                        let _ = self.door(project, "run-state", json!({
-                            "runId": rid, "state": "waiting", "note": note,
-                            "session": run["sessionId"].as_str().unwrap_or("") })).await;
-                        continue;
+                // У ГОЛОВЫ ТРИ СОСТОЯНИЯ, А НЕ ДВА: та же, другая и НЕ ПРОЧИТАНА.
+                //
+                // Отказ `rev-parse` давал пустую строку, она не равна
+                // записанной, и сессия получала «дерево уехало после
+                // одобрения» на неподвижном дереве. Но молча пропускать
+                // сверку нельзя тем более: дальше одобрение снимает запрет на
+                // коммит, и право коммитить выдавалось бы по одобрению,
+                // которое не с чем сверить. Непрочитанная голова паркует
+                // прогон так же, как уехавшая, — и говорит об этом своими
+                // словами.
+                let now = Self::git(&bundle.repo, &["rev-parse", "HEAD"]);
+                let note = match (&recorded, &now) {
+                    (Some(was), Err(why)) if !was.is_empty() => {
+                        Some(format!("голова дерева не читается ({why}) — сверить одобрение не с чем"))
                     }
+                    (Some(was), Ok(now)) if !was.is_empty() && was != now.trim() => {
+                        Some(format!("дерево изменилось после одобрения ({was} → {}) — повторите approval", now.trim()))
+                    }
+                    _ => None,
+                };
+                if let Some(note) = note {
+                    let _ = self.door(project, "question-ask", json!({
+                        "runId": rid, "title": format!("{task}: одобрение не сходится с деревом"),
+                        "body": note })).await;
+                    let _ = self.door(project, "run-state", json!({
+                        "runId": rid, "state": "waiting", "note": note,
+                        "session": run["sessionId"].as_str().unwrap_or("") })).await;
+                    continue;
                 }
             }
             let (prompt, session, stage) =
@@ -1260,14 +1284,20 @@ mod tests {
     /// записывал замер как правду о стволе.
     #[test]
     fn a_refusing_git_is_not_an_empty_answer() {
-        let tmp = std::env::temp_dir().join("mh-not-a-repo-мера");
+        // Каталог — СВОЙ у каждого прогона. Общее имя в `/tmp` делало пробу
+        // ложно красной, когда два прогона шли разом: чужая уборка попадала
+        // между заведением каталога и `git init`.
+        let tmp = std::env::temp_dir().join(format!("mh-not-a-repo-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).expect("каталог заводится");
         let path = tmp.to_string_lossy().into_owned();
-        let out = Worker::git(&path, &["rev-parse", "HEAD"]);
-        assert!(out.is_err(), "вне репозитория git обязан отказать словом, а вышло {out:?}");
         assert!(Worker::git(&path, &["init", "--quiet"]).is_ok(), "успешный вызов остаётся успешным");
-        let head = Worker::git(&path, &["status", "--porcelain"]).expect("чистый статус читается");
-        assert_eq!(head.trim(), "", "пустой вывод — это по-прежнему успех, а не отказ");
+        // Репозиторий без коммитов: `rev-parse HEAD` отказывает здесь всегда —
+        // и не зависит от того, лежит ли `TMPDIR` внутри чужого репозитория,
+        // где «не репозиторий» перестаёт быть правдой.
+        let out = Worker::git(&path, &["rev-parse", "HEAD"]);
+        assert!(out.is_err(), "без коммитов головы нет, и это отказ словом, а вышло {out:?}");
+        let status = Worker::git(&path, &["status", "--porcelain"]).expect("чистый статус читается");
+        assert_eq!(status.trim(), "", "пустой вывод — это по-прежнему успех, а не отказ");
         std::fs::remove_dir_all(&tmp).ok();
     }
 }

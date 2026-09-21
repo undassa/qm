@@ -9781,12 +9781,20 @@ pub(crate) async fn record_test_runs(
         )
         .await?;
     }
+    // ОБРЕЗКА СЧИТАЕТ ЧИСТЫЕ И ГРЯЗНЫЕ ПОРОЗНЬ.
+    //
+    // Двадцать последних на проверку — без различия — значили бы, что двадцать
+    // грязных партий подряд выметают всю чистую историю. Дальше страшное:
+    // `G3 · test-trunk-green` берёт предмет из чистых строк, пустой предмет
+    // считается пройденным, и «мерить ствол стало нечем» отрисовалось бы
+    // ЗЕЛЁНЫМ. Заодно исчезли бы падения, которыми `corpus ·
+    // red-observed-failing` доказывает красную фазу.
     tx.execute(
         "DELETE FROM test_run t
           WHERE t.project_id = $1
             AND (SELECT count(*) FROM test_run k
                   WHERE k.project_id = t.project_id AND k.check_name = t.check_name
-                    AND k.at >= t.at) > 20",
+                    AND k.dirty = t.dirty AND k.at >= t.at) > 20",
         &[&project],
     )
     .await?;
@@ -9814,10 +9822,16 @@ pub(crate) async fn test_status(pool: &Pool, project: &str) -> Result<Value, cra
     let last = client
         .query_opt("SELECT max(at), max(at) FILTER (WHERE NOT dirty) FROM test_run WHERE project_id = $1", &[&project])
         .await?;
+    // СЧЁТ — ПО ПОСЛЕДНЕМУ ЧИСТОМУ ПРОГОНУ, а не по последнему вообще.
+    // Грязный прогон снят не со ствола, и выдавать его числа за состояние
+    // набора — то же враньё, от которого отгорожены пункты гейта: 21.09
+    // оборванный сброс дал партию из одной строки `build-failed`, и дверь
+    // отвечала «прогонов 1» на набор, где часом раньше прошло 756 проверок.
     let counts = client
         .query(
             "SELECT verdict, count(*) FROM test_run
-              WHERE project_id = $1 AND at = (SELECT max(at) FROM test_run WHERE project_id = $1)
+              WHERE project_id = $1 AND NOT dirty
+                AND at = (SELECT max(at) FROM test_run WHERE project_id = $1 AND NOT dirty)
               GROUP BY verdict",
             &[&project],
         )
