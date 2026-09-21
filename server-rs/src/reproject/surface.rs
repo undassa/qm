@@ -28,6 +28,9 @@ static TASK_NAME: Lazy<Regex> =
 static REQUIREMENT_ID: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"\b((?:FR|NFR)-[A-Z0-9]+(?:-\d+[a-z]?)?)\b").expect("образец требования"));
 static SEPARATOR: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[\s|:-]+$").expect("образец разделителя"));
+/// Пункт перечня приёмки: номер, точка, жирный ключ — в кавычках или без.
+static ITEM: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^(\d+)\.\s+\*\*`?([^`*]+?)`?\*\*").expect("образец пункта приёмки"));
 
 /// Строка истории: имя, область, персона, источник и связи.
 type StoryRow = (String, String, String, String, String, String, String, String);
@@ -89,6 +92,8 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize,
     let empty_titles: Vec<String> = Vec::new();
 
     let mut stories: Vec<StoryRow> = Vec::new();
+
+    let mut story_paths: HashMap<String, String> = HashMap::new();
     let mut screens: Vec<(String, String, String, String, String)> = Vec::new();
     let mut references: Vec<(String, &str, String)> = Vec::new();
     let mut story_requirements: Vec<(String, String)> = Vec::new();
@@ -107,6 +112,7 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize,
         if e.0 == "story"
         && STORY_NAME.is_match(path) {
             let id = e.1.clone();
+            story_paths.insert(id.clone(), path.clone());
             stories.push((
                 id.clone(),
                 super::title_without_name(&title_of(), &id),
@@ -177,6 +183,57 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize,
     let mut client = crate::db::conn(pool).await?;
     // Имя поля — из словаря схемы: зашитое, оно знает один набор.
     let terms = crate::scheme::Terms::load_at(&*client, project).await?;
+
+    // ── Пункты приёмки истории: позиционное имя и сценарий за ним ───────────
+    //
+    // Заголовок раздела и образец позиционного имени — из словаря, а не зашиты:
+    // роли `section.acceptance` и `id.acceptance-item`. Нет слова — карта не
+    // считается вовсе, и это видно пустой таблицей, а не догадкой.
+    //
+    // Ключ пункта стоит жирным сразу за номером, иногда в обратных кавычках:
+    //     1. **`TC-SIZE-05`** · Остановка доступна на любом шаге…
+    //     3. **S7-AC-3** · Ничего не уходит в модель…
+    // Первая форма называет сценарий, вторая — позицию: у неё сценария нет.
+    let acceptance: Vec<(String, i32, String, String)> = match terms.one("section.acceptance") {
+        None => Vec::new(),
+        Some(section) => {
+            let scenario_shapes: Vec<Regex> = terms
+                .all("id.check")
+                .iter()
+                .filter_map(|p| Regex::new(&format!("^(?:{p})$")).ok())
+                .collect();
+            let mut out = Vec::new();
+            for (id, ..) in &stories {
+                let Some(text) = declared.get(&story_paths[id]).map(String::as_str) else { continue };
+                // Номер истории: `US-ADE-07` → `S7`. Ноль не сохраняется —
+                // набор пишет `S7-AC-5`, а не `S07-AC-5`.
+                let Some(number) = id.rsplit('-').next().and_then(|n| n.parse::<u32>().ok()) else {
+                    continue;
+                };
+                let mut inside = false;
+                for line in text.lines() {
+                    let t = line.trim();
+                    if let Some(head) = t.strip_prefix("## ").or_else(|| t.strip_prefix("### ")) {
+                        inside = head.trim() == section;
+                        continue;
+                    }
+                    if !inside {
+                        continue;
+                    }
+                    let Some(c) = ITEM.captures(t) else { continue };
+                    let Ok(ord) = c[1].parse::<i32>() else { continue };
+                    let named = c[2].trim().trim_matches('`').to_owned();
+                    let scenario = if scenario_shapes.iter().any(|re| re.is_match(&named)) {
+                        named
+                    } else {
+                        String::new()
+                    };
+                    out.push((id.clone(), ord, format!("S{number}-AC-{ord}"), scenario));
+                }
+            }
+            out
+        }
+    };
     let screen_requirements: Vec<(String, String)> = if let Some(field) =
         terms.one("field.requirements").map(str::to_owned)
     {
@@ -217,6 +274,17 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize,
     // Дверь `story-requirement-add` появилась, и снос целиком стал стирать её
     // запись каждой пересборкой: дверь отвечала «записано», а до следующего
     // прогона запись не доживала.
+    // Карта пунктов приёмки — выведенная целиком: сносится и пишется заново,
+    // объявлять её нечем и не надо.
+    tx.execute("DELETE FROM story_acceptance_item WHERE project_id = $1", &[&project]).await?;
+    for (story, ord, key, scenario) in &acceptance {
+        tx.execute(
+            "INSERT INTO story_acceptance_item (project_id, story_id, ord, key, scenario)
+             VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING",
+            &[&project, story, ord, key, scenario],
+        )
+        .await?;
+    }
     tx.execute("DELETE FROM project_screen_references WHERE project_id = $1 AND origin = 'projected'",
                &[&project]).await?;
     tx.execute("DELETE FROM project_story_requirements WHERE project_id = $1 AND origin = 'projected'",

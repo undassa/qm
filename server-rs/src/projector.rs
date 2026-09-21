@@ -471,6 +471,30 @@ CREATE TABLE IF NOT EXISTS project_stories(
     PRIMARY KEY (project_id, id)
   );
 
+-- ПУНКТ ПРИЁМКИ ИСТОРИИ И СЦЕНАРИЙ ЗА НИМ — ОДНО, ПОД ДВУМЯ ИМЕНАМИ.
+--
+-- Перечень «Критерий приёмки» истории записывает пункт ЛИБО идентификатором
+-- сценария, ЛИБО позиционным ключом `S<N>-AC-<M>` — и обе формы стоят в одном
+-- перечне вперемешку: позиционным записан тот пункт, у которого сценария нет
+-- вовсе (закрывается гейтом либо отложен).
+--
+-- Отсюда расхождение, стоившее дня. Проверка, переведённая с пункта, снимает
+-- отпечаток под ПОЗИЦИОННЫМ именем — таких в дереве `tot-ade` сорок четыре
+-- против тринадцати под именем сценария, — а прибор искал имя сценария и
+-- объявлял двадцать два сценария непереведёнными. Замер 21.09: это было
+-- ОДНО число под двумя именами, а не два соглашения.
+--
+-- Карта ВЫВОДИТСЯ, а не объявляется. Объявленная была бы второй копией того,
+-- что уже сказано историями, и разошлась бы молча в тот день, когда кто-то
+-- правит историю и не помнит про копию.
+CREATE TABLE IF NOT EXISTS story_acceptance_item (
+  project_id text NOT NULL,
+  story_id   text NOT NULL,
+  ord        integer NOT NULL,
+  key        text NOT NULL,          -- позиционное имя, `S<N>-AC-<M>`
+  scenario   text NOT NULL DEFAULT '',  -- сценарий, если пункт назван им
+  PRIMARY KEY (project_id, story_id, ord));
+
 CREATE TABLE IF NOT EXISTS project_story_requirements(
     project_id TEXT NOT NULL, story_id TEXT NOT NULL, requirement_id TEXT NOT NULL,
     PRIMARY KEY (project_id, story_id, requirement_id)
