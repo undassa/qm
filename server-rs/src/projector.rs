@@ -1450,6 +1450,9 @@ CREATE TABLE IF NOT EXISTS test_run (
 );
 CREATE INDEX IF NOT EXISTS test_run_by_check ON test_run (project_id, check_name, at DESC);
 -- ЧЕМ ПРОВЕРКА ШЛА: файл бинаря, как его называет прогон.
+-- Имя колонки — `ran_in`, а не `binary`: `binary` в Postgres зарезервировано,
+-- и `ADD COLUMN binary` падает разбором. Поймал это самотест схемы на пустой
+-- базе — тот самый, что стоит ради таких правок.
 --
 -- Без него «упала» неотличимо от «обязана падать»: зеркало красной фазы падает
 -- по построению, и пункт `test-trunk-green` звал поломкой ствола сорок один
@@ -1458,7 +1461,7 @@ CREATE INDEX IF NOT EXISTS test_run_by_check ON test_run (project_id, check_name
 --
 -- Имя приходит даром: `cargo test` печатает `Running tests/<файл>.rs (…)`
 -- перед блоком каждого бинаря, и разбор его просто выбрасывал.
-ALTER TABLE test_run ADD COLUMN IF NOT EXISTS binary text NOT NULL DEFAULT '';
+ALTER TABLE test_run ADD COLUMN IF NOT EXISTS ran_in text NOT NULL DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS chat_message (
   id           bigserial PRIMARY KEY,
@@ -9697,7 +9700,7 @@ pub(crate) async fn record_test_runs(
     let at = now_ms();
     for (check, verdict, binary) in rows {
         tx.execute(
-            "INSERT INTO test_run (project_id, check_name, commit_sha, dirty, verdict, at, actor, binary)
+            "INSERT INTO test_run (project_id, check_name, commit_sha, dirty, verdict, at, actor, ran_in)
              VALUES ($1,$2,$3,false,$4,$5,$6,$7)",
             &[&project, check, &commit, verdict, &at, &actor, binary],
         )
