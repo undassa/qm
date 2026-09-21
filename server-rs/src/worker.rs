@@ -250,11 +250,57 @@ impl Worker {
         }
     }
 
+    /// Своё дерево прогона: `<репозиторий>-mh-runner`, рядом, а не внутри.
+    ///
+    /// **Ствол мерят на стволе, а не на чужом рабочем столе.** Прежде прогон
+    /// шёл в `bundle.repo` — в каталоге, где работает сессия набора. Он грязен
+    /// почти всегда: замер 2026-09-21 дал 39 файлов в индексе и ветку `pr-70`,
+    /// и наблюдатель отказывался каждый час двенадцать часов подряд. Отказ был
+    /// верен — факт с грязного дерева хуже отсутствия факта (заявка 18), — но
+    /// неверен был выбор предмета: запись прогона замерла на снимке двухдневной
+    /// давности, и пункт `test-trunk-green` звал поломкой ствола 68 имён, из
+    /// которых почти все с тех пор позеленели.
+    fn runner_tree(repo: &str) -> String {
+        format!("{repo}-mh-runner")
+    }
+
+    /// Завести либо обновить дерево прогона до вершины ствола.
+    ///
+    /// Отказ — словом, и тогда прогона не будет: **мерить не то хуже, чем не
+    /// мерить**. Своего в дереве не остаётся между заходами: `reset --hard` и
+    /// `clean -fd` снимают всё, кроме игнорируемого, — каталог сборки переживает
+    /// и не собирается заново каждый час.
+    fn prepare_runner_tree(repo: &str) -> Result<String, String> {
+        let tree = Self::runner_tree(repo);
+        Self::git(repo, &["fetch", "origin", "--quiet"]);
+        if !std::path::Path::new(&tree).is_dir() {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(["worktree", "add", "--detach", &tree, "origin/main"])
+                .output()
+                .map_err(|e| format!("дерево прогона не завелось: {e}"))?;
+            if !out.status.success() {
+                return Err(format!(
+                    "дерево прогона не завелось: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ));
+            }
+        }
+        Self::git(&tree, &["reset", "--hard", "origin/main"]);
+        Self::git(&tree, &["clean", "-qfd"]);
+        Ok(tree)
+    }
+
     async fn run_tests_once(&self, bundle: &Bundle, spec: &TestSpec) -> Result<Option<Value>, String> {
-        let cwd = if spec.dir.is_empty() { bundle.repo.clone() } else { format!("{}/{}", bundle.repo, spec.dir) };
+        let root = Self::prepare_runner_tree(&bundle.repo)?;
+        let cwd = if spec.dir.is_empty() { root.clone() } else { format!("{root}/{}", spec.dir) };
         if !std::path::Path::new(&cwd).is_dir() {
             return Err(format!("каталог прогона {cwd} нет"));
         }
+        // Дерево своё и только что сброшено — грязным ему быть неоткуда. Но
+        // проверка остаётся: она стережёт не сессию, а нас самих, и её молчание
+        // — единственное, чем «прогон снят со ствола» отличается от обещания.
         let dirty = !Self::git(&cwd, &["status", "--porcelain"]).trim().is_empty();
         if dirty {
             println!("{} · тесты: дерево грязное — прогон не снимается", bundle.name);
