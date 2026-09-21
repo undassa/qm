@@ -13783,7 +13783,24 @@ pub(crate) async fn measure_phases(pool: &Pool, project: &str) -> Result<Value, 
     let empty = Vec::new();
     let list = computed["phases"].as_array().unwrap_or(&empty);
     let now = now_ms();
-    let client = crate::db::conn(pool).await?;
+    // СНОС И ВСТАВКА — ОДНОЙ ТРАНЗАКЦИЕЙ ПОД ЗАМКОМ НАБОРА.
+    //
+    // Прежде оба шли на голом соединении. Два пересчёта разом — правка
+    // документа дверью и круг прогонщика — снимали строки, потом оба писали, и
+    // второй падал о первичный ключ: «duplicate key value violates unique
+    // constraint `phase_state_pkey`». Замер 21.09: так и случилось, когда я
+    // правил документ, а прогонщик считал свой круг.
+    //
+    // Отказ при этом виден не сразу: дверь отвечает «правка записана, но
+    // проекции не собраны», и пульт продолжает судить по прежним числам, пока
+    // кто-нибудь не позовёт пересчёт руками. Хуже отказа то, что снос уже
+    // прошёл: без транзакции окно, в котором фаз нет ни одной, отдаётся
+    // читателю как измерение.
+    let mut connection = crate::db::conn(pool).await?;
+    let client = connection.transaction().await?;
+    client
+        .execute("SELECT pg_advisory_xact_lock(hashtext('phases:' || $1))", &[&project])
+        .await?;
     client
         .execute("DELETE FROM phase_state WHERE project_id = $1", &[&project])
         .await?;
@@ -13810,6 +13827,7 @@ pub(crate) async fn measure_phases(pool: &Pool, project: &str) -> Result<Value, 
             )
             .await?;
     }
+    client.commit().await?;
     Ok(json!({ "phases": list.len(), "at": now }))
 }
 
