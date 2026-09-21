@@ -1,7 +1,22 @@
 WITH best AS (SELECT max(at) AS at FROM test_run WHERE project_id = $1 AND NOT dirty)
-SELECT 'упала на стволе: ' || r.check_name AS detail
+-- ИСКЛЮЧЕНИЕ НИЖЕ ОПИРАЕТСЯ НА ДАТЧИК, И БЕЗ НЕГО ПУНКТ НЕ УТВЕРЖДАЕТ.
+--
+-- Проверку, которую ещё напишет незакрытая задача, пункт прощает по колонке
+-- `task_ready_item.check_id`. Колонка выводится в том числе из датчика
+-- `test-name`: свободно названная проверка (`undo_redo_frame`) опознаётся
+-- только тем, что функция с таким именем написана. Датчик несвежий — прощение
+-- пропадает, и красная фаза предстала бы поломкой ствола. Молчать тут тоже
+-- нельзя: «нечем мерить» не значит «зелено».
+SELECT 'датчик «test-name» ' || fact_gap($1, 'test-name')
+       || ': отличить падение красной фазы от поломки ствола нечем — неизвестно, и это не зелёное' AS detail
+ WHERE NOT fact_fresh($1, 'test-name')
+   AND EXISTS (SELECT 1 FROM test_run r, best
+                WHERE r.project_id = $1 AND NOT r.dirty AND r.at = best.at AND r.verdict = 'failed')
+UNION ALL
+SELECT 'упала на стволе: ' || r.check_name
   FROM test_run r, best
  WHERE r.project_id = $1 AND NOT r.dirty AND r.at = best.at AND r.verdict = 'failed'
+   AND fact_fresh($1, 'test-name')
    -- Проверку, которую ещё напишет НЕЗАКРЫТАЯ задача, поломкой ствола не зовут:
    -- она падает потому, что работа не сделана, и об этом говорят счётчики.
    AND NOT EXISTS (SELECT 1 FROM task_ready_item i
