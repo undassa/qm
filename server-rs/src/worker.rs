@@ -133,6 +133,26 @@ enum Stage {
     Watch, // ревью: чистый лист, только читает
 }
 
+/// Поле ответа двери — и ОТСУТСТВИЕ ЕГО НАЗЫВАЕТСЯ ВСЛУХ.
+///
+/// `serde_json` на несуществующий ключ отдаёт `Null`, а `Null` послушно
+/// становится нулём, пустым перечнем и пустой строкой. Читатель, написанный
+/// по памяти о форме ответа, молчит вместо отказа.
+///
+/// Трижды за одну смену: `fresh` вместо `stale` у датчиков, `was`/`now`
+/// вместо `accepted` у подачи состояний, `done` вместо `sensed` у съёма.
+/// Последний написал в журнал «снято 0» при тридцати снятых — и это читалось
+/// как «механизм не работает».
+///
+/// Потолок: ловит только там, где позвали. Типизировать ответы дверей — та
+/// правка, которая закрыла бы класс целиком, и она больше этой.
+fn fld<'a>(v: &'a Value, key: &str, who: &str) -> &'a Value {
+    if v.get(key).is_none() {
+        println!("{who}: в ответе двери нет поля `{key}` — читают не то, что отвечают");
+    }
+    &v[key]
+}
+
 pub struct Worker {
     pool: Pool,
     kinds: Arc<crate::kinds::Kinds>,
@@ -265,8 +285,8 @@ impl Worker {
                 Ok(Some(v)) => println!(
                     "{} · тесты: {} проверок, упало {} · {}",
                     bundle.name,
-                    v["runs"], v["failed"].as_array().map(|a| a.len()).unwrap_or(0),
-                    v["cleanAt"].as_i64().map(|t| format!("{t}")).unwrap_or_default(),
+                    fld(&v, "runs", &bundle.name), fld(&v, "failed", &bundle.name).as_array().map(|a| a.len()).unwrap_or(0),
+                    fld(&v, "cleanAt", &bundle.name).as_i64().map(|t| format!("{t}")).unwrap_or_default(),
                 ),
                 Ok(None) => {}
                 Err(e) => println!("{} · тесты: {e}", bundle.name),
@@ -505,7 +525,7 @@ impl Worker {
                     // ей нельзя.
                     Ok(out) => println!(
                         "{} · состояния задач: {n} из трейлеров, принято {}",
-                        bundle.name, out["accepted"]
+                        bundle.name, fld(&out, "accepted", &bundle.name)
                     ),
                     Err(why) => println!("{} · состояния задач: {why}", bundle.name),
                 }
@@ -540,7 +560,7 @@ impl Worker {
                 // Первый съём написал «снято 0» при тридцати снятых датчиках,
                 // и это читалось как «механизм не работает». Строка в журнале
                 // повторяется на каждой новой вершине — молчать ей нельзя.
-                v["sensed"].as_array().map(|a| a.len()).unwrap_or(0)
+                fld(&v, "sensed", &name).as_array().map(|a| a.len()).unwrap_or(0)
             ),
             Ok(Err(why)) => println!("{name} · датчики: {why}"),
             Err(e) => println!("{name} · датчики: съём не завершился: {e}"),
