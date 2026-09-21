@@ -2634,6 +2634,15 @@ impl Mcp {
                 let method = args.get("method").and_then(|v| v.as_str()).unwrap_or("");
                 let drop = flag(args, "drop");
                 match crate::projector::set_method(&self.pool, p, crate::projector::Method { kind: kind_arg, id: id.unwrap_or(""), ord, method_kind: mk, method, declared_by: &self.author, drop }).await {
+                    // ОТКАЗ ОСТАЁТСЯ ОТКАЗОМ И В ОБОЛОЧКЕ. Успех с полем
+                    // `status` уходит с кодом 0, и цикл на `set -e`,
+                    // объявляющий полтораста способов несуществующим номерам,
+                    // отрапортовал бы полтораста успехов. Так же поступает
+                    // соседняя дверь `readiness` с полем `unprojected`.
+                    Ok(v) if v.get("status") == Some(&json!("no_item")) => json!({
+                        "content": [{ "type": "text", "text": v["why"].as_str().unwrap_or("") }],
+                        "isError": true
+                    }),
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),
                 }
