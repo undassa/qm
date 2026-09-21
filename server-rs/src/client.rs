@@ -23,6 +23,20 @@ pub struct Door {
 impl Door {
     /// Собрать из окружения. Отсутствие любого — отказ словом, а не пустой вызов.
     pub fn from_env() -> Result<Self, String> {
+        Self::from_env_for(None)
+    }
+
+    /// То же, но набор НАЗВАН, а не выведен из текущего каталога.
+    ///
+    /// Обходчик ведёт два набора в одном процессе, а каталог у процесса один:
+    /// вывести набор из него значит вывести не тот. Замер 21.09: съём датчиков
+    /// в обходчике не сработал ни разу — дверь отказывала «не задано
+    /// MH_PROJECT», потому что набор я подставлял ПОСЛЕ сборки двери, а она
+    /// требует его ВО ВРЕМЯ.
+    ///
+    /// Отказ при этом был назван словом и попал в журнал — иначе пробел
+    /// выглядел бы как «датчики просто не обновляются».
+    pub fn from_env_for(project: Option<&str>) -> Result<Self, String> {
         let near = Self::from_mcp_json();
         let need = |name: &str, fallback: Option<&str>| -> Result<String, String> {
             match std::env::var(name).ok().filter(|v| !v.trim().is_empty()) {
@@ -56,9 +70,12 @@ impl Door {
         // потом читается из файла. Знание «чей это репозиторий» принадлежит
         // серверу: держать ответ файлом внутри самого дерева значит завести
         // вторую запись о том, что сервер и так знает, — и однажды разойтись.
-        let project = match need("MH_PROJECT", None) {
-            Ok(v) => v,
-            Err(e) => Self::ask_whose(&url, &secret, &principal).ok_or(e)?,
+        let project = match project {
+            Some(p) => p.to_owned(),
+            None => match need("MH_PROJECT", None) {
+                Ok(v) => v,
+                Err(e) => Self::ask_whose(&url, &secret, &principal).ok_or(e)?,
+            },
         };
         Ok(Door { url, project, secret, principal })
     }

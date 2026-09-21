@@ -523,14 +523,13 @@ impl Worker {
     /// Отказ не отменяет прогона: несвежий датчик хуже свежего, но прогон,
     /// не снятый из-за датчика, хуже обоих.
     async fn sense_tree(&self, bundle: &Bundle, root: &str) {
-        let mut door = match crate::client::Door::from_env() {
+        let door = match crate::client::Door::from_env_for(Some(&bundle.project)) {
             Ok(d) => d,
             Err(why) => {
                 println!("{} · датчики: двери нет — {why}", bundle.name);
                 return;
             }
         };
-        door.project = bundle.project.clone();
         let (name, root) = (bundle.name.clone(), root.to_owned());
         match tokio::task::spawn_blocking(move || crate::client::sense(&door, None, &root)).await {
             Ok(Ok(v)) => println!(
