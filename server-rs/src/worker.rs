@@ -339,8 +339,24 @@ impl Worker {
             Ok(Ok(o)) => o,
         };
         let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-        let mut rows: Vec<(String, String)> = Vec::new();
+        let mut rows: Vec<(String, String, String)> = Vec::new();
+        // ЧЕМ ШЛА ПРОВЕРКА. `cargo test` печатает `Running tests/<файл>.rs (…)`
+        // перед блоком каждого бинаря. Прежде разбор эту строку пропускал, и
+        // «упала» становилось неотличимо от «обязана падать»: зеркало красной
+        // фазы падает по построению, а пункт про ствол звал это поломкой.
+        let mut binary = String::new();
         for line in text.lines() {
+            if let Some(rest) = line.trim_start().strip_prefix("Running ") {
+                binary = rest
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or("")
+                    .to_owned();
+                continue;
+            }
             let rest = line.strip_prefix("test ").unwrap_or("");
             let Some((name, tail)) = rest.split_once(" ... ") else { continue };
             let name = name.trim();
@@ -356,12 +372,12 @@ impl Worker {
             } else {
                 continue;
             };
-            rows.push((name.to_owned(), verdict.to_owned()));
+            rows.push((name.to_owned(), verdict.to_owned(), binary.clone()));
         }
         if rows.is_empty() && !out.status.success() {
             // Не собралось: ни одной проверки не увидели — факт об этом тоже
             // факт, иначе красное сборки неотличимо от «не гоняли».
-            rows.push(("(build)".to_owned(), "build-failed".to_owned()));
+            rows.push(("(build)".to_owned(), "build-failed".to_owned(), String::new()));
         }
         if rows.is_empty() {
             return Ok(None);

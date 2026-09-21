@@ -1449,6 +1449,16 @@ CREATE TABLE IF NOT EXISTS test_run (
   actor      text    NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS test_run_by_check ON test_run (project_id, check_name, at DESC);
+-- ЧЕМ ПРОВЕРКА ШЛА: файл бинаря, как его называет прогон.
+--
+-- Без него «упала» неотличимо от «обязана падать»: зеркало красной фазы падает
+-- по построению, и пункт `test-trunk-green` звал поломкой ствола сорок один
+-- живой мираж проекта. Связь через задачу этого не закрывает — 24 из 41 не
+-- названы в наборе ни одной задачей, и спрашивать о них было некого.
+--
+-- Имя приходит даром: `cargo test` печатает `Running tests/<файл>.rs (…)`
+-- перед блоком каждого бинаря, и разбор его просто выбрасывал.
+ALTER TABLE test_run ADD COLUMN IF NOT EXISTS binary text NOT NULL DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS chat_message (
   id           bigserial PRIMARY KEY,
@@ -9678,18 +9688,18 @@ pub(crate) async fn add_run_event(
 /// по двадцати последним на проверку — «наблюдалась красной до кода» требует
 /// прошлого, но не вечного.
 pub(crate) async fn record_test_runs(
-    pool: &Pool, project: &str, commit: &str, rows: &[(String, String)], actor: &str,
+    pool: &Pool, project: &str, commit: &str, rows: &[(String, String, String)], actor: &str,
 ) -> Result<Value, crate::db::Fail> {
     let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
     // Одно время на ПАРТИЮ: иначе пятьсот вставок растянутся на миллисекунды,
     // и «последний прогон» по max(at) увидит лишь хвост партии.
     let at = now_ms();
-    for (check, verdict) in rows {
+    for (check, verdict, binary) in rows {
         tx.execute(
-            "INSERT INTO test_run (project_id, check_name, commit_sha, dirty, verdict, at, actor)
-             VALUES ($1,$2,$3,false,$4,$5,$6)",
-            &[&project, check, &commit, verdict, &at, &actor],
+            "INSERT INTO test_run (project_id, check_name, commit_sha, dirty, verdict, at, actor, binary)
+             VALUES ($1,$2,$3,false,$4,$5,$6,$7)",
+            &[&project, check, &commit, verdict, &at, &actor, binary],
         )
         .await?;
     }
