@@ -4116,11 +4116,29 @@ pub async fn rebuild(pool: &Pool, project: &str) -> Result<Value, crate::db::Fai
     .await?;
     let red_in_plan = tx
         .execute(
+            // РОДИТЕЛЬ СТАВИТСЯ ЗДЕСЬ ЖЕ, А НЕ ЖДЁТ СЛЕДУЮЩЕГО ПРОХОДА СВЯЗЕЙ.
+            //
+            // Снос и вставка стирали `parent_task_id`, а заполнял его
+            // `reproject::relations`, идущий ПЕРЕД пересборкой. Между ними
+            // открывалось окно, в котором у КАЖДОЙ красной задачи родителя
+            // нет, — и замер, попавший в него, давал 81 находку
+            // `G2 · red-task-complete` и 81 `G3 · red-checks-match-parent`.
+            // Замер 21.09: два пункта покраснели на пустом месте, фаза Ф4
+            // закрылась, очередь задач перестала выдавать. Следующий проход
+            // связей всё чинил — то есть находки жили до часа и исчезали сами,
+            // что для того, кто их читает, неотличимо от чуда.
+            //
+            // Имя приводится по таблице задач, а не берётся буквой: набор
+            // пишет `M1-T1`, а задача может зваться `m1-t1`. Не нашлось —
+            // пусто, и об этом скажет сам пункт.
             "INSERT INTO project_plan_tasks
-                (project_id, id, milestone_id, ord, title, entity_kind, entity_name, size, kind, state, closing_commit)
+                (project_id, id, milestone_id, ord, title, entity_kind, entity_name, size, kind, state, closing_commit, parent_task_id)
              SELECT r.project_id, r.id, r.milestone, 0,
                     r.id || ' · проверки для ' || r.parent_task,
-                    'red-task', r.id, '', 'red', 'not_started', ''
+                    'red-task', r.id, '', 'red', 'not_started', '',
+                    coalesce((SELECT p.id FROM project_plan_tasks p
+                               WHERE p.project_id = r.project_id
+                                 AND lower(p.id) = lower(btrim(r.parent_task))), '')
                FROM red_task r
               WHERE r.project_id = $1
                 -- Красная задача, не назвавшая существующей вехи, роняла ВЕСЬ
@@ -4132,7 +4150,8 @@ pub async fn rebuild(pool: &Pool, project: &str) -> Result<Value, crate::db::Fai
              ON CONFLICT (project_id, id) DO UPDATE SET milestone_id = EXCLUDED.milestone_id,
                ord = EXCLUDED.ord, title = EXCLUDED.title, entity_kind = EXCLUDED.entity_kind,
                entity_name = EXCLUDED.entity_name, size = EXCLUDED.size, kind = EXCLUDED.kind,
-               state = EXCLUDED.state, closing_commit = EXCLUDED.closing_commit, origin = 'projected'
+               state = EXCLUDED.state, closing_commit = EXCLUDED.closing_commit, origin = 'projected',
+               parent_task_id = EXCLUDED.parent_task_id
              WHERE project_plan_tasks.origin = 'declared'",
             &[&project],
         )
