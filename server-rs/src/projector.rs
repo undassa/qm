@@ -10092,6 +10092,47 @@ pub(crate) async fn automaton(
     let circle: i32 = row.get(1);
     let rethinks: i32 = row.get(2);
     let halt: String = row.get(3);
+    // ЗАКРЫТАЯ ЗАДАЧА ЗАКРЫВАЕТ АВТОМАТ И ПРИ ЧТЕНИИ, А НЕ ТОЛЬКО ПРИ ОТЧЁТЕ.
+    //
+    // Первая правка двигала автомат, когда сессия что-то отчитывала. Но
+    // вставший прогон никто не отчитывает: сессия ушла, и слова не будет
+    // никогда. Замер 21.09: прогон `M3-T3` стоял на `closing` три часа,
+    // держал вопрос владельцу — а задача закрыта тремя трейлерами на стволе.
+    // Правка ловила будущий случай и не расталкивала уже вставший.
+    //
+    // Противоречие «история говорит закрыта, автомат ждёт слова» разрешается
+    // всякий раз, когда о нём спрашивают, — читателю не нужно знать, что для
+    // этого надо было отчитаться.
+    let closed_by_history = step == "closing"
+        && halt.trim().is_empty()
+        && client
+            .query_opt(
+                "SELECT 1 FROM project_task_runs r
+                   JOIN project_plan_tasks t ON t.project_id = r.project_id AND t.id = r.task_id
+                  WHERE r.project_id = $1 AND r.id = $2 AND t.state = 'closed'",
+                &[&project, &run],
+            )
+            .await?
+            .is_some();
+    if closed_by_history {
+        client
+            .execute(
+                "UPDATE task_run_automaton SET step = 'closed', updated_at = $3
+                  WHERE project_id = $1 AND run_id = $2",
+                &[&project, &run, &now_ms()],
+            )
+            .await?;
+        client
+            .execute(
+                "INSERT INTO task_run_event (project_id, run_id, at, kind, text) VALUES ($1,$2,$3,'автомат',$4)",
+                &[&project, &run, &now_ms(),
+                 &"closing → closed: задача закрыта трейлером на стволе, довёл харнес".to_owned()],
+            )
+            .await?;
+        return Ok(json!({ "runId": run, "step": "closed", "circle": circle,
+            "rethinks": rethinks, "halt": "",
+            "why": "задача закрыта трейлером на стволе: автомат доведён харнесом" }));
+    }
     if let Some(status) = status {
         if !halt.trim().is_empty() {
             // Вставший автомат не двигает ни чьё слово, кроме владельца:
@@ -10101,32 +10142,6 @@ pub(crate) async fn automaton(
                 "how": "resume=1 снимает остановку по слову владельца",
                 "step": step, "circle": circle, "rethinks": rethinks }));
         }
-        // ЗАКРЫТАЯ ЗАДАЧА ЗАКРЫВАЕТ И АВТОМАТ.
-        //
-        // Шаг `closing` ждёт слова `CLOSED` от сессии. Если сессия его не
-        // сказала — ушла, отвлеклась, ответила прозой, — прогон встаёт и
-        // заводит вопрос владельцу. А состояние задачи харнес выводит из
-        // истории сам: закрывающий трейлер на стволе значит «сделано».
-        //
-        // Замер 21.09: два прогона из шести стояли так по два часа и держали
-        // два вопроса к владельцу. У `M3-T3` трейлеров на стволе было ТРИ.
-        // Противоречие «история говорит закрыта, автомат ждёт слова»
-        // разрешал человек, хотя обе стороны знает прибор.
-        //
-        // Слово прибора отличимо от слова сессии: в событие пишется, кто довёл.
-        let closed_by_history = step == "closing"
-            && status != "CLOSED"
-            && client
-                .query_opt(
-                    "SELECT 1 FROM project_task_runs r
-                       JOIN project_plan_tasks t
-                         ON t.project_id = r.project_id AND t.id = r.task_id
-                      WHERE r.project_id = $1 AND r.id = $2 AND t.state = 'closed'",
-                    &[&project, &run],
-                )
-                .await?
-                .is_some();
-        let status = if closed_by_history { "CLOSED" } else { status };
         // Пустой статус — тоже вердикт: чистый отчёт без маркера. Как и у
         // прототипа, всё, что не RETHINK и не NEEDS FIX, — согласие: жёсткий
         // разбор слов превращал бы каждый честный абзац в отказ.
@@ -10148,11 +10163,7 @@ pub(crate) async fn automaton(
             .execute(
                 "INSERT INTO task_run_event (project_id, run_id, at, kind, text) VALUES ($1, $2, $3, 'автомат', $4)",
                 &[&project, &run, &now_ms(),
-                 &if closed_by_history {
-                     format!("{step} → {next}: задача закрыта трейлером на стволе, довёл харнес")
-                 } else {
-                     format!("{step} → {next} по {status}: {}", note.trim())
-                 }],
+                 &format!("{step} → {next} по {status}: {}", note.trim())],
             )
             .await?;
         return Ok(json!({ "status": "written", "runId": run,
