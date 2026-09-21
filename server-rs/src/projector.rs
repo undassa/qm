@@ -768,37 +768,6 @@ CREATE TABLE IF NOT EXISTS readiness_method (
   -- Галочка якорь НЕ рвёт: разбор снимает `- [ ]` и `- [x]` одинаково, и
   -- самая частая правка чек-листа безопасна.
   item_text text NOT NULL DEFAULT '',
-  -- ПОДСАДКА — УСЛОВИЕ ПРИЁМА, А НЕ ДИСЦИПЛИНА ОБЪЯВЛЯЮЩЕГО.
-  --
-  -- Закрывать пункт приёмки прошедшим вердиктом было написано и отозвано в
-  -- один день: `SELECT 1 WHERE false` — законный запрос, он выполняется, не
-  -- даёт ни строки и гасит находку навсегда. Перечислять опасные формы
-  -- бесполезно — набор назвал это точнее: дыру открывает ЛЮБОЕ условие,
-  -- ложное по построению.
-  --
-  -- Закрывает её только подсадка: тавтология не краснеет ни от чего. Поэтому
-  -- сервер применяет объявленную подсадку в откатываемой точке, ждёт от
-  -- запроса строк и откатывает. `probe_ok` — след этой проверки, и пункт
-  -- закрывается только при нём.
-  --
-  -- Так же давно устроены пункты гейта: рядом с правилом лежит `.probe.sql`,
-  -- и пункт, которого не роняет его проба, объявляет это сам.
-  probe text NOT NULL DEFAULT '',
-  probe_ok boolean,
-  -- ВЕРДИКТ СЧИТАЕТ ОДИН ИСПОЛНИТЕЛЬ И КЛАДЁТ СЮДА.
-  --
-  -- Правилу гейта нужен вердикт, а правило есть запрос: выполнить объявленное
-  -- оно не может. Соблазн — написать исполнителя на стороне базы; он был
-  -- написан и отозван. Две реализации одного предиката разошлись в тот же
-  -- день, на котором их сличили: `SELECT 1 WHERE false` одна читала как
-  -- «прошёл», другая как «не выполнился». Доккомментарий исполнителя это
-  -- предсказывал дословно.
-  --
-  -- Поэтому исполнитель остаётся один — тот же, что у двери `readiness`, — и
-  -- круг замера гейта считает им все объявленные запросы перед тем, как
-  -- мерить пункты. Правило читает посчитанное.
-  verdict text NOT NULL DEFAULT '',
-  verdict_at bigint NOT NULL DEFAULT 0,
   PRIMARY KEY (project_id, owner_kind, owner_id, ord));
 
 -- Связи, вынутые из фактов и полей документов. Каждая — своя таблица, потому
@@ -2855,10 +2824,6 @@ $ф$ LANGUAGE sql STABLE;
 UPDATE kind_layout SET spec = spec - 'at' - 'under' - 'not-under' - 'file'
  WHERE spec ?| array['at', 'under', 'not-under', 'file'];
 ALTER TABLE readiness_method ADD COLUMN IF NOT EXISTS item_text text NOT NULL DEFAULT '';
-ALTER TABLE readiness_method ADD COLUMN IF NOT EXISTS probe text NOT NULL DEFAULT '';
-ALTER TABLE readiness_method ADD COLUMN IF NOT EXISTS probe_ok boolean;
-ALTER TABLE readiness_method ADD COLUMN IF NOT EXISTS verdict text NOT NULL DEFAULT '';
-ALTER TABLE readiness_method ADD COLUMN IF NOT EXISTS verdict_at bigint NOT NULL DEFAULT 0;
 ALTER TABLE scheme_term ADD COLUMN IF NOT EXISTS project_id text NOT NULL DEFAULT '';
 ALTER TABLE scheme_term DROP CONSTRAINT IF EXISTS scheme_term_pkey;
 ALTER TABLE scheme_term ADD PRIMARY KEY (project_id, role, value);
@@ -5005,50 +4970,6 @@ pub(crate) async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, c
     // а таковы оба пункта про порядок фаз, и `corpus` меряется последним, —
     // видит свежие числа этого круга, а не прошлого.
     let client = conn.transaction().await?;
-    // ОБЪЯВЛЕННЫЕ ЗАПРОСЫ СЧИТАЮТСЯ ПЕРЕД КРУГОМ, ТЕМ ЖЕ ИСПОЛНИТЕЛЕМ.
-    //
-    // Считаются только те, чью подсадку сервер видел роняющей: объявление без
-    // подсадки вердикта не получает вовсе, и пункт им не закрывается. Довод —
-    // у колонки `probe_ok`.
-    //
-    // Место выбрано так, чтобы правило читало числа ЭТОГО круга: пункт
-    // `corpus · ready-items-checked` меряется ниже и берёт отсюда.
-    for r in client
-        .query(
-            "SELECT owner_kind, owner_id, ord, method FROM readiness_method
-              WHERE project_id = $1 AND method_kind = 'query' AND probe_ok
-                AND coalesce(btrim(method), '') <> ''
-              ORDER BY owner_kind, owner_id, ord",
-            &[&project],
-        )
-        .await?
-    {
-        let (ok, oi, ord, m): (String, String, i32, String) =
-            (r.get(0), r.get(1), r.get(2), r.get(3));
-        // ТОЧКА ВОЗВРАТА НА КАЖДЫЙ ЗАПРОС, И ЭТО НЕ ОСТОРОЖНОСТЬ.
-        //
-        // Круг идёт одной транзакцией, а Postgres после ошибки прерывает её
-        // целиком: один объявленный запрос с опечаткой унёс бы ВЕСЬ замер
-        // гейта, и прибор ослеп бы молча — дверь отдаёт сохранённый круг и
-        // пропуска не показывает. Соседний замер пунктов живёт под такой же
-        // точкой по той же причине, и довод записан там же.
-        client.batch_execute("SAVEPOINT способ").await?;
-        let v = execute_method(&client, project, "query", &m).await;
-        client
-            .batch_execute(if v.state == "unknown" {
-                "ROLLBACK TO SAVEPOINT способ; RELEASE SAVEPOINT способ"
-            } else {
-                "RELEASE SAVEPOINT способ"
-            })
-            .await?;
-        client
-            .execute(
-                "UPDATE readiness_method SET verdict = $5, verdict_at = $6
-                  WHERE project_id = $1 AND owner_kind = $2 AND owner_id = $3 AND ord = $4",
-                &[&project, &ok, &oi, &ord, &v.state, &now_ms()],
-            )
-            .await?;
-    }
     // Объявление — общее, замер — проектный. Пункты берутся из `gate_item`, и
     // проект, у которого их ещё не было, получает все сразу: гейт отвечает на
     // вопрос «можно ли идти дальше», и ответ не должен зависеть от того, кто как
@@ -5869,7 +5790,6 @@ pub(crate) struct Method<'a> {
     pub method_kind: &'a str,
     pub method: &'a str,
     pub declared_by: &'a str,
-    pub probe: &'a str,
     pub drop: bool,
 }
 
@@ -5886,7 +5806,7 @@ pub(crate) struct Method<'a> {
 /// сервер является. Команду выполняет харнес и подаёт итог — тем же путём, что
 /// состояния задач.
 pub(crate) async fn set_method(pool: &Pool, project: &str, fields: Method<'_>) -> Result<Value, crate::db::Fail> {
-    let Method { kind, id, ord, method_kind, method, declared_by, probe, drop } = fields;
+    let Method { kind, id, ord, method_kind, method, declared_by, drop } = fields;
     let client = crate::db::conn(pool).await?;
     if drop {
         let n = client
@@ -5925,45 +5845,16 @@ pub(crate) async fn set_method(pool: &Pool, project: &str, fields: Method<'_>) -
     // якорь лёг бы от старого пункта к новому номеру — строка, мёртвая с
     // рождения. Поэтому текст берётся подзапросом в том же операторе, и ноль
     // вставленных строк САМ значит «пункта нет».
-    // ПОДСАДКА ПРОВЕРЯЕТСЯ ЗДЕСЬ, ОДИН РАЗ, И ЕЁ СЛЕД ХРАНИТСЯ.
-    //
-    // Порядок внутри точки возврата: применить подсадку, выполнить
-    // объявленный запрос, ждать СТРОК. Нет строк — запрос не видит дефекта,
-    // который подсадка завела, и закрывать им пункт нельзя. Откат безусловен.
-    //
-    // Пустая подсадка не отказ: объявление принимается, но `probe_ok`
-    // остаётся неизвестным, и пункт таким способом не закрывается. Отказывать
-    // значило бы сломать объявления, сделанные до этого правила.
-    let probe_ok: Option<bool> = if method_kind == "query" && !probe.trim().is_empty() {
-        let mut probing = crate::db::conn(pool).await?;
-        let tx = probing.transaction().await?;
-        let seen = match tx.batch_execute(probe).await {
-            Ok(()) => match tx.query(method, &[&project]).await {
-                Ok(rows) => Some(!rows.is_empty()),
-                // Запрос, не выполнившийся ПОД подсадкой, вердикта не имеет:
-                // это не «не увидел», а «ответить нечем».
-                Err(_) => None,
-            },
-            Err(_) => None,
-        };
-        // Откат ВСЕГДА: подсадка пишет, и оставить её написанное значило бы
-        // испортить набор проверкой набора.
-        tx.rollback().await?;
-        seen
-    } else {
-        None
-    };
     let written = client
         .execute(
-            "INSERT INTO readiness_method (project_id, owner_kind, owner_id, ord, method_kind, method, declared_by, item_text, probe, probe_ok)
-             SELECT $1, $2, $3, $4, $5, $6, $7, i.text, $8, $9
+            "INSERT INTO readiness_method (project_id, owner_kind, owner_id, ord, method_kind, method, declared_by, item_text)
+             SELECT $1, $2, $3, $4, $5, $6, $7, i.text
                FROM readiness_item i
               WHERE i.project_id = $1 AND i.owner_kind = $2 AND i.owner_id = $3 AND i.ord = $4
              ON CONFLICT (project_id, owner_kind, owner_id, ord)
                DO UPDATE SET method_kind = EXCLUDED.method_kind, method = EXCLUDED.method,
-                             declared_by = EXCLUDED.declared_by, item_text = EXCLUDED.item_text,
-                             probe = EXCLUDED.probe, probe_ok = EXCLUDED.probe_ok",
-            &[&project, &kind, &id, &ord, &method_kind, &method, &declared_by, &probe, &probe_ok],
+                             declared_by = EXCLUDED.declared_by, item_text = EXCLUDED.item_text",
+            &[&project, &kind, &id, &ord, &method_kind, &method, &declared_by],
         )
         .await?;
     if written == 0 {
@@ -5992,18 +5883,7 @@ pub(crate) async fn set_method(pool: &Pool, project: &str, fields: Method<'_>) -
     // «true» стало ложью в тот миг, когда способ начал держаться за текст:
     // переживёт, ПОКА текст пункта тот же.
     Ok(json!({ "updated": n, "methodKind": method_kind, "declaredBy": declared_by,
-               "survivesRebuild": "пока текст пункта тот же",
-               "probeOk": probe_ok,
-               "why": match (method_kind, probe_ok) {
-                   ("query", Some(true)) => "подсадка роняет запрос: способ принят и пункт им закрывается",
-                   ("query", Some(false)) => "ПОДСАДКА НЕ УРОНИЛА ЗАПРОС: он не видит дефекта, который она завела. \
-                                              Пункт этим способом не закрывается",
-                   ("query", None) if probe.trim().is_empty() =>
-                       "подсадки нет: способ записан, но пункт им НЕ закрывается. \
-                        Объявите `probe` — тавтология ею и отсеивается",
-                   ("query", None) => "подсадка либо запрос под нею не выполнились: ответить нечем",
-                   _ => "",
-               } }))
+               "survivesRebuild": "пока текст пункта тот же" }))
 }
 
 /// Сейчас в миллисекундах — время подачи, а не время события.
