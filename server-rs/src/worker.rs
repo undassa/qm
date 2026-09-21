@@ -346,6 +346,44 @@ impl Worker {
         };
         let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         let mut rows: Vec<(String, String, String)> = Vec::new();
+        // ДВА ФОРМАТА, И ГЛАВНЫЙ — NEXTEST.
+        //
+        // «Упало на стволе» определяет не харнес, а сам набор своим рецептом:
+        // `just test` у `tot-ade` — это `cargo nextest ... -E 'not
+        // binary(/^mirror_/)'`. Прогонщик, меряющий другой командой, изобретает
+        // красноту, которой у набора нет: под `cargo test` проверки делят один
+        // процесс, и `the_door_counts_what_is_born_deeper_in_the_tree` ложно
+        // краснела — её собственная шапка это и говорит, с замером.
+        //
+        // У nextest связь «проверка ↔ бинарь» — ОДНА СТРОКА, а не порядок строк:
+        //     PASS [0.002s] (1/313) tot-core::mirror_foo s8_ac_6_имя
+        // Склеить её нечем, и разбору нечего терять между потоками.
+        for line in text.lines() {
+            let t = line.trim_start();
+            let Some((head, rest)) = t.split_once(char::is_whitespace) else { continue };
+            let verdict = match head {
+                "PASS" => "passed",
+                "FAIL" => "failed",
+                "SKIP" => "ignored",
+                _ => continue,
+            };
+            // Хвост после `[время]` и необязательного `(n/N)`: два слова —
+            // «крейт::бинарь» и имя проверки.
+            let tail = rest.rsplit(']').next().unwrap_or("").trim_start();
+            let tail = tail.strip_prefix('(').map_or(tail, |x| {
+                x.split_once(')').map_or(tail, |(_, after)| after.trim_start())
+            });
+            let mut parts = tail.split_whitespace();
+            let (Some(binary), Some(name)) = (parts.next(), parts.next()) else { continue };
+            if parts.next().is_some() {
+                continue;
+            }
+            rows.push((
+                name.to_owned(),
+                verdict.to_owned(),
+                binary.rsplit("::").next().unwrap_or(binary).to_owned(),
+            ));
+        }
         // ЧЕМ ШЛА ПРОВЕРКА. `cargo test` печатает `Running tests/<файл>.rs (…)`
         // перед блоком каждого бинаря. Прежде разбор эту строку пропускал, и
         // «упала» становилось неотличимо от «обязана падать»: зеркало красной

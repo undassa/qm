@@ -10,7 +10,7 @@
       "project": "ae7ec7fa-62d3-4664-89d2-18f35a25eb3a",
       "repo": "/opt/src/github.com/tot-space/tot-ade",
       "test": {
-        "cmd": "cargo test --workspace --no-fail-fast",
+        "cmd": "just test",
         "dir": ""
       }
     }
