@@ -660,7 +660,20 @@ CREATE TABLE IF NOT EXISTS harness_process_step (
   process text NOT NULL,
   ord integer NOT NULL,
   question text NOT NULL,
-  method_kind text NOT NULL CHECK (method_kind IN ('query','command','unknown')),
+  -- РОД «ЗАПРОС» ОСТАВЛЕН ДЛЯ ПУНКТОВ ГЕЙТА, НО НАБОР ИМ НЕ ОБЪЯВЛЯЕТ.
+  --
+  -- Свободный SQL от набора проверкой не становится: подсадка рядом с ним
+  -- доказывает согласованность пары «запрос плюс подсадка» и никогда —
+  -- относимость к пункту. Ревью измерило обход в одну строку: запрос, ложный
+  -- в сессии замера и истинный под `SET application_name`, закрывал ЛЮБОЙ
+  -- пункт навсегда, не измеряя ничего.
+  --
+  -- Вместо языка — словарь. Набор объявляет ЗАЯВЛЕНИЕ известного рода с
+  -- типизированным предметом; предикат написан здесь и проходит ревью, из
+  -- набора приходит только предмет. `checks-green` — первый такой род: список
+  -- имён проверок, которые обязаны быть зелены на последнем чистом прогоне
+  -- ствола.
+  method_kind text NOT NULL CHECK (method_kind IN ('query','command','checks-green','unknown')),
   method text NOT NULL DEFAULT '',
   -- Когда ступень вообще в игре. Пусто — всегда. Условная ступень объявляется,
   -- а не подразумевается: пропуск обязан быть виден с причиной.
@@ -736,6 +749,10 @@ CREATE TABLE IF NOT EXISTS readiness_method (
   method_kind text NOT NULL CHECK (method_kind IN ('query','command','unknown')),
   method text NOT NULL DEFAULT '',
   declared_by text NOT NULL DEFAULT '',
+  -- Вердикт заявления: что оно показало в последнем круге замера гейта.
+  -- Считает его один исполнитель — тот же, что у двери `readiness`.
+  verdict text NOT NULL DEFAULT '',
+  verdict_at bigint NOT NULL DEFAULT 0,
   -- ТЕКСТ ПУНКТА НА МИГ ОБЪЯВЛЕНИЯ — ЯКОРЬ, КОТОРОГО НЕ БЫЛО.
   --
   -- `ord` есть НОМЕР СТРОКИ в документе задачи. Значит всякая правка выше
@@ -4970,6 +4987,56 @@ pub(crate) async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, c
     // а таковы оба пункта про порядок фаз, и `corpus` меряется последним, —
     // видит свежие числа этого круга, а не прошлого.
     let client = conn.transaction().await?;
+    // ЗАЯВЛЕНИЯ СЧИТАЮТСЯ ПЕРЕД КРУГОМ, ТЕМ ЖЕ ИСПОЛНИТЕЛЕМ, ЧТО У ДВЕРИ.
+    //
+    // Правилу гейта нужен вердикт, а правило есть запрос: выполнить
+    // объявленное оно не может. Писать второго исполнителя на стороне базы
+    // пробовали — две реализации одного предиката разошлись в тот же день, на
+    // котором их сличили. Поэтому исполнитель один, а посчитанное кладётся
+    // рядом с объявлением.
+    //
+    // ЯКОРЬ ПРОВЕРЯЕТСЯ И ЗДЕСЬ. `ord` есть номер строки в документе, и
+    // заявление переживает пересборку: правка выше чек-листа уводит его на
+    // чужой пункт. Возврат заявлений на пункты это уже стережёт текстом;
+    // вердикт без той же проверки обошёл бы стража — прошедшее заявление
+    // сняло бы находку с пункта, которого никто не мерил. Замер: из 166
+    // способов 94 стояли на соседнем пункте.
+    //
+    // Точка возврата на каждое: круг идёт одной транзакцией, а Postgres после
+    // ошибки прерывает её целиком, и одно неудачное заявление унесло бы весь
+    // замер гейта — молча, потому что дверь отдаёт сохранённый круг.
+    for r in client
+        .query(
+            "SELECT m.owner_kind, m.owner_id, m.ord, m.method_kind, m.method
+               FROM readiness_method m
+               JOIN readiness_item i
+                 ON i.project_id = m.project_id AND i.owner_kind = m.owner_kind
+                AND i.owner_id = m.owner_id AND i.ord = m.ord
+                AND (m.item_text = '' OR m.item_text = i.text)
+              WHERE m.project_id = $1 AND m.method_kind = 'checks-green'
+                AND coalesce(btrim(m.method), '') <> ''
+              ORDER BY m.owner_kind, m.owner_id, m.ord",
+            &[&project],
+        )
+        .await?
+    {
+        let (ok, oi, ord, mk, m): (String, String, i32, String, String) =
+            (r.get(0), r.get(1), r.get(2), r.get(3), r.get(4));
+        client.batch_execute("SAVEPOINT заявление").await?;
+        let v = execute_method(&client, project, &mk, &m).await;
+        // Откат безусловен: от заявления нам нужен только вердикт, а
+        // оставленное им в базе было бы зафиксировано коммитом круга.
+        client
+            .batch_execute("ROLLBACK TO SAVEPOINT заявление; RELEASE SAVEPOINT заявление")
+            .await?;
+        client
+            .execute(
+                "UPDATE readiness_method SET verdict = $5, verdict_at = $6
+                  WHERE project_id = $1 AND owner_kind = $2 AND owner_id = $3 AND ord = $4",
+                &[&project, &ok, &oi, &ord, &v.state, &now_ms()],
+            )
+            .await?;
+    }
     // Объявление — общее, замер — проектный. Пункты берутся из `gate_item`, и
     // проект, у которого их ещё не было, получает все сразу: гейт отвечает на
     // вопрос «можно ли идти дальше», и ответ не должен зависеть от того, кто как
@@ -5853,7 +5920,12 @@ pub(crate) async fn set_method(pool: &Pool, project: &str, fields: Method<'_>) -
               WHERE i.project_id = $1 AND i.owner_kind = $2 AND i.owner_id = $3 AND i.ord = $4
              ON CONFLICT (project_id, owner_kind, owner_id, ord)
                DO UPDATE SET method_kind = EXCLUDED.method_kind, method = EXCLUDED.method,
-                             declared_by = EXCLUDED.declared_by, item_text = EXCLUDED.item_text",
+                             declared_by = EXCLUDED.declared_by, item_text = EXCLUDED.item_text,
+                             -- ВЕРДИКТ ОБНУЛЯЕТСЯ ПРИ ПЕРЕОБЪЯВЛЕНИИ. Иначе между
+                             -- новым объявлением и ближайшим кругом правило читало
+                             -- бы вердикт, посчитанный для ДРУГОГО текста, и
+                             -- отличить это было бы нечем.
+                             verdict = '', verdict_at = 0",
             &[&project, &kind, &id, &ord, &method_kind, &method, &declared_by],
         )
         .await?;
@@ -12490,6 +12562,64 @@ pub(crate) async fn execute_method_upto(
             detail: vec![],
             why: "у способа вида «запрос» запроса нет".into(),
         },
+        // ЗАЯВЛЕНИЕ «НАЗВАННЫЕ ПРОВЕРКИ ЗЕЛЕНЫ», И ПРЕДИКАТ ЗДЕСЬ, А НЕ У НАБОРА.
+        //
+        // Из набора приходит СПИСОК ИМЁН, и ничего кроме: он уезжает доводом
+        // запроса, а не склейкой в него. Свободный SQL от набора не приходит
+        // вовсе — вместе с ним исчезает весь список обходов, ради которого
+        // отозван род «запрос» для пунктов приёмки.
+        //
+        // Имя, которого в прогоне НЕТ, даёт строку наравне с упавшим. Это не
+        // мелочь: пункт, называющий несуществующую проверку, до сих пор
+        // выглядел ровно как пункт, называющий живую, и «зелены под `just
+        // test`» читалось как выполненное. Набор нашёл такой случай руками —
+        // `s4_ac_1_no_path_leads_to_a_write_under_drift`, переименованную по
+        // `ADR-0107`, — и его же подсадка это и доказывала.
+        //
+        // Прогон берётся последний с ЧИСТОГО дерева: прогон на дереве с чужой
+        // правкой зеленит и краснит что угодно.
+        "checks-green" => {
+            let names: Vec<String> =
+                method.split_whitespace().map(str::to_owned).collect();
+            if names.is_empty() {
+                return Verdict { state: "unknown", violations: 0, detail: vec![],
+                    why: "заявление «проверки зелены» не называет ни одной проверки".into() };
+            }
+            match client
+                .query(
+                    "SELECT n AS detail FROM unnest($2::text[]) AS n
+                      WHERE NOT EXISTS (
+                            SELECT 1 FROM test_run r
+                             WHERE r.project_id = $1 AND NOT r.dirty
+                               AND r.at = (SELECT max(at) FROM test_run
+                                            WHERE project_id = $1 AND NOT dirty)
+                               AND r.check_name = n AND r.verdict = 'passed')
+                      ORDER BY n",
+                    &[&project, &names],
+                )
+                .await
+            {
+                Ok(found) => Verdict {
+                    state: if found.is_empty() { "passed" } else { "failed" },
+                    violations: found.len(),
+                    detail: {
+                        let mut d: Vec<String> = found
+                            .iter()
+                            .map(|r| {
+                                format!("{} — не зелена на последнем чистом прогоне ствола либо её в нём нет вовсе",
+                                        r.try_get::<_, String>(0).unwrap_or_default())
+                            })
+                            .collect();
+                        d.sort();
+                        d.truncate(limit);
+                        d
+                    },
+                    why: String::new(),
+                },
+                Err(e) => Verdict { state: "unknown", violations: 0, detail: vec![],
+                    why: format!("заявление не посчиталось: {}", crate::db::Says::says(&e)) },
+            }
+        }
         "command" => Verdict {
             state: "unknown",
             violations: 0,

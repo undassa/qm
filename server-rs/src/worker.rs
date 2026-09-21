@@ -514,6 +514,35 @@ impl Worker {
         }
     }
 
+    /// Съём датчиков набора с дерева обходчика.
+    ///
+    /// Дверь берётся из окружения службы — та же, что у `mh sense`, — и ей
+    /// подставляется набор этого прохода. Съём блокирующий: он читает файлы и
+    /// ходит в сеть, и держать на нём исполнителя задач нельзя.
+    ///
+    /// Отказ не отменяет прогона: несвежий датчик хуже свежего, но прогон,
+    /// не снятый из-за датчика, хуже обоих.
+    async fn sense_tree(&self, bundle: &Bundle, root: &str) {
+        let mut door = match crate::client::Door::from_env() {
+            Ok(d) => d,
+            Err(why) => {
+                println!("{} · датчики: двери нет — {why}", bundle.name);
+                return;
+            }
+        };
+        door.project = bundle.project.clone();
+        let (name, root) = (bundle.name.clone(), root.to_owned());
+        match tokio::task::spawn_blocking(move || crate::client::sense(&door, None, &root)).await {
+            Ok(Ok(v)) => println!(
+                "{} · датчики: снято {}",
+                name,
+                v["done"].as_array().map(|a| a.len()).unwrap_or(0)
+            ),
+            Ok(Err(why)) => println!("{name} · датчики: {why}"),
+            Err(e) => println!("{name} · датчики: съём не завершился: {e}"),
+        }
+    }
+
     async fn run_tests_once(&self, bundle: &Bundle, spec: &TestSpec) -> Result<Option<Value>, String> {
         let root = Self::prepare_runner_tree(&bundle.repo)?;
         let cwd = if spec.dir.is_empty() { root.clone() } else { format!("{root}/{}", spec.dir) };
@@ -567,6 +596,21 @@ impl Worker {
         if fresh {
             return Ok(None);
         }
+        // ДАТЧИКИ СНИМАЮТСЯ С ТОЙ ЖЕ ВЕРШИНЫ, ЧТО И ПРОГОН.
+        //
+        // Съём запускался только руками (`mh sense`), и постоянного механизма
+        // не было — `HARNESS-PLAN-7` записал это дословно. Цена измерена
+        // 21.09: факты о коде отстали на четыре часа, проверка
+        // `m4_t9_change_outside_the_border_is_drift_not_moved` была зелена в
+        // прогоне и ОТСУТСТВОВАЛА у датчика, а пункт гейта «проверка не
+        // написана» судит именно по датчику. Отставания при этом не видно:
+        // срок объявлен неделей, и четыре часа прибор честно числит свежестью.
+        //
+        // Место то же, что у прогона, и по той же причине: здесь лежит чистое
+        // дерево ствола с прочитанной вершиной — два условия, без которых
+        // факт не считается свежим никогда. И снимается только на НОВОЙ
+        // вершине: на прежней снимать нечего.
+        self.sense_tree(bundle, &root).await;
         println!("{} · тесты: прогон на {head}", bundle.name);
         let (mut rows, ok) = Self::profile(&cwd, &spec.cmd).await?;
         if rows.is_empty() && !ok {

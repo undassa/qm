@@ -53,7 +53,14 @@ fn main() {
         "guard" => std::process::exit(client::guard(&door)),
         "sense" => {
             let only = args.next();
-            match client::sense(&door, only.as_deref()) {
+            let root = match client::sense_root() {
+                Ok(r) => r,
+                Err(why) => {
+                    eprintln!("mh sense: {why}");
+                    std::process::exit(2);
+                }
+            };
+            match client::sense(&door, only.as_deref(), &root) {
                 Ok(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default()),
                 Err(why) => {
                     eprintln!("mh sense: {why}");
