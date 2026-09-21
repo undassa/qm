@@ -192,6 +192,18 @@ fn one_letter_apart(a: &str, b: &str) -> bool {
     slips + (l.len() - i) + (s.len() - j) <= 1
 }
 
+/// Доводы двери: обязательные и остальные, которые она тоже принимает.
+fn door_arguments(schema: Option<&Value>) -> (Value, Vec<String>) {
+    let needs = schema.and_then(|s| s.get("required")).cloned().unwrap_or(json!([]));
+    let required: Vec<&str> =
+        needs.as_array().map_or(Vec::new(), |a| a.iter().filter_map(|v| v.as_str()).collect());
+    let takes = schema
+        .and_then(|s| s.get("properties"))
+        .and_then(|p| p.as_object())
+        .map_or(Vec::new(), |p| p.keys().filter(|k| !required.contains(&k.as_str())).cloned().collect());
+    (needs, takes)
+}
+
 impl Mcp {
     /// Перечень инструментов: пара на вид плюс общие.
     /// Двери, похожие на названную: общая приставка, вхождение, либо разница в
@@ -1501,11 +1513,22 @@ impl Mcp {
                         if about.contains(w.as_str()) { score += 2 * ves }
                     }
                     if score > 0 {
+                        // НЕОБЯЗАТЕЛЬНЫЕ ДОВОДЫ — ТОЖЕ ОТВЕТ.
+                        //
+                        // Перечень показывал только обязательные, и дверь,
+                        // умеющая обратное действие, выглядела не умеющей его.
+                        // Замер 21.09: сессия объявила задаче требование
+                        // `task-requirement-add`, поняла, что оно чужое, и не
+                        // нашла, чем снять, — довод `drop` у двери есть и в
+                        // схеме подписан, а в перечне его не было. Две находки
+                        // `G2` стояли, пока об этом не спросили голосом; дверей
+                        // с `drop` в приборе больше сотни.
+                        let (needs, takes) = door_arguments(t.get("inputSchema"));
                         hits.push((score, json!({
                             "door": t.get("name").cloned().unwrap_or(Value::Null),
                             "about": t.get("description").cloned().unwrap_or(Value::Null),
-                            "needs": t.get("inputSchema").and_then(|s| s.get("required")).cloned()
-                                .unwrap_or(json!([])),
+                            "needs": needs,
+                            "takes": takes,
                             "score": score,
                         })));
                     }
@@ -3196,5 +3219,27 @@ mod refusal_tests {
         assert_eq!(by_merits["_meta"]["busy"], serde_json::json!(false));
         let database: Miss = crate::db::Fail::Down("база не принимает соединение".to_owned()).into();
         assert_eq!(refusal(database)["_meta"]["busy"], serde_json::json!(false), "недоступная база — не занятость");
+    }
+
+    /// Перечень дверей называет и необязательные доводы. Пока он называл одни
+    /// обязательные, дверь `task-requirement-add` выглядела не умеющей снять
+    /// объявленное ребро — а `drop` у неё есть, и подписан. Двух находок `G2`
+    /// это стоило до того, как спросили голосом.
+    #[test]
+    fn a_door_listing_names_what_else_it_takes() {
+        use super::door_arguments;
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "task": {}, "requirement": {}, "drop": {} },
+            "required": ["task", "requirement"],
+        });
+        let (needs, takes) = door_arguments(Some(&schema));
+        assert_eq!(needs, serde_json::json!(["task", "requirement"]));
+        assert_eq!(takes, vec!["drop".to_string()], "необязательный довод обязан быть назван");
+
+        // Двери без схемы и без необязательных доводов отвечают пустотой, а не падают.
+        assert_eq!(door_arguments(None), (serde_json::json!([]), Vec::new()));
+        let bare = serde_json::json!({ "type": "object", "properties": { "id": {} }, "required": ["id"] });
+        assert!(door_arguments(Some(&bare)).1.is_empty(), "лишнего не выдумывается");
     }
 }
