@@ -732,8 +732,12 @@ CREATE TABLE IF NOT EXISTS readiness_item (
   owner_kind text NOT NULL, owner_id text NOT NULL, ord integer NOT NULL,
   text text NOT NULL,
   declared boolean,                      -- стояла ли галочка в документе
+  -- Род держится ДВУМЯ таблицами: объявление живёт в `readiness_method`,
+  -- копия — здесь, и пересборка возвращает её сюда. Заводя род, надо
+  -- пускать его в обе: ограничение одной из них отвергло первое же
+  -- объявление `checks-green`, уже после того как вторая его приняла.
   method_kind text NOT NULL DEFAULT 'unknown'
-    CHECK (method_kind IN ('query','command','unknown')),
+    CHECK (method_kind IN ('query','command','checks-green','unknown')),
   method text NOT NULL DEFAULT '',
   PRIMARY KEY (project_id, owner_kind, owner_id, ord));
 
@@ -2857,6 +2861,9 @@ ALTER TABLE readiness_method ADD COLUMN IF NOT EXISTS verdict text NOT NULL DEFA
 ALTER TABLE readiness_method ADD COLUMN IF NOT EXISTS verdict_at bigint NOT NULL DEFAULT 0;
 ALTER TABLE readiness_method DROP CONSTRAINT IF EXISTS readiness_method_method_kind_check;
 ALTER TABLE readiness_method ADD CONSTRAINT readiness_method_method_kind_check
+  CHECK (method_kind IN ('query','command','checks-green','unknown'));
+ALTER TABLE readiness_item DROP CONSTRAINT IF EXISTS readiness_item_method_kind_check;
+ALTER TABLE readiness_item ADD CONSTRAINT readiness_item_method_kind_check
   CHECK (method_kind IN ('query','command','checks-green','unknown'));
 ALTER TABLE scheme_term ADD COLUMN IF NOT EXISTS project_id text NOT NULL DEFAULT '';
 ALTER TABLE scheme_term DROP CONSTRAINT IF EXISTS scheme_term_pkey;
