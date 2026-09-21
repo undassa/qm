@@ -569,62 +569,7 @@ pub fn sense(door: &Door, only: Option<&str>) -> Result<Value, String> {
         }
 
         if how == "task-trailers" {
-            let log = std::process::Command::new("git")
-                // ВРЕМЯ КОММИТА ПОДАЁТСЯ ВМЕСТЕ С ТРЕЙЛЕРОМ. Без него сервер
-                // знает лишь «когда увидел», а этим порядок не судится: набор,
-                // проработавший год и подключённый вчера, показал бы всю историю
-                // вчерашним днём, и правило «план записан до закрытия» не
-                // отличило бы сделанного до себя от сделанного после.
-                .args(["-C", &root, "log", "--all", "--pretty=%H%x00%ct%x00%B%x01"])
-                .output()
-                .ok()
-                .and_then(|o| String::from_utf8(o.stdout).ok())
-                .unwrap_or_default();
-            // ЗАКРЫТО — ЗНАЧИТ В ПРОДУКТЕ, а не «где-то в ветке». `--all` выше
-            // берёт трейлеры отовсюду, и это правильно: иначе работу, ведомую
-            // на ветке, не видно вовсе. Но состояние `closed` по трейлеру с
-            // невлитой ветки — неправда: доска говорит «сделано», а в стволе
-            // этого нет.
-            //
-            // Померено 19 сентября: у `tot-ade` три коммита закрытия жили
-            // только в ветке — обе задачи волны 2, PR не влит. Доска
-            // показывала владельцу «закрыто 3», в стволе была одна.
-            //
-            // Трейлер с невлитой ветки даёт `claimed`: работа есть, в продукт
-            // не попала. Вольётся — станет `closed` следующей же подачей.
-            let mainline = ["origin/HEAD", "origin/main", "main", "origin/master", "master"]
-                .iter()
-                .find(|r| {
-                    std::process::Command::new("git")
-                        .args(["-C", &root, "rev-parse", "--verify", "--quiet", r])
-                        .output()
-                        .is_ok_and(|o| o.status.success())
-                })
-                .copied();
-            // Ствола нет — судить «в продукте ли» нечем, и молча считать всё
-            // закрытым нельзя: это ровно та ложь, от которой здесь уходим.
-            let Some(mainline) = mainline else {
-                return Err(format!(
-                    "{fact}: ствола не найдено ни под одним из имён origin/HEAD · main · master.                      Закрыта ли задача В ПРОДУКТЕ, судить нечем, а считать закрытым всё подряд —                      это доска, которая врёт вверх."
-                ));
-            };
-            let in_product: std::collections::HashSet<String> = std::process::Command::new("git")
-                .args(["-C", &root, "log", mainline, "--pretty=%H"])
-                .output()
-                .ok()
-                .and_then(|o| String::from_utf8(o.stdout).ok())
-                .unwrap_or_default()
-                .lines()
-                .map(|l| l.trim().to_owned())
-                .collect();
-            let rex = regex::Regex::new(re).map_err(|e| format!("{fact}: образец трейлера не разбирается: {e}"))?;
-            let states = trailer_states(&log, &in_product, &rex);
-            if states.is_empty() {
-                return Err(format!(
-                    "{fact}: закрывающих трейлеров в истории нет ни одного. Пустая подача \
-                     стёрла бы состояния, выведенные прежде, — это отказ, а не ноль."
-                ));
-            }
+            let states = task_states_from_repo(&root, re).map_err(|why| format!("{fact}: {why}"))?;
             // ЧЕМ СНЯТ ФАКТ — коммитом и чистотой дерева, как у всякой другой
             // подачи. Без них `fact_fresh` отвечает «снят БЕЗ КОММИТА», и
             // `G4 · task-state-matches-history` держит находку, которую набору
@@ -1974,6 +1919,73 @@ pub(crate) fn stub() {
 ///
 /// Поэтому `closed` понижается до `claimed` только тогда, когда задачу не
 /// закрывает НИ ОДИН коммит ствола.
+/// Состояния задач, выведенные из закрывающих трейлеров репозитория.
+///
+/// ОДНА НА ДВУХ ЗВАВШИХ, И ЭТО НЕ УДОБСТВО. Правило «закрыто — значит в
+/// продукте» живёт тут одно: обходчик снимает его каждый час со своего чистого
+/// дерева, `mh sense` — по требованию из рабочего. Второй список веток ствола
+/// или второй разбор лога разошлись бы молча, и доска у двух звавших
+/// показывала бы разное.
+pub(crate) fn task_states_from_repo(root: &str, re: &str) -> Result<Vec<Value>, String> {
+            let log = std::process::Command::new("git")
+        // ВРЕМЯ КОММИТА ПОДАЁТСЯ ВМЕСТЕ С ТРЕЙЛЕРОМ. Без него сервер
+        // знает лишь «когда увидел», а этим порядок не судится: набор,
+        // проработавший год и подключённый вчера, показал бы всю историю
+        // вчерашним днём, и правило «план записан до закрытия» не
+        // отличило бы сделанного до себя от сделанного после.
+        .args(["-C", root, "log", "--all", "--pretty=%H%x00%ct%x00%B%x01"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_default();
+    // ЗАКРЫТО — ЗНАЧИТ В ПРОДУКТЕ, а не «где-то в ветке». `--all` выше
+    // берёт трейлеры отовсюду, и это правильно: иначе работу, ведомую
+    // на ветке, не видно вовсе. Но состояние `closed` по трейлеру с
+    // невлитой ветки — неправда: доска говорит «сделано», а в стволе
+    // этого нет.
+    //
+    // Померено 19 сентября: у `tot-ade` три коммита закрытия жили
+    // только в ветке — обе задачи волны 2, PR не влит. Доска
+    // показывала владельцу «закрыто 3», в стволе была одна.
+    //
+    // Трейлер с невлитой ветки даёт `claimed`: работа есть, в продукт
+    // не попала. Вольётся — станет `closed` следующей же подачей.
+    let mainline = ["origin/HEAD", "origin/main", "main", "origin/master", "master"]
+        .iter()
+        .find(|r| {
+            std::process::Command::new("git")
+                .args(["-C", root, "rev-parse", "--verify", "--quiet", r])
+                .output()
+                .is_ok_and(|o| o.status.success())
+        })
+        .copied();
+    // Ствола нет — судить «в продукте ли» нечем, и молча считать всё
+    // закрытым нельзя: это ровно та ложь, от которой здесь уходим.
+    let Some(mainline) = mainline else {
+        return Err(format!(
+            "ствола не найдено ни под одним из имён origin/HEAD · main · master.                      Закрыта ли задача В ПРОДУКТЕ, судить нечем, а считать закрытым всё подряд —                      это доска, которая врёт вверх."
+        ));
+    };
+    let in_product: std::collections::HashSet<String> = std::process::Command::new("git")
+        .args(["-C", root, "log", mainline, "--pretty=%H"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_default()
+        .lines()
+        .map(|l| l.trim().to_owned())
+        .collect();
+    let rex = regex::Regex::new(re).map_err(|e| format!("образец трейлера не разбирается: {e}"))?;
+    let states = trailer_states(&log, &in_product, &rex);
+    if states.is_empty() {
+        return Err(format!(
+            "закрывающих трейлеров в истории нет ни одного. Пустая подача \
+             стёрла бы состояния, выведенные прежде, — это отказ, а не ноль."
+        ));
+    }
+    Ok(states)
+}
+
 fn trailer_states(
     log: &str,
     in_product: &std::collections::HashSet<String>,

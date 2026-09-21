@@ -415,6 +415,74 @@ impl Worker {
         Ok((rows, out.status.success()))
     }
 
+    /// Состояния задач — со ствола, каждый час, а не когда сессия вспомнит.
+    ///
+    /// Дверь `task-state-push` описана словами «принять состояния, ВЫВЕДЕННЫЕ
+    /// харнесом из закрывающих трейлеров», а звать её было некому: выводил их
+    /// `mh sense`, и гоняют его руками. `HARNESS-PLAN-7` записал этот пробел
+    /// дословно — «скриптов харнеса, зовущих `task-state-push`: 0, постоянного
+    /// механизма нет».
+    ///
+    /// Цена измерена 21.09: ствол закрыл `M4-T9` трейлером, а прибор два с
+    /// половиной часа показывал её взятой в работу. Владелец смотрел на доску и
+    /// спрашивал, почему за смену не закрыто ни одной задачи, — закрыто было
+    /// шесть.
+    ///
+    /// Место выбрано не случайно: здесь уже лежит ЧИСТОЕ дерево ствола с
+    /// прочитанным `HEAD` — ровно те два условия, без которых `fact_fresh`
+    /// отвечает «снят БЕЗ КОММИТА» и факт не считается свежим никогда.
+    ///
+    /// Вывод берётся общей функцией с `mh sense`, а не повторяется здесь:
+    /// правило «закрыто — значит в продукте» должно жить в одном месте, иначе
+    /// два звавших однажды покажут разное.
+    ///
+    /// ПОТОЛОК: набор без объявленной команды тестов сюда не заходит — дерева
+    /// ему обходчик не готовит. Такому набору состояния по-прежнему подаёт
+    /// только `mh sense`.
+    async fn push_task_states(&self, bundle: &Bundle, root: &str, head: &str) {
+        let specs = match self.door(&bundle.project, "sensor-specs", json!({})).await {
+            Ok(v) => v,
+            Err(why) => {
+                println!("{} · состояния задач: {why}", bundle.name);
+                return;
+            }
+        };
+        let empty = Vec::new();
+        let re = specs["specs"]
+            .as_array()
+            .unwrap_or(&empty)
+            .iter()
+            .find(|s| s["how"].as_str() == Some("task-trailers"))
+            .and_then(|s| s["extract"].as_str())
+            .unwrap_or("");
+        // Образец трейлера ОБЪЯВЛЯЕТ НАБОР. Не объявлен — молчим и говорим об
+        // этом: подать пустое значило бы стереть состояния, выведенные прежде.
+        if re.is_empty() {
+            println!("{} · состояния задач: датчик «task-trailers» не объявлен — не подаю", bundle.name);
+            return;
+        }
+        match crate::client::task_states_from_repo(root, re) {
+            Ok(states) => {
+                let n = states.len();
+                match self
+                    .door(
+                        &bundle.project,
+                        "task-state-push",
+                        json!({ "states": states, "commit": head, "dirty": false }),
+                    )
+                    .await
+                {
+                    Ok(out) => println!(
+                        "{} · состояния задач: {n} из трейлеров, было {} стало {}",
+                        bundle.name, out["was"], out["now"]
+                    ),
+                    Err(why) => println!("{} · состояния задач: {why}", bundle.name),
+                }
+            }
+            Err(why) => println!("{} · состояния задач: {why}", bundle.name),
+        }
+    }
+
     async fn run_tests_once(&self, bundle: &Bundle, spec: &TestSpec) -> Result<Option<Value>, String> {
         let root = Self::prepare_runner_tree(&bundle.repo)?;
         let cwd = if spec.dir.is_empty() { root.clone() } else { format!("{root}/{}", spec.dir) };
@@ -433,6 +501,10 @@ impl Worker {
         if head.is_empty() {
             return Err("HEAD не читается".into());
         }
+        // СОСТОЯНИЯ ЗАДАЧ ПОДАЮТСЯ ДО РАЗВИЛКИ «ПЕРЕПРОГОН НЕ НУЖЕН».
+        // Тесты на той же голове и правда мерить нечего, а трейлеры — есть:
+        // ветку могли влить без единой правки кода.
+        self.push_task_states(bundle, &cwd, &head).await;
         // Перепрогон той же головы не нужен: свежий замер есть.
         let fresh = match crate::db::conn(&self.pool).await {
             Ok(c) => c
