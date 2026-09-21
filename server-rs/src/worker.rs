@@ -319,7 +319,7 @@ impl Worker {
         let joined = format!("( {} ) 2>&1", cmd);
         let run = tokio::process::Command::new("bash")
             .args(["-c", &joined])
-            .current_dir(&cwd)
+            .current_dir(cwd)
             .env("CARGO_TERM_COLOR", "never")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
