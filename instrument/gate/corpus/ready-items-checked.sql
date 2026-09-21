@@ -23,11 +23,27 @@ SELECT 'датчик «test-name» ' || fact_gap($1, 'test-name')
  WHERE NOT fact_fresh($1, 'test-name')
    AND EXISTS (SELECT 1 FROM task_ready_item WHERE project_id = $1)
 UNION ALL
-SELECT t.id || ' — пункт приёмки без названной проверки: ' || r.text
+SELECT t.id || ' — пункт приёмки без названной проверки и без объявленного способа: '
+       || r.text || ' — способ объявляется дверью `method-set kind=task id=' || t.id
+       || ' ord=' || r.ord || ' methodKind=…`'
   FROM project_plan_tasks t
   JOIN task_ready_item r ON r.project_id = t.project_id AND r.task_id = t.id
  WHERE t.project_id = $1 AND fact_fresh($1, 'test-name')
    AND t.kind = 'dev' AND t.state = 'closed' AND NOT r.done AND r.check_id = ''
+   -- ОБЪЯВЛЕННЫЙ СПОСОБ — ТОЖЕ ПРОВЕРКА.
+   --
+   -- Пункт приёмки не обязан называть тест: «пуст вывод `rg …`», «`just gate`
+   -- зелён» проверяются иначе, и для этого в приборе есть `readiness_method`
+   -- и дверь `method-set`. Пункт требовал имени теста от всякой строки и
+   -- держал 409 находок, из которых бóльшая часть — о строках, у которых
+   -- имени теста не бывает по существу.
+   --
+   -- Соединение идёт по номеру строки документа: обе таблицы нумеруют пункт
+   -- им, и это то самое, чего у них раньше не было общего.
+   AND NOT EXISTS (SELECT 1 FROM readiness_item i
+                    WHERE i.project_id = r.project_id AND i.owner_kind = 'task'
+                      AND i.owner_id = r.task_id AND i.ord = r.ord
+                      AND i.method_kind <> 'unknown')
 UNION ALL
 SELECT t.id || ' — проверка пункта приёмки не написана: ' || r.check_id
   FROM project_plan_tasks t

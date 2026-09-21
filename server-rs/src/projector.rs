@@ -4058,14 +4058,26 @@ pub async fn rebuild(pool: &Pool, project: &str) -> Result<Value, crate::db::Fai
         .collect();
     let lines = tx
         .query(
-            "SELECT d.entity_name, (b.ord * 1000 + x.n)::int, x.line
-               FROM project_documents d
-               JOIN project_document_blocks b
-                 ON b.project_id = d.project_id AND b.entity_kind = d.entity_kind
-                    AND b.entity_name = d.entity_name
-               CROSS JOIN LATERAL regexp_split_to_table(b.raw, '\\n') WITH ORDINALITY AS x(line, n)
+            // НОМЕР ПУНКТА — НОМЕР СТРОКИ ДОКУМЕНТА, И ЭТОТ ЖЕ НОМЕР ЗНАЕТ
+            // `readiness_item`.
+            //
+            // Прежде номер считался внутри блока и складывался с номером блока
+            // (`b.ord * 1000 + x.n`). Строка чек-листа получала в приборе ДВА
+            // номера: один здесь, другой у `readiness_item`, — и дверь
+            // `method-set`, которой объявляют способ проверки пункта, берёт
+            // второй, а показывает пункты дверь `ready`, то есть первый.
+            // Объявить способ по увиденному номеру было нельзя: запись легла
+            // бы мимо пункта и не прочиталась бы никем.
+            //
+            // Один предмет — один номер. Отсюда же соединение двух таблиц:
+            // пункт, у которого объявлен способ, перестаёт быть «пунктом без
+            // названной проверки» — проверять его есть чем.
+            "SELECT d.entity_name, l.n::int, l.line
+               FROM project_documents d,
+                    LATERAL (SELECT line, row_number() OVER () AS n
+                               FROM regexp_split_to_table(d.content, E'\n') line) l
               WHERE d.project_id = $1 AND d.entity_kind = 'task'
-                AND left(lower(x.line), 5) IN ('- [ ]', '- [x]')",
+                AND left(lower(l.line), 5) IN ('- [ ]', '- [x]')",
             &[&project],
         )
         .await?;
