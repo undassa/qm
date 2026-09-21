@@ -10101,6 +10101,32 @@ pub(crate) async fn automaton(
                 "how": "resume=1 снимает остановку по слову владельца",
                 "step": step, "circle": circle, "rethinks": rethinks }));
         }
+        // ЗАКРЫТАЯ ЗАДАЧА ЗАКРЫВАЕТ И АВТОМАТ.
+        //
+        // Шаг `closing` ждёт слова `CLOSED` от сессии. Если сессия его не
+        // сказала — ушла, отвлеклась, ответила прозой, — прогон встаёт и
+        // заводит вопрос владельцу. А состояние задачи харнес выводит из
+        // истории сам: закрывающий трейлер на стволе значит «сделано».
+        //
+        // Замер 21.09: два прогона из шести стояли так по два часа и держали
+        // два вопроса к владельцу. У `M3-T3` трейлеров на стволе было ТРИ.
+        // Противоречие «история говорит закрыта, автомат ждёт слова»
+        // разрешал человек, хотя обе стороны знает прибор.
+        //
+        // Слово прибора отличимо от слова сессии: в событие пишется, кто довёл.
+        let closed_by_history = step == "closing"
+            && status != "CLOSED"
+            && client
+                .query_opt(
+                    "SELECT 1 FROM project_task_runs r
+                       JOIN project_plan_tasks t
+                         ON t.project_id = r.project_id AND t.id = r.task_id
+                      WHERE r.project_id = $1 AND r.id = $2 AND t.state = 'closed'",
+                    &[&project, &run],
+                )
+                .await?
+                .is_some();
+        let status = if closed_by_history { "CLOSED" } else { status };
         // Пустой статус — тоже вердикт: чистый отчёт без маркера. Как и у
         // прототипа, всё, что не RETHINK и не NEEDS FIX, — согласие: жёсткий
         // разбор слов превращал бы каждый честный абзац в отказ.
@@ -10122,7 +10148,11 @@ pub(crate) async fn automaton(
             .execute(
                 "INSERT INTO task_run_event (project_id, run_id, at, kind, text) VALUES ($1, $2, $3, 'автомат', $4)",
                 &[&project, &run, &now_ms(),
-                 &format!("{step} → {next} по {status}: {}", note.trim())],
+                 &if closed_by_history {
+                     format!("{step} → {next}: задача закрыта трейлером на стволе, довёл харнес")
+                 } else {
+                     format!("{step} → {next} по {status}: {}", note.trim())
+                 }],
             )
             .await?;
         return Ok(json!({ "status": "written", "runId": run,
