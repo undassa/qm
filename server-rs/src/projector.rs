@@ -10302,14 +10302,15 @@ pub(crate) async fn test_status(
         )
         .await?;
     let (at, clean_at): (Option<i64>, Option<i64>) = (last.as_ref().and_then(|r| r.get(0)), last.as_ref().and_then(|r| r.get(1)));
-    // Коммит и чем гоняли — у того же прогона: два профиля кладутся одной
-    // партией, и `ran_in` у них разный, поэтому перечнем.
+    // Коммит того же прогона: «не то дерево» отличается от «не та проверка»
+    // только им. `ran_in` здесь не перечисляется — это ИМЯ БИНАРЯ, а их у
+    // набора две сотни; имя бинаря отвечается поимённо, рядом с вердиктом.
     let about = client
         .query(
-            "SELECT DISTINCT commit_sha, ran_in FROM test_run
+            "SELECT DISTINCT commit_sha FROM test_run
               WHERE project_id = $1 AND NOT dirty
                 AND at = (SELECT max(at) FROM test_run WHERE project_id = $1 AND NOT dirty)
-              ORDER BY 1, 2",
+              ORDER BY 1",
             &[&project],
         )
         .await?;
@@ -10319,11 +10320,20 @@ pub(crate) async fn test_status(
     } else {
         let rows = client
             .query(
-                "SELECT n, (SELECT string_agg(DISTINCT r.verdict, ' ') FROM test_run r
-                             WHERE r.project_id = $1 AND NOT r.dirty
-                               AND r.at = (SELECT max(at) FROM test_run
-                                            WHERE project_id = $1 AND NOT dirty)
-                               AND r.check_name = n)
+                "SELECT n,
+                        (SELECT string_agg(DISTINCT r.verdict, ' ') FROM test_run r
+                          WHERE r.project_id = $1 AND NOT r.dirty
+                            AND r.at = (SELECT max(at) FROM test_run
+                                         WHERE project_id = $1 AND NOT dirty)
+                            AND (r.check_name = n
+                                 OR right(r.check_name, length(n) + 2) = '::' || n)),
+                        (SELECT string_agg(DISTINCT r.ran_in, ' ') FROM test_run r
+                          WHERE r.project_id = $1 AND NOT r.dirty
+                            AND r.at = (SELECT max(at) FROM test_run
+                                         WHERE project_id = $1 AND NOT dirty)
+                            AND (r.check_name = n
+                                 OR right(r.check_name, length(n) + 2) = '::' || n)
+                            AND r.ran_in <> '')
                    FROM unnest($2::text[]) AS n ORDER BY n",
                 &[&project, &asked],
             )
@@ -10333,7 +10343,12 @@ pub(crate) async fn test_status(
                 .map(|r| {
                     let name: String = r.get(0);
                     let verdict: Option<String> = r.get(1);
-                    (name, json!(verdict.unwrap_or_else(|| "в прогоне нет".to_owned())))
+                    let binary: Option<String> = r.get(2);
+                    match verdict {
+                        Some(v) => (name, json!({ "verdict": v, "ranIn": binary.unwrap_or_default() })),
+                        None => (name, json!({ "verdict": "в прогоне нет",
+                                               "why": "имя не то, либо проверка не идёт профилем, которым снят прогон" })),
+                    }
                 })
                 .collect(),
         )
@@ -10341,7 +10356,6 @@ pub(crate) async fn test_status(
     Ok(json!({
         "at": at.unwrap_or(0), "cleanAt": clean_at.unwrap_or(0),
         "commits": about.iter().map(|r| r.get::<_, String>(0)).collect::<std::collections::BTreeSet<_>>(),
-        "ranIn": about.iter().map(|r| r.get::<_, String>(1)).collect::<std::collections::BTreeSet<_>>(),
         "counts": counts.iter().map(|r| (r.get::<_, String>(0), r.get::<_, i64>(1))).collect::<std::collections::BTreeMap<_, _>>(),
         "failed": failed.iter().map(|r| r.get::<_, String>(0)).collect::<Vec<_>>(),
         "names": by_name,
@@ -12743,6 +12757,15 @@ pub(crate) async fn execute_method_upto(
                 return Verdict { state: "unknown", violations: 0, detail: vec![],
                     why: "заявление «проверки зелены» не называет ни одной проверки".into() };
             }
+            // ИМЯ ИЩЕТСЯ И ПОЛНЫМ ПУТЁМ МОДУЛЯ. `nextest` печатает проверку из
+            // `src` вместе с её модулем — `save::tests::bom_and_latin1_survive_the_save`, —
+            // а набор называет её так, как она написана: именем функции. Замер
+            // 22.09: у `M5-T5` восемь заявлений из шестнадцати считались
+            // красными, и все восемь называли проверки из `src`; проверки из
+            // `tests/` совпадали, потому что их `nextest` печатает голыми.
+            // Суффикс берётся через `right`, а не `LIKE`: в имени проверки
+            // подчёркивание — обычный знак, а для `LIKE` это образец.
+            //
             // УПАЛА И «ЕЁ ТАМ НЕТ» — РАЗНЫЕ ОТВЕТЫ, и краснеет пункт от обоих.
             // Сведённые в одну строку, они стоили набору половины дня: из
             // шестнадцати заявлений `M5-T5` четырнадцать считались красными, и
@@ -12756,14 +12779,28 @@ pub(crate) async fn execute_method_upto(
                                      WHERE r.project_id = $1 AND NOT r.dirty
                                        AND r.at = (SELECT max(at) FROM test_run
                                                     WHERE project_id = $1 AND NOT dirty)
-                                       AND r.check_name = n) AS была
+                                       AND (r.check_name = n
+                                            OR right(r.check_name, length(n) + 2) = '::' || n)) AS была
                        FROM unnest($2::text[]) AS n
                       WHERE NOT EXISTS (
                             SELECT 1 FROM test_run r
                              WHERE r.project_id = $1 AND NOT r.dirty
                                AND r.at = (SELECT max(at) FROM test_run
                                             WHERE project_id = $1 AND NOT dirty)
-                               AND r.check_name = n AND r.verdict = 'passed')
+                               AND (r.check_name = n
+                                    OR right(r.check_name, length(n) + 2) = '::' || n)
+                               AND r.verdict = 'passed')
+                         -- Имя, совпавшее с двумя проверками, зелено только если
+                         -- зелены ОБЕ: одного прохода довольно было бы, чтобы
+                         -- упавший однофамилец уехал незамеченным.
+                         OR EXISTS (
+                            SELECT 1 FROM test_run r
+                             WHERE r.project_id = $1 AND NOT r.dirty
+                               AND r.at = (SELECT max(at) FROM test_run
+                                            WHERE project_id = $1 AND NOT dirty)
+                               AND (r.check_name = n
+                                    OR right(r.check_name, length(n) + 2) = '::' || n)
+                               AND r.verdict <> 'passed')
                       ORDER BY n",
                     &[&project, &names],
                 )
