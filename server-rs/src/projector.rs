@@ -402,7 +402,12 @@ CREATE TABLE IF NOT EXISTS project_plan_tasks(
     project_id TEXT NOT NULL, id TEXT NOT NULL, milestone_id TEXT NOT NULL,
     ord INTEGER NOT NULL, title TEXT NOT NULL, path TEXT NOT NULL, size TEXT NOT NULL,
     state TEXT NOT NULL CHECK (state IN ('not_started','claimed','closed')),
-    kind TEXT NOT NULL DEFAULT 'dev' CHECK (kind IN ('dev','test')),
+    -- Вид `red` в списке потому, что его ПИШЕТ пересборка: красная задача
+    -- ложится в план строкой `kind = 'red'`. Без него схема, которую сервер
+    -- заводит сам, отвергала эту вставку, и новый экземпляр оставался без
+    -- красных задач вовсе; на рабочей базе не видно, потому что там таблицу
+    -- завёл донор до того, как сервер стал заводить схему сам.
+    kind TEXT NOT NULL DEFAULT 'dev' CHECK (kind IN ('dev','test','red')),
     closing_commit TEXT,
     PRIMARY KEY (project_id, id),
     FOREIGN KEY (project_id, milestone_id) REFERENCES project_plan_milestones(project_id, id) ON DELETE CASCADE
@@ -3015,6 +3020,28 @@ DO $$ BEGIN
   ALTER TABLE project_requirements DROP CONSTRAINT IF EXISTS project_requirements_kind_check;
   ALTER TABLE project_requirements ADD CONSTRAINT project_requirements_kind_check
     CHECK (kind IN ('FR','NFR','UI','ST'));
+END $$;
+
+-- Список видов задачи чинится ТАМ, ГДЕ ОН ЕСТЬ, и не заводится там, где его нет.
+--
+-- База, заведённая сервером, знала виды `dev` и `test` и отвергала `red`, а его
+-- пишет пересборка: красная задача ложится в план строкой `kind = 'red'`. Здесь
+-- список приводится к тому, что в колонку пишут.
+--
+-- Условие — не осторожность ради осторожности. На рабочей базе таблицу завёл
+-- донор, ограничения на ней нет вовсе, и `ADD CONSTRAINT` там проверял бы все
+-- существующие строки: вид задачи принимает и дверь `task-add`, аргумент её не
+-- сверяется ни с чем, и что лежит в колонке за всё время, не прочитано. Отказ
+-- проверки — это сервер, который не поднялся. Заводить прежде не заведённое
+-- ограничение — отдельная работа со своим замером (issue #52).
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_constraint
+              WHERE conrelid = 'project_plan_tasks'::regclass
+                AND conname = 'project_plan_tasks_kind_check') THEN
+    ALTER TABLE project_plan_tasks DROP CONSTRAINT project_plan_tasks_kind_check;
+    ALTER TABLE project_plan_tasks ADD CONSTRAINT project_plan_tasks_kind_check
+      CHECK (kind IN ('dev','test','red'));
+  END IF;
 END $$;
 
 -- Что история объявляет своим: кто в ней действует и какими страницами она
@@ -14853,6 +14880,114 @@ mod kind_tables {
         assert!(own_tables(&tx, "mockup").await.unwrap().is_empty());
         assert!(own_tables(&tx, "bare").await.unwrap().is_empty());
         assert!(own_tables(&tx, "unknown").await.unwrap().is_empty());
+        tx.rollback().await.unwrap();
+    }
+}
+
+/// Список видов задачи в схеме против видов, которые в неё пишут.
+///
+/// Схему теперь заводит сервер, а не донор, и расхождение между `CHECK` и тем,
+/// что код пишет, стало отказом на первом же новом экземпляре: `CHECK (kind IN
+/// ('dev','test'))` отвергал красную задачу, которую кладёт пересборка, и набор
+/// не собирался вовсе. На рабочей базе этого не видно — там таблицу завёл донор
+/// до ограничения, и заметить было нечем.
+#[cfg(test)]
+mod plan_task_kinds {
+    /// Один оператор `CREATE TABLE` из схемы, слово в слово.
+    fn table_ddl(name: &str) -> &'static str {
+        let from = super::DDL
+            .find(&format!("CREATE TABLE IF NOT EXISTS {name}("))
+            .expect("таблица объявлена в схеме");
+        let to = from + super::DDL[from..].find("\n  );").expect("конец оператора") + 5;
+        &super::DDL[from..to]
+    }
+
+    /// Тот самый `DO`-блок схемы, что чинит список видов задачи.
+    fn repair_ddl() -> &'static str {
+        let from = super::DDL
+            .find("DO $$ BEGIN\n  IF EXISTS (SELECT 1 FROM pg_constraint")
+            .expect("починка объявлена в схеме");
+        let to = from + super::DDL[from..].find("END $$;").expect("конец блока") + 7;
+        &super::DDL[from..to]
+    }
+
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn the_schema_takes_every_kind_the_rebuild_writes() {
+        let url = std::env::var("MH_TEST_DB_URL").expect("MH_TEST_DB_URL: адрес пустой базы");
+        let pool = crate::db::pool(&url, 1).expect("пул тестовой базы");
+        let mut c = pool.get().await.expect("соединение с тестовой базой");
+        let taken: bool = c
+            .query_one("SELECT to_regclass('public.project_plan_tasks') IS NOT NULL", &[])
+            .await
+            .unwrap()
+            .get(0);
+        assert!(!taken, "MH_TEST_DB_URL ведёт в базу с планом: тесту нужна пустая");
+        let tx = c.transaction().await.unwrap();
+        tx.batch_execute(&format!(
+            "CREATE TABLE public.project_plan_milestones (project_id text, id text,
+               PRIMARY KEY (project_id, id));
+             {}
+             INSERT INTO public.project_plan_milestones VALUES ('п', 'M1');",
+            table_ddl("project_plan_tasks")
+        ))
+        .await
+        .unwrap();
+        // Виды берутся не по памяти: `dev` и `test` пишет разбор плана
+        // (`reproject::plan`), `red` — вставка красных задач в `rebuild`.
+        for kind in ["dev", "test", "red"] {
+            tx.execute(
+                "INSERT INTO public.project_plan_tasks
+                   (project_id, id, milestone_id, ord, title, path, size, state, kind)
+                 VALUES ('п', $1, 'M1', 1, 'подсадка', '', 'S', 'not_started', $1)",
+                &[&kind],
+            )
+            .await
+            .unwrap_or_else(|e| panic!("схема не принимает kind {kind}, который в неё пишут: {e}"));
+        }
+        // И обратная сторона: ограничение живо, а не снято ради прохода.
+        let invented = tx
+            .execute(
+                "INSERT INTO public.project_plan_tasks
+                   (project_id, id, milestone_id, ord, title, path, size, state, kind)
+                 VALUES ('п', 'иное', 'M1', 1, 'подсадка', '', 'S', 'not_started', 'иное')",
+                &[],
+            )
+            .await;
+        assert!(invented.is_err(), "вид, которого никто не пишет, схема принимать не должна");
+        tx.rollback().await.unwrap();
+    }
+
+    /// Починка базы, заведённой с прежним списком видов.
+    ///
+    /// `CREATE TABLE IF NOT EXISTS` существующую таблицу не трогает, поэтому
+    /// правка объявления чинит только новые базы; заведённые в промежутке
+    /// чинит отдельный `DO`-блок, и проверяется он тем же текстом, которым
+    /// чинит.
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn the_repair_widens_the_list_a_database_was_created_with() {
+        let url = std::env::var("MH_TEST_DB_URL").expect("MH_TEST_DB_URL: адрес пустой базы");
+        let pool = crate::db::pool(&url, 1).expect("пул тестовой базы");
+        let mut c = pool.get().await.expect("соединение с тестовой базой");
+        let taken: bool = c
+            .query_one("SELECT to_regclass('public.project_plan_tasks') IS NOT NULL", &[])
+            .await
+            .unwrap()
+            .get(0);
+        assert!(!taken, "MH_TEST_DB_URL ведёт в базу с планом: тесту нужна пустая");
+        let tx = c.transaction().await.unwrap();
+        tx.batch_execute(
+            "CREATE TABLE public.project_plan_tasks (project_id text, id text, kind text NOT NULL
+               DEFAULT 'dev' CHECK (kind IN ('dev','test')));
+             INSERT INTO public.project_plan_tasks VALUES ('п', 'M1-T1', 'dev');",
+        )
+        .await
+        .unwrap();
+        tx.batch_execute(repair_ddl()).await.unwrap();
+        tx.execute("INSERT INTO public.project_plan_tasks VALUES ('п', 'V1-T1', 'red')", &[])
+            .await
+            .expect("после починки схема принимает вид, который в неё пишут");
         tx.rollback().await.unwrap();
     }
 }
