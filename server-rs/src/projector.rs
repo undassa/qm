@@ -10155,9 +10155,30 @@ pub(crate) async fn add_run_event(
     Ok(json!({ "status": "written", "runId": run, "kind": kind }))
 }
 
+/// Обрезка истории прогонов после каждой партии. Вынесена в константу, чтобы
+/// проверка ниже гоняла ТОТ ЖЕ запрос, что харнес, а не его пересказ.
+///
+/// ПОСЛЕДНЕЕ ЧИСТОЕ ПАДЕНИЕ НЕ ВЫМЕТАЕТСЯ НИКОГДА. Двадцать последних на
+/// проверку — это двадцать ЛЮБЫХ, и зелёные вытесняют красное. Пока проход
+/// шёл раз в час, это были почти сутки; с проходом раз в пять минут —
+/// сто минут. Замер 22.09: `V5-T33` влита 21.09 в 13:30, прогон красного
+/// профиля на её коммите был в 14:19, тело село в 15:02 — а к вечеру
+/// следующего дня записи о падении `page_11_rail_lists_top_dirs` уже не
+/// было, и `red-observed-failing` закрыл выдачу задач находкой, которую
+/// никакая работа набора снять не могла: доказательство стёр сам прибор.
+///
+/// Хранится одна строка на проверку — самое свежее чистое падение; рост
+/// ограничен числом проверок, которые хоть раз падали.
+const TEST_RUN_PRUNE: &str = "DELETE FROM test_run t
+          WHERE t.project_id = $1
+            AND (SELECT count(*) FROM test_run k
+                  WHERE k.project_id = t.project_id AND k.check_name = t.check_name
+                    AND k.dirty = t.dirty AND k.at >= t.at) > 20";
+
 /// Прогоны тестов, снятые харнесом: по строке на проверку. История обрезается
-/// по двадцати последним на проверку — «наблюдалась красной до кода» требует
-/// прошлого, но не вечного.
+/// по двадцати последним на проверку, кроме самого свежего чистого падения —
+/// «наблюдалась красной до кода» требует прошлого, и зелёные прогоны его не
+/// вытесняют (`TEST_RUN_PRUNE`).
 pub(crate) async fn record_test_runs(
     pool: &Pool, project: &str, commit: &str, rows: &[(String, String, String)], actor: &str,
     dirty: bool,
@@ -10184,11 +10205,7 @@ pub(crate) async fn record_test_runs(
     // ЗЕЛЁНЫМ. Заодно исчезли бы падения, которыми `corpus ·
     // red-observed-failing` доказывает красную фазу.
     tx.execute(
-        "DELETE FROM test_run t
-          WHERE t.project_id = $1
-            AND (SELECT count(*) FROM test_run k
-                  WHERE k.project_id = t.project_id AND k.check_name = t.check_name
-                    AND k.dirty = t.dirty AND k.at >= t.at) > 20",
+        TEST_RUN_PRUNE,
         &[&project],
     )
     .await?;
@@ -15277,5 +15294,59 @@ mod ready_item_names {
         }
         // Число без разделителя списком не является: «200 мс укладывается» — хвост.
         assert!(continues_an_item("200 мс укладывается в бюджет"));
+    }
+}
+
+#[cfg(test)]
+mod test_run_prune {
+    use super::TEST_RUN_PRUNE;
+
+    /// Порча, которую ловит проверка: обрезка считает двадцать последних прогонов
+    /// любыми, и зелёные вытесняют единственное красное — доказательство красной
+    /// фазы пропадает через сто минут после посадки тела (замер 22.09, `V5-T33`).
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn the_latest_clean_failure_outlives_green_runs() {
+        let url = std::env::var("MH_TEST_DB_URL").expect("MH_TEST_DB_URL: адрес пустой базы");
+        let pool = crate::db::pool(&url, 1).expect("пул тестовой базы");
+        let mut c = pool.get().await.expect("соединение с тестовой базой");
+        let foreign: bool = c
+            .query_one("SELECT to_regclass('public.test_run') IS NOT NULL", &[])
+            .await
+            .unwrap()
+            .get(0);
+        assert!(!foreign, "MH_TEST_DB_URL ведёт в базу с прогонами: тесту нужна пустая");
+        let tx = c.transaction().await.unwrap();
+        tx.batch_execute(
+            "CREATE TABLE public.test_run (
+               id serial PRIMARY KEY, project_id text NOT NULL, check_name text NOT NULL,
+               commit_sha text NOT NULL DEFAULT '', dirty boolean NOT NULL DEFAULT true,
+               verdict text NOT NULL, at bigint NOT NULL, actor text NOT NULL DEFAULT '');
+             INSERT INTO public.test_run (project_id, check_name, dirty, verdict, at)
+               VALUES ('p', 'red_check', false, 'failed', 1);
+             INSERT INTO public.test_run (project_id, check_name, dirty, verdict, at)
+               SELECT 'p', 'red_check', false, 'passed', 1 + g FROM generate_series(1, 25) g;
+             INSERT INTO public.test_run (project_id, check_name, dirty, verdict, at)
+               SELECT 'p', 'green_check', false, 'passed', g FROM generate_series(1, 25) g;",
+        )
+        .await
+        .unwrap();
+        tx.execute(TEST_RUN_PRUNE, &[&"p"]).await.unwrap();
+        let failed: i64 = tx
+            .query_one(
+                "SELECT count(*) FROM public.test_run WHERE check_name = 'red_check' AND verdict = 'failed'",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(failed, 1, "единственное чистое падение вытеснено зелёными прогонами");
+        let green: i64 = tx
+            .query_one("SELECT count(*) FROM public.test_run WHERE check_name = 'green_check'", &[])
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(green, 20, "обрезка перестала резать: у проверки без падений больше двадцати строк");
+        tx.rollback().await.unwrap();
     }
 }
