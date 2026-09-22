@@ -1,0 +1,27 @@
+[Unit]
+# Приватный раннер CI, по одному на репозиторий. Имя экземпляра — репозиторий с
+# экранированной косой: systemctl start ci-runner@tot-space-tot-ade
+#
+# Раннер ОДНОРАЗОВЫЙ (--ephemeral): после одной работы он снимается с учёта и
+# контейнер выходит. Поэтому Restart=always здесь не лечение сбоя, а устройство:
+# следующая работа получает свежий раннер и чистое дерево, как у хостового.
+Description=Приватный раннер CI для %I
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=undassa
+Group=undassa
+Environment=HOME=/home/undassa
+WorkingDirectory=/opt/ci-runner
+ExecStart=/opt/ci-runner/run-one.sh %I
+Restart=always
+RestartSec=5
+# Токен регистрации чеканится при каждом запуске и живёт час. Если GitHub
+# недоступен, перезапуски не должны молотить вхолостую: пять за минуту и стоп.
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+[Install]
+WantedBy=multi-user.target
