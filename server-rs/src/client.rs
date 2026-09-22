@@ -625,8 +625,14 @@ pub fn sense(door: &Door, only: Option<&str>, root: &str) -> Result<Value, Strin
                 "task-state-push",
                 &json!({ "states": states, "commit": head, "dirty": dirty }),
             )?;
+            // ЧИТАЕТСЯ ТО, ЧТО ЭТА ДВЕРЬ ОТВЕЧАЕТ. Девять соседних строк журнала
+            // идут за `push_facts`, и та отдаёт `was`/`now`. Эта одна идёт за
+            // `task-state-push`, а он отвечает `accepted`/`pushedAt` — и обоих
+            // прежних ключей у него нет. `serde_json` отдаёт на отсутствующий
+            // ключ `Null`, поэтому дефект выходил не отказом, а правдоподобной
+            // строкой «было null стало null» в каждом съёме.
             done.push(json!({ "fact": fact, "files": 0, "found": states.len(),
-                              "was": out["was"], "now": out["now"] }));
+                              "accepted": out["accepted"] }));
             continue;
         }
 
