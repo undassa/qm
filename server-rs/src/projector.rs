@@ -10159,9 +10159,9 @@ pub(crate) async fn add_run_event(
 /// проверка ниже гоняла ТОТ ЖЕ запрос, что харнес, а не его пересказ.
 ///
 /// ПОСЛЕДНЕЕ ЧИСТОЕ ПАДЕНИЕ НЕ ВЫМЕТАЕТСЯ НИКОГДА. Двадцать последних на
-/// проверку — это двадцать ЛЮБЫХ, и зелёные вытесняют красное. Пока проход
-/// шёл раз в час, это были почти сутки; с проходом раз в пять минут —
-/// сто минут. Замер 22.09: `V5-T33` влита 21.09 в 13:30, прогон красного
+/// проверку — это двадцать ЛЮБЫХ, и зелёные вытесняют красное. Прогон
+/// снимается на каждую новую вершину ствола (неизменную — раз в шесть часов),
+/// так что двадцать зелёных набегают за день работы набора. Замер 22.09: `V5-T33` влита 21.09 в 13:30, прогон красного
 /// профиля на её коммите был в 14:19, тело село в 15:02 — а к вечеру
 /// следующего дня записи о падении `page_11_rail_lists_top_dirs` уже не
 /// было, и `red-observed-failing` закрыл выдачу задач находкой, которую
@@ -10173,7 +10173,12 @@ const TEST_RUN_PRUNE: &str = "DELETE FROM test_run t
           WHERE t.project_id = $1
             AND (SELECT count(*) FROM test_run k
                   WHERE k.project_id = t.project_id AND k.check_name = t.check_name
-                    AND k.dirty = t.dirty AND k.at >= t.at) > 20";
+                    AND k.dirty = t.dirty AND k.at >= t.at) > 20
+            AND NOT (NOT t.dirty AND t.verdict = 'failed'
+                     AND NOT EXISTS (SELECT 1 FROM test_run f
+                                      WHERE f.project_id = t.project_id AND f.check_name = t.check_name
+                                        AND NOT f.dirty AND f.verdict = 'failed'
+                                        AND (f.at, f.id) > (t.at, t.id)))";
 
 /// Прогоны тестов, снятые харнесом: по строке на проверку. История обрезается
 /// по двадцати последним на проверку, кроме самого свежего чистого падения —
@@ -15323,24 +15328,65 @@ mod test_run_prune {
                commit_sha text NOT NULL DEFAULT '', dirty boolean NOT NULL DEFAULT true,
                verdict text NOT NULL, at bigint NOT NULL, actor text NOT NULL DEFAULT '');
              INSERT INTO public.test_run (project_id, check_name, dirty, verdict, at)
-               VALUES ('p', 'red_check', false, 'failed', 1);
+               VALUES ('p', 'red_check', false, 'failed', 2), ('p', 'red_check', false, 'failed', 1),
+                      ('p', 'red_check', true, 'failed', 50), ('q', 'red_check', false, 'failed', 60);
              INSERT INTO public.test_run (project_id, check_name, dirty, verdict, at)
-               SELECT 'p', 'red_check', false, 'passed', 1 + g FROM generate_series(1, 25) g;
+               SELECT 'p', 'red_check', false, 'passed', 2 + g FROM generate_series(1, 25) g;
+             INSERT INTO public.test_run (project_id, check_name, dirty, verdict, at)
+               VALUES ('p', 'other_red', false, 'failed', 3);
+             INSERT INTO public.test_run (project_id, check_name, dirty, verdict, at)
+               SELECT 'p', 'other_red', false, 'passed', 3 + g FROM generate_series(1, 25) g;
+             INSERT INTO public.test_run (project_id, check_name, dirty, verdict, at)
+               VALUES ('p', 'tie_check', false, 'failed', 5), ('p', 'tie_check', false, 'failed', 5);
+             INSERT INTO public.test_run (project_id, check_name, dirty, verdict, at)
+               SELECT 'p', 'tie_check', false, 'passed', 5 + g FROM generate_series(1, 25) g;
+             INSERT INTO public.test_run (project_id, check_name, dirty, verdict, at)
+               VALUES ('p', 'dirty_check', true, 'failed', 1);
+             INSERT INTO public.test_run (project_id, check_name, dirty, verdict, at)
+               SELECT 'p', 'dirty_check', true, 'passed', 1 + g FROM generate_series(1, 25) g;
              INSERT INTO public.test_run (project_id, check_name, dirty, verdict, at)
                SELECT 'p', 'green_check', false, 'passed', g FROM generate_series(1, 25) g;",
         )
         .await
         .unwrap();
         tx.execute(TEST_RUN_PRUNE, &[&"p"]).await.unwrap();
-        let failed: i64 = tx
+        let failed: Vec<i64> = tx
+            .query(
+                "SELECT at FROM public.test_run
+                  WHERE project_id = 'p' AND check_name = 'red_check' AND NOT dirty AND verdict = 'failed'
+                  ORDER BY at",
+                &[],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        assert_eq!(failed, vec![2], "хранится самое свежее по времени чистое падение, и только оно");
+        let kept = |check: &'static str| {
+            let tx = &tx;
+            async move {
+                tx.query_one(
+                    "SELECT count(*) FROM public.test_run
+                      WHERE project_id = 'p' AND check_name = $1 AND NOT dirty AND verdict = 'failed'",
+                    &[&check],
+                )
+                .await
+                .unwrap()
+                .get::<_, i64>(0)
+            }
+        };
+        assert_eq!(kept("other_red").await, 1, "падение одной проверки не заслоняет падение другой");
+        assert_eq!(kept("tie_check").await, 1, "два падения в одной партии — хранится одно");
+        let dirty_failed: i64 = tx
             .query_one(
-                "SELECT count(*) FROM public.test_run WHERE check_name = 'red_check' AND verdict = 'failed'",
+                "SELECT count(*) FROM public.test_run WHERE check_name = 'dirty_check' AND verdict = 'failed'",
                 &[],
             )
             .await
             .unwrap()
             .get(0);
-        assert_eq!(failed, 1, "единственное чистое падение вытеснено зелёными прогонами");
+        assert_eq!(dirty_failed, 0, "падение на грязном дереве не доказательство и режется как все");
         let green: i64 = tx
             .query_one("SELECT count(*) FROM public.test_run WHERE check_name = 'green_check'", &[])
             .await
