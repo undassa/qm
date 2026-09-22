@@ -646,10 +646,18 @@ pub fn sense(door: &Door, only: Option<&str>, root: &str) -> Result<Value, Strin
                 if path.is_empty() {
                     continue;
                 }
+                // КОД ВОЗВРАТА, А НЕ ПУСТОТА ВЫВОДА. `git rev-parse` на пути,
+                // которого в дереве нет, печатает В STDOUT сам довод —
+                // «HEAD:vendor/rio-vt» — и валится кодом 128. Проверка на
+                // пустоту его поэтому не ловила, и довод уезжал в находку как
+                // хэш: «хэш дерева HEAD:vendor/rio-vt, а заморожен d147d60c…».
+                // Набор читал бессмыслицу вместо готового ответа «каталога нет
+                // в дереве git», который тут же и лежит ниже.
                 let now = std::process::Command::new("git")
                     .args(["-C", &root, "rev-parse", &format!("HEAD:{path}")])
                     .output()
                     .ok()
+                    .filter(|o| o.status.success())
                     .and_then(|o| String::from_utf8(o.stdout).ok())
                     .map(|s| s.trim().to_owned())
                     .unwrap_or_default();
