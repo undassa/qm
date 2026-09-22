@@ -10260,7 +10260,21 @@ pub(crate) async fn record_test_runs(
 
 /// Статус прогонов для пульта: когда последний раз, сколько чем кончилось,
 /// что падает на чистом дереве.
-pub(crate) async fn test_status(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+///
+/// С ИМЕНАМИ ОТВЕЧАЕТ ПОИМЁННО, и это не удобство. Заявление «проверки зелены»
+/// краснеет и от упавшей проверки, и от имени, которого в прогоне нет вовсе, —
+/// а различить их было нечем: перечень упавших дверь обрезает, и набор,
+/// объявивший шестнадцать имён, читал «не зелена либо её нет» про каждое.
+/// Замер 22.09: четырнадцать заявлений `M5-T5` считались красными, и стоила
+/// эта неразличимость половины дня.
+///
+/// Коммит чистого прогона называется здесь же: «не то дерево» отличается от
+/// «не та проверка» только им.
+pub(crate) async fn test_status(
+    pool: &Pool,
+    project: &str,
+    names: &str,
+) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let last = client
         .query_opt("SELECT max(at), max(at) FILTER (WHERE NOT dirty) FROM test_run WHERE project_id = $1", &[&project])
@@ -10288,10 +10302,49 @@ pub(crate) async fn test_status(pool: &Pool, project: &str) -> Result<Value, cra
         )
         .await?;
     let (at, clean_at): (Option<i64>, Option<i64>) = (last.as_ref().and_then(|r| r.get(0)), last.as_ref().and_then(|r| r.get(1)));
+    // Коммит и чем гоняли — у того же прогона: два профиля кладутся одной
+    // партией, и `ran_in` у них разный, поэтому перечнем.
+    let about = client
+        .query(
+            "SELECT DISTINCT commit_sha, ran_in FROM test_run
+              WHERE project_id = $1 AND NOT dirty
+                AND at = (SELECT max(at) FROM test_run WHERE project_id = $1 AND NOT dirty)
+              ORDER BY 1, 2",
+            &[&project],
+        )
+        .await?;
+    let asked: Vec<String> = names.split_whitespace().map(str::to_owned).collect();
+    let by_name = if asked.is_empty() {
+        Value::Null
+    } else {
+        let rows = client
+            .query(
+                "SELECT n, (SELECT string_agg(DISTINCT r.verdict, ' ') FROM test_run r
+                             WHERE r.project_id = $1 AND NOT r.dirty
+                               AND r.at = (SELECT max(at) FROM test_run
+                                            WHERE project_id = $1 AND NOT dirty)
+                               AND r.check_name = n)
+                   FROM unnest($2::text[]) AS n ORDER BY n",
+                &[&project, &asked],
+            )
+            .await?;
+        Value::Object(
+            rows.iter()
+                .map(|r| {
+                    let name: String = r.get(0);
+                    let verdict: Option<String> = r.get(1);
+                    (name, json!(verdict.unwrap_or_else(|| "в прогоне нет".to_owned())))
+                })
+                .collect(),
+        )
+    };
     Ok(json!({
         "at": at.unwrap_or(0), "cleanAt": clean_at.unwrap_or(0),
+        "commits": about.iter().map(|r| r.get::<_, String>(0)).collect::<std::collections::BTreeSet<_>>(),
+        "ranIn": about.iter().map(|r| r.get::<_, String>(1)).collect::<std::collections::BTreeSet<_>>(),
         "counts": counts.iter().map(|r| (r.get::<_, String>(0), r.get::<_, i64>(1))).collect::<std::collections::BTreeMap<_, _>>(),
         "failed": failed.iter().map(|r| r.get::<_, String>(0)).collect::<Vec<_>>(),
+        "names": by_name,
         "runs": counts.iter().map(|r| r.get::<_, i64>(1)).sum::<i64>(),
     }))
 }
@@ -12690,9 +12743,21 @@ pub(crate) async fn execute_method_upto(
                 return Verdict { state: "unknown", violations: 0, detail: vec![],
                     why: "заявление «проверки зелены» не называет ни одной проверки".into() };
             }
+            // УПАЛА И «ЕЁ ТАМ НЕТ» — РАЗНЫЕ ОТВЕТЫ, и краснеет пункт от обоих.
+            // Сведённые в одну строку, они стоили набору половины дня: из
+            // шестнадцати заявлений `M5-T5` четырнадцать считались красными, и
+            // по тексту нельзя было понять, упала проверка, названа не тем
+            // именем или не идёт этим профилем вовсе. Поимённо о том же
+            // отвечает дверь `test-run names=…`.
             match client
                 .query(
-                    "SELECT n AS detail FROM unnest($2::text[]) AS n
+                    "SELECT n AS detail,
+                            EXISTS (SELECT 1 FROM test_run r
+                                     WHERE r.project_id = $1 AND NOT r.dirty
+                                       AND r.at = (SELECT max(at) FROM test_run
+                                                    WHERE project_id = $1 AND NOT dirty)
+                                       AND r.check_name = n) AS была
+                       FROM unnest($2::text[]) AS n
                       WHERE NOT EXISTS (
                             SELECT 1 FROM test_run r
                              WHERE r.project_id = $1 AND NOT r.dirty
@@ -12711,8 +12776,14 @@ pub(crate) async fn execute_method_upto(
                         let mut d: Vec<String> = found
                             .iter()
                             .map(|r| {
-                                format!("{} — не зелена на последнем чистом прогоне ствола либо её в нём нет вовсе",
-                                        r.try_get::<_, String>(0).unwrap_or_default())
+                                let name = r.try_get::<_, String>(0).unwrap_or_default();
+                                if r.try_get::<_, bool>(1).unwrap_or(false) {
+                                    format!("{name} — не зелена на последнем чистом прогоне ствола")
+                                } else {
+                                    format!("{name} — в последнем чистом прогоне ствола её нет вовсе: \
+                                             имя не то, либо проверка не идёт профилем, которым снят прогон \
+                                             (`mh call test-run names={name}`)")
+                                }
                             })
                             .collect();
                         d.sort();

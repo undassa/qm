@@ -271,7 +271,7 @@ impl Worker {
 
     /// Статус прогонов тестов: когда последний, что упало на чистом дереве.
     async fn test_status(&self, project: &str) -> Value {
-        crate::projector::test_status(&self.pool, project).await.unwrap_or(json!({ "runs": 0 }))
+        crate::projector::test_status(&self.pool, project, "").await.unwrap_or(json!({ "runs": 0 }))
     }
 
     /// Наблюдатель прогонов (заявка 20): раз в TEST_TICK гоняет тесты набора,

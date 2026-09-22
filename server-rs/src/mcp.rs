@@ -780,8 +780,8 @@ impl Mcp {
             "inputSchema": { "type": "object", "properties": { "limit": json!({"type":"integer","description":"сколько прогонов, по умолчанию 10"}) } } }));
         tools.push(json!({ "name": "ready", "description": "пункты приёмки задачи из «Признак готовности»: что открыто, что проверено; без задачи — по всему набору",
             "inputSchema": { "type": "object", "properties": { "task": s("задача; пусто — весь набор") } } }));
-        tools.push(json!({ "name": "test-run", "description": "прогоны тестов, снятые харнесом: когда последний раз, что упало на чистом дереве",
-            "inputSchema": { "type": "object", "properties": {} } }));
+        tools.push(json!({ "name": "test-run", "description": "прогоны тестов, снятые харнесом: когда последний раз, каким коммитом и чем гоняли, что упало на чистом дереве. `names` — имена через пробел: о каждом отвечает поимённо, и «в прогоне нет» отличается от «упала»",
+            "inputSchema": { "type": "object", "properties": { "names": s("имена проверок через пробел; пусто — общий ответ") } } }));
         tools.push(json!({ "name": "chat-start", "description": "завести беседу над набором: место, где думают вслух и спрашивают по ходу",
             "inputSchema": { "type": "object", "properties": { "title": s("о чём беседа") } } }));
         tools.push(json!({ "name": "chat-say", "description": "сказать в беседе: side owner — человек с пульта, agent — ответ",
@@ -1462,7 +1462,8 @@ impl Mcp {
                     Err(e) => refusal(e.into()),
                 }
             }
-            "test-run" => match crate::projector::test_status(&self.pool, p).await {
+            "test-run" => match crate::projector::test_status(
+                &self.pool, p, args.get("names").and_then(|v| v.as_str()).unwrap_or("")).await {
                 Ok(v) => ok(v),
                 Err(e) => refusal(e.into()),
             },
