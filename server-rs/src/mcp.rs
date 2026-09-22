@@ -683,8 +683,14 @@ impl Mcp {
                 "required": ["skills"] } }));
         tools.push(json!({ "name": "preflight-push", "description": "принять вердикты предполёта: подача СЛИВАЕТСЯ — добавляет и заменяет по имени задачи, чужое остаётся; полное стирание — `clear`",
             "inputSchema": { "type": "object", "properties": {
-                "verdicts": { "type": "array", "description": "[{task, at, taskRevision, verdict, findings, body}]",
-                              "items": { "type": "object" } },
+                "verdicts": { "type": "array", "description": "вердикты предполёта",
+                              "items": { "type": "object",
+                                "properties": { "task": s("имя задачи"), "verdict": s("вердикт: ready · blocked"),
+                                  "findings": json!({"type":"integer","description":"ЧИСЛО находок, не перечень"}),
+                                  "at": json!({"type":"integer","description":"время разбора в мс"}),
+                                  "taskRevision": json!({"type":"integer","description":"ревизия задачи, на которой разбирали"}),
+                                  "body": s("разбор словами") },
+                                "required": ["task", "verdict"] } },
                 "clear": json!({"type":"boolean","description":"снять ВСЕ прежние вердикты, а не только поданные заново"}) },
                 "required": ["verdicts"] } }));
         tools.push(json!({ "name": "task-plan-push", "description": "записать план задачи — как исполнитель собирается её делать; время ставит сервер, и им доказывается, что план был раньше правки",
@@ -1773,16 +1779,57 @@ impl Mcp {
                         "body": r.get::<_, String>(6) })).collect::<Vec<_>>() }))
             }
             "preflight-push" => {
-                let list: Vec<(String, i64, i64, String, i32, String)> = Some(rows(args, "verdicts"))
-                    .map(|l| l.iter().filter_map(|it| Some((
-                        it.get("task")?.as_str()?.to_owned(),
+                // СТРОКА С НЕВЕРНЫМ ПОЛЕМ ОТКАЗЫВАЕТСЯ, А НЕ ВЫБРАСЫВАЕТСЯ МОЛЧА.
+                //
+                // Прежде разбор шёл `filter_map` с `?`: строка без `task` или без
+                // `verdict` исчезала, а дверь отвечала «подача пуста». Набор,
+                // искавший форму, получал один и тот же ответ на `[]`, на верную
+                // строку с опечаткой в ключе и на файл — и пошёл подбирать форму
+                // БОЕВЫМИ ВЫЗОВАМИ. Один подбор прошёл, и в набор на минуту лёг
+                // вердикт «готово», которого никто не делал.
+                //
+                // Вынудил его к этому отказ без адреса. Теперь отказ называет
+                // строку и поле, а `findings` не вида «число» не превращается в
+                // ноль: перечень находок, поданный прозой, уходил в никуда, и
+                // пункт гейта говорил «находок ноль».
+                let raw = rows(args, "verdicts");
+                let mut list: Vec<(String, i64, i64, String, i32, String)> = Vec::new();
+                let mut bad: Vec<String> = Vec::new();
+                for (n, it) in raw.iter().enumerate() {
+                    let task = it.get("task").and_then(|v| v.as_str());
+                    let verdict = it.get("verdict").and_then(|v| v.as_str());
+                    let findings = it.get("findings");
+                    if task.is_none() {
+                        bad.push(format!("строка {n}: нет поля `task` со строкой"));
+                        continue;
+                    }
+                    if verdict.is_none() {
+                        bad.push(format!("строка {n}: нет поля `verdict` со строкой"));
+                        continue;
+                    }
+                    if findings.is_some_and(|v| !v.is_number()) {
+                        bad.push(format!(
+                            "строка {n}: `findings` — ЧИСЛО находок, а подано {}. \
+                             Перечень уйдёт в никуда, и пункт скажет «находок ноль»",
+                            if findings.is_some_and(Value::is_array) { "перечнем" } else { "не числом" }
+                        ));
+                        continue;
+                    }
+                    list.push((
+                        task.unwrap_or_default().to_owned(),
                         num(it, "at").unwrap_or(0),
                         num(it, "taskRevision").unwrap_or(0),
-                        it.get("verdict")?.as_str()?.to_owned(),
+                        verdict.unwrap_or_default().to_owned(),
                         num(it, "findings").unwrap_or(0) as i32,
                         it.get("body").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
-                    ))).collect())
-                    .unwrap_or_default();
+                    ));
+                }
+                if !bad.is_empty() {
+                    return json!({ "content": [{ "type": "text", "text": format!(
+                        "подача не принята, и вот чем: {}. Форма строки: \
+                         {{task, verdict, findings (число), at, taskRevision, body}}",
+                        bad.join("; ")) }], "isError": true });
+                }
                 // «Сказать явно» должно быть ЧЕМ: без флага отказ был тупиком —
                 // снять ошибочный вердикт можно было только запросом в базу мимо
                 // сервера.
