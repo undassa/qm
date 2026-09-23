@@ -29,6 +29,33 @@ CREATE OR REPLACE VIEW task_ready AS
          AS ready
     FROM project_plan_tasks t;
 
+-- ЧТО ДЕРЖИТ ЗАДАЧУ — ОДИН ОТВЕТ НА ВСЕ ТРИ ДВЕРИ. `next-task` её не выдаёт,
+-- `blockers` объясняет почему, `waves` раздаёт волну исполнителям — и держание
+-- рождалось в каждой двери отдельно. Цена измерена дважды. Сперва с барьером
+-- фаз: доска знала про фазу, очередь не знала, и мимо барьера уходило ровно
+-- то, что он держит, — комментарий об этом стоит в `waves` до сих пор. Потом
+-- с красной парой: `next-task` перестал выдавать двенадцать задач `tot-ade`,
+-- а `waves` продолжал их раздавать, и `blockers` о тринадцати задачах в
+-- рабочих деревьях отвечал «ничто не держит».
+--
+-- Поэтому предикат здесь, а двери его читают. Добавляя новое держание, пишите
+-- его В ЭТОТ ВИД: дверь, которая о нём не узнает, отправит человека делать
+-- работу, которую у него тут же отберут.
+CREATE OR REPLACE VIEW task_held AS
+  SELECT t.project_id, t.id AS task_id,
+         -- Занятую не отдаём второму: открытое рабочее дерево значит, что
+         -- задачу уже ведут. Пропуск, а не отказ — вернётся, как снимут.
+         (SELECT w.branch FROM task_worktree w
+           WHERE w.project_id = t.project_id AND w.task_id = t.id) AS worktree,
+         -- Зеркало вперёд тела (`ADR-0080`): пока красная пара не закрыта, её
+         -- файла в стволе нет, и начать работу нечем.
+         (SELECT r.id FROM red_task r
+            JOIN project_plan_tasks z ON z.project_id = r.project_id AND z.id = r.id
+           WHERE r.project_id = t.project_id AND lower(r.parent_task) = lower(t.id)
+             AND z.state <> 'closed'
+           ORDER BY r.id LIMIT 1) AS mirror
+    FROM project_plan_tasks t;
+
 -- Чем требование доказано — ОДИН ответ на всех, а не по ответу на дверь.
 --
 -- Годным доказательством набор зовёт четыре вещи: запись доказательства рода,
@@ -4775,47 +4802,14 @@ pub(crate) async fn next_task(pool: &Pool, project: &str) -> Result<Value, crate
                LEFT JOIN task_phase tp ON tp.project_id = $1 AND tp.task_id = o.id
               WHERE o.id NOT IN (SELECT task_id FROM blocked_by_task)
                 AND o.id NOT IN (SELECT task_id FROM blocked_by_milestone)
-                -- ЗАНЯТУЮ НЕ ОТДАЁМ ВТОРОМУ. Открытое рабочее дерево значит,
-                -- что задачу уже ведут прямо сейчас. Диспетчер этого не знал и
-                -- мог выдать её второму исполнителю: двое пишут один файл,
-                -- один из них зря. Померено на `M1-T2`: дерево открыто, ветка
-                -- `m1t2-markup-layers`, а карточка и очередь молчали.
-                --
-                -- Пропуск, а не отказ: задача остаётся в плане и вернётся, как
-                -- только дерево снимут. Кто её ведёт — видно в `waves`.
-                AND o.id NOT IN (SELECT task_id FROM task_worktree WHERE project_id = $1)
-                -- ЗЕРКАЛО ВПЕРЁД ТЕЛА. Задача кода, чья красная пара ещё не
-                -- закрыта, невыполнима: `ADR-0080` требует, чтобы проверка
-                -- приземлилась раньше тела, а пока пара открыта, её файла в
-                -- стволе нет. Померено: дверь выдавала `M5-T46`, чьё зеркало
-                -- `V5-T46` лежало в незакрытой ветке, и исполнителю нечем было
-                -- начать.
-                --
-                -- Прежний барьер мерил не то и стоял не здесь: «есть хоть одна
-                -- незакрытая красная — не выдаём ничего». Он держал и сами
-                -- красные задачи, то есть ровно ту работу, которая его снимает.
-                -- Этот держит одну задачу её собственной парой.
-                --
-                -- Пара берётся у `red_task.parent_task` — связь объявлена
-                -- таблицей, а не прозой. Первая редакция выдирала имя из поля
-                -- «Зеркало» образцом, и это было хуже трижды: у `myack` поля
-                -- нет ни у одной задачи, и держалось ноль вместо двух; образец
-                -- брал ПЕРВЫЙ подходящий токен, отчего `M5-T31`, чей текст
-                -- говорит «зеркала здесь нет», получал зеркалом задачу КОДА
-                -- `M5-T54`; опечатка в имени снимала запрет, потому что `JOIN`
-                -- не находил строки. Таблица порождается, а не печатается, и
-                -- целостна на обоих наборах — ни одной строки без задачи ни по
-                -- `id`, ни по `parent_task`. Тем же путём об этой связи
-                -- спрашивают `red-observed-failing` и `task-tree-op-matches-disk`.
-                --
-                -- Пропуск, а не отказ: задача вернётся, как только пара
-                -- закроется, а до тех пор дверь отдаёт саму красную задачу.
-                AND NOT EXISTS (
-                  SELECT 1 FROM red_task r
-                    JOIN project_plan_tasks z
-                      ON z.project_id = r.project_id AND z.id = r.id
-                   WHERE r.project_id = $1 AND lower(r.parent_task) = lower(o.id)
-                     AND z.state <> 'closed')
+                -- ДЕРЖАНИЕ ЧИТАЕТСЯ ИЗ `task_held`, а не пишется здесь: тот
+                -- же ответ обязаны давать `blockers` и `waves`. Когда оно
+                -- стояло в каждой двери отдельно, `waves` раздавал двенадцать
+                -- задач, которых эта дверь уже не выдавала, а `blockers` о
+                -- тринадцати занятых отвечал «ничто не держит».
+                AND NOT EXISTS (SELECT 1 FROM task_held h
+                                 WHERE h.project_id = $1 AND h.task_id = o.id
+                                   AND (h.worktree IS NOT NULL OR h.mirror IS NOT NULL))
               ORDER BY (tp.open IS NOT TRUE), o.milestone_id, o.ord
               LIMIT 1",
             &[&project],
@@ -5026,19 +5020,17 @@ pub(crate) async fn task_blockers(pool: &Pool, project: &str, task: &str) -> Res
     // отвечала бы «ничто не держит» ровно о задаче, которой не дают, — и берут
     // тот ответ, что короче. Барьер фаз этот же дефект уже проходил, и чинили
     // его тем же: держание рождается в одном месте и читается обеими дверями.
-    let mirror = client
+    let held = client
         .query_opt(
-            "SELECT r.id FROM red_task r
-               JOIN project_plan_tasks z ON z.project_id = r.project_id AND z.id = r.id
-              WHERE r.project_id = $1 AND lower(r.parent_task) = lower($2)
-                AND z.state <> 'closed'
-              ORDER BY r.id LIMIT 1",
+            "SELECT worktree, mirror FROM task_held
+              WHERE project_id = $1 AND task_id = $2",
             &[&project, &task],
         )
         .await?;
-    let mirror: Option<String> = mirror.map(|r| r.get(0));
+    let worktree: Option<String> = held.as_ref().and_then(|r| r.get(0));
+    let mirror: Option<String> = held.as_ref().and_then(|r| r.get(1));
     let free = tasks.is_empty() && milestones.is_empty() && phase_open == Some(true)
-        && mirror.is_none();
+        && worktree.is_none() && mirror.is_none();
     Ok(json!({
         "task": task,
         "phase": match &phase {
@@ -5063,6 +5055,7 @@ pub(crate) async fn task_blockers(pool: &Pool, project: &str, task: &str) -> Res
             "openTasks": r.get::<_, i64>(2),
         })).collect::<Vec<_>>(),
         "waitsForMirror": mirror,
+        "inWorktree": worktree,
         // Пустота СКАЗАНА СЛОВОМ: два пустых списка и «ничто не держит» — разное
         // только для того, кто знает, что задача существует и была спрошена.
         "why": if free {
@@ -5070,6 +5063,9 @@ pub(crate) async fn task_blockers(pool: &Pool, project: &str, task: &str) -> Res
         } else if let Some(m) = &mirror {
             format!("красная пара `{m}` не закрыта: проверка обязана приземлиться раньше тела (`ADR-0080`), \
                      и до тех пор задача не выдаётся")
+        } else if let Some(b) = &worktree {
+            format!("задачу уже ведут в рабочем дереве `{b}`: второму её не отдают, и это пропуск, \
+                     а не отказ — вернётся, как дерево снимут")
         } else {
             String::new()
         },
@@ -14186,8 +14182,17 @@ pub(crate) async fn waves(pool: &Pool, project: &str) -> Result<Value, crate::db
                     -- стояла `not_started`, пока её писали: состояние берётся
                     -- из закрывающих трейлеров, а до закрытия их нет.
                     (SELECT w.branch FROM task_worktree w
-                      WHERE w.project_id = t.project_id AND w.task_id = t.id) AS in_flight
+                      WHERE w.project_id = t.project_id AND w.task_id = t.id) AS in_flight,
+                    -- ЗЕРКАЛО — ТОЖЕ В КАРТОЧКЕ, и по тому же доводу, что фаза
+                    -- четырьмя строками выше. Барьер `next-task` перестал
+                    -- выдавать задачу, чья красная пара не закрыта, а волна
+                    -- продолжала её раздавать: двенадцать карточек `tot-ade`
+                    -- звали на работу, которой дверь не даёт. Один и тот же
+                    -- дефект второй раз, поэтому держание теперь читается из
+                    -- `task_held` и тут, и в `next-task`, и в `blockers`.
+                    h.mirror AS held_by_mirror
                FROM project_plan_tasks t
+               LEFT JOIN task_held h ON h.project_id = t.project_id AND h.task_id = t.id
                LEFT JOIN red_task r ON r.project_id = t.project_id AND r.id = t.id
                LEFT JOIN task_phase tp ON tp.project_id = t.project_id AND tp.task_id = t.id
               WHERE t.project_id = $1
@@ -14257,6 +14262,7 @@ pub(crate) async fn waves(pool: &Pool, project: &str) -> Result<Value, crate::db
             "phaseOpen": r.get::<_, Option<bool>>("phase_open"),
             "wave": r.get::<_, Option<i32>>("wave"),
             "inFlight": r.get::<_, Option<String>>("in_flight"),
+            "heldByMirror": r.get::<_, Option<String>>("held_by_mirror"),
             "waits": depends[i].iter().filter(|&&j| tasks[j].get::<_, String>("state") != "closed").count(),
         }));
     }
@@ -14271,15 +14277,23 @@ pub(crate) async fn waves(pool: &Pool, project: &str) -> Result<Value, crate::db
         .iter()
         .filter(|c| c["state"] != "closed" && c["phaseOpen"] != serde_json::Value::Bool(true))
         .count();
+    let held_mirror = cards
+        .iter()
+        .filter(|c| c["state"] != "closed" && !c["heldByMirror"].is_null())
+        .count();
     Ok(json!({
         "cards": cards,
         "total": cards.len(),
         // Барьер красной фазы: весь трек проверок предшествует всему коду.
         "openRed": open_red,
         "heldByPhase": held,
-        "why": if held > 0 {
-            "карточки с `phaseOpen` не `true` в очередь не идут: их фаза не открыта либо вид задачи не отображён ни на одну фазу"
-        } else { "" },
+        "heldByMirror": held_mirror,
+        "why": match (held > 0, held_mirror > 0) {
+            (true, true) => "карточки с `phaseOpen` не `true` в очередь не идут: их фаза не открыта либо вид задачи не отображён ни на одну фазу.                              Карточки с непустым `heldByMirror` — тоже: их красная пара не закрыта, и `next-task` их не выдаст".to_owned(),
+            (true, false) => "карточки с `phaseOpen` не `true` в очередь не идут: их фаза не открыта либо вид задачи не отображён ни на одну фазу".to_owned(),
+            (false, true) => "карточки с непустым `heldByMirror` в очередь не идут: их красная пара не закрыта, и `next-task` их не выдаст".to_owned(),
+            (false, false) => String::new(),
+        },
     }))
 }
 
