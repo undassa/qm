@@ -7,7 +7,18 @@ t AS (INSERT INTO project_plan_tasks (project_id, id, milestone_id, ord, title, 
 з AS (INSERT INTO readiness_method
         (project_id, owner_kind, owner_id, ord, method_kind, method, declared_by, item_text, verdict, verdict_at)
       SELECT $1, 'task', t.id, 3, 'checks-green', 'проба_несуществующая_проверка', 'проба',
-             'проба самотеста: заявление не прошло', 'failed', 1 FROM t RETURNING ord)
+             'проба самотеста: заявление не прошло', 'failed', 1 FROM t RETURNING ord),
+-- ЯКОРЮ НУЖЕН ПУНКТ В `readiness_item`, И ТЕКСТ ТАМ БЕЗ МЕТКИ `- [ ]`.
+--
+-- Правило сличает `item_text` с `readiness_item.text`, а не с текстом из
+-- `task_ready_item`: там строка лежит целиком, с меткой и склеенными
+-- продолжениями. Подсадка, не знающая об этой разнице, породила бы форму,
+-- которой проектор не создаёт, и перестала бы что-либо ловить — ровно это и
+-- случилось с первой редакцией правила: проба осталась зелёной и с условием,
+-- и без него, потому что подсаживала один и тот же текст в обе таблицы.
+и AS (INSERT INTO readiness_item (project_id, owner_kind, owner_id, ord, text, declared, method_kind)
+      SELECT $1, 'task', t.id, 3, 'проба самотеста: заявление не прошло', false, 'checks-green'
+        FROM t RETURNING ord)
 INSERT INTO task_ready_item (project_id, task_id, ord, check_id, text, done, origin)
 -- ТРИ СТРОКИ, ПОТОМУ ЧТО ВЕТКИ ТРИ. Первая несёт имя проверки, которой нет в
 -- дереве, — её ловит ветка «проверка не написана». Вторая имени не несёт
@@ -20,8 +31,8 @@ INSERT INTO task_ready_item (project_id, task_id, ord, check_id, text, done, ori
 -- ветка». И того, что ПРОШЕДШЕЕ заявление находку СНИМАЕТ, проба не проверяет
 -- вовсе — подсадить зелёное она не умеет. Это проверяется замером до и после
 -- на живом наборе, и иначе сегодня никак.
-SELECT $1, t.id, 1, 'probe_check', 'проба самотеста', false, 'проба' FROM t
+SELECT $1, t.id, 1, 'probe_check', '- [ ] проба самотеста', false, 'проба' FROM t
 UNION ALL
-SELECT $1, t.id, 2, '', 'проба самотеста: пункт без названной проверки', false, 'проба' FROM t
+SELECT $1, t.id, 2, '', '- [ ] проба самотеста: пункт без названной проверки', false, 'проба' FROM t
 UNION ALL
-SELECT $1, t.id, 3, '', 'проба самотеста: заявление не прошло', false, 'проба' FROM t, з
+SELECT $1, t.id, 3, '', '- [ ] проба самотеста: заявление не прошло', false, 'проба' FROM t, з, и

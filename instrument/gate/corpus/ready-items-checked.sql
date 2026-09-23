@@ -91,11 +91,20 @@ WITH прогон AS (
 -- закрывать им пункт значило бы повторить ровно то, что три ветки ниже и
 -- осуждают: «написанная и никогда не запущенная проверка закрывала пункт так
 -- же, как зелёная». Оно остаётся в честной куче «судить нечем».
+-- ЯКОРЬ ЗДЕСЬ НУЖНЕЕ, ЧЕМ ГДЕ-ЛИБО: это единственное место, где заявление
+-- СНИМАЕТ находку. Съехавшее на соседа заявление без якоря погасило бы
+-- «судить нечем» у пункта, которого никто не мерил, — и погасило бы молча,
+-- а этот файл двумя ветками выше сам называет молчание худшим исходом.
 заявление AS (
   SELECT m.owner_id AS task_id, m.ord
     FROM readiness_method m
    WHERE m.project_id = $1 AND m.owner_kind = 'task'
-     AND m.method_kind = 'checks-green' AND m.verdict = 'passed'),
+     AND m.method_kind = 'checks-green' AND m.verdict = 'passed'
+     AND (m.item_text = '' OR EXISTS (
+           SELECT 1 FROM readiness_item i
+            WHERE i.project_id = m.project_id AND i.owner_kind = m.owner_kind
+              AND i.owner_id = m.owner_id AND i.ord = m.ord
+              AND i.text = m.item_text))),
 ответ AS (
   SELECT r.check_name, bool_or(r.verdict = 'passed') AS зелена
     FROM test_run r, прогон п
@@ -210,11 +219,20 @@ SELECT t.id || ' — заявлений «проверки зелены» не �
   JOIN readiness_method m
     ON m.project_id = t.project_id AND m.owner_kind = 'task'
    AND m.owner_id = r.task_id AND m.ord = r.ord
-   -- Якорь — то же условие, что у круга замера и у двери показа. Вердикт
-   -- ложится на заявление, а заявление относится к пункту, чей текст оно
-   -- запомнило; без якоря правка выше чек-листа принесла бы сюда вердикт,
-   -- снятый с соседнего пункта.
-   AND (m.item_text = '' OR m.item_text = r.text)
+   -- Якорь — то же условие, что у круга замера. Вердикт ложится на заявление,
+   -- а заявление относится к пункту, чей текст оно запомнило; без якоря
+   -- правка выше чек-листа принесла бы сюда вердикт, снятый с соседнего
+   -- пункта.
+   --
+   -- Сравнивается с `readiness_item`, а НЕ с `r.text`: `task_ready_item`
+   -- держит строку с меткой `- [ ]` и склеенными продолжениями, а якорь
+   -- пишется из `readiness_item`, где метки нет. Первая редакция этой правки
+   -- сравнивала с `r.text` и была ложна всегда — 0 совпадений из 198.
+   AND (m.item_text = '' OR EXISTS (
+         SELECT 1 FROM readiness_item i
+          WHERE i.project_id = m.project_id AND i.owner_kind = m.owner_kind
+            AND i.owner_id = m.owner_id AND i.ord = m.ord
+            AND i.text = m.item_text))
    AND m.method_kind = 'checks-green' AND m.verdict = 'failed'
  WHERE t.project_id = $1 AND fact_fresh($1, 'test-name')
    AND t.kind = 'dev' AND t.state = 'closed' AND NOT r.done AND r.check_id = ''
