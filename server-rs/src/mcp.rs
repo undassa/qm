@@ -3076,7 +3076,12 @@ impl Mcp {
                         // отличить от чужого: у `tot-ade` 40 адресов из 112
                         // пришли из справки о соседнем продукте, гейт это
                         // видел, а дверь не отвечала.
-                        "SELECT path, line::text, entity_kind, entity_name, anchor
+                        // ИМЯ ПРЕДМЕТА ИЗ ФРАЗЫ — тоже в ответе, и оно сильнее
+                        // якоря: якорь сверяет одну строку, а фраза почти
+                        // всегда говорит о предмете целиком. Датчику оно нужно
+                        // затем, чтобы ответить, лежит ли названное там, куда
+                        // ведёт адрес: файл у него в руках, а у правила нет.
+                        "SELECT path, line::text, entity_kind, entity_name, anchor, named
                            FROM project_code_address
                           WHERE project_id = $1
                           ORDER BY path, line",
@@ -3088,7 +3093,8 @@ impl Mcp {
                     .iter()
                     .map(|r| json!({ "path": r.get::<_, String>(0), "line": r.get::<_, String>(1),
                                      "kind": r.get::<_, String>(2), "name": r.get::<_, String>(3),
-                                     "anchor": r.get::<_, String>(4) }))
+                                     "anchor": r.get::<_, String>(4),
+                                     "named": r.get::<_, String>(5) }))
                     .collect();
                 let bare = out.iter().filter(|a| a["anchor"].as_str().unwrap_or("").is_empty()).count();
                 Ok(json!({ "count": out.len(), "bare": bare, "addresses": out,

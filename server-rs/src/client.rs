@@ -724,8 +724,22 @@ pub fn sense(door: &Door, only: Option<&str>, root: &str) -> Result<Value, Strin
                     }
                 };
                 match text.lines().nth(n - 1) {
-                    Some(l) => names.push((key, l.trim().chars().take(200).collect())),
-                    None => names.push((key, format!("в файле строк {}", text.lines().count()))),
+                    Some(l) => names.push((key.clone(), l.trim().chars().take(200).collect())),
+                    None => {
+                        names.push((key, format!("в файле строк {}", text.lines().count())));
+                        continue;
+                    }
+                }
+                // СРАВНЕНИЕ ДЕЛАЕТ ДАТЧИК, ПОТОМУ ЧТО ФАЙЛ У НЕГО. Фраза
+                // документа называет предмет, адрес ведёт в строку; сошлись
+                // они или нет, видно только тому, кто видит текст целиком.
+                // Тащить в базу цепочку охватывающих и тело внутреннего ради
+                // одного сравнения незачем — правило прочтёт готовый ответ.
+                //
+                // Ключ строится, а не разбирается: `!` в пути не бывает.
+                let named = row["named"].as_str().unwrap_or("").trim();
+                if !named.is_empty() {
+                    names.push((format!("{key}!named"), name_stands_at(&text, n, named)));
                 }
             }
             let facts: Vec<Value> = names.iter()
@@ -2153,5 +2167,122 @@ mod trailers {
         ]);
         let product = ["82ec5f6".to_owned(), "cafe777".to_owned()].into_iter().collect();
         assert_eq!(state_of(&trailer_states(&l, &product, &rex()), "M1-T5"), "reopened");
+    }
+}
+
+/// Стоит ли названный фразой предмет там, куда ведёт адрес.
+///
+/// **Три ответа, а не два.** «Имя на месте», «имя в файле есть, но не здесь» и
+/// «имени в файле нет вовсе» лечатся по-разному: первое — ничем, второе —
+/// правкой номера строки, третье — правкой самой фразы, потому что предмет
+/// уехал из файла. Слить второе с третьим значило бы звать чинить строку там,
+/// где чинить надо ссылку.
+///
+/// **Сверяется ПОСЛЕДНИЙ сегмент имени, и это существенно.** Сверка по
+/// объемлющему прячет съезд внутри него: адрес, уехавший с `EventMsg::Reverted`
+/// на `EventMsg::Applied`, совпал бы по `EventMsg` и прошёл бы за верный.
+/// Прочитано на четырнадцати живых адресах набора: из восьми съехавших по
+/// объемлющему не виден ни один, по последнему сегменту видны все восемь.
+///
+/// **«Или в теле внутреннего» — не послабление.** У строки внутри большого
+/// перечисления самый внутренний элемент есть ВАРИАНТ, а не перечисление, так
+/// что съезд с варианта на вариант этим не прикрывается. Нужно оно затем, что
+/// фраза законно называет предмет, который строка использует, а не объемлет:
+/// строка внутри `fn block`, говорящая о `BlockOrigin`, верна.
+fn name_stands_at(text: &str, line: usize, named: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let indent = |s: &str| s.len() - s.trim_start().len();
+    let declares = |s: &str| {
+        let t = s.trim_start();
+        t.starts_with("fn ") || t.starts_with("pub fn ") || t.starts_with("struct ")
+            || t.starts_with("pub struct ") || t.starts_with("enum ") || t.starts_with("pub enum ")
+            || t.starts_with("impl ") || t.starts_with("trait ") || t.starts_with("pub trait ")
+            || t.starts_with("mod ") || t.starts_with("pub mod ")
+            || t.chars().next().is_some_and(char::is_uppercase)
+    };
+    let word = |s: &str| s.split(|c: char| !c.is_alphanumeric() && c != '_').any(|w| w == named);
+
+    let at = line.saturating_sub(1);
+    let mut depth = lines.get(at).map_or(usize::MAX, |l| indent(l));
+    let mut inner: Option<usize> = None;
+    let mut chain = false;
+    for i in (0..at.min(lines.len())).rev() {
+        let l = lines[i];
+        if l.trim().is_empty() || indent(l) >= depth || !declares(l) {
+            continue;
+        }
+        depth = indent(l);
+        if inner.is_none() {
+            inner = Some(i);
+        }
+        if word(l) {
+            chain = true;
+        }
+    }
+    if chain || lines.get(at).is_some_and(|l| word(l)) {
+        return format!("имя «{named}» на месте");
+    }
+    // Тело самого внутреннего: от его объявления до строки с отступом не
+    // больше, чем у него самого.
+    if let Some(start) = inner {
+        let own = indent(lines[start]);
+        let end = lines
+            .iter()
+            .enumerate()
+            .skip(start + 1)
+            .find(|(_, l)| !l.trim().is_empty() && indent(l) <= own)
+            .map_or(lines.len(), |(i, _)| i);
+        if lines[start..end].iter().any(|l| word(l)) {
+            return format!("имя «{named}» на месте");
+        }
+    }
+    if lines.iter().any(|l| word(l)) {
+        return format!("фраза называет «{named}», а по адресу его нет: в файле он есть в другом месте");
+    }
+    format!("фраза называет «{named}», а в файле его нет вовсе: предмет уехал")
+}
+
+#[cfg(test)]
+mod address_tests {
+    use super::name_stands_at;
+
+    /// Четыре разбора, кодирующие предикат, прочитанный на живых адресах.
+    ///
+    /// Второй — главный: адрес съехал с одного варианта перечисления на
+    /// соседний. Сверка по объемлющему `EventMsg` сказала бы «на месте», и
+    /// ровно так съезд и прятался. Поэтому сверяется последний сегмент.
+    ///
+    /// Третий — обратный: строка лежит внутри функции, которая названный
+    /// предмет использует, а не объемлет. Без «или в теле внутреннего» это
+    /// дало бы ложную находку — она и была на живом `M5-T59`.
+    #[test]
+    fn a_named_subject_is_looked_for_where_the_address_leads() {
+        let text = "pub enum EventMsg {\n\
+                    \x20   Applied {\n\
+                    \x20       receipt: ReceiptId,\n\
+                    \x20   },\n\
+                    \x20   Reverted {\n\
+                    \x20       delta: DeltaId,\n\
+                    \x20   },\n\
+                    }\n\
+                    \n\
+                    pub fn block(origin: &BlockOrigin) -> Block {\n\
+                    \x20   let kind = origin.kind();\n\
+                    \x20   Block { kind }\n\
+                    }\n";
+        // Адрес ведёт в тело `Applied`, фраза называет его же.
+        assert!(name_stands_at(text, 3, "Applied").contains("на месте"));
+        // Тот же адрес, а фраза называет СОСЕДНИЙ вариант: это съезд, и
+        // сверка по объемлющему `EventMsg` его бы не увидела.
+        let said = name_stands_at(text, 3, "Reverted");
+        assert!(
+            said.contains("в другом месте"),
+            "съезд с варианта на соседний не назван: «{said}»"
+        );
+        // Строка внутри `block`, предмет назван в её теле, а не объемлет её.
+        assert!(name_stands_at(text, 11, "BlockOrigin").contains("на месте"));
+        // Предмета в файле нет вовсе — лечится правкой ссылки, не строки.
+        let gone = name_stands_at(text, 3, "ReasonExcess");
+        assert!(gone.contains("уехал"), "ушедший предмет назван как съехавший: «{gone}»");
     }
 }
