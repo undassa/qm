@@ -1,3 +1,9 @@
+-- «В ДЕРЕВЕ НЕТ» ПРАВИЛО СКАЗАТЬ НЕ МОЖЕТ. Имена тестов берутся у датчика
+-- `test-name`, а он читает по объявленному перечню: у `tot-ade` это
+-- `crates/**/*.rs`, и тест вне `crates` неотличим здесь от ненаписанного.
+-- Тот же класс, что у `task-path-exists`, `task-tree-op-matches-disk` и
+-- `measured-by`; досягаемость обходчика в SQL не выражается, поэтому обе
+-- возможности называются читателю, а правило утверждает только измеренное.
 WITH строка AS (
   SELECT t.id AS task_id, l.line
     FROM project_plan_tasks t
@@ -17,7 +23,9 @@ SELECT 'датчик «test-name» ' || fact_gap($1, 'test-name')
        || ': написаны ли тесты задач с закрытым зеркалом — неизвестно, и это не зелёное' AS detail
  WHERE NOT fact_fresh($1, 'test-name') AND EXISTS (SELECT 1 FROM проверка)
 UNION ALL
-SELECT п.task_id || ' — зеркало ' || п.зеркало || ' закрыто, а теста ' || п.check_id || ' в дереве нет'
+SELECT п.task_id || ' — зеркало ' || п.зеркало || ' закрыто, а теста ' || п.check_id
+       || ' среди прочитанного датчиком нет. Нет его в дереве или датчик туда не дошёл'
+       || ' — покажет `sensor-specs`'
   FROM проверка п
  WHERE fact_fresh($1, 'test-name')
    AND NOT EXISTS (SELECT 1 FROM code_fact f WHERE f.project_id = $1 AND f.kind = 'test-name' AND f.name = п.check_id)

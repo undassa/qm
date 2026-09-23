@@ -9,48 +9,35 @@
 -- неверной причиной («пропускают каталоги с точки»): дотовых каталогов в
 -- перечне было четыре, пятого не было.
 --
--- СПРАШИВАЕТСЯ ПРОЧИТАННОЕ, А НЕ ОБЪЯВЛЕННОЕ, и это существенно. Первая
--- редакция разбирала глобы из `project_sensor_spec.reads` — и завела вторую
--- копию предиката, который на деле живёт в обходчике (`client.rs::walk`): тот
--- безусловно пропускает `.git`, `node_modules`, `target`, `dist`, `.venv`
--- независимо от объявления, а глоб вида `**/*.rs` разбирает как «спуск от
--- корня». Копия не знала ни того ни другого и на законном объявлении врала бы
--- в обе стороны. Верхи берутся у ИМЁН ПРОЧИТАННЫХ ФАКТОВ — это ответ по замеру,
--- а не по декларации; исключения и грамматика глоба входят в него даром.
+-- РАЗВИЛКУ НАЗВАТЬ НЕЧЕМ, И ПРАВИЛО ЕЁ НЕ НАЗЫВАЕТ. Три редакции пытались
+-- различить «каталога нет» и «датчик туда не дошёл»: по глобам
+-- `project_sensor_spec.reads`, по каталогам `project_code_dir`, по верхнему
+-- отрезку имени прочитанного факта. Все три врали, и последняя — измеримо:
+-- у `myack` датчик читает `backend/crates/**/*.rs`, верх `backend` попадал в
+-- прочитанные, а `backend/Cargo.toml` и `backend/migrations/*.sql` — нет, и
+-- правило говорило «нет даже каталога» о существующем. Двадцать ложных строк
+-- одним замером.
 --
--- Именно у имён, а не у `project_code_dir`: тот строится предками, и у
--- корневого файла предков нет вовсе. Через каталоги корневой файл был бы
--- неотличим от непрочитанного навсегда, а `myack` корневых файлов не читает
--- ни одного из 415, и `tot-ade` не читает `.gitignore`. У имён корневой файл
--- сам себе верх, и особого случая не нужно.
-WITH верхи AS (
-  SELECT DISTINCT split_part(f.name, '/', 1) AS верх
-    FROM code_fact f
-   WHERE f.project_id = $1 AND f.kind IN ('repo-file', 'code-file')),
-лист AS (
-  SELECT l.task_id, l.leaf, l.target_dir, split_part(l.target_dir, '/', 1) AS верх
-    FROM project_task_tree_leaf l
-   WHERE l.project_id = $1 AND (fact_fresh($1, 'repo-file') OR fact_fresh($1, 'code-file'))
-     AND l.is_path AND NOT l.exempt AND NOT l.forward_declared
-     AND l.target_dir <> '' AND l.op <> '+'
-     AND NOT EXISTS (SELECT 1 FROM project_code_dir d
-                      WHERE d.project_id = $1 AND d.dir = l.target_dir))
+-- Причина общая: досягаемость обходчика (`client.rs::walk`) не выражается ни
+-- глобом, ни каталогом, ни верхом. В неё входят безусловный пропуск `.git`,
+-- `node_modules`, `target`, `dist`, `.venv`, фильтр расширения, глубина глоба
+-- и `skip_re` — и каждая замена знает лишь часть. Правило, которое чинит
+-- ложное утверждение, не вправе заводить своё.
+--
+-- Поэтому сказано ровно измеренное, а обе возможности названы читателю. Одно
+-- сообщение короче трёх редакций разветвления и не врёт ни на одном входе.
 SELECT 'датчик файлов дерева «repo-file» ' || fact_gap($1, 'repo-file')
        || ': есть ли каталоги задач — неизвестно, и это не зелёное' AS detail
  WHERE NOT (fact_fresh($1, 'repo-file') OR fact_fresh($1, 'code-file'))
    AND EXISTS (SELECT 1 FROM project_task_tree_leaf l
                 WHERE l.project_id = $1 AND l.is_path AND NOT l.exempt)
 UNION ALL
--- ПУСТЫЕ ВЕРХИ ЗНАЧАТ «ДАТЧИК НЕ ПРОЧЁЛ НИЧЕГО», и тогда «не мерил» — верно о
--- любом пути, а «нет даже каталога» — ложь обо всех сразу. Это состояние нового
--- набора: план написан, дерева ещё нет, подача пустая и свежая.
-SELECT п.task_id || ' — ' || п.leaf || ': среди прочитанного датчиком в «' || п.верх
-       || '» нет ни одного файла. Каталога нет в дереве либо датчик туда не дошёл — '
-       || 'что именно, покажет `sensor-specs`'
-  FROM лист п
- WHERE NOT EXISTS (SELECT 1 FROM верхи в WHERE в.верх = п.верх)
-UNION ALL
-SELECT п.task_id || ' — ' || п.leaf || ': нет даже каталога ' || п.target_dir
-  FROM лист п
- WHERE EXISTS (SELECT 1 FROM верхи в WHERE в.верх = п.верх)
+SELECT l.task_id || ' — ' || l.leaf || ': среди прочитанного датчиком такого пути нет. '
+       || 'Каталога нет в дереве либо датчик туда не дошёл — покажет `sensor-specs`' AS detail
+  FROM project_task_tree_leaf l
+ WHERE l.project_id = $1 AND (fact_fresh($1, 'repo-file') OR fact_fresh($1, 'code-file'))
+   AND l.is_path AND NOT l.exempt AND NOT l.forward_declared
+   AND l.target_dir <> '' AND l.op <> '+'
+   AND NOT EXISTS (SELECT 1 FROM project_code_dir d
+                    WHERE d.project_id = $1 AND d.dir = l.target_dir)
  ORDER BY 1
