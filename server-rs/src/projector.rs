@@ -742,7 +742,7 @@ CREATE TABLE IF NOT EXISTS readiness_item (
   -- пускать его в обе: ограничение одной из них отвергло первое же
   -- объявление `checks-green`, уже после того как вторая его приняла.
   method_kind text NOT NULL DEFAULT 'unknown'
-    CHECK (method_kind IN ('query','command','checks-green','unknown')),
+    CHECK (method_kind IN ('query','command','checks-green','judged-by-gate','unknown')),
   method text NOT NULL DEFAULT '',
   PRIMARY KEY (project_id, owner_kind, owner_id, ord));
 
@@ -764,7 +764,7 @@ CREATE TABLE IF NOT EXISTS readiness_method (
   --
   -- Вместо языка — словарь. `checks-green` несёт СПИСОК ИМЁН проверок;
   -- предикат написан в исполнителе и проходит ревью.
-  method_kind text NOT NULL CHECK (method_kind IN ('query','command','checks-green','unknown')),
+  method_kind text NOT NULL CHECK (method_kind IN ('query','command','checks-green','judged-by-gate','unknown')),
   method text NOT NULL DEFAULT '',
   declared_by text NOT NULL DEFAULT '',
   -- Вердикт заявления в последнем круге замера гейта.
@@ -2862,10 +2862,10 @@ ALTER TABLE readiness_method ADD COLUMN IF NOT EXISTS verdict text NOT NULL DEFA
 ALTER TABLE readiness_method ADD COLUMN IF NOT EXISTS verdict_at bigint NOT NULL DEFAULT 0;
 ALTER TABLE readiness_method DROP CONSTRAINT IF EXISTS readiness_method_method_kind_check;
 ALTER TABLE readiness_method ADD CONSTRAINT readiness_method_method_kind_check
-  CHECK (method_kind IN ('query','command','checks-green','unknown'));
+  CHECK (method_kind IN ('query','command','checks-green','judged-by-gate','unknown'));
 ALTER TABLE readiness_item DROP CONSTRAINT IF EXISTS readiness_item_method_kind_check;
 ALTER TABLE readiness_item ADD CONSTRAINT readiness_item_method_kind_check
-  CHECK (method_kind IN ('query','command','checks-green','unknown'));
+  CHECK (method_kind IN ('query','command','checks-green','judged-by-gate','unknown'));
 ALTER TABLE scheme_term ADD COLUMN IF NOT EXISTS project_id text NOT NULL DEFAULT '';
 ALTER TABLE scheme_term DROP CONSTRAINT IF EXISTS scheme_term_pkey;
 ALTER TABLE scheme_term ADD PRIMARY KEY (project_id, role, value);
@@ -5060,7 +5060,7 @@ pub(crate) async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, c
                  ON i.project_id = m.project_id AND i.owner_kind = m.owner_kind
                 AND i.owner_id = m.owner_id AND i.ord = m.ord
                 AND (m.item_text = '' OR m.item_text = i.text)
-              WHERE m.project_id = $1 AND m.method_kind = 'checks-green'
+              WHERE m.project_id = $1 AND m.method_kind IN ('checks-green', 'judged-by-gate')
                 AND coalesce(btrim(m.method), '') <> ''
               ORDER BY m.owner_kind, m.owner_id, m.ord",
             &[&project],
@@ -10367,10 +10367,27 @@ pub(crate) async fn test_status(
 /// Без задачи — по всем задачам набора, что пульту и разбору долгов.
 pub(crate) async fn ready_items(pool: &Pool, project: &str, task: &str) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
+    // ОБЪЯВЛЕННЫЙ СПОСОБ ВИДЕН ЗДЕСЬ, И ЭТО ПОЧИНКА, А НЕ УКРАШЕНИЕ.
+    //
+    // Дверь `method-set` отвечает `updated: 1`, а эта отдавала пять полей, среди
+    // которых способа не было ни одного. Значит объявивший не мог отличить
+    // «принято и считается» от «принято и не сработает никогда»: род `command`
+    // отозван по измеренному доводу и не считается ни при каких условиях, а
+    // `checks-green` с именем, которого нет в последнем прогоне, даёт красное.
+    //
+    // 23.09 на этом независимо ошиблись обе стороны — и набор, и я: оба решили,
+    // что объявление уходит в никуда, и оба написали это как находку прибора.
+    // Оно доходило; увидеть было нечем. Вердикт показывается рядом со способом
+    // затем, что «объявлено» и «посчитано» — разные состояния, и разница между
+    // ними и есть весь смысл рода.
     let rows = client
         .query(
-            "SELECT r.task_id, r.ord, r.check_id, r.text, r.done
+            "SELECT r.task_id, r.ord, r.check_id, r.text, r.done,
+                    coalesce(m.method_kind, ''), coalesce(m.method, ''), coalesce(m.verdict, '')
                FROM task_ready_item r
+               LEFT JOIN readiness_method m
+                 ON m.project_id = r.project_id AND m.owner_kind = 'task'
+                AND m.owner_id = r.task_id AND m.ord = r.ord
               WHERE r.project_id = $1 AND ($2 = '' OR r.task_id = $2)
               ORDER BY r.task_id, r.ord",
             &[&project, &task],
@@ -10379,10 +10396,22 @@ pub(crate) async fn ready_items(pool: &Pool, project: &str, task: &str) -> Resul
     let items: Vec<Value> = rows
         .iter()
         .map(|r| {
+            let kind: String = r.get(5);
+            let verdict: String = r.get(7);
             json!({
                 "task": r.get::<_, String>(0), "ord": r.get::<_, i32>(1),
                 "check": r.get::<_, String>(2), "text": r.get::<_, String>(3),
                 "done": r.get::<_, bool>(4),
+                "methodKind": kind,
+                "method": r.get::<_, String>(6),
+                // Пустой вердикт при объявленном способе — «ещё не мерили», и
+                // сказать это словом надо здесь: пустая строка рядом с
+                // непустым родом читается как «не прошло».
+                "verdict": if verdict.is_empty() && !kind.is_empty() {
+                    "не мерен: вердикт появится после круга замера гейта".to_owned()
+                } else {
+                    verdict
+                },
             })
         })
         .collect();
@@ -12750,6 +12779,86 @@ pub(crate) async fn execute_method_upto(
         //
         // Прогон берётся последний с ЧИСТОГО дерева: прогон на дереве с чужой
         // правкой зеленит и краснит что угодно.
+        // РОД «СУДИТСЯ НАБОРОМ»: в `method` — имя пункта гейта, который это
+        // обещание и судит. Вердикт берётся у того пункта в последнем круге
+        // замера, то есть **считает сервер**, а не верит объявившему.
+        //
+        // Этим род и законен там, где `command` отозван. Довод против `command`
+        // был не в том, что команду нельзя объявить, а в том, что сервер её
+        // выполнить не может вовсе и отвечает «неизвестно» всегда: один вызов
+        // двери снимал бы пункт навсегда. Здесь ответ есть, и он измеренный.
+        //
+        // Зачем вообще нужен. Пункты вида «`just gate` зелёный целиком» и
+        // «коммит несёт закрывающий трейлер» повторяют то, что набор судит
+        // глобально; имени проверки у них нет и быть не может. До этого рода они
+        // лежали в куче «судить нечем» — то есть обещание теряло владельца
+        // вместо того, чтобы получить адрес. Цена измерена 23.09: девять таких
+        // пунктов у двух закрытых задач остановили лестницу набора целиком,
+        // и снять их было нечем.
+        //
+        // ПОТОЛОК НАЗВАН: вердикт отстаёт на круг. Круг сперва меряет заявления,
+        // потом пункты, так что названный пункт отвечает состоянием прошлого
+        // замера. Для обещания «пункт гейта зелён» это верно по существу —
+        // зелёным он стал не в этот миг, — но объявивший увидит свой вердикт
+        // только со следующего круга.
+        //
+        // Имя, которого среди пунктов нет, даёт `unknown`, а не `passed`:
+        // опечаткой пункт приёмки не закрыть. Правило `ready-items-checked`
+        // берёт только `passed`, так что и ошибиться в сторону послабления
+        // нечем.
+        "judged-by-gate" => {
+            let item = method.trim();
+            match client
+                .query(
+                    "SELECT g.state, g.violations FROM project_gates g
+                      WHERE g.project_id = $1 AND g.item = $2
+                      ORDER BY g.checked_at DESC NULLS LAST LIMIT 1",
+                    &[&project, &item],
+                )
+                .await
+            {
+                Ok(rows) => match rows.first() {
+                    None => Verdict {
+                        state: "unknown",
+                        violations: 0,
+                        detail: vec![],
+                        why: format!("пункта гейта «{item}» в наборе нет: судить нечем"),
+                    },
+                    Some(r) => {
+                        let state: String = r.get(0);
+                        let violations: i32 = r.get(1);
+                        match state.as_str() {
+                            "passed" => Verdict {
+                                state: "passed",
+                                violations: 0,
+                                detail: vec![],
+                                why: format!("пункт гейта «{item}» зелён в последнем замере"),
+                            },
+                            "failed" => Verdict {
+                                state: "failed",
+                                violations: violations.max(0) as usize,
+                                detail: vec![format!("пункт гейта «{item}» красен")],
+                                why: format!(
+                                    "пункт гейта «{item}» красен в последнем замере: чинится он, а не этот пункт приёмки"
+                                ),
+                            },
+                            прочее => Verdict {
+                                state: "unknown",
+                                violations: 0,
+                                detail: vec![],
+                                why: format!("пункт гейта «{item}» в последнем замере — «{прочее}»"),
+                            },
+                        }
+                    }
+                },
+                Err(e) => Verdict {
+                    state: "unknown",
+                    violations: 0,
+                    detail: vec![],
+                    why: format!("вердикт пункта не прочитан: {}", crate::db::Says::says(&e)),
+                },
+            }
+        }
         "checks-green" => {
             let names: Vec<String> =
                 method.split_whitespace().map(str::to_owned).collect();
