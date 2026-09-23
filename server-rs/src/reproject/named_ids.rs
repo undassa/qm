@@ -108,7 +108,14 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<usize, crate::
         .expect("образец адреса с якорем");
     let addr_plain = Regex::new(r"`([A-Za-z0-9_./-]+\.(?:rs|sql|ts|tsx|yaml|toml)):([0-9]+)`")
         .expect("образец адреса");
-    let mut addresses: Vec<(String, String, String, i32, String)> = Vec::new();
+    // ПРЕДМЕТ, НАЗВАННЫЙ ФРАЗОЙ У АДРЕСА. Берётся последний токен в обратных
+    // кавычках ПЕРЕД адресом и в пределах той же фразы: ячейки таблицы,
+    // предложения или скобки. По всей строке брать нельзя — у `Q-123` строка
+    // таблицы длинная, в её начале `writes`, и два адреса рядом с разными
+    // именами получили бы одно чужое.
+    let elem = Regex::new(r"`([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*)`")
+        .expect("образец имени предмета");
+    let mut addresses: Vec<(String, String, String, i32, String, String)> = Vec::new();
     let mut seen_addr = std::collections::HashSet::new();
     // АДРЕС ВНУТРИ СПРАВКИ — АДРЕС ЧУЖОГО ДЕРЕВА. Виды с проекцией
     // `provenance` («ценность в том, откуда взято») держат материал соседнего
@@ -146,14 +153,16 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<usize, crate::
                     && !anchor.contains('…')
                     && !anchor.starts_with(':');
                 if seen_addr.insert(format!("{kind}\u{1}{name}\u{1}{}\u{1}{n}", &c[1])) {
+                    let предмет = named_before(&elem, line, c.get(0).map_or(0, |m| m.start()));
                     addresses.push((kind.clone(), name.clone(), c[1].to_owned(), n,
-                                    if ok { anchor } else { String::new() }));
+                                    if ok { anchor } else { String::new() }, предмет));
                 }
             }
             for c in addr_plain.captures_iter(line) {
                 let n: i32 = c[2].parse().unwrap_or(0);
                 if seen_addr.insert(format!("{kind}\u{1}{name}\u{1}{}\u{1}{n}", &c[1])) {
-                    addresses.push((kind.clone(), name.clone(), c[1].to_owned(), n, String::new()));
+                    let предмет = named_before(&elem, line, c.get(0).map_or(0, |m| m.start()));
+                    addresses.push((kind.clone(), name.clone(), c[1].to_owned(), n, String::new(), предмет));
                 }
             }
         }
@@ -168,23 +177,23 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<usize, crate::
     // каждое — тринадцать тысяч обращений к базе: сорок две секунды из сорока
     // трёх, что занимала вся пересборка набора. Работа та же, ожидание — нет.
     //
-    // Предел Postgres — 65535 параметров на запрос; при шести колонках это
-    // десять тысяч строк, и тысяча в пачке оставляет запас на любую колонку,
+    // Предел Postgres — 65535 параметров на запрос; при семи колонках это
+    // девять тысяч строк, и тысяча в пачке оставляет запас на любую колонку,
     // которую сюда допишут.
     const BATCH: usize = 1000;
     tx.execute("DELETE FROM project_code_address WHERE project_id = $1", &[&project]).await?;
     for chunk in addresses.chunks(BATCH) {
         let mut sql = String::from(
-            "INSERT INTO project_code_address(project_id, entity_kind, entity_name, path, line, anchor) VALUES ",
+            "INSERT INTO project_code_address(project_id, entity_kind, entity_name, path, line, anchor, named) VALUES ",
         );
         let mut args: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = vec![&project];
-        for (i, (k, n, path, line, anchor)) in chunk.iter().enumerate() {
+        for (i, (k, n, path, line, anchor, named)) in chunk.iter().enumerate() {
             if i > 0 {
                 sql.push(',');
             }
-            let b = i * 5 + 2;
-            sql.push_str(&format!("($1,${},${},${},${},${})", b, b + 1, b + 2, b + 3, b + 4));
-            args.extend([k as &(dyn tokio_postgres::types::ToSql + Sync), n, path, line, anchor]);
+            let b = i * 6 + 2;
+            sql.push_str(&format!("($1,${},${},${},${},${},${})", b, b + 1, b + 2, b + 3, b + 4, b + 5));
+            args.extend([k as &(dyn tokio_postgres::types::ToSql + Sync), n, path, line, anchor, named]);
         }
         sql.push_str(" ON CONFLICT DO NOTHING");
         tx.execute(sql.as_str(), &args).await?;
@@ -226,4 +235,83 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<usize, crate::
     }
     tx.commit().await?;
     Ok(rows.len())
+}
+
+/// Предмет, названный фразой ПЕРЕД адресом, — последний сегмент его имени.
+///
+/// **Граница фразы, а не строки.** У `Q-123` строка таблицы держит два адреса,
+/// у каждого своё имя рядом, а в начале строки стоит третье. Разбор по строке
+/// приписал бы начальное имя обоим. Границей служат знаки, которыми фраза
+/// кончается: разделитель ячейки, точка, точка с запятой, скобка, тире.
+///
+/// **Последний сегмент, а не любой.** Сверка по объемлющему имени прячет съезд
+/// внутри него: у адреса, съехавшего с `EventMsg::Reverted` на
+/// `EventMsg::Applied`, объемлющее `EventMsg` совпадает, и правило сказало бы
+/// «верно». Прочитано на четырнадцати живых адресах: по последнему сегменту
+/// восемь съехавших видны все восемь.
+///
+/// **Имя файла не предмет.** `scope.rs` и `error.rs` называют файл, а адрес и
+/// так его называет; сверять имя файла с самим собой — проверка ни о чём.
+fn named_before(elem: &Regex, line: &str, at: usize) -> String {
+    let head = &line[..at];
+    // ТИРЕ НЕ ГРАНИЦА: в живых фразах оно СОЕДИНЯЕТ имя с адресом — «событие
+    // `EventMsg::Reverted` — `event.rs:406`», — и, посчитанное границей,
+    // отрезало имя у каждой такой фразы. Скобка — то же самое: она вводит
+    // адрес сразу за именем («`delegation_narrows` (`policy.rs:167`)»), и как
+    // граница отрезала имя. Границы только там, где фраза и правда кончается:
+    // ячейка таблицы, точка с запятой, точка. Обе ошибки нашла проверка ниже —
+    // сперва на тире, потом на скобке, и обе на живых фразах набора.
+    //
+    // Считается по СИМВОЛАМ, а не по байтам: тире трёхбайтовое, и `rfind + 1`
+    // резал бы строку внутри него — срез по такой границе паникует, то есть
+    // отказывает в проде. Обе ошибки поймала проверка ниже, до выкладки.
+    let start = head
+        .char_indices()
+        .filter(|(_, c)| matches!(c, '|' | ';'))
+        .next_back()
+        .map_or(0, |(i, c)| i + c.len_utf8())
+        .max(head.rfind(". ").map_or(0, |i| i + 2));
+    elem.captures_iter(&head[start..])
+        .filter_map(|c| {
+            let whole = c[1].to_owned();
+            let last = whole.rsplit("::").next().unwrap_or(&whole).to_owned();
+            (!last.is_empty() && !whole.contains('.')).then_some(last)
+        })
+        .last()
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::named_before;
+    use regex::Regex;
+
+    /// Фикстура — живые фразы четырнадцати адресов, прочитанных глазами.
+    ///
+    /// Три из них правило оценивало неверно, пока имя брали из всей строки, а
+    /// не из фразы у адреса. Самый злой вход — строка таблицы `Q-123`: в её
+    /// начале стоит `writes`, а рядом с двумя адресами — свои имена. Разбор по
+    /// строке приписывал начальное имя обоим и давал две ложные находки.
+    #[test]
+    fn имя_берётся_у_фразы_а_не_у_строки() {
+        let elem = Regex::new(r"`([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*)`").unwrap();
+        let случаи: &[(&str, &str, &str)] = &[
+            ("событие `EventMsg::Reverted` — `crates/tot-protocol/src/event.rs:406`",
+             "crates/tot-protocol/src/event.rs:406", "Reverted"),
+            ("состояние `DeltaState::Reverted` в `crates/tot-protocol/src/delta.rs:192`",
+             "crates/tot-protocol/src/delta.rs:192", "Reverted"),
+            ("| `writes` | пункты 1 и 2 в коде (`crates/tot-harness/src/policy.rs:98`) | `delegation_narrows` (`crates/tot-harness/src/policy.rs:167`) |",
+             "crates/tot-harness/src/policy.rs:167", "delegation_narrows"),
+            ("в `crates/tot-tui/src/frame/tabs.rs:34` и `scope.rs:21`",
+             "scope.rs:21", ""),
+        ];
+        for (строка, адрес, ждём) in случаи {
+            let at = строка.find(&format!("`{адрес}`")).expect("адрес во фразе");
+            let дано = named_before(&elem, строка, at);
+            assert_eq!(
+                &дано, ждём,
+                "фраза «{строка}»: у адреса {адрес} названо «{дано}», а фраза называет «{ждём}»"
+            );
+        }
+    }
 }

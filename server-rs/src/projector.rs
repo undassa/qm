@@ -872,7 +872,18 @@ CREATE TABLE IF NOT EXISTS project_code_address (
   entity_kind text NOT NULL, entity_name text NOT NULL,
   path text NOT NULL, line integer NOT NULL,
   anchor text NOT NULL DEFAULT '',
+  -- ИМЯ ПРЕДМЕТА, НАЗВАННОЕ ФРАЗОЙ У САМОГО АДРЕСА. Якорь сверяет одну
+  -- строку, а фраза почти всегда говорит о предмете целиком: «событие
+  -- `EventMsg::Reverted`» плюс адрес. Съезд ловится сравнением имени с тем,
+  -- что по адресу лежит, и это сильнее якоря — прочитано на четырнадцати
+  -- живых адресах: восемь съехали, и якорь молчал бы о всех восьми.
+  --
+  -- Имя берётся у ближайшей фразы, а НЕ из всей строки: у `Q-123` строка
+  -- таблицы длинная, в её начале стоит `writes`, и разбор по строке приписал
+  -- это имя двум адресам, у каждого из которых рядом своё.
+  named text NOT NULL DEFAULT '',
   PRIMARY KEY (project_id, entity_kind, entity_name, path, line));
+ALTER TABLE project_code_address ADD COLUMN IF NOT EXISTS named text NOT NULL DEFAULT '';
 
 -- Имя, названное документом: раскрытое перечнем, с оговоркой и с ответом на
 -- вопрос «есть ли такое». Одна таблица на все виды имён: правило «указатель в
