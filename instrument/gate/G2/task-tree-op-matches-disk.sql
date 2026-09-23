@@ -2,6 +2,25 @@ WITH свежий AS (
   SELECT k FROM unnest(ARRAY['repo-file', 'code-file']) AS k WHERE fact_fresh($1, k)),
 датчик AS (
   SELECT EXISTS (SELECT 1 FROM свежий) AS свеж),
+-- «НА ДИСКЕ» ЗНАЧИТ «СРЕДИ ПОДАННОГО», А НЕ «В ДЕРЕВЕ». Файл, лежащий там,
+-- куда датчик не смотрит, даёт ту же пустоту, что и несуществующий, и правило
+-- утверждало второе. Так `.config/nextest.toml` — файл в дереве, названный
+-- набором прозой в шести местах — читался отсутствующим: `.config/**` не было
+-- в `reads` датчика `repo-file`. Тот же разбор и та же развилка стоят у
+-- `task-path-exists`; предикат один, и живёт он в обоих правилах одинаково.
+читают AS (
+  SELECT DISTINCT split_part(btrim(глоб), '/', 1) AS верх
+    FROM project_sensor_spec s,
+         LATERAL regexp_split_to_table(s.reads, '\s+') AS g(глоб)
+   WHERE s.project_id = $1 AND s.fact IN ('repo-file', 'code-file') AND btrim(глоб) <> ''),
+-- Подающий без объявления читает неизвестно откуда: о нём «туда не смотрит»
+-- сказать нельзя, и правило говорит по-старому.
+объявлены AS (
+  SELECT NOT EXISTS (
+           SELECT 1 FROM code_fact f
+            WHERE f.project_id = $1 AND f.kind IN ('repo-file', 'code-file')
+              AND NOT EXISTS (SELECT 1 FROM project_sensor_spec s
+                               WHERE s.project_id = $1 AND s.fact = f.kind)) AS все),
 лист AS (
   SELECT l.task_id, l.op, l.path,
          CASE WHEN right(l.path, 1) = '/'
@@ -40,7 +59,13 @@ UNION ALL
 SELECT л.task_id || ' — «+ ' || л.path || '»: файл уже есть в дереве — пометка «!»'
   FROM лист л, датчик WHERE датчик.свеж AND л.op = '+' AND л.на_диске AND л.path NOT LIKE '%/'
 UNION ALL
-SELECT л.task_id || ' — «' || л.op || ' ' || л.path || '»: файла нет, и ни одна зависимость задачи его не создаёт'
+SELECT л.task_id || ' — «' || л.op || ' ' || л.path || '»: '
+       || CASE WHEN (SELECT все FROM объявлены)
+                AND NOT EXISTS (SELECT 1 FROM читают ч WHERE ч.верх = split_part(л.path, '/', 1))
+               THEN 'ни один датчик дерева не читает «' || split_part(л.path, '/', 1)
+                    || '» — есть там файл или нет, набор не мерил. Каталог есть: добавьте его в '
+                    || '`reads` датчика `repo-file` (`sensor-spec-add`). Нет: поправьте адрес'
+               ELSE 'файла нет, и ни одна зависимость задачи его не создаёт' END
   FROM лист л, датчик
  WHERE датчик.свеж AND л.op IN ('!', '-') AND NOT л.на_диске
    AND NOT EXISTS (SELECT 1 FROM предок п
