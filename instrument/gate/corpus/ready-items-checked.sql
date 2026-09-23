@@ -210,6 +210,11 @@ SELECT t.id || ' — заявлений «проверки зелены» не �
   JOIN readiness_method m
     ON m.project_id = t.project_id AND m.owner_kind = 'task'
    AND m.owner_id = r.task_id AND m.ord = r.ord
+   -- Якорь — то же условие, что у круга замера и у двери показа. Вердикт
+   -- ложится на заявление, а заявление относится к пункту, чей текст оно
+   -- запомнило; без якоря правка выше чек-листа принесла бы сюда вердикт,
+   -- снятый с соседнего пункта.
+   AND (m.item_text = '' OR m.item_text = r.text)
    AND m.method_kind = 'checks-green' AND m.verdict = 'failed'
  WHERE t.project_id = $1 AND fact_fresh($1, 'test-name')
    AND t.kind = 'dev' AND t.state = 'closed' AND NOT r.done AND r.check_id = ''
