@@ -4785,22 +4785,25 @@ pub(crate) async fn next_task(pool: &Pool, project: &str) -> Result<Value, crate
                 -- красные задачи, то есть ровно ту работу, которая его снимает.
                 -- Этот держит одну задачу её собственной парой.
                 --
-                -- Пара читается полем «Зеркало» — именно этим именем, не
-                -- похожим: у задач есть поля вроде «Правка утверждений
-                -- закрытого зеркала», и поиск по образцу брал бы их тоже.
-                -- Поле, не назвавшее задачи, не держит: у `M5-T59`, `M6-T3` и
-                -- `M6-T4` оно есть и пусто — пары у них нет законно, и это
-                -- сказано в их тексте.
+                -- Пара берётся у `red_task.parent_task` — связь объявлена
+                -- таблицей, а не прозой. Первая редакция выдирала имя из поля
+                -- «Зеркало» образцом, и это было хуже трижды: у `myack` поля
+                -- нет ни у одной задачи, и держалось ноль вместо двух; образец
+                -- брал ПЕРВЫЙ подходящий токен, отчего `M5-T31`, чей текст
+                -- говорит «зеркала здесь нет», получал зеркалом задачу КОДА
+                -- `M5-T54`; опечатка в имени снимала запрет, потому что `JOIN`
+                -- не находил строки. Таблица порождается, а не печатается, и
+                -- целостна на обоих наборах — ни одной строки без задачи ни по
+                -- `id`, ни по `parent_task`. Тем же путём об этой связи
+                -- спрашивают `red-observed-failing` и `task-tree-op-matches-disk`.
                 --
                 -- Пропуск, а не отказ: задача вернётся, как только пара
                 -- закроется, а до тех пор дверь отдаёт саму красную задачу.
                 AND NOT EXISTS (
-                  SELECT 1 FROM project_document_fields f
+                  SELECT 1 FROM red_task r
                     JOIN project_plan_tasks z
-                      ON z.project_id = f.project_id
-                     AND z.id = substring(f.value from '([A-Z]+[0-9]+-T[0-9]+[a-z]?)')
-                   WHERE f.project_id = $1 AND f.entity_kind = o.entity_kind
-                     AND f.entity_name = o.entity_name AND f.name = 'Зеркало'
+                      ON z.project_id = r.project_id AND z.id = r.id
+                   WHERE r.project_id = $1 AND lower(r.parent_task) = lower(o.id)
                      AND z.state <> 'closed')
               ORDER BY (tp.open IS NOT TRUE), o.milestone_id, o.ord
               LIMIT 1",
@@ -5007,7 +5010,24 @@ pub(crate) async fn task_blockers(pool: &Pool, project: &str, task: &str) -> Res
         .await?;
     let phase_open = phase.as_ref().and_then(|r| r.get::<_, Option<bool>>(2));
     let held_by: Option<String> = phase.as_ref().and_then(|r| r.get(3));
-    let free = tasks.is_empty() && milestones.is_empty() && phase_open == Some(true);
+    // ДВЕ ДВЕРИ ОБ ОДНОЙ ЗАДАЧЕ ОТВЕЧАЮТ ОДНО. `next_task` не выдаёт задачу,
+    // чья красная пара не закрыта; если бы эта дверь об этом не знала, она
+    // отвечала бы «ничто не держит» ровно о задаче, которой не дают, — и берут
+    // тот ответ, что короче. Барьер фаз этот же дефект уже проходил, и чинили
+    // его тем же: держание рождается в одном месте и читается обеими дверями.
+    let mirror = client
+        .query_opt(
+            "SELECT r.id FROM red_task r
+               JOIN project_plan_tasks z ON z.project_id = r.project_id AND z.id = r.id
+              WHERE r.project_id = $1 AND lower(r.parent_task) = lower($2)
+                AND z.state <> 'closed'
+              ORDER BY r.id LIMIT 1",
+            &[&project, &task],
+        )
+        .await?;
+    let mirror: Option<String> = mirror.map(|r| r.get(0));
+    let free = tasks.is_empty() && milestones.is_empty() && phase_open == Some(true)
+        && mirror.is_none();
     Ok(json!({
         "task": task,
         "phase": match &phase {
@@ -5031,9 +5051,17 @@ pub(crate) async fn task_blockers(pool: &Pool, project: &str, task: &str) -> Res
             "said": r.get::<_, String>(1),
             "openTasks": r.get::<_, i64>(2),
         })).collect::<Vec<_>>(),
+        "waitsForMirror": mirror,
         // Пустота СКАЗАНА СЛОВОМ: два пустых списка и «ничто не держит» — разное
         // только для того, кто знает, что задача существует и была спрошена.
-        "why": if free { "ничто не держит: все зависимости закрыты и фаза задачи открыта" } else { "" },
+        "why": if free {
+            "ничто не держит: все зависимости закрыты и фаза задачи открыта".to_owned()
+        } else if let Some(m) = &mirror {
+            format!("красная пара `{m}` не закрыта: проверка обязана приземлиться раньше тела (`ADR-0080`), \
+                     и до тех пор задача не выдаётся")
+        } else {
+            String::new()
+        },
     }))
 }
 
