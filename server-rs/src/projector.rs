@@ -12842,11 +12842,11 @@ pub(crate) async fn execute_method_upto(
                                     "пункт гейта «{item}» красен в последнем замере: чинится он, а не этот пункт приёмки"
                                 ),
                             },
-                            прочее => Verdict {
+                            other => Verdict {
                                 state: "unknown",
                                 violations: 0,
                                 detail: vec![],
-                                why: format!("пункт гейта «{item}» в последнем замере — «{прочее}»"),
+                                why: format!("пункт гейта «{item}» в последнем замере — «{other}»"),
                             },
                         }
                     }
