@@ -23,7 +23,22 @@ SELECT 'датчик «op-body-word» ' || fact_gap($1, 'op-body-word') || ': ч
 UNION ALL
 SELECT 'протокол — enum Op или EventMsg не разобран: протокол не прочитан' WHERE NOT EXISTS (SELECT 1 FROM опы) OR NOT EXISTS (SELECT 1 FROM события)
 UNION ALL
-SELECT 'Op — принимает ActorId: чужой след стал бы читаемым (' || name || ')' FROM слова WHERE detail ~ '\yActorId\y'
+-- ГРАНИЦА ПО РОЛИ ПОЛЯ, А НЕ ПО ЕГО ТИПУ. Статья запрещает читать чужой след по
+-- чужому идентификатору; поле, называющее НАЗНАЧАЕМОГО, следа не читает — оно
+-- говорит, кому документ отдан. Решение владельца 2026-09-23 провело границу
+-- именно так, и отвергло вариант «вписать имя операции в запрос»: прошитое имя
+-- прошло бы проверку за счёт имени, а не за счёт предмета.
+--
+-- Имена назначаемых полей объявляет НАБОР ролью `field.assignee`, и потому
+-- исключение видно одной строкой словаря, а не россыпью по запросам. Замер на
+-- день объявления: полей типа актора в протоколе `tot-ade` ровно два, оба
+-- назначаемые (`Op::DocOwnerAssign`, `EventMsg::DocOwnerAssigned`), и оба зовутся
+-- `owner`. Первое новое поле придётся объявить явно — молча оно не пройдёт.
+SELECT 'Op — принимает ActorId: чужой след стал бы читаемым (' || w.name || ')' FROM слова w
+ WHERE w.detail ~ '\yActorId\y'
+   AND NOT EXISTS (SELECT 1 FROM scheme($1) s
+                    WHERE s.role = 'field.assignee'
+                      AND w.detail ~ ('^[[:space:]]*(pub[[:space:]]+)?' || s.value || '[[:space:]]*:'))
 UNION ALL
 SELECT 'MemoryConfirm — операции публикации нет: подтверждение кандидата и есть акт публикации' WHERE EXISTS (SELECT 1 FROM опы) AND NOT EXISTS (SELECT 1 FROM опы WHERE вариант = 'MemoryConfirm')
 ORDER BY 1
