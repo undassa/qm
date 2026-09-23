@@ -267,8 +267,7 @@ fn named_before(elem: &Regex, line: &str, at: usize) -> String {
     // отказывает в проде. Обе ошибки поймала проверка ниже, до выкладки.
     let start = head
         .char_indices()
-        .filter(|(_, c)| matches!(c, '|' | ';'))
-        .next_back()
+        .rfind(|(_, c)| matches!(c, '|' | ';'))
         .map_or(0, |(i, c)| i + c.len_utf8())
         .max(head.rfind(". ").map_or(0, |i| i + 2));
     elem.captures_iter(&head[start..])
