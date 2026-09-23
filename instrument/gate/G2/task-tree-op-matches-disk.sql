@@ -15,7 +15,7 @@ WITH свежий AS (
 -- каталогом, ни верхом: в неё входят безусловный пропуск `.git`,
 -- `node_modules`, `target`, `dist`, `.venv`, фильтр расширения, глубина глоба
 -- и `skip_re`. Поэтому сказано ровно измеренное, а обе возможности названы
--- читателю. Тот же приём у `task-path-exists` и `measured-by`.
+-- читателю.
 лист AS (
   SELECT l.task_id, l.op, l.path,
          CASE WHEN right(l.path, 1) = '/'
