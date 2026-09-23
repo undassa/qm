@@ -40,6 +40,11 @@ pub enum Fail {
     /// места, а клиент по ним решает, повторять ли.
     Down(String),
     Db(tokio_postgres::Error),
+    /// Набор говорит то, что спроецировать нельзя, — и отказ называет что
+    /// именно. Отдельно от `Db`, потому что чинить надо не базу и не повтор, а
+    /// документ: сообщение Postgres об этом молчит, и час уходит на поиск
+    /// строки, которую здесь можно назвать по имени.
+    Corpus(String),
 }
 
 impl From<tokio_postgres::Error> for Fail {
@@ -90,7 +95,7 @@ impl Says for tokio_postgres::Error {
 impl Says for Fail {
     fn says(&self) -> String {
         match self {
-            Fail::Busy(why) | Fail::Down(why) => why.clone(),
+            Fail::Busy(why) | Fail::Down(why) | Fail::Corpus(why) => why.clone(),
             Fail::Db(e) => e.says(),
         }
     }

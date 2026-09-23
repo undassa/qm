@@ -284,6 +284,29 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize,
     // и 338 зависимостей — каскад отработал в зазоре между DELETE и INSERT.
     let version_ids: Vec<String> = versions.iter().map(|v| v.0.clone()).collect();
     let milestone_ids: Vec<String> = milestones.iter().map(|m| m.0.clone()).collect();
+    // ПАДЕНИЕ НАЗЫВАЕТ ВИНОВНОГО. Задача с вехой, которой в плане нет, роняет
+    // вставку о внешний ключ, и сообщение Postgres говорит только имя
+    // ограничения: «violates foreign key constraint … _milestone_id_fkey».
+    // Набор при этом судит по ПРЕЖНИМ проекциям и показывает двадцать красных
+    // пунктов вместо четырёх — то есть выглядит как двадцать находок, а не как
+    // одна сломанная пересборка.
+    //
+    // Цена измерена: час работы набора ушёл на поиск задачи, которую здесь
+    // можно назвать одной строкой. Виновником оказался документ подсадки
+    // самотеста, утёкший из транзакции: веха выводилась из имени `M9-T9990`,
+    // такой вехи нет.
+    let unknown: Vec<String> = tasks
+        .iter()
+        .filter(|t| !milestone_ids.contains(&t.1))
+        .map(|t| format!("{} → веха «{}»", t.0, t.1))
+        .collect();
+    if !unknown.is_empty() {
+        return Err(crate::db::Fail::Corpus(format!(
+            "пересборка плана не пройдёт: {} задач(и) называют веху, которой план не знает — {}.              План вех строится из документов вех; либо веха не заведена, либо поле «Веха» задачи              называет не то. Проекции остались прежними, и гейт считает по ним",
+            unknown.len(),
+            unknown.join(" · ")
+        )));
+    }
     let task_ids: Vec<String> = tasks.iter().map(|t| t.0.clone()).collect();
     tx.execute("DELETE FROM project_plan_versions
                  WHERE project_id = $1 AND origin = 'projected' AND id <> ALL($2)",
