@@ -15,12 +15,18 @@
 -- безусловно пропускает `.git`, `node_modules`, `target`, `dist`, `.venv`
 -- независимо от объявления, а глоб вида `**/*.rs` разбирает как «спуск от
 -- корня». Копия не знала ни того ни другого и на законном объявлении врала бы
--- в обе стороны. Верхи `project_code_dir` — это то, куда обход ДОШЁЛ, то есть
--- ответ по замеру, а не по декларации; исключения и грамматика глоба в него
--- входят даром.
+-- в обе стороны. Верхи берутся у ИМЁН ПРОЧИТАННЫХ ФАКТОВ — это ответ по замеру,
+-- а не по декларации; исключения и грамматика глоба входят в него даром.
+--
+-- Именно у имён, а не у `project_code_dir`: тот строится предками, и у
+-- корневого файла предков нет вовсе. Через каталоги корневой файл был бы
+-- неотличим от непрочитанного навсегда, а `myack` корневых файлов не читает
+-- ни одного из 415, и `tot-ade` не читает `.gitignore`. У имён корневой файл
+-- сам себе верх, и особого случая не нужно.
 WITH верхи AS (
-  SELECT DISTINCT split_part(d.dir, '/', 1) AS верх
-    FROM project_code_dir d WHERE d.project_id = $1),
+  SELECT DISTINCT split_part(f.name, '/', 1) AS верх
+    FROM code_fact f
+   WHERE f.project_id = $1 AND f.kind IN ('repo-file', 'code-file')),
 лист AS (
   SELECT l.task_id, l.leaf, l.target_dir, split_part(l.target_dir, '/', 1) AS верх
     FROM project_task_tree_leaf l
@@ -35,17 +41,16 @@ SELECT 'датчик файлов дерева «repo-file» ' || fact_gap($1, '
    AND EXISTS (SELECT 1 FROM project_task_tree_leaf l
                 WHERE l.project_id = $1 AND l.is_path AND NOT l.exempt)
 UNION ALL
--- Датчик не прочёл в дереве вообще ничего: сказать «туда не дошли» можно о
--- любом пути, и это не разбор, а шум. Прежняя формулировка честнее.
+-- ПУСТЫЕ ВЕРХИ ЗНАЧАТ «ДАТЧИК НЕ ПРОЧЁЛ НИЧЕГО», и тогда «не мерил» — верно о
+-- любом пути, а «нет даже каталога» — ложь обо всех сразу. Это состояние нового
+-- набора: план написан, дерева ещё нет, подача пустая и свежая.
 SELECT п.task_id || ' — ' || п.leaf || ': среди прочитанного датчиком в «' || п.верх
        || '» нет ни одного файла. Каталога нет в дереве либо датчик туда не дошёл — '
        || 'что именно, покажет `sensor-specs`'
   FROM лист п
- WHERE EXISTS (SELECT 1 FROM верхи)
-   AND NOT EXISTS (SELECT 1 FROM верхи в WHERE в.верх = п.верх)
+ WHERE NOT EXISTS (SELECT 1 FROM верхи в WHERE в.верх = п.верх)
 UNION ALL
 SELECT п.task_id || ' — ' || п.leaf || ': нет даже каталога ' || п.target_dir
   FROM лист п
- WHERE NOT EXISTS (SELECT 1 FROM верхи)
-    OR EXISTS (SELECT 1 FROM верхи в WHERE в.верх = п.верх)
+ WHERE EXISTS (SELECT 1 FROM верхи в WHERE в.верх = п.верх)
  ORDER BY 1

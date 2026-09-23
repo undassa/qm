@@ -3650,7 +3650,7 @@ SELECT q.project_id, q.id, q.number, q.title, q.state, q.created_at, q.updated_a
 ALTER TABLE project_document_plan_counts ADD COLUMN IF NOT EXISTS planned_kind text NOT NULL DEFAULT '';
 -- КОЛОНКИ, КОТОРЫХ ОБЪЯВЛЕНИЯ НЕ БЫЛО. Обе живут на боевой базе с донорских
 -- времён и не заводились в этом дереве ничем: `measured_by` читает пункт
--- «способ измерения назван сценарием, которого нет в дереве», `priority`
+-- «способ измерения назван сценарием, которого нет среди прочитанного», `priority`
 -- подсаживает проба пункта об образце имени. Чистая база поднималась без них, и
 -- правило с пробой падали «колонки нет».
 ALTER TABLE project_requirements ADD COLUMN IF NOT EXISTS measured_by text NOT NULL DEFAULT '';
