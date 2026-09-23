@@ -238,7 +238,7 @@ SELECT t.id || ' — заявлений «проверки зелены» не �
    AND t.kind = 'dev' AND t.state = 'closed' AND NOT r.done AND r.check_id = ''
  GROUP BY t.project_id, t.id
 UNION ALL
-SELECT t.id || ' — проверка пункта приёмки не написана: ' || r.check_id
+SELECT t.id || ' — проверки пункта приёмки нет среди прочитанного датчиком: ' || r.check_id
   FROM project_plan_tasks t
   JOIN task_ready_item r ON r.project_id = t.project_id AND r.task_id = t.id
  WHERE t.project_id = $1 AND fact_fresh($1, 'test-name') AND fact_fresh($1, 'written-tc')
