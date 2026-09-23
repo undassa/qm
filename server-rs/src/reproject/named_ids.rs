@@ -153,16 +153,16 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<usize, crate::
                     && !anchor.contains('…')
                     && !anchor.starts_with(':');
                 if seen_addr.insert(format!("{kind}\u{1}{name}\u{1}{}\u{1}{n}", &c[1])) {
-                    let предмет = named_before(&elem, line, c.get(0).map_or(0, |m| m.start()));
+                    let named = named_before(&elem, line, c.get(0).map_or(0, |m| m.start()));
                     addresses.push((kind.clone(), name.clone(), c[1].to_owned(), n,
-                                    if ok { anchor } else { String::new() }, предмет));
+                                    if ok { anchor } else { String::new() }, named));
                 }
             }
             for c in addr_plain.captures_iter(line) {
                 let n: i32 = c[2].parse().unwrap_or(0);
                 if seen_addr.insert(format!("{kind}\u{1}{name}\u{1}{}\u{1}{n}", &c[1])) {
-                    let предмет = named_before(&elem, line, c.get(0).map_or(0, |m| m.start()));
-                    addresses.push((kind.clone(), name.clone(), c[1].to_owned(), n, String::new(), предмет));
+                    let named = named_before(&elem, line, c.get(0).map_or(0, |m| m.start()));
+                    addresses.push((kind.clone(), name.clone(), c[1].to_owned(), n, String::new(), named));
                 }
             }
         }
@@ -293,9 +293,9 @@ mod tests {
     /// начале стоит `writes`, а рядом с двумя адресами — свои имена. Разбор по
     /// строке приписывал начальное имя обоим и давал две ложные находки.
     #[test]
-    fn имя_берётся_у_фразы_а_не_у_строки() {
+    fn a_name_is_taken_from_the_phrase_not_the_line() {
         let elem = Regex::new(r"`([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*)`").unwrap();
-        let случаи: &[(&str, &str, &str)] = &[
+        let cases: &[(&str, &str, &str)] = &[
             ("событие `EventMsg::Reverted` — `crates/tot-protocol/src/event.rs:406`",
              "crates/tot-protocol/src/event.rs:406", "Reverted"),
             ("состояние `DeltaState::Reverted` в `crates/tot-protocol/src/delta.rs:192`",
@@ -305,12 +305,12 @@ mod tests {
             ("в `crates/tot-tui/src/frame/tabs.rs:34` и `scope.rs:21`",
              "scope.rs:21", ""),
         ];
-        for (строка, адрес, ждём) in случаи {
-            let at = строка.find(&format!("`{адрес}`")).expect("адрес во фразе");
-            let дано = named_before(&elem, строка, at);
+        for (line, addr, want) in cases {
+            let at = line.find(&format!("`{addr}`")).expect("адрес во фразе");
+            let got = named_before(&elem, line, at);
             assert_eq!(
-                &дано, ждём,
-                "фраза «{строка}»: у адреса {адрес} названо «{дано}», а фраза называет «{ждём}»"
+                &got, want,
+                "фраза «{line}»: у адреса {addr} названо «{got}», а фраза называет «{want}»"
             );
         }
     }
