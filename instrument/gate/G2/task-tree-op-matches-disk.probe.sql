@@ -2,20 +2,34 @@
 -- «датчик туда не дошёл», и подсаживать вторую ветвь не во что. Потолок назван
 -- честно: приговор самотеста — «ответ пункта изменился», и одной строки для
 -- него довольно.
--- ДОКУМЕНТ ПОДСАДКИ НЕСЁТ СУЩЕСТВУЮЩУЮ ВЕХУ, И ЭТО НЕ УКРАШЕНИЕ. Проба живёт
--- в транзакции и умирает с ней — но однажды не умерла, и документ остался в
+-- ВЕХА КЛАДЁТСЯ В ПОЛЯ, А НЕ В СОДЕРЖАНИЕ, И ЭТО НЕ ПРИДИРКА. Проба живёт в
+-- транзакции и умирает с ней — но однажды не умерла, и документ остался в
 -- живом наборе. Веха выводилась из имени (`M9`), такой вехи нет, и вся
 -- пересборка проекций падала о внешний ключ: гейт считал по прежним данным и
 -- показывал двадцать красных вместо четырёх, а набор встал на час.
 --
--- Поэтому веха берётся у самого набора. Утечка остаётся мусором, но мусором
--- безвредным: пересборка её переживёт, и найти её можно спокойно.
+-- Первая починка написала `| Веха | M0 |` в СОДЕРЖАНИЕ документа и обещала,
+-- что пересборка утечку переживёт. Обещание было ложным: содержание разбирает
+-- только `store.rs::write_structure`, которую зовут `put`, `document-add` и
+-- `reparse`, а пересборка плана читает готовые `project_document_fields`. У
+-- утёкшего документа поля не было бы, и падение повторилось бы в точности.
+--
+-- Поэтому поле кладётся прямо, рядом с содержанием, и веха берётся у самого
+-- набора. Утечка остаётся мусором, но мусором безвредным.
 WITH d AS (INSERT INTO project_documents (project_id, entity_kind, entity_name, content, content_hash, bytes, revision, updated_at, updated_by)
            SELECT $1, 'task', 'M9-T9990',
                   E'# M9-T9990 · подсадка самотеста\n\n| Поле | Значение |\n|---|---|\n| Веха | '
                   || (SELECT min(m.id) FROM project_plan_milestones m WHERE m.project_id = $1) || E' |\n',
                   'probe-selftest', 0, 1, 1757000000000, 'probe-selftest'
            RETURNING project_id),
+     поле AS (INSERT INTO project_document_fields
+                (project_id, section_ord, ord, name, shape, value_raw, value, entity_kind, entity_name)
+              SELECT d.project_id, 0, 0, 'Веха', 'row',
+                     (SELECT min(m.id) FROM project_plan_milestones m WHERE m.project_id = $1),
+                     (SELECT min(m.id) FROM project_plan_milestones m WHERE m.project_id = $1),
+                     'task', 'M9-T9990' FROM d
+              ON CONFLICT DO NOTHING
+              RETURNING project_id),
      t AS (INSERT INTO project_plan_tasks (project_id, id, milestone_id, ord, title, size, state, kind, entity_kind, entity_name, origin)
            SELECT d.project_id, 'M9-T9990', (SELECT min(milestone_id) FROM project_plan_tasks WHERE project_id = $1), 9990,
                   'подсадка самотеста', 'S', 'not_started', 'dev', 'task', 'M9-T9990', 'declared' FROM d

@@ -14181,8 +14181,13 @@ pub(crate) async fn waves(pool: &Pool, project: &str) -> Result<Value, crate::db
                     -- вопросы, и карточка обязана отвечать на оба. `M1-T2`
                     -- стояла `not_started`, пока её писали: состояние берётся
                     -- из закрывающих трейлеров, а до закрытия их нет.
-                    (SELECT w.branch FROM task_worktree w
-                      WHERE w.project_id = t.project_id AND w.task_id = t.id) AS in_flight,
+                    -- Держание рабочим деревом — ОТТУДА ЖЕ, откуда зеркало.
+                    -- Свой подзапрос здесь был третьим экземпляром одного
+                    -- предиката, и сводка его не считала: тринадцать карточек
+                    -- `tot-ade` с открытой фазой и открытым деревом не попадали
+                    -- ни в одно ведро, а вычитающий названное получал сорок
+                    -- доступных при пятнадцати настоящих.
+                    h.worktree AS in_flight,
                     -- ЗЕРКАЛО — ТОЖЕ В КАРТОЧКЕ, и по тому же доводу, что фаза
                     -- четырьмя строками выше. Барьер `next-task` перестал
                     -- выдавать задачу, чья красная пара не закрыта, а волна
@@ -14281,6 +14286,12 @@ pub(crate) async fn waves(pool: &Pool, project: &str) -> Result<Value, crate::db
         .iter()
         .filter(|c| c["state"] != "closed" && !c["heldByMirror"].is_null())
         .count();
+    // Занятые деревом считаются тоже: сводка, называющая два ведра из трёх,
+    // врёт вычитанием — это и есть счёт без знаменателя.
+    let held_flight = cards
+        .iter()
+        .filter(|c| c["state"] != "closed" && !c["inFlight"].is_null())
+        .count();
     Ok(json!({
         "cards": cards,
         "total": cards.len(),
@@ -14288,12 +14299,15 @@ pub(crate) async fn waves(pool: &Pool, project: &str) -> Result<Value, crate::db
         "openRed": open_red,
         "heldByPhase": held,
         "heldByMirror": held_mirror,
+        "heldByWorktree": held_flight,
         "why": match (held > 0, held_mirror > 0) {
             (true, true) => "карточки с `phaseOpen` не `true` в очередь не идут: их фаза не открыта либо вид задачи не отображён ни на одну фазу.                              Карточки с непустым `heldByMirror` — тоже: их красная пара не закрыта, и `next-task` их не выдаст".to_owned(),
             (true, false) => "карточки с `phaseOpen` не `true` в очередь не идут: их фаза не открыта либо вид задачи не отображён ни на одну фазу".to_owned(),
             (false, true) => "карточки с непустым `heldByMirror` в очередь не идут: их красная пара не закрыта, и `next-task` их не выдаст".to_owned(),
             (false, false) => String::new(),
-        },
+        } + if held_flight > 0 {
+            ". Карточки с непустым `inFlight` тоже: задачу уже ведут в рабочем дереве, и второму её не отдают"
+        } else { "" },
     }))
 }
 
