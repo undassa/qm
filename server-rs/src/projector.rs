@@ -8405,8 +8405,9 @@ pub(crate) async fn declare_question(pool: &Pool, project: &str, fields: Questio
         // девять тысяч знаков: состояние «разбор есть, слово за владельцем» было
         // невыразимо.
         //
-        // «Есть ли разбор» по-прежнему спрашивается — у `has_answer` и `answer`,
-        // и они здесь не меняются. Две колонки на два вопроса, а не одна на оба.
+        // Текст разбора при этом никуда не девается: он лежит в `answer`, и эта
+        // строка его не трогает. Признак отвечает на «чьё слово следующее», а не
+        // на «есть ли разбор».
         &[&project, &id, &number, &title, &state, &answer,
           &declared_answer_state(owner, answer),
           &!answer.trim().is_empty()]).await?;
@@ -10106,18 +10107,39 @@ pub(crate) async fn list_asks(pool: &Pool, project: &str, state: &str, limit: i6
 /// ролью `section.owner-decides` у документа вопроса и доводом `owner` у
 /// `question-add`, — и сводятся они здесь, в пересборке, через которую идут оба.
 ///
-/// Запись заводится один раз на вопрос: ответ владельца не повторяет вопрос.
-/// Вопрос, закрытый в наборе или снятый с владельца, закрывает свою запись.
+/// Запись заводится один раз на КРУГ, а не один раз на вопрос: ответ владельца
+/// не повторяет вопрос, но вопрос, отданный владельцу повторно, обязан встать в
+/// очередь снова. Вопрос, закрытый в наборе или снятый с владельца, закрывает
+/// свою запись.
 pub(crate) async fn sync_owner_questions(pool: &Pool, project: &str) -> Result<u64, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let now = now_ms();
     let asked = client
         .execute(
+            // ПОВТОРНАЯ ОТДАЧА ВЛАДЕЛЬЦУ ЗАВОДИТ НОВУЮ ЗАПИСЬ. Сторож смотрел, есть
+            // ли у вопроса запись ВООБЩЕ, а закрывающий `UPDATE` ниже ставит
+            // `done`, как только вопрос перестал быть `open`+`owner`. Значит
+            // второй раз вопрос в очередь не попадал НИКОГДА: ступень 5 его уже
+            // не держит, `console` его показывает, а `asks` — та дверь, по которой
+            // владелец разбирает очередь, — молчит. Отказ тихий, и разошлись бы
+            // две двери об одном вопросе.
+            //
+            // Пока состояние «разбор есть, слово за владельцем» было невыразимо,
+            // круг был один — «отдали → ответили → всё», — и сторож держался на
+            // этом. Выразимость его и отменяет.
+            //
+            // Тело — разбор, а не пусто. `state_text` заполняет только пересборка
+            // документа; у объявленного дверью вопроса он пуст всегда (замерено:
+            // у всех 17 `owner`-вопросов `tot-ade` длина 0), а разбор лежит в
+            // `answer`. Владельцу уезжали заголовок и пустота.
             "INSERT INTO owner_ask (project_id, kind, title, body, asked_by, at, question_id)
-             SELECT q.project_id, 'question', q.id || ' · ' || q.title, coalesce(q.state_text, ''), 'набор', $2, q.id
+             SELECT q.project_id, 'question', q.id || ' · ' || q.title,
+                    coalesce(nullif(q.state_text, ''), q.answer, ''), 'набор', $2, q.id
                FROM project_questions q
               WHERE q.project_id = $1 AND q.state = 'open' AND q.answer_state = 'owner'
-                AND NOT EXISTS (SELECT 1 FROM owner_ask a WHERE a.project_id = q.project_id AND a.question_id = q.id)",
+                AND NOT EXISTS (SELECT 1 FROM owner_ask a
+                                 WHERE a.project_id = q.project_id AND a.question_id = q.id
+                                   AND a.state = 'open')",
             &[&project, &now],
         )
         .await?;
@@ -15151,6 +15173,79 @@ mod work_run_token {
         assert_eq!(command.replace(WORK_RUN_NAME, "Q-1"), "mh call question id=Q-1");
         let from_old_memory = "mh call question id={имя}".replace("{имя}", WORK_RUN_NAME);
         assert_eq!(from_old_memory.replace(WORK_RUN_NAME, "Q-1"), "mh call question id=Q-1");
+    }
+}
+
+/// Очередь пульта против круга «отдали → ответили → отдали снова».
+///
+/// Проверка заведена по находке ревью: сторож очереди смотрел, есть ли у вопроса
+/// запись ВООБЩЕ, а закрывающий `UPDATE` ставит `done`, как только вопрос
+/// перестал быть `open`+`owner`. Пока состояние «разбор есть, слово за
+/// владельцем» было невыразимо, круг был один и сторож держался; выразимость
+/// его отменила, и второй круг уходил в тишину — ступень 5 отпущена, `console`
+/// показывает, `asks` молчит.
+#[cfg(test)]
+mod owner_queue {
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn a_question_handed_to_the_owner_twice_queues_twice() {
+        let url = std::env::var("MH_TEST_DB_URL").expect("MH_TEST_DB_URL: адрес пустой базы");
+        let apart = format!("{}{}", if url.contains('?') { '&' } else { '?' },
+                            "options=-c%20search_path%3Downer_queue");
+        let pool = crate::db::pool(&format!("{url}{apart}"), 2).expect("пул тестовой базы");
+        {
+            let client = pool.get().await.expect("соединение с тестовой базой");
+            client
+                .batch_execute("DROP SCHEMA IF EXISTS owner_queue CASCADE; CREATE SCHEMA owner_queue;")
+                .await
+                .expect("своя схема заводится");
+        }
+        crate::projector::ensure(&pool).await.expect("схема встаёт на пустой базе");
+
+        let hand = |answer: &'static str, owner: bool| {
+            let pool = pool.clone();
+            async move {
+                super::declare_question(&pool, "П", super::Question {
+                    id: "Q-1", number: 1, title: "вопрос", state: "open",
+                    answer, closed_by: "", owner,
+                }, false).await.expect("вопрос объявляется");
+                super::sync_owner_questions(&pool, "П").await.expect("очередь сводится")
+            }
+        };
+        let open_rows = || {
+            let pool = pool.clone();
+            async move {
+                let client = pool.get().await.expect("соединение");
+                let n: i64 = client
+                    .query_one("SELECT count(*) FROM owner_ask WHERE project_id = 'П' AND state = 'open'", &[])
+                    .await.expect("очередь читается").get(0);
+                n
+            }
+        };
+
+        // Круг первый: отдали с разбором — встала запись, и тело у неё не пусто.
+        assert_eq!(hand("разбор первого круга", true).await, 1, "первая отдача заводит запись");
+        assert_eq!(open_rows().await, 1, "запись открыта");
+        {
+            let client = pool.get().await.expect("соединение");
+            let body: String = client
+                .query_one("SELECT body FROM owner_ask WHERE project_id = 'П' AND question_id = 'Q-1'", &[])
+                .await.expect("запись на месте").get(0);
+            assert_eq!(body, "разбор первого круга",
+                       "владельцу уезжает разбор, а не пустое тело: `state_text` у объявленного вопроса пуст всегда");
+        }
+
+        // Владелец ответил: признак снят, запись закрыта.
+        hand("ответ владельца", false).await;
+        assert_eq!(open_rows().await, 0, "ответ владельца закрывает запись");
+
+        // Круг второй: ответ оказался неполон, вопрос отдан снова.
+        assert_eq!(hand("разбор второго круга", true).await, 1,
+                   "повторная отдача обязана завести новую запись: иначе ступень 5 отпущена, а очередь молчит");
+        assert_eq!(open_rows().await, 1, "в очереди снова одна открытая запись");
+
+        let client = pool.get().await.expect("соединение");
+        client.batch_execute("DROP SCHEMA IF EXISTS owner_queue CASCADE").await.expect("схема снимается");
     }
 }
 
