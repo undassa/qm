@@ -8331,6 +8331,35 @@ pub(crate) struct Question<'a> {
     pub closed_by: &'a str,
     pub owner: bool,
 }
+fn declared_answer_state(owner: bool, answer: &str) -> &'static str {
+    if owner {
+        "owner"
+    } else if !answer.trim().is_empty() {
+        "answered"
+    } else {
+        "unsaid"
+    }
+}
+
+#[cfg(test)]
+mod declared_answer_state_tests {
+    // Порча, которую этот перечень ловит: «владелец» уходит вниз, под «ответ
+    // непуст». Так оно и стояло, и разобранный до конца вопрос с остатком
+    // владельцу выходил `answered` — держал ступень 5 и не вставал в очередь
+    // пульта. Случай, ради которого перечень написан, — последний. Подсадка
+    // перестановки проверена: перечень краснеет на ней.
+    use super::declared_answer_state;
+
+    #[test]
+    fn a_declared_owner_outranks_a_written_answer() {
+        assert_eq!(declared_answer_state(false, ""), "unsaid");
+        assert_eq!(declared_answer_state(false, "   \n "), "unsaid");
+        assert_eq!(declared_answer_state(false, "разбор"), "answered");
+        assert_eq!(declared_answer_state(true, ""), "owner");
+        assert_eq!(declared_answer_state(true, "разбор есть, остаток владельцу"), "owner");
+    }
+}
+
 pub(crate) async fn declare_question(pool: &Pool, project: &str, fields: Question<'_>, drop_it: bool) -> Result<Value, crate::db::Fail> {
     let Question { id, number, title, state, answer, closed_by, owner } = fields;
     if id.trim().is_empty() {
@@ -8365,8 +8394,21 @@ pub(crate) async fn declare_question(pool: &Pool, project: &str, fields: Questio
            state = EXCLUDED.state, answer = EXCLUDED.answer,
            answer_state = EXCLUDED.answer_state, has_answer = EXCLUDED.has_answer,
            origin = 'declared'",
+        // ОБЪЯВЛЕННОЕ СИЛЬНЕЕ ВЫВЕДЕННОГО. `owner` приходит словом зовущего,
+        // `answered` выводится из того, что текст непуст, — и порядок, ставивший
+        // вывод впереди слова, делал ложным обещание самой двери («owner:=true —
+        // решает владелец: вопрос не держит ступень 5»). Замерено 2026-09-24 на
+        // `tot-ade`: Q-164 и Q-165 разобраны до конца, остаток адресован владельцу
+        // прямым текстом, признак подан — и обе записи вышли `answered`, держа
+        // ступень 5 и не встав в очередь пульта. Выдача задач стояла, а
+        // единственным способом выставить признак оставалось стереть разбор на
+        // девять тысяч знаков: состояние «разбор есть, слово за владельцем» было
+        // невыразимо.
+        //
+        // «Есть ли разбор» по-прежнему спрашивается — у `has_answer` и `answer`,
+        // и они здесь не меняются. Две колонки на два вопроса, а не одна на оба.
         &[&project, &id, &number, &title, &state, &answer,
-          &(if !answer.trim().is_empty() { "answered" } else if owner { "owner" } else { "unsaid" }),
+          &declared_answer_state(owner, answer),
           &!answer.trim().is_empty()]).await?;
     // СВЯЗЬ «ЧЕМ ЗАКРЫТ» — ЧАСТЬ ОТВЕТА, а не побочное действие. Вставка стояла
     // под `.ok()`: связь молча не писалась, а дверь всё равно отвечала
