@@ -5374,7 +5374,23 @@ async fn measure_item(
         Ok(entry)
 }
 
-pub(crate) async fn gate(pool: &Pool, project: &str, phase: Option<&str>) -> Result<Value, crate::db::Fail> {
+/// Состояние гейта. `sql` — отдавать ли тексты запроса, подсадки и предмета.
+///
+/// **По умолчанию их нет, и это замер, а не вкус.** Ответ одного гейта — 107
+/// тысяч знаков, из них 80 тысяч (75%) — эти три поля; ответ всех гейтов — 548
+/// тысяч. Читают их редко: гейт зовут, чтобы узнать, что провалено, а тексты
+/// нужны тому, кто чинит сам пункт. Перечень инструментов и так едет в каждом
+/// запросе агента целиком, и дверь, зовомая чаще всех, не должна доплачивать
+/// за то, чего не спрашивали.
+///
+/// Потерять их нельзя, и потому они не сняты, а отложены: `sql=true` отдаёт
+/// прежний ответ целиком, и сам ответ об этом говорит.
+pub(crate) async fn gate(
+    pool: &Pool,
+    project: &str,
+    phase: Option<&str>,
+    sql: bool,
+) -> Result<Value, crate::db::Fail> {
     let mut conn = crate::db::conn(pool).await?;
     // ВЕРДИКТ И ЕГО ОСНОВАНИЕ ЧИТАЮТСЯ ОДНИМ СНИМКОМ. Числа гейта берутся у
     // `gate_state`, а пункты, из которых они сложены, — у `project_gates`; это
@@ -5499,11 +5515,15 @@ pub(crate) async fn gate(pool: &Pool, project: &str, phase: Option<&str>) -> Res
                     m.insert("item".into(), json!(title));
                     m.insert("kind".into(), json!(r.get::<_, Option<String>>(3).unwrap_or_default()));
                     m.insert("means".into(), json!(r.get::<_, Option<String>>(6).unwrap_or_default()));
-                    m.insert("query".into(), json!(r.get::<_, Option<String>>(7).unwrap_or_default()));
-                    m.insert("probe".into(), json!(r.get::<_, Option<String>>(8).unwrap_or_default()));
                     m.insert("owner".into(), json!(r.get::<_, Option<String>>(9).unwrap_or_default()));
-                    m.insert("subject".into(), json!(r.get::<_, Option<String>>(11).unwrap_or_default()));
                     m.insert("subjectWhy".into(), json!(r.get::<_, Option<String>>(12).unwrap_or_default()));
+                    // Тексты отдаются только по просьбе: три четверти ответа —
+                    // это они, а спрашивают их редко. Довод у сигнатуры.
+                    if sql {
+                        m.insert("query".into(), json!(r.get::<_, Option<String>>(7).unwrap_or_default()));
+                        m.insert("probe".into(), json!(r.get::<_, Option<String>>(8).unwrap_or_default()));
+                        m.insert("subject".into(), json!(r.get::<_, Option<String>>(11).unwrap_or_default()));
+                    }
                     m.insert("since".into(), json!(r.get::<_, Option<i64>>(13).unwrap_or(0)));
                 }
                 // СИРОТА НАЗЫВАЕТСЯ ВСЛУХ. Замер, чьё правило снято, продолжает
@@ -14404,7 +14424,8 @@ pub(crate) async fn waves(pool: &Pool, project: &str) -> Result<Value, crate::db
 async fn compute_phases(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
     // Гейт считается ДО того, как это соединение взято: он берёт своё, и два
     // сразу на один ответ — способ запереть пул на себе же.
-    let gates = gate(pool, project, None).await?;
+    // Тексты запросов здесь не нужны: фазе нужен исход, а не то, чем он получен.
+    let gates = gate(pool, project, None, false).await?;
     let client = crate::db::conn(pool).await?;
     let rows = client
         .query(

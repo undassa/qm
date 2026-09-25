@@ -710,8 +710,9 @@ impl Mcp {
             "inputSchema": { "type": "object", "properties": {} } }));
         tools.push(json!({ "name": "claims", "description": "где расходятся числа: заявленные набором числа против факта, с оговоркой о том, что считается",
             "inputSchema": { "type": "object", "properties": {} } }));
-        tools.push(json!({ "name": "gate", "description": "состояние гейта, вычисленное сейчас: запрос выполняется, подпись сверяется хешем",
-            "inputSchema": { "type": "object", "properties": { "id": s("имя гейта, например G2; без него — все") } } }));
+        tools.push(json!({ "name": "gate", "description": "состояние гейта, вычисленное сейчас: запрос выполняется, подпись сверяется хешем. Тексты запроса, подсадки и предмета — по `sql=true`: без него ответ втрое короче",
+            "inputSchema": { "type": "object", "properties": { "id": s("имя гейта, например G2; без него — все"),
+                "sql": json!({"type":"boolean","description":"отдать тексты запроса, подсадки и предмета у каждого пункта; они три четверти ответа, и нужны тому, кто чинит сам пункт"}) } } }));
         tools.push(json!({ "name": "next-task", "description": "следующая незакрытая задача с закрытыми зависимостями, со всем контекстом внутри",
             "inputSchema": { "type": "object", "properties": {} } }));
         tools.push(json!({ "name": "blockers", "description": "что держит задачу: чего ждёт задача: задачи и этапы целиком",
@@ -2760,7 +2761,14 @@ impl Mcp {
                 Ok(v) => ok(v),
                 Err(e) => refusal(e),
             },
-            "gate" => match crate::projector::gate(&self.pool, p, id).await {
+            "gate" => match crate::projector::gate(
+                &self.pool,
+                p,
+                id,
+                args.get("sql").and_then(Value::as_bool).unwrap_or(false),
+            )
+            .await
+            {
                 Ok(v) => ok(v),
                 Err(e) => refusal(e.into()),
             },
