@@ -1936,6 +1936,26 @@ mod tests {
         assert!(!crate::mcp::flag(&args, "нет-такого"), "неназванный довод — это «нет»");
     }
 
+    /// Незаписанный счёт возвращается в память целиком и складывается верно.
+    ///
+    /// Сложение у возврата не то же, что у прибавления вызова: числа
+    /// складываются, а самый долгий берётся наибольшим. Ошибиться здесь легко и
+    /// незаметно — счёт останется правдоподобным.
+    #[test]
+    fn a_returned_tally_adds_up() {
+        let key = ("набор".to_owned(), "gate".to_owned(), "agent".to_owned(), false);
+        let mut lost = std::collections::HashMap::new();
+        lost.insert(key.clone(), (3_i64, 30_i64, 20_i32));
+        crate::mcp::return_calls(lost);
+        let mut again = std::collections::HashMap::new();
+        again.insert(key.clone(), (2_i64, 5_i64, 4_i32));
+        crate::mcp::return_calls(again);
+
+        let taken = crate::mcp::take_calls();
+        assert_eq!(taken.get(&key), Some(&(5, 35, 20)), "вызовы и время складываются, самый долгий — наибольший");
+        assert!(crate::mcp::take_calls().is_empty(), "снятое обнуляется, иначе счёт ляжет дважды");
+    }
+
     /// Ни один обработчик не разбирает булев довод сам.
     ///
     /// Утверждение выше судит ПОМОЩНИКА, и с подсаженным обратно `as_bool` оно
@@ -1946,14 +1966,36 @@ mod tests {
     /// способами разом.
     #[test]
     fn no_handler_reads_a_flag_by_hand() {
+        // ПРОБЕЛЫ СХЛОПНУТЫ, И ЭТО НЕ УКРАШЕНИЕ. Первая редакция сторожа
+        // фильтровала СТРОКИ — и та же порча, разбитая переносами, проходила
+        // её зелёной (перемерено подсадкой). Написание в местном стиле как раз
+        // многострочное: `args` \n `.get("query")` \n `.and_then(…)`.
         let source = include_str!("mcp.rs");
-        let by_hand: Vec<&str> = source
-            .lines()
-            .filter(|l| l.contains("args.get(") && l.contains("as_bool"))
+        let flat = source.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        // Довод, приведённый к булеву сырым `as_bool`. Единственное законное
+        // место — поле ОТВЕТА двери (`isError`), и `args` в него не входит.
+        let by_as_bool: Vec<String> = flat
+            .match_indices("as_bool")
+            .map(|(at, _)| flat[at.saturating_sub(70)..at].to_owned())
+            .filter(|before| before.contains("args"))
             .collect();
         assert!(
-            by_hand.is_empty(),
-            "булев довод читается мимо `flag`, и на строке из оболочки это молча даёт «нет»: {by_hand:#?}"
+            by_as_bool.is_empty(),
+            "довод приведён к булеву сырым `as_bool`: оболочка шлёт строку, и это молча даёт «нет». \
+             Зовите `flag`. Места: {by_as_bool:#?}"
+        );
+
+        // Второе написание того же: довод сравнивают с написанием «да» руками.
+        // Перечень написаний знает `truthy`, и руками он всегда неполон —
+        // `brief=1` и `resume=true` от клиента протокола так и пропадали.
+        let by_spelling: Vec<&str> = ["== \"true\"", "== \"1\"", "== \"да\"", "== \"yes\"", "== \"on\""]
+            .into_iter()
+            .filter(|spelling| flat.contains(spelling))
+            .collect();
+        assert!(
+            by_spelling.is_empty(),
+            "довод сравнивается с написанием «да» руками, а перечень написаний знает `truthy`: {by_spelling:?}"
         );
     }
 

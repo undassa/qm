@@ -157,7 +157,17 @@ async fn remember_door_calls(pool: &Pool) {
         crate::mcp::return_calls(counted);
         return;
     };
+    // Номер суток от эпохи UTC, а не дата базы: читателю, написавшему
+    // `where day = current_date`, вернулся бы ноль, неотличимый от «вызовов не
+    // было». Сдвиг на границе суток не больше круга сборщика.
     let day = (crate::projector::now_ms() / 86_400_000) as i32;
+    // НЕЗАПИСАННОЕ ВОЗВРАЩАЕТСЯ В ПАМЯТЬ ЦЕЛИКОМ, И ЭТО НЕ МЕЛОЧЬ. Первая
+    // редакция возвращала счёт только при отказе взять соединение, а отказ
+    // самой записи на середине круга проглатывала — то есть теряла счёт ровно
+    // в тот круг, когда база была занята и знать это было особенно нужно.
+    // `remember_strain` десятью строками ниже так и делает; довод у
+    // `return_calls` это и обещает.
+    let mut lost = std::collections::HashMap::new();
     for ((project, door, author, failed), (calls, sum, max)) in counted {
         if let Err(e) = client
             .execute(
@@ -172,7 +182,11 @@ async fn remember_door_calls(pool: &Pool) {
             .await
         {
             tracing::warn!("счёт вызовов двери «{door}» не записан: {}", e.says());
+            lost.insert((project, door, author, failed), (calls, sum, max));
         }
+    }
+    if !lost.is_empty() {
+        crate::mcp::return_calls(lost);
     }
 }
 

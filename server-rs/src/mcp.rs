@@ -1084,7 +1084,7 @@ impl Mcp {
         }
         if !reserved && self.kinds.get(name).is_some() {
             return match entities::entity(&self.pool, &self.kinds, p, name, id).await {
-                Ok(v) if args.get("brief").map(|b| b == "true" || b == true).unwrap_or(false) => {
+                Ok(v) if flag(args, "brief") => {
                     ok(entities::without_body(v))
                 }
                 Ok(v) => ok(v),
@@ -1497,7 +1497,7 @@ impl Mcp {
                 // Статус, переданный даже пустым, — вердикт; отсутствующий — чтение.
                 let status = args.get("status").and_then(|v| v.as_str());
                 match crate::projector::automaton(&self.pool, p, &g("runId"), status, &g("note"),
-                                                  g("resume").trim() == "1" || g("resume").trim() == "true").await {
+                                                  flag(args, "resume")).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),
                 }
