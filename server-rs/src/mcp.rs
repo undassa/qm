@@ -887,7 +887,36 @@ impl Mcp {
 
     /// Отметка ставится ПОСЛЕ ответа и только на успешный: пересчитывать набор
     /// из-за отказа значит считать то же самое второй раз.
+    /// След вызова двери: имя, исход, время.
+    ///
+    /// **Отказ записи проглочен, и это единственное место в двери, где так
+    /// можно.** След ничего не решает: ни ответа, ни отметки «пересчитать», ни
+    /// вердикта. Уронить дверь из-за неудавшегося учёта значило бы обменять
+    /// работу набора на знание о ней.
+    ///
+    /// Заведён затем, что перечень инструментов едет в каждом запросе агента
+    /// целиком, а какая его часть нужна — до сих пор устанавливалось догадкой.
+    async fn trace(&self, name: &str, failed: bool, took: std::time::Duration) {
+        let Ok(client) = crate::db::conn(&self.pool).await else { return };
+        let millis = i32::try_from(took.as_millis()).unwrap_or(i32::MAX);
+        let at = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or_default(),
+        )
+        .unwrap_or_default();
+        let _ = client
+            .execute(
+                "INSERT INTO door_call (at, project, door, author, failed, millis) \
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+                &[&at, &self.project, &name, &self.author, &failed, &millis],
+            )
+            .await;
+    }
+
     pub async fn call(&self, name: &str, args: &Value) -> Value {
+        let started = std::time::Instant::now();
         let out = self.run(name, args).await;
         // ОТКАЗ УЗНАЁТСЯ ПО `isError`, а не по ключу `error`, которого отказ не
         // несёт вовсе: `refusal` отдаёт `{content, isError}`. Условие было верно
@@ -897,6 +926,12 @@ impl Mcp {
         // делать.
         let failed = out.get("isError").and_then(|v| v.as_bool()).unwrap_or(false)
             || out.get("error").is_some();
+        // СЛЕД ВЫЗОВА, И ОН НИЧЕГО НЕ РЕШАЕТ. Перечень инструментов едет в
+        // каждом запросе агента целиком; какая его часть нужна на деле —
+        // устанавливалось догадкой по одной сессии. Отсюда след: имя двери,
+        // исход и время. Отказ записи проглочен намеренно — учёт, уронивший
+        // дверь, хуже отсутствующего учёта, и ответ он не трогает.
+        self.trace(name, failed, started.elapsed()).await;
         if Self::WRITES.contains(&name) && !failed {
             // Правка ОБЩЕГО объявления метит все наборы: пункт гейта, фаза и
             // ступень лестницы одни на всех, и посчитать их надо всем.
