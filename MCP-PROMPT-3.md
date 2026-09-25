@@ -18,7 +18,7 @@
 случай — ненаписанная дверь**, и агент без доступа к базе на этом месте встанет.
 
 Отдельно проверено, чего в списке **нет**: `addresses-declared`, `summary`, `links-of`,
-`retired-terms`, `scheme-terms`, `phases`, `search` и `gate` (с полями `query`, `probe`, `id`)
+`retired-terms`, `scheme-terms`, `phases`, `search` и `gate` (поле `id` всегда; тексты `query` и `probe` — по `sql=true`)
 отдают всё нужное. Там, где я лез в таблицы за этим, виновата невнимательность, а не харнес.
 
 ---

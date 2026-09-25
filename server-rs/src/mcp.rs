@@ -24,6 +24,42 @@ pub struct Mcp {
     pub author: String,
 }
 
+/// Ключ счёта вызовов: набор, дверь, автор, исход.
+pub(crate) type DoorKey = (String, String, String, bool);
+/// Что посчитано: вызовов, суммарно миллисекунд, самый долгий.
+pub(crate) type DoorTally = (i64, i64, i32);
+
+/// Счёт вызовов дверей, копящийся в памяти до круга сборщика.
+///
+/// Образец взят у `db::BUSY`: счёт живёт в памяти, а строкой ложится раз в
+/// круг. Потерять при выкатке можно неполный круг счёта — это цена, названная
+/// вслух, и она меньше цены записи на каждый вызов, посчитанной ревью.
+static CALLS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<DoorKey, DoorTally>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Снять накопленное и обнулить. Зовёт сборщик.
+pub(crate) fn take_calls() -> std::collections::HashMap<DoorKey, DoorTally> {
+    match CALLS.lock() {
+        Ok(mut calls) => std::mem::take(&mut *calls),
+        Err(_) => Default::default(),
+    }
+}
+
+/// Вернуть снятое обратно в память: неудавшаяся запись не должна стирать счёт.
+///
+/// Тот же довод, что у `watch::remember_strain`: счёт, потерянный вместе с
+/// отказом записи, делает вызовы невидимыми ровно в тот круг, когда база и была
+/// занята, — то есть врёт именно там, где интересно.
+pub(crate) fn return_calls(counted: std::collections::HashMap<DoorKey, DoorTally>) {
+    let Ok(mut calls) = CALLS.lock() else { return };
+    for (key, (n, sum, max)) in counted {
+        let seen = calls.entry(key).or_insert((0, 0, 0));
+        seen.0 += n;
+        seen.1 += sum;
+        seen.2 = seen.2.max(max);
+    }
+}
+
 /// Отказ говорит словом, что именно не так.
 ///
 /// «Нет проекции» и «ничего не нашлось» — разные ответы, и агент обязан их
@@ -111,7 +147,7 @@ fn rows(args: &Value, key: &str) -> Vec<Value> {
 /// «нет» получилось молча, и две находки гейта стояли до тех пор, пока не
 /// угадали `drop:=true`. Дверь, принимающая довод и не понимающая его, хуже
 /// двери, которая отказывает.
-fn flag(args: &Value, key: &str) -> bool {
+pub(crate) fn flag(args: &Value, key: &str) -> bool {
     args.get(key).is_some_and(truthy)
 }
 
@@ -710,7 +746,7 @@ impl Mcp {
             "inputSchema": { "type": "object", "properties": {} } }));
         tools.push(json!({ "name": "claims", "description": "где расходятся числа: заявленные набором числа против факта, с оговоркой о том, что считается",
             "inputSchema": { "type": "object", "properties": {} } }));
-        tools.push(json!({ "name": "gate", "description": "состояние гейта, вычисленное сейчас: запрос выполняется, подпись сверяется хешем. Тексты запроса, подсадки и предмета — по `sql=true`: без него ответ втрое короче",
+        tools.push(json!({ "name": "gate", "description": "состояние гейта, вычисленное сейчас: запрос выполняется, подпись сверяется хешем. Тексты запроса, подсадки и предмета — по `sql=true`: без него ответ вчетверо короче",
             "inputSchema": { "type": "object", "properties": { "id": s("имя гейта, например G2; без него — все"),
                 "sql": json!({"type":"boolean","description":"отдать тексты запроса, подсадки и предмета у каждого пункта; они три четверти ответа, и нужны тому, кто чинит сам пункт"}) } } }));
         tools.push(json!({ "name": "next-task", "description": "следующая незакрытая задача с закрытыми зависимостями, со всем контекстом внутри",
@@ -886,36 +922,32 @@ impl Mcp {
         "task-state-push", "task-plan-push", "preflight-push", "code-facts-push", "worktree-push",
     ];
 
-    /// Отметка ставится ПОСЛЕ ответа и только на успешный: пересчитывать набор
-    /// из-за отказа значит считать то же самое второй раз.
-    /// След вызова двери: имя, исход, время.
+    /// Прибавить вызов к счёту. В памяти и без единого ожидания.
     ///
-    /// **Отказ записи проглочен, и это единственное место в двери, где так
-    /// можно.** След ничего не решает: ни ответа, ни отметки «пересчитать», ни
-    /// вердикта. Уронить дверь из-за неудавшегося учёта значило бы обменять
-    /// работу набора на знание о ней.
+    /// **Строкой на вызов это было написано сначала, и было неверно.** Запись
+    /// брала соединение из пула прямо на пути ответа, и ревью намерило цену:
+    /// ~35 тысяч строк в сутки от ОДНОЙ открытой вкладки готовности; накрутку
+    /// счётчика «занято», который оператор читает как перегрузку; и до трёх
+    /// секунд ожидания пула ПЕРЕД отметкой «пересчитать» — то есть расширение
+    /// ровно того окна потери, о котором сказано десятью строками ниже. Счёт
+    /// отвечает на тот же вопрос и не трогает ни пул, ни ответ.
     ///
-    /// Заведён затем, что перечень инструментов едет в каждом запросе агента
-    /// целиком, а какая его часть нужна — до сих пор устанавливалось догадкой.
-    async fn trace(&self, name: &str, failed: bool, took: std::time::Duration) {
-        let Ok(client) = crate::db::conn(&self.pool).await else { return };
+    /// Замок занят или отравлен — счёт молча пропускается. Он ничего не решает:
+    /// ни ответа, ни отметки «пересчитать», ни вердикта, и обменивать на него
+    /// работу набора нельзя.
+    fn tally(&self, name: &str, failed: bool, took: std::time::Duration) {
         let millis = i32::try_from(took.as_millis()).unwrap_or(i32::MAX);
-        let at = i64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or_default(),
-        )
-        .unwrap_or_default();
-        let _ = client
-            .execute(
-                "INSERT INTO door_call (at, project, door, author, failed, millis) \
-                 VALUES ($1, $2, $3, $4, $5, $6)",
-                &[&at, &self.project, &name, &self.author, &failed, &millis],
-            )
-            .await;
+        let Ok(mut calls) = CALLS.lock() else { return };
+        let seen = calls
+            .entry((self.project.clone(), name.to_owned(), self.author.clone(), failed))
+            .or_insert((0, 0, 0));
+        seen.0 += 1;
+        seen.1 += i64::from(millis);
+        seen.2 = seen.2.max(millis);
     }
 
+    /// Отметка ставится ПОСЛЕ ответа и только на успешный: пересчитывать набор
+    /// из-за отказа значит считать то же самое второй раз.
     pub async fn call(&self, name: &str, args: &Value) -> Value {
         let started = std::time::Instant::now();
         let out = self.run(name, args).await;
@@ -927,12 +959,13 @@ impl Mcp {
         // делать.
         let failed = out.get("isError").and_then(|v| v.as_bool()).unwrap_or(false)
             || out.get("error").is_some();
-        // СЛЕД ВЫЗОВА, И ОН НИЧЕГО НЕ РЕШАЕТ. Перечень инструментов едет в
-        // каждом запросе агента целиком; какая его часть нужна на деле —
-        // устанавливалось догадкой по одной сессии. Отсюда след: имя двери,
-        // исход и время. Отказ записи проглочен намеренно — учёт, уронивший
-        // дверь, хуже отсутствующего учёта, и ответ он не трогает.
-        self.trace(name, failed, started.elapsed()).await;
+        // СЧЁТ СТОИТ ДО ОТМЕТКИ, И ЭТО БЕЗОПАСНО РОВНО ПОТОМУ, ЧТО ОН НИЧЕГО НЕ
+        // ЖДЁТ. Первая редакция писала строку в базу и могла простоять здесь до
+        // трёх секунд на исчерпанном пуле — то есть расширяла окно «правка
+        // легла, отметка не поставлена», о котором сказано абзацем ниже. Счёт в
+        // памяти этого окна не трогает, а место перед отметкой застаёт и путь с
+        // ранним возвратом внутри блока.
+        self.tally(name, failed, started.elapsed());
         if Self::WRITES.contains(&name) && !failed {
             // Правка ОБЩЕГО объявления метит все наборы: пункт гейта, фаза и
             // ступень лестницы одни на всех, и посчитать их надо всем.
@@ -1739,7 +1772,7 @@ impl Mcp {
                 // читает каталог, а не `HEAD`, и молчащий об этом след делал
                 // факт с незакоммиченной правки неотличимым от фактa со ствола.
                 let commit = args.get("commit").and_then(|v| v.as_str()).unwrap_or("").to_owned();
-                let dirty = args.get("dirty").and_then(|v| v.as_bool()).unwrap_or(false);
+                let dirty = flag(args, "dirty");
                 let snapshot = crate::projector::Snapshot { commit: &commit, dirty, reads: read };
                 match crate::projector::push_code_facts(
                     &self.pool, p, &fact_kind, &list, &self.author, snapshot).await {
@@ -1870,7 +1903,7 @@ impl Mcp {
                 // «Сказать явно» должно быть ЧЕМ: без флага отказ был тупиком —
                 // снять ошибочный вердикт можно было только запросом в базу мимо
                 // сервера.
-                let clear = args.get("clear").and_then(|v| v.as_bool()).unwrap_or(false);
+                let clear = flag(args, "clear");
                 if list.is_empty() && !clear {
                     return json!({ "content": [{ "type": "text",
                         "text": "подача пуста: полная подача без вердиктов стёрла бы все. Если это и есть \
@@ -2765,7 +2798,7 @@ impl Mcp {
                 &self.pool,
                 p,
                 id,
-                args.get("sql").and_then(Value::as_bool).unwrap_or(false),
+                flag(args, "sql"),
             )
             .await
             {

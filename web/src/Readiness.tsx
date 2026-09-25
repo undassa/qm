@@ -118,7 +118,12 @@ export function Readiness({
   const live = useLive(
     () =>
       Promise.all([
-        tool<{ gates: Gate[]; stale?: boolean; why?: string }>(projectId, "gate"),
+        // `sql` просится здесь ЯВНО: дверь отдаёт тексты запроса и пробы только
+        // по просьбе, а страница их рисует — кнопкой «запрос правила» и
+        // объяснением «не роняли». Без довода оба поля приходят пустыми,
+        // `tsc` об этом молчит (они объявлены необязательными), и страница
+        // сохранила бы утверждение, потеряв его доказательство.
+        tool<{ gates: Gate[]; stale?: boolean; why?: string }>(projectId, "gate", { sql: "true" }),
         tool<{ phases: Phase[] }>(projectId, "phases"),
         tool<{ steps: Step[] }>(projectId, "process-state"),
         tool<NextStep>(projectId, "next-step"),

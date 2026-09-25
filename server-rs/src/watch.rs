@@ -131,12 +131,49 @@ pub fn spawn(pool: Pool) {
             till_forget -= 1;
             tokio::time::sleep(TICK).await;
             remember_strain(&pool).await;
+            remember_door_calls(&pool).await;
             if let Err(e) = crate::db::counting(round(&pool)).await {
                 // Пересчёт, упавший молча, — это доска, застывшая без объяснения.
                 tracing::warn!("пересчёт гейтов не прошёл: {}", e.says());
             }
         }
     });
+}
+
+/// Положить накопленный счёт вызовов дверей в базу: строка на день, дверь,
+/// автора и исход.
+///
+/// Записью на каждый вызов это было написано сначала. Ревью намерило цену —
+/// соединение из пула на пути ответа, ~35 тысяч строк в сутки от одной
+/// открытой вкладки и накрутка счётчика «занято», который читают как
+/// перегрузку. Счёт отвечает на тот же вопрос, а размер его ограничен числом
+/// дверей: срок жизни оттого и не нужен.
+async fn remember_door_calls(pool: &Pool) {
+    let counted = crate::mcp::take_calls();
+    if counted.is_empty() {
+        return;
+    }
+    let Ok(client) = crate::db::conn(pool).await else {
+        crate::mcp::return_calls(counted);
+        return;
+    };
+    let day = (crate::projector::now_ms() / 86_400_000) as i32;
+    for ((project, door, author, failed), (calls, sum, max)) in counted {
+        if let Err(e) = client
+            .execute(
+                "INSERT INTO door_call (day, project_id, door, author, failed, calls, millis_sum, millis_max) \
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8) \
+                 ON CONFLICT (day, project_id, door, author, failed) DO UPDATE SET \
+                   calls = door_call.calls + EXCLUDED.calls, \
+                   millis_sum = door_call.millis_sum + EXCLUDED.millis_sum, \
+                   millis_max = greatest(door_call.millis_max, EXCLUDED.millis_max)",
+                &[&day, &project, &door, &author, &failed, &calls, &sum, &max],
+            )
+            .await
+        {
+            tracing::warn!("счёт вызовов двери «{door}» не записан: {}", e.says());
+        }
+    }
 }
 
 /// Положить накопленную натугу в базу: отказы «занято» и вложенные взятия.
