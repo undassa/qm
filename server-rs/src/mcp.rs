@@ -1004,8 +1004,29 @@ impl Mcp {
     }
 
     fn args_refusal(&self, name: &str, args: &Value) -> Option<Value> {
-        let tool = self.tools().into_iter().find(|t| t["name"] == name)?;
-        let (given, known) = (args.as_object()?, tool["inputSchema"]["properties"].as_object()?);
+        // ДОВОДЫ СОБИРАЮТСЯ СО ВСЕХ ЗАПИСЕЙ ЭТОГО ИМЕНИ, А НЕ С ПЕРВОЙ.
+        //
+        // Имя инструмента не единственно: виды сущностей кладутся в перечень
+        // первыми и дают запись с именем вида, а дверь с тем же именем — позже.
+        // У набора есть вид `gate`, и оттого дверь `gate` для этой сверки
+        // читалась записью вида: схема вида знает один `id`, и всякий другой
+        // довод двери отвергался как неизвестный. Довод `sql`, заведённый
+        // 2026-09-25, так и не сработал ни разу — отказ приходил до разбора.
+        //
+        // Объединение никогда не отвергает лишнего: довод, известный хоть одной
+        // записи имени, известен. Исполняет вызов не эта функция, а разбор
+        // имени ниже, и он про столкновение имён знает.
+        let tools = self.tools();
+        let mut known = serde_json::Map::new();
+        for tool in tools.iter().filter(|t| t["name"] == name) {
+            if let Some(props) = tool["inputSchema"]["properties"].as_object() {
+                known.extend(props.clone());
+            }
+        }
+        if known.is_empty() && !tools.iter().any(|t| t["name"] == name) {
+            return None;
+        }
+        let (given, known) = (args.as_object()?, &known);
         let unknown: Vec<String> = given
             .keys()
             .filter(|k| !known.contains_key(*k) && !matches!(k.as_str(), "id" | "kind" | "brief"))
@@ -3436,5 +3457,43 @@ mod refusal_tests {
         assert_eq!(door_arguments(None), (serde_json::json!([]), Vec::new()));
         let bare = serde_json::json!({ "type": "object", "properties": { "id": {} }, "required": ["id"] });
         assert!(door_arguments(Some(&bare)).1.is_empty(), "лишнего не выдумывается");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Mcp, Value};
+    use serde_json::json;
+    use std::sync::Arc;
+
+    /// Имя инструмента не единственно, и сверка доводов обязана это знать.
+    ///
+    /// Виды сущностей кладутся в перечень первыми, дверь с тем же именем —
+    /// позже, а сверка искала первую запись по имени. У набора есть вид `gate`,
+    /// и оттого дверь `gate` сверялась схемой вида: та знает один `id`, и
+    /// заведённый 2026-09-25 довод `sql` отвергался как неизвестный — до
+    /// разбора, то есть названный в описании двери способ не работал ни разу.
+    #[test]
+    fn a_door_is_not_shadowed_by_a_kind_of_the_same_name() {
+        let kind: crate::kinds::Kind = serde_json::from_value(json!({})).expect("вид из умолчаний");
+        let kinds = crate::kinds::Kinds([("gate".to_owned(), kind)].into_iter().collect());
+        let mcp = Mcp {
+            pool: crate::db::pool("postgres://нет/нет", 1).expect("пул без соединения"),
+            kinds: Arc::new(kinds),
+            project: "набор".to_owned(),
+            author: "проверка".to_owned(),
+        };
+
+        let same_name = mcp.tools().iter().filter(|t: &&Value| t["name"] == "gate").count();
+        assert_eq!(same_name, 2, "предмет проверки — два инструмента с одним именем");
+
+        assert!(
+            mcp.args_refusal("gate", &json!({ "sql": true })).is_none(),
+            "довод двери отвергнут схемой вида с тем же именем"
+        );
+        assert!(
+            mcp.args_refusal("gate", &json!({ "такого-довода-нет": 1 })).is_some(),
+            "неизвестный довод обязан отвергаться, иначе объединение сняло бы сверку целиком"
+        );
     }
 }
