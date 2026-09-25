@@ -20,6 +20,21 @@
 
 use mh_server::{client, door};
 
+/// Напечатать ответ. Оборванная труба — не отказ.
+///
+/// `println!` роняет процесс паникой, когда читатель ушёл, и код выхода
+/// становится 101 — вне договора, объявленного справкой выше (0, 1, 2, 75).
+/// `mh call … | head` под `set -o pipefail` валил бы всякий сценарий, а ответ
+/// при этом приходил целиком: труба оборвалась ПОСЛЕ того, как прочли нужное.
+/// Печатать больше некому — это исход, а не ошибка.
+fn say(v: &serde_json::Value) {
+    use std::io::Write;
+    let text = serde_json::to_string_pretty(v).unwrap_or_default();
+    if writeln!(std::io::stdout().lock(), "{text}").is_err() {
+        std::process::exit(0);
+    }
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let what = args.next().unwrap_or_default();
@@ -61,7 +76,7 @@ fn main() {
                 }
             };
             match client::sense(&door, only.as_deref(), &root) {
-                Ok(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default()),
+                Ok(v) => say(&v),
                 Err(why) => {
                     eprintln!("mh sense: {why}");
                     std::process::exit(2);
@@ -71,7 +86,7 @@ fn main() {
         "install" => {
             let into = args.next().unwrap_or_else(|| ".".to_owned());
             match client::install(&door, &into) {
-                Ok(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default()),
+                Ok(v) => say(&v),
                 Err(why) => {
                     eprintln!("mh install: {why}");
                     std::process::exit(2);
@@ -79,7 +94,7 @@ fn main() {
             }
         }
         "tools" => match door.tools() {
-            Ok(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default()),
+            Ok(v) => say(&v),
             Err(why) => {
                 eprintln!("mh tools: {why}");
                 std::process::exit(2);
@@ -100,7 +115,7 @@ fn main() {
             };
             match door.call(&name, &parsed) {
                 Ok((v, refused)) => {
-                    println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+                    say(&v);
                     // Занятость — СВОЙ код выхода (75, «попробуйте позже»): по
                     // общему коду отказа цикл повторов не отличал перегрузку от
                     // вердикта двери и бил в сервер тем сильнее, чем ему хуже.
