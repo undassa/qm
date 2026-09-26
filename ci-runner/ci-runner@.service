@@ -5,6 +5,14 @@
 # Раннер ОДНОРАЗОВЫЙ (--ephemeral): после одной работы он снимается с учёта и
 # контейнер выходит. Поэтому Restart=always здесь не лечение сбоя, а устройство:
 # следующая работа получает свежий раннер и чистое дерево, как у хостового.
+# Ограничитель частоты живёт в [Unit], и это не вкусовщина: пока он стоял в
+# [Service], systemd молча его игнорировал — `systemd-analyze verify` говорит
+# «Unknown key name 'StartLimitIntervalSec' in section 'Service'», а машина
+# показывала NRestarts=375 при Result=success, то есть «пять за минуту и стоп»
+# не случалось ни разу. Защита от недоступного GitHub была объявлена и не
+# работала; на ней же держится отказ раннера по нехватке диска.
+StartLimitBurst=5
+StartLimitIntervalSec=60
 Description=Приватный раннер CI для %I
 After=docker.service network-online.target
 Requires=docker.service
@@ -18,10 +26,6 @@ WorkingDirectory=/opt/ci-runner
 ExecStart=/opt/ci-runner/run-one.sh %I
 Restart=always
 RestartSec=5
-# Токен регистрации чеканится при каждом запуске и живёт час. Если GitHub
-# недоступен, перезапуски не должны молотить вхолостую: пять за минуту и стоп.
-StartLimitBurst=5
-StartLimitIntervalSec=60
 
 [Install]
 WantedBy=multi-user.target
