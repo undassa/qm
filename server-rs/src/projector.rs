@@ -649,8 +649,25 @@ CREATE TABLE IF NOT EXISTS generated_drift (
 
 CREATE TABLE IF NOT EXISTS code_fact (
   project_id text NOT NULL, kind text NOT NULL, name text NOT NULL,
-  detail text NOT NULL DEFAULT '',
-  PRIMARY KEY (project_id, kind, name));
+  detail text NOT NULL DEFAULT '', place text NOT NULL DEFAULT '',
+  PRIMARY KEY (project_id, kind, name, place));
+-- МЕСТО — ЧАСТЬ КЛЮЧА. Ключом было одно имя, и имя, названное в трёх файлах,
+-- ложилось одним фактом о первом из них: пункт перевода называл протухший
+-- отпечаток в одном файле из трёх (undassa/mh#121, #66). Место пусто у фактов,
+-- которые и так одни на имя, — у них ключ прежний.
+ALTER TABLE code_fact ADD COLUMN IF NOT EXISTS place text NOT NULL DEFAULT '';
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint c
+                   JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey)
+                  WHERE c.conrelid = 'code_fact'::regclass AND c.contype = 'p' AND a.attname = 'place') THEN
+    ALTER TABLE code_fact DROP CONSTRAINT code_fact_pkey;
+    ALTER TABLE code_fact ADD PRIMARY KEY (project_id, kind, name, place);
+    -- Пункты читают место из колонки, а факты прежнего вида хранят его только
+    -- в тексте: без переноса до первой перечитки набора карта крейтов пуста.
+    UPDATE code_fact SET place = substring(detail from 'названо в (.*)$')
+     WHERE place = '' AND detail LIKE 'названо в %';
+  END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS fact_push (
   project_id text NOT NULL, fact text NOT NULL,
@@ -6188,7 +6205,7 @@ pub(crate) async fn push_code_facts(
     pool: &Pool,
     project: &str,
     kind: &str,
-    facts: &[(String, String)],
+    facts: &[(String, String, String)],
     actor: &str,
     snapshot: Snapshot<'_>,
 ) -> Result<Value, crate::db::Fail> {
@@ -6211,12 +6228,22 @@ pub(crate) async fn push_code_facts(
                     «ничего не нашёл» здесь неотличимо от «не смотрел». Назовите read=N — \
                     сколько файлов датчик прочёл. Ничего не записано" }));
     }
+    // КЛИЕНТ СТАРШЕ МЕСТА. Датчик по образцу до undassa/mh#121 называл файл
+    // только текстом «названо в …» и подавал место пустым. Пункты карты крейтов
+    // соединяются по месту, и такая подача молча опустошала карту: пункт
+    // зеленел без находок (замер на пробе deps:layering — зависимость вверх не
+    // названа). Отказ громкий, записи нет.
+    if let Some((name, _, _)) = facts.iter().find(|(_, d, p)| p.is_empty() && d.starts_with("названо в ")) {
+        return Ok(json!({ "status": "client_without_place", "kind": kind, "name": name,
+            "why": "факт назван в файле, а место не подано: клиент старше undassa/mh#121. \
+                    Обновите mh и снимите вид заново. Ничего не записано" }));
+    }
     tx.execute("DELETE FROM code_fact WHERE project_id = $1 AND kind = $2", &[&project, &kind]).await?;
-    for (name, detail) in facts {
+    for (name, detail, place) in facts {
         tx.execute(
-            "INSERT INTO code_fact (project_id, kind, name, detail) VALUES ($1,$2,$3,$4)
-             ON CONFLICT (project_id, kind, name) DO UPDATE SET detail = EXCLUDED.detail",
-            &[&project, &kind, name, detail],
+            "INSERT INTO code_fact (project_id, kind, name, detail, place) VALUES ($1,$2,$3,$4,$5)
+             ON CONFLICT (project_id, kind, name, place) DO UPDATE SET detail = EXCLUDED.detail",
+            &[&project, &kind, name, detail, place],
         )
         .await?;
     }
@@ -16096,5 +16123,81 @@ mod test_run_prune {
             .get(0);
         assert_eq!(green, 20, "обрезка перестала резать: у проверки без падений больше двадцати строк");
         tx.rollback().await.unwrap();
+    }
+}
+
+/// Одно имя в трёх файлах — три факта, и пункт перевода называет все три.
+///
+/// Случай undassa/mh#121: отпечаток `76528515` стоял в трёх файлах tot-ade, а
+/// ключ факта был одним именем, и `translations:section-match-source` называл
+/// протухший перевод только в первом из них.
+#[cfg(test)]
+mod fact_places {
+    use super::{push_code_facts, Snapshot};
+
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn a_stamp_in_three_files_is_named_three_times() {
+        let url = std::env::var("MH_TEST_DB_URL").expect("MH_TEST_DB_URL: адрес пустой базы");
+        let apart = format!("{}{}", if url.contains('?') { '&' } else { '?' },
+                            "options=-c%20search_path%3Dfact_places");
+        let pool = crate::db::pool(&format!("{url}{apart}"), 2).expect("пул тестовой базы");
+        // Таблица прежнего вида с прежним фактом: схема обязана перевести ключ,
+        // не потеряв строк. Таблица нового вида в соседней схеме — так идут тесты
+        // с базой в CI: проверка «ключ уже переведён» по имени ограничения видела
+        // её и пропускала перевод своей таблицы.
+        pool.get().await.expect("соединение")
+            .batch_execute(
+                "DROP SCHEMA IF EXISTS fact_places_other CASCADE; CREATE SCHEMA fact_places_other;
+                 CREATE TABLE fact_places_other.code_fact (project_id text NOT NULL, kind text NOT NULL,
+                   name text NOT NULL, detail text NOT NULL DEFAULT '', place text NOT NULL DEFAULT '',
+                   PRIMARY KEY (project_id, kind, name, place));
+                 DROP SCHEMA IF EXISTS fact_places CASCADE; CREATE SCHEMA fact_places;
+                 CREATE TABLE code_fact (project_id text NOT NULL, kind text NOT NULL, name text NOT NULL,
+                   detail text NOT NULL DEFAULT '', PRIMARY KEY (project_id, kind, name));
+                 INSERT INTO code_fact VALUES ('p', 'crate', 'old', 'названо в old/Cargo.toml');")
+            .await
+            .expect("прежняя таблица заводится");
+        super::ensure(&pool).await.expect("схема встаёт поверх прежней таблицы");
+        let client = pool.get().await.expect("соединение");
+        let kept: i64 = client.query_one("SELECT count(*) FROM code_fact WHERE name = 'old'", &[])
+            .await.expect("счёт").get(0);
+        assert_eq!(kept, 1, "перевод ключа потерял прежний факт");
+        let place: String = client.query_one("SELECT place FROM code_fact WHERE name = 'old'", &[])
+            .await.expect("место").get(0);
+        assert_eq!(place, "old/Cargo.toml", "место прежнего факта не перенесено из текста в колонку");
+
+        let old_client = vec![("probe-x".to_owned(), "названо в x/Cargo.toml".to_owned(), String::new())];
+        let refused = push_code_facts(&pool, "p", "crate", &old_client, "t",
+                                      Snapshot { commit: "abc", dirty: false, reads: 1 })
+            .await.expect("ответ на подачу");
+        assert_eq!(refused["status"], "client_without_place", "подача без места принята: {refused}");
+        let still: i64 = client.query_one("SELECT count(*) FROM code_fact WHERE kind = 'crate'", &[])
+            .await.expect("счёт").get(0);
+        assert_eq!(still, 1, "отказанная подача стёрла вид");
+
+        let stamp = "`screen:SCR-1` §Состав · `00000000`".to_owned();
+        let facts: Vec<(String, String, String)> = ["a.rs", "b.rs", "c.rs"].iter()
+            .map(|f| (stamp.clone(), format!("названо в {f}"), (*f).to_owned()))
+            .collect();
+        push_code_facts(&pool, "p", "section-stamp", &facts, "t",
+                        Snapshot { commit: "abc", dirty: false, reads: 3 })
+            .await.expect("подача принята");
+        client
+            .batch_execute(
+                "INSERT INTO project_documents (project_id, entity_kind, entity_name, content, content_hash,
+                                                bytes, revision, updated_at, updated_by)
+                 VALUES ('p', 'screen', 'SCR-1', E'# Экран\\n\\n## Состав\\n\\nновый текст\\n', '', 0, 1, 0, 't')")
+            .await
+            .expect("документ заводится");
+        let rule = include_str!("../../instrument/gate/G3/translations.section-match-source.sql");
+        let found: Vec<String> = client.query(rule, &[&"p"]).await.expect("пункт исполняется")
+            .iter().map(|r| r.get(0)).collect();
+        for f in ["a.rs", "b.rs", "c.rs"] {
+            assert!(found.iter().any(|d| d.starts_with(&format!("{f} — ")) && d.contains("переписан")),
+                    "протухший перевод в {f} не назван: {found:?}");
+        }
+        client.batch_execute("DROP SCHEMA IF EXISTS fact_places CASCADE; DROP SCHEMA IF EXISTS fact_places_other CASCADE")
+            .await.expect("схемы снимаются");
     }
 }

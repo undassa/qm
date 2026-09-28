@@ -1,6 +1,6 @@
 WITH крейты AS (
   SELECT c.name AS крейт, m.name AS манифест, regexp_replace(m.name, 'Cargo\.toml$', '') AS каталог
-    FROM code_fact m JOIN code_fact c ON c.project_id = m.project_id AND c.kind = 'crate' AND substring(c.detail from 'названо в (.*)$') = m.name
+    FROM code_fact m JOIN code_fact c ON c.project_id = m.project_id AND c.kind = 'crate' AND c.place = m.name
    WHERE m.project_id = $1 AND m.kind = 'crate-manifest'),
 разрешено AS (
   SELECT split_part(s.value, ':', 1) AS крейт, nullif(split_part(s.value, ':', 2), '') AS модуль

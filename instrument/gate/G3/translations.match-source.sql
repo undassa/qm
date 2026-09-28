@@ -54,7 +54,7 @@ WITH строки AS (
 штампы AS (
   SELECT substring(f.name from '^([A-Z]+(?:-[A-Z]+)?-\d+|S\d+-AC-\d+) · ') AS ид,
          substring(f.name from '`([0-9a-f]{8})`') AS отп,
-         coalesce(substring(f.detail from 'названо в (.*)$'), f.detail) AS файл
+         coalesce(nullif(f.place, ''), f.detail) AS файл
     FROM code_fact f WHERE f.project_id = $1 AND f.kind = 'translation-stamp')
 SELECT 'датчик «translation-stamp» ' || fact_gap($1, 'translation-stamp') || ': сверять отпечатки переводов нечем' AS detail WHERE NOT fact_fresh($1, 'translation-stamp')
 UNION ALL

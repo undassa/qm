@@ -1,1 +1,1 @@
-INSERT INTO code_fact (project_id, kind, name, detail) VALUES ($1, 'section-stamp', '`screen:SCR-ADE-66` §Состав · `00000000`', 'названо в crates/tot-probe/tests/probe.rs') ON CONFLICT DO NOTHING
+INSERT INTO code_fact (project_id, kind, name, detail, place) VALUES ($1, 'section-stamp', '`screen:SCR-ADE-66` §Состав · `00000000`', 'названо в crates/tot-probe/tests/probe.rs', 'crates/tot-probe/tests/probe.rs') ON CONFLICT DO NOTHING

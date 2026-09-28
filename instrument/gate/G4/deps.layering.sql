@@ -6,7 +6,7 @@ WITH карта AS (
    WHERE g.project_id = $1 AND g.gate = 'deps:layering'),
 крейты AS (
   SELECT c.name AS крейт, m.name AS манифест, regexp_replace(m.name, 'Cargo\.toml$', '') AS каталог
-    FROM code_fact m JOIN code_fact c ON c.project_id = m.project_id AND c.kind = 'crate' AND substring(c.detail from 'названо в (.*)$') = m.name
+    FROM code_fact m JOIN code_fact c ON c.project_id = m.project_id AND c.kind = 'crate' AND c.place = m.name
    WHERE m.project_id = $1 AND m.kind = 'crate-manifest'),
 зав AS (
   SELECT k.крейт, substring(f.detail from '^\s*([a-z][a-z0-9_-]*)') AS имя, f.name AS место, trim(f.detail) AS строка

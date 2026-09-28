@@ -705,7 +705,7 @@ impl Mcp {
                 "body": s("true — отдать и тело скилла") } } }));
         tools.push(json!({ "name": "code-facts-push", "description": "принять наблюдение датчика о репозитории: таблицы миграций, операции контракта; подача полная в пределах вида",
             "inputSchema": { "type": "object", "properties": { "kind": s("вид факта, например migration-table"),
-                "facts": { "type": "array", "description": "[{name, detail}]", "items": { "type": "object" } },
+                "facts": { "type": "array", "description": "[{name, detail, place?}]: place — файл, где имя названо; одно имя в разных местах — разные факты", "items": { "type": "object" } },
                 "commit": s("коммит рабочего каталога, которым снят факт: без него подача читается как «неизвестно»"),
                 "dirty": json!({"type":"boolean","description":"дерево было грязным: факт рассказывает не про ствол, гейт отвечает «неизвестно»"}),
                 "read": json!({"type":"integer","description":"сколько файлов датчик прочёл: пустая подача без read>0 отказ"}) },
@@ -1756,10 +1756,11 @@ impl Mcp {
             },
             "code-facts-push" => {
                 let fact_kind = args.get("kind").and_then(|v| v.as_str()).unwrap_or("").to_owned();
-                let list: Vec<(String, String)> = Some(rows(args, "facts"))
+                let list: Vec<(String, String, String)> = Some(rows(args, "facts"))
                     .map(|l| l.iter().filter_map(|it| Some((
                         it.get("name")?.as_str()?.to_owned(),
                         it.get("detail").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
+                        it.get("place").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
                     ))).collect())
                     .unwrap_or_default();
                 // Пустая подача ЗАКОННА только с названным объёмом прочтения.
@@ -1812,12 +1813,12 @@ impl Mcp {
             "code-facts" => {
                 let client = match crate::db::conn(&self.pool).await { Ok(c) => c, Err(e) => return refusal(e.into()) };
                 match client
-                    .query("SELECT kind, name, detail FROM code_fact WHERE project_id = $1 ORDER BY kind, name", &[&p])
+                    .query("SELECT kind, name, detail, place FROM code_fact WHERE project_id = $1 ORDER BY kind, name, place", &[&p])
                     .await
                 {
                     Ok(rows) => ok(json!({ "count": rows.len(), "facts": rows.iter().map(|r| json!({
                         "kind": r.get::<_, String>(0), "name": r.get::<_, String>(1),
-                        "detail": r.get::<_, String>(2) })).collect::<Vec<_>>() })),
+                        "detail": r.get::<_, String>(2), "place": r.get::<_, String>(3) })).collect::<Vec<_>>() })),
                     Err(e) => refusal(e.into()),
                 }
             }

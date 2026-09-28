@@ -977,7 +977,7 @@ pub fn sense(door: &Door, only: Option<&str>, root: &str) -> Result<Value, Strin
                               "was": out["was"], "now": out["now"] }));
             continue;
         }
-        let mut names: Vec<(String, String)> = Vec::new();
+        let mut names: Vec<(String, String, String)> = Vec::new();
         let mut seen = std::collections::HashSet::new();
         let declared: Vec<String> = if how == "secret-fields" {
             files.iter().filter_map(|f| std::fs::read_to_string(f).ok()).flat_map(|t| declared_types(&t)).collect()
@@ -990,7 +990,7 @@ pub fn sense(door: &Door, only: Option<&str>, root: &str) -> Result<Value, Strin
                 // Дисковая сторона сверки: файл есть. Сравнит сервер — у него
                 // объявленная сторона лежит таблицей документа.
                 if seen.insert(short.clone()) {
-                    names.push((short.clone(), "есть на диске".to_owned()));
+                    names.push((short.clone(), "есть на диске".to_owned(), String::new()));
                 }
                 continue;
             }
@@ -1006,7 +1006,7 @@ pub fn sense(door: &Door, only: Option<&str>, root: &str) -> Result<Value, Strin
             if how == "file-matches" {
                 let hit = regex::Regex::new(re).ok().map(|r| r.is_match(&text)).unwrap_or(false);
                 if !re.is_empty() && hit && seen.insert(short.clone()) {
-                    names.push((short.clone(), spec["note"].as_str().unwrap_or("совпало").to_owned()));
+                    names.push((short.clone(), spec["note"].as_str().unwrap_or("совпало").to_owned(), String::new()));
                 }
                 continue;
             }
@@ -1032,7 +1032,7 @@ pub fn sense(door: &Door, only: Option<&str>, root: &str) -> Result<Value, Strin
                         // рвётся посреди буквы, и обрезка по длине валит датчик
                         // целиком — паникой, а не отказом.
                         let body: String = line.trim().chars().take(200).collect();
-                        names.push((key, body));
+                        names.push((key, body, String::new()));
                     }
                 }
                 continue;
@@ -1043,7 +1043,7 @@ pub fn sense(door: &Door, only: Option<&str>, root: &str) -> Result<Value, Strin
                     // разными типами, и одно исключение сняло бы оба разом.
                     let key = format!("{short}#{decl}.{field}");
                     if seen.insert(key.clone()) {
-                        names.push((key, format!("голым под derive(Debug), тип {ty}")));
+                        names.push((key, format!("голым под derive(Debug), тип {ty}"), String::new()));
                     }
                 }
                 continue;
@@ -1051,21 +1051,15 @@ pub fn sense(door: &Door, only: Option<&str>, root: &str) -> Result<Value, Strin
             if re.trim().is_empty() {
                 // Пустой образец — факт о самом файле: `.sqlx` снят или нет.
                 if seen.insert(short.clone()) {
-                    names.push((short.clone(), format!("есть в {reads}")));
+                    names.push((short.clone(), format!("есть в {reads}"), String::new()));
                 }
                 continue;
             }
             let Ok(rx) = regex::Regex::new(re) else { continue };
-            for c in rx.captures_iter(&text) {
-                let name = c.get(1).or_else(|| c.get(0)).map(|m| m.as_str().to_owned());
-                let Some(name) = name else { continue };
-                if seen.insert(name.clone()) {
-                    names.push((name, format!("названо в {short}")));
-                }
-            }
+            names.extend(named_in(&rx, &short, &text));
         }
         let facts: Vec<Value> = names.iter()
-            .map(|(n, note)| json!({ "name": n, "detail": note }))
+            .map(|(n, note, place)| json!({ "name": n, "detail": note, "place": place }))
             .collect();
         let read_n = files.len();
         let out = push_facts(door, fact, &facts, &head, dirty, read_n)?;
@@ -1150,6 +1144,22 @@ fn imported_types(text: &str) -> Vec<String> {
                 })
                 .collect::<Vec<String>>()
         })
+        .collect()
+}
+
+/// Имена, найденные образцом в одном файле: факт на пару (имя, файл).
+///
+/// Ключом было одно имя на весь съём. Отпечаток `76528515` стоял в трёх файлах
+/// tot-ade, а факт был один — «названо в» первом из них, и пункт
+/// `translations:section-match-source` называл протухший перевод в одном файле
+/// из трёх: переснявший названное получал следующую порцию вместо зелёного
+/// (undassa/mh#121, #66).
+fn named_in(rx: &regex::Regex, short: &str, text: &str) -> Vec<(String, String, String)> {
+    let mut seen = std::collections::HashSet::new();
+    rx.captures_iter(text)
+        .filter_map(|c| c.get(1).or_else(|| c.get(0)).map(|m| m.as_str().to_owned()))
+        .filter(|name| seen.insert(name.clone()))
+        .map(|name| (name, format!("названо в {short}"), short.to_owned()))
         .collect()
 }
 
@@ -1896,6 +1906,23 @@ pub struct Keys {
         assert_eq!(got, vec![
             ("Target", "перечисление без множества CHECK (a.rs), значений 2"),
             ("Operator", "помечено x-stored-in: monitors.condition"),
+        ]);
+    }
+}
+
+#[cfg(test)]
+mod places {
+    use super::named_in;
+
+    /// Один отпечаток в двух файлах — два факта, каждый со своим местом.
+    #[test]
+    fn a_name_in_two_files_is_two_facts() {
+        let rx = regex::Regex::new(r"`([0-9a-f]{8})`").expect("образец");
+        let text = "// `76528515`\n// `76528515`\n";
+        let facts: Vec<_> = ["a.rs", "b.rs"].iter().flat_map(|f| named_in(&rx, f, text)).collect();
+        assert_eq!(facts, [
+            ("76528515".to_owned(), "названо в a.rs".to_owned(), "a.rs".to_owned()),
+            ("76528515".to_owned(), "названо в b.rs".to_owned(), "b.rs".to_owned()),
         ]);
     }
 }

@@ -1,7 +1,7 @@
 WITH RECURSIVE крейты AS (
   SELECT c.name AS крейт, m.name AS манифест
     FROM code_fact m JOIN code_fact c ON c.project_id = m.project_id AND c.kind = 'crate'
-         AND substring(c.detail from 'названо в (.*)$') = m.name
+         AND c.place = m.name
    WHERE m.project_id = $1 AND m.kind = 'crate-manifest'),
 рёбра AS (
   SELECT k.крейт AS от, substring(f.detail from '^\s*([a-z][a-z0-9_-]*)') AS к
