@@ -7110,7 +7110,7 @@ pub(crate) async fn authors(pool: &Pool, project: &str) -> Result<Value, crate::
     }))
 }
 
-/// Пускать ли этого человека и записать, что он приходил.
+/// Пускать ли этого человека и отметить, что он приходил.
 ///
 /// Один вызов на запрос, и он же ведёт след: отдельный «журнал входов» рядом с
 /// проверкой разошёлся бы с ней в первый же отказ.
@@ -7118,19 +7118,78 @@ pub(crate) async fn authors(pool: &Pool, project: &str) -> Result<Value, crate::
 ///
 /// Секрет ищется отпечатком: в базе его нет и быть не должно. Снятый ключ
 /// (`dropped_at`) не пускает — иначе «снять доступ» значило бы только надеяться.
-/// Отметка последнего входа ставится тем же запросом: «кто сюда ходит» — вопрос,
-/// на который обязан быть ответ и через неделю.
+/// Отметка последнего входа ложится в `VISITS`, а не в базу на пути запроса:
+/// почему — сказано там.
 pub(crate) async fn key_admits(pool: &Pool, secret: &str) -> Result<Option<(String, String)>, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
+    let sha = secret_sha(secret);
     let row = client
         .query_opt(
-            "UPDATE session_key SET last_seen = $2
-              WHERE secret_sha = $1 AND dropped_at IS NULL
-              RETURNING principal, session",
-            &[&secret_sha(secret), &now_ms()],
+            "SELECT principal, session FROM session_key
+              WHERE secret_sha = $1 AND dropped_at IS NULL",
+            &[&sha],
         )
         .await?;
+    if row.is_some() {
+        if let Ok(mut visits) = VISITS.lock() {
+            let at = visits.keys.entry(sha).or_insert(0);
+            *at = (*at).max(now_ms());
+        }
+    }
     Ok(row.map(|r| (r.get(0), r.get(1))))
+}
+
+/// Следы входа, копящиеся в памяти до круга сборщика (`watch::remember_visits`).
+///
+/// **Запись на каждый запрос уже была, и она делала страницу медленной.** Все
+/// запросы одного человека писали в ОДНУ строку `edge_seen` при
+/// `synchronous_commit = on`, и параллельные запросы страницы вставали к ней в
+/// очередь: в `pg_stat_activity` все ждали `Lock/transactionid` или `Lock/tuple`,
+/// одно — `IO/WALSync`. Страница из шести запросов отдавала последний ответ
+/// через 4–7 с при 0,2 с работы каждого обработчика.
+///
+/// Память здесь — буфер перед базой, а не хранилище: «кто сюда ходит» обязан
+/// отвечаться и через неделю, поэтому след ложится в `edge_seen` и
+/// `session_key.last_seen` раз в круг. Цена названа вслух: выкатка теряет
+/// неполный круг следа, а читатель видит его с опозданием до круга.
+pub(crate) struct Visits {
+    /// Человек → (первый вход, последний вход, пущен раз, отказано раз).
+    pub(crate) edge: std::collections::HashMap<String, (i64, i64, i64, i64)>,
+    /// Отпечаток ключа → последний вход.
+    pub(crate) keys: std::collections::HashMap<String, i64>,
+}
+
+static VISITS: std::sync::LazyLock<std::sync::Mutex<Visits>> = std::sync::LazyLock::new(|| {
+    std::sync::Mutex::new(Visits { edge: Default::default(), keys: Default::default() })
+});
+
+/// Снять накопленное и обнулить. Зовёт сборщик.
+pub(crate) fn take_visits() -> Visits {
+    match VISITS.lock() {
+        Ok(mut visits) => Visits {
+            edge: std::mem::take(&mut visits.edge),
+            keys: std::mem::take(&mut visits.keys),
+        },
+        Err(_) => Visits { edge: Default::default(), keys: Default::default() },
+    }
+}
+
+/// Вернуть снятое обратно: неудавшаяся запись не должна стирать след — тот же
+/// довод, что у `mcp::return_calls`. Первый вход берётся ранним, последний
+/// поздним, а счёт складывается: сложить времена значило бы соврать правдоподобно.
+pub(crate) fn return_visits(taken: Visits) {
+    let Ok(mut visits) = VISITS.lock() else { return };
+    for (who, (first, last, ok, no)) in taken.edge {
+        let seen = visits.edge.entry(who).or_insert((first, last, 0, 0));
+        seen.0 = seen.0.min(first);
+        seen.1 = seen.1.max(last);
+        seen.2 += ok;
+        seen.3 += no;
+    }
+    for (sha, at) in taken.keys {
+        let seen = visits.keys.entry(sha).or_insert(at);
+        *seen = (*seen).max(at);
+    }
 }
 
 /// Отпечаток секрета. Один способ на запись и на чтение: два разошлись бы молча,
@@ -7184,6 +7243,54 @@ mod keys {
     }
 }
 
+#[cfg(test)]
+mod visits {
+    /// Проверка входа только читает базу. Сторож по форме, потому что регресс
+    /// тут ровно один: кто-то вернёт запись следа «рядом с проверкой», и
+    /// параллельные запросы страницы снова встанут в очередь к одной строке
+    /// (замер: 4–7 с на страницу при 0,2 с на обработчик). Настоящую базу
+    /// юнит-тест не поднимает, а запись на пути запроса видна в тексте.
+    #[test]
+    fn the_request_path_does_not_write() {
+        let source = include_str!("projector.rs");
+        for name in ["key_admits", "edge_admits"] {
+            // Образец собирается здесь, чтобы поиск не нашёл этот самый тест.
+            let start = source.find(&format!("async fn {name}(")).expect("функция на месте");
+            let body = &source[start..start + source[start..].find("\n}\n").expect("конец функции")];
+            let code: String = body
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .to_lowercase();
+            // Фразами SQL, а не словами: `or_insert` на счёте в памяти — не запись.
+            for write in ["insert into", "update ", "delete from", ".execute("] {
+                assert!(!code.contains(write), "{name} пишет в базу ({write}): след входа — в VISITS");
+            }
+        }
+    }
+
+    /// Вернувшийся след складывается верно: счёт прибавляется, первый вход
+    /// берётся ранним, последний — поздним. Ошибка здесь незаметна: след
+    /// останется правдоподобным.
+    #[test]
+    fn a_returned_visit_adds_up() {
+        let who = "проверка-следа".to_owned();
+        let sha = "отпечаток-проверки".to_owned();
+        let visit = |f, l, o, n, at| super::Visits {
+            edge: [(who.clone(), (f, l, o, n))].into(),
+            keys: [(sha.clone(), at)].into(),
+        };
+        super::return_visits(visit(20, 30, 2, 1, 30));
+        super::return_visits(visit(10, 25, 3, 0, 25));
+        let taken = super::take_visits();
+        assert_eq!(taken.edge.get(&who), Some(&(10, 30, 5, 1)));
+        assert_eq!(taken.keys.get(&sha), Some(&30));
+        let again = super::take_visits();
+        assert!(!again.edge.contains_key(&who), "снятое обнуляется, иначе след ляжет дважды");
+    }
+}
+
 /// Снять ключ сессии: секрет перестаёт пускать, а строка остаётся.
 ///
 /// Строка остаётся НАРОЧНО: «кто ходил этим ключом и когда» — вопрос, который
@@ -7208,37 +7315,28 @@ fn getrandom(into: &mut [u8; 32]) {
         .expect("/dev/urandom: без случайности секрет не секрет");
 }
 
+/// Пускать ли человека, которого назвал край. Список допущенных пуст — пускают
+/// всех. След входа ложится в `VISITS`, а не в базу: почему — сказано там.
 pub(crate) async fn edge_admits(pool: &Pool, principal: &str) -> Result<bool, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
-    let declared: i64 = client
-        .query_one("SELECT count(*) FROM edge_principal", &[])
-        .await
-        ?
-        .get(0);
-    let allowed = if declared == 0 {
-        true
-    } else {
-        client
-            .query_one(
-                "SELECT count(*) FROM edge_principal WHERE principal = $1",
-                &[&principal],
-            )
-            .await
-            ?
-            .get::<_, i64>(0)
-            > 0
-    };
-    let now = now_ms();
-    let (ok, no): (i64, i64) = if allowed { (1, 0) } else { (0, 1) };
-    let _ = client
-        .execute(
-            "INSERT INTO edge_seen (principal, first_at, last_at, requests, refused)
-             VALUES ($1,$2,$2,$3,$4)
-             ON CONFLICT (principal) DO UPDATE SET last_at = EXCLUDED.last_at,
-               requests = edge_seen.requests + $3, refused = edge_seen.refused + $4",
-            &[&principal, &now, &ok, &no],
+    let allowed: bool = client
+        .query_one(
+            "SELECT NOT EXISTS (SELECT 1 FROM edge_principal)
+                 OR EXISTS (SELECT 1 FROM edge_principal WHERE principal = $1)",
+            &[&principal],
         )
-        .await;
+        .await?
+        .get(0);
+    let now = now_ms();
+    if let Ok(mut visits) = VISITS.lock() {
+        let seen = visits.edge.entry(principal.to_owned()).or_insert((now, now, 0, 0));
+        seen.1 = seen.1.max(now);
+        if allowed {
+            seen.2 += 1;
+        } else {
+            seen.3 += 1;
+        }
+    }
     Ok(allowed)
 }
 

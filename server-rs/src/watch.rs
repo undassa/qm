@@ -132,6 +132,7 @@ pub fn spawn(pool: Pool) {
             tokio::time::sleep(TICK).await;
             remember_strain(&pool).await;
             remember_door_calls(&pool).await;
+            remember_visits(&pool).await;
             if let Err(e) = crate::db::counting(round(&pool)).await {
                 // Пересчёт, упавший молча, — это доска, застывшая без объяснения.
                 tracing::warn!("пересчёт гейтов не прошёл: {}", e.says());
@@ -187,6 +188,60 @@ async fn remember_door_calls(pool: &Pool) {
     }
     if !lost.is_empty() {
         crate::mcp::return_calls(lost);
+    }
+}
+
+/// Положить накопленные следы входа в базу (`projector::VISITS`).
+///
+/// ОДНИМ ОПЕРАТОРОМ на обе таблицы: он либо лёг весь, либо не лёг вовсе, и
+/// тогда вернуть в память можно всё снятое, не гадая, какая половина записана.
+/// Прибавки, `least` и `greatest` вместо присваивания — потому что сервер
+/// бывает не один (сине-зелёная выкатка), и каждый несёт свою долю счёта.
+async fn remember_visits(pool: &Pool) {
+    let taken = crate::projector::take_visits();
+    if taken.edge.is_empty() && taken.keys.is_empty() {
+        return;
+    }
+    let Ok(client) = crate::db::conn(pool).await else {
+        crate::projector::return_visits(taken);
+        return;
+    };
+    // Строки берутся В ОДНОМ ПОРЯДКЕ на любом сервере: при сине-зелёной выкатке
+    // два сервера сбрасывают пересекающиеся имена, и обход `HashMap` в разном
+    // порядке давал бы взаимную блокировку — postgres снял бы один из сбросов.
+    let mut keys: Vec<_> = taken.keys.iter().collect();
+    keys.sort();
+    let (shas, seen_at): (Vec<&String>, Vec<i64>) = keys.into_iter().map(|(k, at)| (k, *at)).unzip();
+    let mut edge: Vec<_> = taken.edge.iter().collect();
+    edge.sort_by(|a, b| a.0.cmp(b.0));
+    let mut who = Vec::new();
+    let (mut first, mut last, mut ok, mut no) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for (p, (f, l, o, n)) in edge {
+        who.push(p);
+        first.push(*f);
+        last.push(*l);
+        ok.push(*o);
+        no.push(*n);
+    }
+    if let Err(e) = client
+        .execute(
+            "WITH k AS (
+               UPDATE session_key s SET last_seen = greatest(coalesce(s.last_seen, 0), u.at)
+                 FROM unnest($1::text[], $2::bigint[]) AS u(sha, at)
+                WHERE s.secret_sha = u.sha)
+             INSERT INTO edge_seen (principal, first_at, last_at, requests, refused)
+             SELECT * FROM unnest($3::text[], $4::bigint[], $5::bigint[], $6::bigint[], $7::bigint[])
+             ON CONFLICT (principal) DO UPDATE SET
+               first_at = least(edge_seen.first_at, EXCLUDED.first_at),
+               last_at = greatest(edge_seen.last_at, EXCLUDED.last_at),
+               requests = edge_seen.requests + EXCLUDED.requests,
+               refused = edge_seen.refused + EXCLUDED.refused",
+            &[&shas, &seen_at, &who, &first, &last, &ok, &no],
+        )
+        .await
+    {
+        tracing::warn!("след входа не записан: {}", e.says());
+        crate::projector::return_visits(taken);
     }
 }
 
