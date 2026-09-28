@@ -346,7 +346,7 @@ impl Mcp {
         tools.push(json!({ "name": "put", "description": "записать сущность целиком; expectedRevision бережёт от потери чужой правки",
             "inputSchema": { "type": "object", "properties": { "deferProjection": json!({"type":"boolean","description":"не пересобирать проекции сейчас; позвать `reproject` после серии правок"}), "kind": s("вид"), "id": s("имя"), "content": s("текст целиком"), "expectedRevision": json!({"type":"integer"}),
                 "create": json!({"type":"boolean","description":"завести, если сущности ещё нет; без этого `put` только правит"}) }, "required": ["kind", "content"] } }));
-        tools.push(json!({ "name": "put-section", "description": "заменить один раздел сущности; проекции пересобираются в этом же вызове",
+        tools.push(json!({ "name": "put-section", "description": "заменить один раздел сущности вместе с подразделами (тело — как отдаёт `section`); тело без какого-то подраздела отказано; проекции пересобираются в этом же вызове",
             "inputSchema": { "type": "object", "properties": { "deferProjection": json!({"type":"boolean","description":"не пересобирать проекции сейчас; позвать `reproject` после серии правок"}), "kind": s("вид"), "id": s("имя"), "anchor": s("якорь"), "body": s("новое тело раздела"), "expectedRevision": json!({"type":"integer"}) }, "required": ["kind", "anchor", "body"] } }));
         tools.push(json!({ "name": "rm", "description": "удалить сущность",
             "inputSchema": { "type": "object", "properties": { "deferProjection": json!({"type":"boolean","description":"не пересобирать проекции сейчас; позвать `reproject` после серии правок"}), "kind": s("вид"), "id": s("имя") }, "required": ["kind"] } }));
@@ -3362,7 +3362,7 @@ impl Mcp {
                 }
             }
         }
-        if matches!(status.as_str(), "conflict" | "not_found" | "no_such_section" | "invalid_path") {
+        if matches!(status.as_str(), "conflict" | "not_found" | "no_such_section" | "drops_sections" | "invalid_path") {
             return json!({ "content": [{ "type": "text", "text": v.to_string() }], "isError": true });
         }
         ok(v)

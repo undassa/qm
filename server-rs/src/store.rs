@@ -243,8 +243,7 @@ pub(crate) struct SectionEdit<'a> {
     pub body: &'a str,
 }
 
-/// Заменить один раздел: голова до его первого блока, новое тело, хвост после
-/// последнего. Границы — те же блоки, которыми раздел читают.
+/// Заменить один раздел документа вместе с его подразделами.
 pub(crate) async fn put_section(pool: &Pool, project: &str, fields: SectionEdit<'_>, author: &str, expected_revision: Option<i64>, now_ms: i64) -> Result<Value, crate::db::Fail> {
     let SectionEdit { kind, name, anchor, body } = fields;
     let client = crate::db::conn(pool).await?;
@@ -264,20 +263,64 @@ pub(crate) async fn put_section(pool: &Pool, project: &str, fields: SectionEdit<
         }));
     };
     let content: String = row.get(0);
-    let structure = parse_document(&content);
+    drop(client);
+    match splice_section(&content, anchor, body) {
+        Splice::NoSection => Ok(json!({ "status": "no_such_section" })),
+        Splice::Drops(dropped) => Ok(json!({
+            "status": "drops_sections",
+            "dropped": dropped,
+            "why": format!(
+                "раздел «{anchor}» заменяется вместе с подразделами, а в новом теле нет {} из них: {}. \
+                 Возьмите тело дверью `section` и правьте его целиком, правьте подразделы порознь \
+                 или, чтобы убрать подраздел, запишите документ целиком через `put`.",
+                dropped.len(), dropped.join(", ")),
+        })),
+        Splice::Done(next) => put(pool, project, Document { kind, name, content: &next }, author, expected_revision, now_ms).await,
+    }
+}
+
+/// Чем кончилась подстановка раздела в документ.
+enum Splice {
+    Done(String),
+    NoSection,
+    /// Якоря подразделов, которых в новом теле нет.
+    Drops(Vec<String>),
+}
+
+/// Тело раздела заменяет и его подразделы: границы те же, какими раздел читает
+/// дверь `section`, и прочитанное ею тело ложится обратно без потерь.
+///
+/// Тело, в котором подраздела нет, отказано. `put-section` по шапке
+/// `# Указатель вопросов` с телом до первого `## ` снёс три подраздела и таблицу
+/// на 171 вопрос, а ответ был тем же «записано» (undassa/mh#123). Убрать
+/// подраздел можно записью документа целиком — там потерю видит сам пишущий.
+fn splice_section(content: &str, anchor: &str, body: &str) -> Splice {
+    let structure = parse_document(content);
     let Some(section) = structure.sections.iter().find(|s| s.anchor == anchor) else {
-        return Ok(json!({ "status": "no_such_section" }));
+        return Splice::NoSection;
     };
+    let normalized = if body.is_empty() || body.ends_with('\n') { body.to_owned() } else { format!("{body}\n") };
+    // Счёт, а не множество: два подраздела с одним заголовком («### Решение» под
+    // двумя вопросами) — тело с одним из них теряет второй.
+    let mut kept: Vec<String> = parse_document(&normalized).sections.into_iter().map(|s| s.anchor).collect();
+    let dropped: Vec<String> = structure.sections.iter()
+        .filter(|s| s.ord > section.first_block && s.ord <= section.last_block)
+        .filter(|s| match kept.iter().position(|k| *k == s.anchor) {
+            Some(i) => { kept.swap_remove(i); false }
+            None => true,
+        })
+        .map(|s| s.anchor.clone())
+        .collect();
+    if !dropped.is_empty() {
+        return Splice::Drops(dropped);
+    }
     let head: Vec<Block> = structure.blocks.iter().filter(|b| b.ord <= section.first_block).cloned().collect();
     let tail: Vec<Block> = structure.blocks.iter().filter(|b| b.ord > section.last_block).cloned().collect();
-    let normalized = if body.is_empty() || body.ends_with('\n') { body.to_owned() } else { format!("{body}\n") };
-    let next = format!(
+    Splice::Done(format!(
         "{}{normalized}{}",
         crate::parse::render_document(&head),
         crate::parse::render_document(&tail)
-    );
-    drop(client);
-    put(pool, project, Document { kind, name, content: &next }, author, expected_revision, now_ms).await
+    ))
 }
 
 /// Удалить документ вместе с его разбором.
@@ -515,4 +558,48 @@ async fn write_structure(
         .await?;
     }
     Ok(crate::parse::ragged_rows(&s.cells))
+}
+
+#[cfg(test)]
+mod splice_tests {
+    use super::{splice_section, Splice};
+
+    const DOC: &str = "# Указатель\n\nОткрытых: 38\n\n## Открытые\n\nq1\n\n## Закрытые\n\nq2\n";
+
+    /// Случай undassa/mh#123: тело шапки без подразделов снесло бы их молча.
+    #[test]
+    fn a_body_without_the_subsections_is_refused() {
+        match splice_section(DOC, "указатель", "\nОткрытых: 39\n\n") {
+            Splice::Drops(d) => assert_eq!(d, ["открытые", "закрытые"]),
+            Splice::Done(next) => panic!("тело без подразделов принято: {next:?}"),
+            Splice::NoSection => panic!("раздел не найден"),
+        }
+    }
+
+    /// Тело, прочитанное дверью `section` и поправленное, ложится на место.
+    #[test]
+    fn a_body_with_the_subsections_replaces_the_section() {
+        match splice_section(DOC, "указатель", "\nОткрытых: 39\n\n## Открытые\n\nq1\n\n## Закрытые\n\nq2\n") {
+            Splice::Done(next) => assert_eq!(next, DOC.replace("38", "39")),
+            _ => panic!("тело с подразделами отказано"),
+        }
+    }
+
+    #[test]
+    fn a_leaf_section_is_replaced_alone() {
+        match splice_section(DOC, "открытые", "\nq1, q3\n\n") {
+            Splice::Done(next) => assert_eq!(next, DOC.replace("q1\n", "q1, q3\n")),
+            _ => panic!("лист отказан"),
+        }
+    }
+
+    /// Два подраздела с одним заголовком: тело, сохранившее один, теряет второй.
+    #[test]
+    fn a_repeated_subsection_is_counted() {
+        let doc = "# Вопросы\n\n## Q-1\n\n### Решение\n\nа\n\n## Q-2\n\n### Решение\n\nб\n";
+        match splice_section(doc, "вопросы", "\n## Q-1\n\n### Решение\n\nа\n\n## Q-2\n\nб\n") {
+            Splice::Drops(d) => assert_eq!(d, ["решение"]),
+            _ => panic!("потеря второго «Решения» принята"),
+        }
+    }
 }

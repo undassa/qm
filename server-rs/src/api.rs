@@ -70,6 +70,8 @@ pub(crate) enum Failure {
     Unprojected(String),
     NotFound,
     NoSuchSection,
+    /// Новое тело раздела потеряло бы подразделы; строка говорит, какие.
+    DropsSections(String),
     /// Документ успели поправить: писавший видел не ту правку, что лежит сейчас.
     Conflict,
     InvalidPath,
@@ -104,6 +106,7 @@ impl IntoResponse for Failure {
             // «Нет такого раздела» — не «нет такого документа»: по первому идут
             // проверять якорь, по второму — путь.
             Failure::NoSuchSection => (StatusCode::NOT_FOUND, "no_such_section", String::new()),
+            Failure::DropsSections(why) => (StatusCode::CONFLICT, "drops_sections", why),
             Failure::Conflict => (
                 StatusCode::CONFLICT,
                 "conflict",
@@ -360,6 +363,8 @@ fn writer_answer(out: serde_json::Value) -> Result<Json<serde_json::Value>, Fail
         Some("conflict") => Err(Failure::Conflict),
         Some("not_found") => Err(Failure::NotFound),
         Some("no_such_section") => Err(Failure::NoSuchSection),
+        Some("drops_sections") => Err(Failure::DropsSections(
+            out.get("why").and_then(|w| w.as_str()).unwrap_or_default().to_owned())),
         Some("invalid_path") => Err(Failure::InvalidPath),
         _ => match out.get("error").and_then(|e| e.as_str()) {
             Some(e) => Err(Failure::Upstream(e.to_owned())),
