@@ -1,4 +1,9 @@
-SELECT d.task_id || ' → ' || d.depends_on || ': такой задачи нет' AS detail FROM project_plan_task_deps d WHERE d.project_id = $1 AND NOT EXISTS (SELECT 1 FROM project_plan_tasks t WHERE t.project_id = d.project_id AND t.id = d.depends_on) UNION ALL SELECT d.task_id || ' → ' || d.depends_on || ': зависит от более поздней' FROM project_plan_task_deps d JOIN project_plan_tasks a ON a.project_id = d.project_id AND a.id = d.task_id JOIN project_plan_tasks b ON b.project_id = d.project_id AND b.id = d.depends_on WHERE d.project_id = $1 AND a.milestone_id = b.milestone_id AND b.number > a.number
+SELECT d.task_id || ' → ' || d.depends_on || ': такой задачи нет' AS detail FROM project_plan_task_deps d WHERE d.project_id = $1 AND NOT EXISTS (SELECT 1 FROM project_plan_tasks t WHERE t.project_id = d.project_id AND t.id = d.depends_on)
+   -- НОМЕРА ЗАДАЧ ВНУТРИ ВЕХИ НЕ СРАВНИВАЮТСЯ. Номер — порядок заведения, а
+   -- не исполнения: при плотной нумерации `M5` задача, решённая позже плана
+   -- (`M5-T94`, нужная `M5-T88`), получала только больший номер, и её
+   -- зависимость краснела без выхода (undassa/mh#124). Невыполнимый порядок
+   -- внутри вехи — это круг, а его ловит последнее слагаемое.
 UNION ALL
 SELECT d.task_id || ' → ' || d.depends_on || ': зависит от задачи более поздней вехи ' || mb.id
   FROM project_plan_task_deps d

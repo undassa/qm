@@ -1,1 +1,1 @@
-INSERT INTO project_plan_task_deps(project_id, task_id, depends_on) SELECT $1, min(id), 'M9-T99' FROM project_plan_tasks WHERE project_id=$1
+WITH пара AS (SELECT min(id) AS a, max(id) AS b FROM project_plan_tasks WHERE project_id = $1::text GROUP BY milestone_id HAVING count(*) > 1 ORDER BY milestone_id LIMIT 1) INSERT INTO project_plan_task_deps(project_id, task_id, depends_on) SELECT $1::text, a, b FROM пара UNION ALL SELECT $1::text, b, a FROM пара ON CONFLICT DO NOTHING

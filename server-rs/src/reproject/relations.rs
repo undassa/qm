@@ -266,21 +266,6 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<usize, crate::
         }
     }
 
-    // Номер задачи внутри этапа: разбирается ЗДЕСЬ, один раз.
-    let numbered = client
-        .query("SELECT id FROM project_plan_tasks WHERE project_id = $1", &[&project])
-        .await?;
-    let num_re = Lazy::new(|| Regex::new(r"T([0-9]+)").expect("образец номера"));
-    let mut numbers: Vec<(String, i32)> = Vec::new();
-    for r in &numbered {
-        let id: String = r.get(0);
-        if let Some(c) = num_re.captures(&id) {
-            if let Ok(n) = c[1].parse::<i32>() {
-                numbers.push((id, n));
-            }
-        }
-    }
-
     // Описанное вперёд: путь листа или любой его предок объявлен документом
     // дерева как отсутствующий. Сравнение предков — работа проекции: запрос
     // соединяет колонку равенством и о путях ничего не знает.
@@ -441,10 +426,6 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<usize, crate::
         tx.execute("UPDATE project_task_tree_leaf SET forward_declared = true
                      WHERE project_id = $1 AND task_id = $2 AND ord = $3",
                    &[&project, task, ord]).await?;
-    }
-    for (id, n) in &numbers {
-        tx.execute("UPDATE project_plan_tasks SET number = $3 WHERE project_id = $1 AND id = $2",
-                   &[&project, id, n]).await?;
     }
     for (task, parent) in &parent_of {
         tx.execute("UPDATE project_plan_tasks SET parent_task_id = $3

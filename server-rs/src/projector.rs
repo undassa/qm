@@ -3263,10 +3263,9 @@ ALTER TABLE project_screen_requirements ADD COLUMN IF NOT EXISTS origin text NOT
 ALTER TABLE project_plan_tasks ADD COLUMN IF NOT EXISTS parent_task_id text NOT NULL DEFAULT '';
 -- Каталог, куда ляжет лист: разбор пути — дело проекции, а не запроса.
 ALTER TABLE project_task_tree_leaf ADD COLUMN IF NOT EXISTS target_dir text NOT NULL DEFAULT '';
--- Порядок задачи внутри этапа — её НОМЕР, а не место в алфавите: `ord` ставит
--- `T10` вторым, до `T9`, и правило «зависит от более поздней» врёт на каждой
--- второй паре. Номер ставится проекцией один раз, запрос сравнивает числа.
-ALTER TABLE project_plan_tasks ADD COLUMN IF NOT EXISTS number integer NOT NULL DEFAULT 0;
+-- Номер задачи внутри вехи не читает ни один пункт: порядок внутри вехи судит
+-- круг зависимостей, а не сравнение номеров (undassa/mh#124).
+ALTER TABLE project_plan_tasks DROP COLUMN IF EXISTS number;
 -- «Описано вперёд»: каталог назван документом дерева как отсутствующий, и
 -- задача вправе класть туда код — она его и заведёт. Считается по ПРЕДКУ:
 -- объявлено `mobile`, значит и `mobile/src/offline` описан вперёд.
@@ -3571,7 +3570,7 @@ CREATE OR REPLACE VIEW entity_row AS
  UNION ALL SELECT project_id, 'story', id, entity_kind, entity_name, NULL::integer,
               (to_jsonb(t.*) - 'project_id' - 'origin' - 'entity_kind' - 'entity_name')::text, t.origin FROM project_stories t
  UNION ALL SELECT project_id, 'task', id, entity_kind, entity_name, NULL::integer,
-              (to_jsonb(p.*) - 'project_id' - 'origin' - 'entity_kind' - 'entity_name' - 'ord' - 'number' - 'preflight' - 'preflight_at' - 'preflight_revision' - 'preflight_findings' - 'preflight_fresh')::text, p.origin FROM project_plan_tasks p
+              (to_jsonb(p.*) - 'project_id' - 'origin' - 'entity_kind' - 'entity_name' - 'ord' - 'preflight' - 'preflight_at' - 'preflight_revision' - 'preflight_findings' - 'preflight_fresh')::text, p.origin FROM project_plan_tasks p
  UNION ALL SELECT project_id, 'milestone', id, entity_kind, entity_name, NULL::integer,
               (to_jsonb(m.*) - 'project_id' - 'origin' - 'entity_kind' - 'entity_name' - 'ord')::text, m.origin FROM project_plan_milestones m
  UNION ALL SELECT project_id, 'question', id, entity_kind, entity_name, NULL::integer,

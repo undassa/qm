@@ -957,3 +957,50 @@ mod fresh {
             .expect("схема снимается");
     }
 }
+
+/// `G2 · task-dependency-points-back` на двух задачах одной вехи: зависимость от
+/// задачи с бо́льшим номером — не находка, круг из них — находка.
+///
+/// Случай undassa/mh#124: `M5-T88` ждёт `M5-T94`, заведённую позже, и пункт
+/// краснел, хотя порядок исполним.
+#[cfg(test)]
+mod dependency_order {
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn a_later_numbered_dependency_passes_and_a_ring_does_not() {
+        let url = std::env::var("MH_TEST_DB_URL").expect("MH_TEST_DB_URL: адрес пустой базы");
+        let apart = format!("{}{}", if url.contains('?') { '&' } else { '?' },
+                            "options=-c%20search_path%3Ddeporder");
+        let pool = crate::db::pool(&format!("{url}{apart}"), 1).expect("пул тестовой базы");
+        pool.get().await.expect("соединение")
+            .batch_execute("DROP SCHEMA IF EXISTS deporder CASCADE; CREATE SCHEMA deporder;")
+            .await
+            .expect("своя схема заводится");
+        crate::projector::ensure(&pool).await.expect("схема встаёт");
+        let client = pool.get().await.expect("соединение");
+        client
+            .batch_execute(
+                "INSERT INTO project_plan_versions (project_id, id) VALUES ('p', 'v1');
+                 INSERT INTO project_plan_milestones (project_id, id, version_id, ord, title)
+                      VALUES ('p', 'M5', 'v1', 5, '');
+                 INSERT INTO project_plan_tasks (project_id, id, milestone_id, ord, title, size, state)
+                      VALUES ('p', 'M5-T88', 'M5', 88, '', 'S', 'not_started'),
+                             ('p', 'M5-T94', 'M5', 94, '', 'S', 'not_started');
+                 INSERT INTO project_plan_task_deps (project_id, task_id, depends_on)
+                      VALUES ('p', 'M5-T88', 'M5-T94');",
+            )
+            .await
+            .expect("план заводится");
+        let rule = include_str!("../../instrument/gate/G2/task-dependency-points-back.sql");
+        let found = |rows: Vec<tokio_postgres::Row>| rows.iter().map(|r| r.get::<_, String>(0)).collect::<Vec<_>>();
+        let forward = found(client.query(rule, &[&"p"]).await.expect("пункт исполняется"));
+        assert!(forward.is_empty(), "зависимость от задачи с бо́льшим номером названа: {forward:?}");
+        client
+            .batch_execute("INSERT INTO project_plan_task_deps (project_id, task_id, depends_on) VALUES ('p', 'M5-T94', 'M5-T88')")
+            .await
+            .expect("круг заводится");
+        let ring = found(client.query(rule, &[&"p"]).await.expect("пункт исполняется"));
+        assert!(ring.iter().any(|d| d.contains("по кругу")), "круг не назван: {ring:?}");
+        client.batch_execute("DROP SCHEMA IF EXISTS deporder CASCADE").await.expect("схема снимается");
+    }
+}
