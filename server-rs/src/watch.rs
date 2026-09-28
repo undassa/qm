@@ -15,6 +15,7 @@
 //! свежего наполовину.
 
 use crate::db::Says;
+use serde_json::json;
 use deadpool_postgres::Pool;
 
 /// Как часто заглядывать в отметку. Две секунды — это задержка между правкой и
@@ -113,6 +114,156 @@ pub(crate) async fn mark(
             &[&project, &crate::projector::now_ms(), &reason],
         )
         .await.map_err(Into::into)
+}
+
+/// Время по часам БАЗЫ, в миллисекундах. Аренду пишут и читают разные
+/// процессы — сервер, `mh-server mcp`, подкоманды, — и сравнивать срок одного
+/// с началом круга другого по их собственным часам значило бы доверить
+/// порядок событий расхождению часов.
+const DB_MS: &str = "(extract(epoch from clock_timestamp()) * 1000)::bigint";
+
+/// Срок аренды пересборки и шаг, которым её продлевает идущая пересборка.
+///
+/// ponytail: потолок назван. Процесс, убитый посреди пересборки, откладывает
+/// замеры набора до `REBUILD_LEASE_MS` (30 с): гейт всё это время стоит на
+/// прошлом честном замере. База, не отвечавшая дольше срока, даёт замеру пройти
+/// посреди живой пересборки. Срок короткий и продлевается, потому что длинный
+/// без продления держал бы замеры после любого оборванного запроса.
+#[cfg(not(test))]
+const REBUILD_LEASE_MS: i64 = 30_000;
+#[cfg(not(test))]
+const REBUILD_BEAT: std::time::Duration = std::time::Duration::from_secs(10);
+// Под тестом срок короткий: продление иначе не проверить за разумное время.
+#[cfg(test)]
+const REBUILD_LEASE_MS: i64 = 1_500;
+#[cfg(test)]
+const REBUILD_BEAT: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Право писать проекции. Выдаёт его только `rebuilding`, а пишущие проекции
+/// функции — `reproject::reproject`, `projector::rebuild_before`,
+/// `projector::rebuild`, `store::reparse_all` — без него не зовутся: «каждый
+/// писатель берёт аренду» держит компилятор, а не обещание: писатель, забывший
+/// аренду, не соберётся.
+///
+/// Право отдаётся заимствованием и не копируется: сохранённое в сторону, оно
+/// пережило бы аренду и открыло бы запись без неё.
+pub struct Lease(());
+
+/// Взятая аренда. Снимается и тогда, когда пересборку бросили на полпути:
+/// оборванный клиентом запрос роняет будущее, и без снятия при сбросе аренда
+/// жила бы до конца срока, откладывая все замеры набора.
+struct Held {
+    id: i64,
+    pool: Pool,
+    beat: tokio::task::JoinHandle<()>,
+    released: bool,
+}
+
+/// Продлить аренду. Снятую не трогает: продление, пришедшее позже снятия
+/// (задача продления оборвана посреди запроса), оживило бы её навсегда.
+async fn renew(pool: &Pool, id: i64) -> Result<(), crate::db::Fail> {
+    crate::db::conn(pool)
+        .await?
+        .execute(
+            &format!("UPDATE projection_rebuild SET until = {DB_MS} + $2 WHERE id = $1 AND NOT ended"),
+            &[&id, &REBUILD_LEASE_MS],
+        )
+        .await?;
+    Ok(())
+}
+
+async fn release(pool: &Pool, id: i64) -> Result<(), crate::db::Fail> {
+    crate::db::conn(pool)
+        .await?
+        .execute(&format!("UPDATE projection_rebuild SET until = {DB_MS}, ended = true WHERE id = $1"), &[&id])
+        .await?;
+    Ok(())
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.beat.abort();
+        if self.released {
+            return;
+        }
+        let (pool, id) = (self.pool.clone(), self.id);
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            rt.spawn(async move {
+                if let Err(e) = release(&pool, id).await {
+                    tracing::warn!("брошенная пересборка: аренда {id} не снята, истечёт сама: {}", e.says());
+                }
+            });
+        }
+    }
+}
+
+/// Пересобрать проекции набора под арендой: пока `work` идёт, замер этого
+/// набора не сохраняется (`rebuilt_since`).
+pub async fn rebuilding<T, E>(pool: &Pool, project: &str, work: impl AsyncFnOnce(&Lease) -> Result<T, E>) -> Result<T, E>
+where
+    E: From<crate::db::Fail>,
+{
+    let id: i64 = {
+        let client = crate::db::conn(pool).await?;
+        client
+            // Строки живут, пока их может спросить круг замера, — с запасом.
+            .execute(&format!("DELETE FROM projection_rebuild WHERE until < {DB_MS} - 600000"), &[])
+            .await
+            .map_err(crate::db::Fail::from)?;
+        client
+            .query_one(
+                &format!("INSERT INTO projection_rebuild (project_id, until) VALUES ($1, {DB_MS} + $2) RETURNING id"),
+                &[&project, &REBUILD_LEASE_MS],
+            )
+            .await
+            .map_err(crate::db::Fail::from)?
+            .get(0)
+    };
+    let beat = {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(REBUILD_BEAT).await;
+                if let Err(e) = renew(&pool, id).await {
+                    tracing::warn!("аренда пересборки {id} не продлена: {}", e.says());
+                }
+            }
+        })
+    };
+    let mut held = Held { id, pool: pool.clone(), beat, released: false };
+    let out = work(&Lease(())).await;
+    held.beat.abort();
+    // Снятие ЖДЁТСЯ, а не отдаётся сбросу: замер, который тот же путь зовёт
+    // следом, иначе застал бы собственную аренду и отложил бы сам себя.
+    // Неудача не роняет пересборку: она уже сделана, а аренда истечёт сама.
+    if let Err(e) = release(pool, id).await {
+        tracing::warn!("аренда пересборки набора {project} не снята, истечёт сама: {}", e.says());
+    }
+    held.released = true;
+    out
+}
+
+/// Время по часам базы — начало круга замера для `rebuilt_since`.
+pub(crate) async fn db_now(client: &impl deadpool_postgres::GenericClient) -> Result<i64, crate::db::Fail> {
+    Ok(client.query_one(&format!("SELECT {DB_MS}"), &[]).await?.get(0))
+}
+
+/// Шла ли пересборка набора хоть миг позже `since` (по часам базы).
+///
+/// Спрашивается «позже», а не «идёт ли сейчас»: пересборка, начавшаяся и
+/// кончившаяся посреди круга замера, успела переписать то, что круг уже прочёл.
+pub(crate) async fn rebuilt_since(
+    client: &impl deadpool_postgres::GenericClient,
+    project: &str,
+    since: i64,
+) -> Result<bool, crate::db::Fail> {
+    Ok(client
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM projection_rebuild WHERE project_id = $1 AND until > $2)",
+            &[&project, &since],
+        )
+        .await?
+        .get(0))
 }
 
 /// Работник: смотрит отметку и, если набор менялся, пересчитывает.
@@ -335,11 +486,12 @@ async fn round(pool: &Pool) -> Result<(), crate::db::Fail> {
         // всякого замка: `plan` брала второе соединение, не отпустив первого с
         // открытой транзакцией. Оно убрано — читает та же транзакция.
         //
-        // Правильная форма — не замок сессии, а аренда с концом: отметка в
-        // `gate_dirty` со сроком, которую переживает падение и которая сама
-        // истекает. Она же нужна и тем, кто пишет проекции мимо сборщика:
-        // `finish_write` делает это на КАЖДУЮ правку документа. Пока её нет,
-        // гонка остаётся — названной, а не прикрытой.
+        // Поэтому не замок сессии, а аренда с концом — `rebuilding`: строка со
+        // сроком, которую переживает падение и которая сама истекает. Её берёт
+        // и всякий, кто пишет проекции мимо сборщика, — `finish_write` делает
+        // это на КАЖДУЮ правку документа. Гонку пересборки с замером она не
+        // запрещает, а обезвреживает: замер, заставший пересборку, не
+        // сохраняется и оставляет набор помеченным к пересчёту.
         let measured = {
             let (pool, project) = (pool.clone(), project.clone());
             match tokio::spawn(async move { crate::db::counting(recount(&pool, &project)).await }).await {
@@ -387,6 +539,9 @@ async fn round(pool: &Pool) -> Result<(), crate::db::Fail> {
         }
         drop(client);
         match measured {
+            Ok(out) if out.get("deferred").is_some() => {
+                tracing::info!("замер набора {project} отложен: шла пересборка проекций, {spent} мс")
+            }
             Ok(out) => tracing::info!(
                 "гейты пересчитаны: проект {project}, повод «{reason}», пунктов {}, провалено {}, {spent} мс",
                 out["measured"], out["failed"]
@@ -432,9 +587,12 @@ async fn forget_abandoned_tryons(pool: &Pool) {
 }
 
 pub(crate) async fn recount(pool: &Pool, project: &str) -> Result<serde_json::Value, crate::db::Fail> {
-    crate::reproject::reproject(pool, project).await?;
-    crate::projector::rebuild_before(pool, project).await?;
-    crate::projector::rebuild(pool, project).await?;
+    rebuilding(pool, project, async |lease| {
+        crate::reproject::reproject(pool, project, lease).await?;
+        crate::projector::rebuild_before(pool, project, lease).await?;
+        crate::projector::rebuild(pool, project, lease).await
+    })
+    .await?;
     measure(pool, project).await
 }
 
@@ -450,8 +608,204 @@ pub(crate) async fn recount(pool: &Pool, project: &str) -> Result<serde_json::Va
 /// Закрытия задач судятся вокруг замера гейтов: взятые до него — по фазе, какой
 /// он её оставил.
 pub(crate) async fn measure(pool: &Pool, project: &str) -> Result<serde_json::Value, crate::db::Fail> {
-    let out = crate::projector::measure_gates(pool, project).await?;
-    crate::projector::measure_process(pool, project, "godzy", "godzy").await?;
-    crate::projector::measure_phases(pool, project).await?;
+    // Начало круга — ДО первого чтения и по часам базы: каждая из трёх записей
+    // ниже откладывается, если пересборка шла хоть миг после него.
+    let since = db_now(&*crate::db::conn(pool).await?).await?;
+    let out = crate::projector::measure_gates(pool, project, since).await?;
+    let mut deferred = out.get("deferred").is_some();
+    if !deferred {
+        deferred = crate::projector::measure_process(pool, project, "godzy", "godzy", since).await?
+            .get("deferred").is_some();
+    }
+    if !deferred {
+        deferred = crate::projector::measure_phases(pool, project, since).await?.get("deferred").is_some();
+    }
+    // Отложенный замер оставляет набор помеченным: иначе сборщик, записав свой
+    // круг сделанным, не вернулся бы к набору до следующей правки, и гейт
+    // отвечал бы замером, снятым до пересборки.
+    //
+    // ПОТОЛОК НАЗВАН: два цикла «пересборка + замер» одного набора, идущие
+    // разом, откладывают друг друга всякий раз — ревью подсадило это четырежды
+    // из четырёх. Сегодня сборщик один и правки идут поодиночке, и это
+    // держится; сине-зелёная выкатка с двумя живыми сборщиками или второй
+    // сборщик требуют другой формы — атомарной пересборки или очереди замеров.
+    if deferred {
+        touch(pool, project, "замер отложен: шла пересборка проекций").await?;
+        return Ok(json!({ "deferred": true, "gates": out,
+                          "why": "замер отложен: во время круга шла пересборка проекций, \
+                                  и прочитанное могло быть полусобранным; сохранён прошлый \
+                                  круг, набор помечен к пересчёту" }));
+    }
     Ok(out)
+}
+
+/// Замер, заставший пересборку, — против гонки заявки 116.
+///
+/// Порча, которую ловят проверки: круг замера сохраняет находки и вердикты,
+/// прочитанные посреди пересборки, а аренда не держится, пока пересборка
+/// идёт, или держится дольше неё.
+#[cfg(test)]
+mod lease {
+    use deadpool_postgres::Pool;
+    use std::time::Duration;
+
+    const P: &str = "П";
+
+    /// Своя схема с одним пунктом гейта и одной ступенью лестницы. `slow` —
+    /// пункт мерится две секунды: в это окно проверка успевает начать и
+    /// кончить пересборку.
+    async fn schema(name: &str, slow: bool) -> Pool {
+        let url = std::env::var("MH_TEST_DB_URL").expect("MH_TEST_DB_URL: адрес пустой базы");
+        let apart = format!("{}options=-c%20search_path%3D{name}", if url.contains('?') { '&' } else { '?' });
+        let pool = crate::db::pool(&format!("{url}{apart}"), 6).expect("пул тестовой базы");
+        {
+            let client = pool.get().await.expect("соединение с тестовой базой");
+            client
+                .batch_execute(&format!("DROP SCHEMA IF EXISTS {name} CASCADE; CREATE SCHEMA {name};"))
+                .await
+                .expect("своя схема заводится");
+        }
+        crate::projector::ensure(&pool).await.expect("схема встаёт на пустой базе");
+        let query = if slow { "SELECT $1::text AS detail FROM pg_sleep(2)" } else { "SELECT $1::text AS detail" };
+        pool.get()
+            .await
+            .expect("соединение")
+            .batch_execute(&format!(
+                "INSERT INTO gate_item (phase, item, id, kind, query) VALUES ('G1', 'пункт', 'пункт', 'query', '{query}');
+                 INSERT INTO harness_process (set_name, name) VALUES ('godzy', 'godzy');
+                 INSERT INTO harness_process_step (set_name, process, ord, question, method_kind, owner_kind, touches)
+                 VALUES ('godzy', 'godzy', 1, 'ступень', 'unknown', 'none', 'corpus');"
+            ))
+            .await
+            .expect("пункт и ступень объявляются");
+        pool
+    }
+
+    async fn drop_schema(pool: &Pool, name: &str) {
+        pool.get()
+            .await
+            .expect("соединение")
+            .batch_execute(&format!("DROP SCHEMA IF EXISTS {name} CASCADE"))
+            .await
+            .expect("схема снимается");
+    }
+
+    async fn count(pool: &Pool, sql: &str) -> i64 {
+        pool.get().await.expect("соединение").query_one(sql, &[]).await.expect("счёт").get(0)
+    }
+
+    async fn live(pool: &Pool) -> bool {
+        let client = crate::db::conn(pool).await.expect("соединение");
+        let now = super::db_now(&*client).await.expect("часы базы");
+        super::rebuilt_since(&*client, P, now).await.expect("аренда")
+    }
+
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn a_measure_during_a_rebuild_is_not_stored() {
+        let pool = schema("lease_during", false).await;
+        let during = super::rebuilding(&pool, P, async |_| {
+            let during = super::measure(&pool, P).await?;
+            // Лестница и фазы откладываются сами, а не только следом за гейтами:
+            // пересборка может начаться и после коммита круга гейтов.
+            let since = super::db_now(&*crate::db::conn(&pool).await?).await?;
+            assert_eq!(crate::projector::measure_process(&pool, P, "godzy", "godzy", since).await?["deferred"], true,
+                       "положение лестницы посреди пересборки не сохраняется");
+            assert_eq!(crate::projector::measure_phases(&pool, P, since).await?["deferred"], true,
+                       "фазы посреди пересборки не сохраняются");
+            Ok::<_, crate::db::Fail>(during)
+        })
+        .await
+        .expect("пересборка с замером внутри");
+        assert_eq!(during["deferred"], true, "замер посреди пересборки откладывается: {during}");
+        assert_eq!(count(&pool, "SELECT count(*) FROM project_gates").await, 0,
+                   "отложенный замер не пишет ни строки в `project_gates`");
+        assert_eq!(count(&pool, "SELECT count(*) FROM process_run").await, 0,
+                   "вердикты ступеней посреди пересборки не ложатся в `process_run`");
+        assert_eq!(count(&pool, "SELECT count(*) FROM gate_dirty").await, 1,
+                   "отложенный замер оставляет набор помеченным к пересчёту");
+
+        // Аренда снята — тот же замер сохраняется целиком.
+        let after = super::measure(&pool, P).await.expect("замер после пересборки");
+        assert!(after.get("deferred").is_none(), "после пересборки замер не откладывается: {after}");
+        assert_eq!(count(&pool, "SELECT count(*) FROM project_gates").await, 1, "замер после пересборки сохранён");
+        assert!(count(&pool, "SELECT count(*) FROM process_run").await > 0, "и вердикты ступеней тоже");
+        drop_schema(&pool, "lease_during").await;
+    }
+
+    /// Пересборка, начавшаяся и кончившаяся посреди круга, откладывает его:
+    /// спрашивается «с начала круга», а не «идёт ли сейчас».
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn a_rebuild_inside_a_round_defers_it() {
+        let pool = schema("lease_inside", true).await;
+        let round = tokio::spawn({
+            let pool = pool.clone();
+            async move { super::measure(&pool, P).await }
+        });
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        super::rebuilding(&pool, P, async |_| Ok::<_, crate::db::Fail>(())).await.expect("пустая пересборка");
+        let out = round.await.expect("круг не упал").expect("круг замера");
+        assert_eq!(out["deferred"], true, "круг, внутри которого прошла пересборка, отложен: {out}");
+        assert_eq!(count(&pool, "SELECT count(*) FROM project_gates").await, 0);
+        drop_schema(&pool, "lease_inside").await;
+    }
+
+    /// Пересборка дольше срока держит аренду до конца: продление идёт.
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn a_rebuild_longer_than_the_term_keeps_its_lease() {
+        let pool = schema("lease_long", false).await;
+        let held = super::rebuilding(&pool, P, async |_| {
+            tokio::time::sleep(Duration::from_millis(3 * super::REBUILD_LEASE_MS as u64)).await;
+            Ok::<_, crate::db::Fail>(live(&pool).await)
+        })
+        .await
+        .expect("долгая пересборка");
+        assert!(held, "через три срока аренда пересборки ещё жива");
+        assert!(!live(&pool).await, "по концу пересборки аренда снята");
+        drop_schema(&pool, "lease_long").await;
+    }
+
+    /// Продление, пришедшее после снятия, аренду не оживляет.
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn a_renewal_after_release_does_not_revive_the_lease() {
+        let pool = schema("lease_revive", false).await;
+        super::rebuilding(&pool, P, async |_| Ok::<_, crate::db::Fail>(())).await.expect("пересборка");
+        let id = count(&pool, "SELECT max(id) FROM projection_rebuild").await;
+        super::renew(&pool, id).await.expect("запоздалое продление");
+        assert!(!live(&pool).await, "снятая аренда не ожила от запоздалого продления");
+        drop_schema(&pool, "lease_revive").await;
+    }
+
+    /// Брошенная пересборка снимает аренду: оборванный клиентом запрос не
+    /// держит замеры набора до конца срока.
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn an_abandoned_rebuild_releases_its_lease() {
+        let pool = schema("lease_dropped", false).await;
+        let abandoned = tokio::time::timeout(
+            Duration::from_millis(500),
+            super::rebuilding(&pool, P, async |_| {
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+                Ok::<_, crate::db::Fail>(())
+            }),
+        )
+        .await;
+        assert!(abandoned.is_err(), "пересборка брошена по сроку");
+        // Снятие при сбросе идёт отдельной задачей. Ждётся признак `ended`, а не
+        // «аренда не жива»: истёкшая по сроку тоже не жива, и проверка прошла бы
+        // без снятия.
+        let mut ended = 0;
+        for _ in 0..50 {
+            ended = count(&pool, "SELECT count(*) FROM projection_rebuild WHERE ended").await;
+            if ended == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(ended, 1, "брошенная пересборка снимает аренду");
+        drop_schema(&pool, "lease_dropped").await;
+    }
 }

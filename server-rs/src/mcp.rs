@@ -2740,7 +2740,7 @@ impl Mcp {
                     Err(e) => refusal(e.into()),
                 }
             }
-            "reparse" => match crate::store::reparse_all(&self.pool, p).await {
+            "reparse" => match crate::watch::rebuilding(&self.pool, p, async |lease| crate::store::reparse_all(&self.pool, p, lease).await).await {
                 Ok(v) => ok(v),
                 Err(e) => refusal(e.into()),
             },
@@ -2988,32 +2988,38 @@ impl Mcp {
         // Время каждого шага — В ОТВЕТЕ. Правка документа шла сорок три секунды,
         // и без разметки виновным назначался тот шаг, на который думалось: те же
         // пересборки, позванные отдельно, укладываются в сто тридцать миллисекунд.
-        let t = std::time::Instant::now();
-        let before = crate::projector::rebuild_before(&self.pool, &self.project)
-            .await
-            .map_err(say("сверка до пересборки"))?;
-        let ms_before = t.elapsed().as_millis() as u64;
-        let t = std::time::Instant::now();
-        // Исход пересборки ЗАПИСЫВАЕТСЯ. Упавшая на полпути оставляет проекции
-        // недособранными, а гейт продолжает отдавать прежние числа — уверенно и
-        // неверно; так был потерян час на тридцать одну ложную находку.
-        let subject = match crate::reproject::reproject(&self.pool, &self.project).await {
-            Ok(v) => {
-                crate::projector::note_reproject(&self.pool, &self.project, true, "").await;
-                v
-            }
-            Err(e) => {
-                let said = e.says();
-                crate::projector::note_reproject(&self.pool, &self.project, false, &said).await;
-                return Err(say("пересборка сущностей")(e));
-            }
-        };
-        let ms_subject = t.elapsed().as_millis() as u64;
-        let t = std::time::Instant::now();
-        let after = crate::projector::rebuild(&self.pool, &self.project)
-            .await
-            .map_err(say("пересборка проекций"))?;
-        let ms_after = t.elapsed().as_millis() as u64;
+        let (before, subject, after, ms_before, ms_subject, ms_after) =
+            crate::watch::rebuilding(&self.pool, &self.project, async |lease| {
+                let t = std::time::Instant::now();
+                let before = crate::projector::rebuild_before(&self.pool, &self.project, lease)
+                    .await
+                    .map_err(say("сверка до пересборки"))?;
+                let ms_before = t.elapsed().as_millis() as u64;
+                let t = std::time::Instant::now();
+                // Исход пересборки ЗАПИСЫВАЕТСЯ. Упавшая на полпути оставляет
+                // проекции недособранными, а гейт продолжает отдавать прежние
+                // числа — уверенно и неверно; так был потерян час на тридцать
+                // одну ложную находку.
+                let subject = match crate::reproject::reproject(&self.pool, &self.project, lease).await {
+                    Ok(v) => {
+                        crate::projector::note_reproject(&self.pool, &self.project, true, "").await;
+                        v
+                    }
+                    Err(e) => {
+                        let said = e.says();
+                        crate::projector::note_reproject(&self.pool, &self.project, false, &said).await;
+                        return Err(say("пересборка сущностей")(e));
+                    }
+                };
+                let ms_subject = t.elapsed().as_millis() as u64;
+                let t = std::time::Instant::now();
+                let after = crate::projector::rebuild(&self.pool, &self.project, lease)
+                    .await
+                    .map_err(say("пересборка проекций"))?;
+                let ms_after = t.elapsed().as_millis() as u64;
+                Ok((before, subject, after, ms_before, ms_subject, ms_after))
+            })
+            .await?;
         let t = std::time::Instant::now();
         let generated = crate::projector::check_generated(&self.pool, &self.project)
             .await

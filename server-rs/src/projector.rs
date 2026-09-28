@@ -1874,6 +1874,25 @@ CREATE TABLE IF NOT EXISTS gate_dirty (
   ran_at bigint,
   ran_ms integer);
 
+-- АРЕНДА ПЕРЕСБОРКИ: строка на каждую идущую пересборку проекций набора.
+--
+-- Пересборка — это двадцать с лишним транзакций подряд, и между ними набор
+-- неполон. Замер гейта, заставший это окно, сохранял находки, которых нет, и
+-- останавливал выдачу задач всему набору: 2026-09-27 так дважды за час
+-- покраснели G2 и `corpus` и сами позеленели минутой позже (заявка 116).
+--
+-- Не замок сессии, а строка со сроком: замок живёт соединением, пул отдаёт его
+-- без `DISCARD ALL`, и упавшая пересборка оставила бы его навсегда. Строка
+-- же истекает сама (`until`, продлевается, пока пересборка идёт), а снятая
+-- получает `until` = миг конца и `ended` — по ним замер узнаёт и ту
+-- пересборку, что успела начаться и кончиться за время его круга, а
+-- запоздалое продление не оживляет снятую.
+CREATE TABLE IF NOT EXISTS projection_rebuild (
+  id bigserial PRIMARY KEY,
+  project_id text NOT NULL,
+  until bigint NOT NULL,
+  ended boolean NOT NULL DEFAULT false);
+
 -- СЛЕД ПЕРЕГРУЗКИ ПЕРЕЖИВАЕТ ПЕРЕГРУЗКУ. Отказы «занято» и взятия второго
 -- соединения при живом первом жили счётчиком в памяти и строкой в журнале: от
 -- часа простоя 2026-09-17 не осталось ничего, что можно прочесть дверью и
@@ -3984,7 +4003,7 @@ pub async fn ensure(pool: &Pool) -> Result<(), crate::db::Fail> {
 /// Донорские проекции читают `task_requirement`; посчитанная после них, она
 /// накормила бы их данными прошлого круга — расхождение на один шаг, невидимое
 /// глазом и оттого худшее.
-pub async fn rebuild_before(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+pub async fn rebuild_before(pool: &Pool, project: &str, _: &crate::watch::Lease) -> Result<Value, crate::db::Fail> {
     let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
 
@@ -4122,7 +4141,7 @@ pub(crate) fn closings_without_commit(states: &[(String, String, String, i64)]) 
 }
 
 /// Пересобрать проекции этого сервера. Возвращает счёт по каждой.
-pub async fn rebuild(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+pub async fn rebuild(pool: &Pool, project: &str, _: &crate::watch::Lease) -> Result<Value, crate::db::Fail> {
     // Отладка: какой из запросов упал, видно по порядку в логе.
     // Пересборка идёт ОДНОЙ транзакцией.
     //
@@ -5134,7 +5153,7 @@ pub(crate) async fn task_blockers(pool: &Pool, project: &str, task: &str) -> Res
 /// колонке `state` лежало заявление, написанное когда-то руками. Рядом они
 /// читались как два мнения, и «расхождением» звалось то, что было просто
 /// непересчитанной записью.
-pub(crate) async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn measure_gates(pool: &Pool, project: &str, since: i64) -> Result<Value, crate::db::Fail> {
     let mut conn = crate::db::conn(pool).await?;
     // ВЕСЬ КРУГ — ОДНОЙ ТРАНЗАКЦИЕЙ, и это не про скорость.
     //
@@ -5352,6 +5371,16 @@ pub(crate) async fn measure_gates(pool: &Pool, project: &str) -> Result<Value, c
             &[&project],
         )
         .await?;
+    // КРУГ, ЗАСТАВШИЙ ПЕРЕСБОРКУ, НЕ СОХРАНЯЕТСЯ — откатывается целиком.
+    //
+    // Пересборка идёт двадцатью с лишним транзакциями, и круг читал набор
+    // посреди них: 2026-09-27 G2 показал двадцать путей задачи, которых нет ни
+    // в одной ветке, `next-task` замолчал для всего набора, а минутой позже
+    // всё позеленело само (заявка 116). Сохранённым остаётся прошлый круг —
+    // целый, с временем, по которому видно, что он прошлый.
+    if crate::watch::rebuilt_since(&client, project, since).await? {
+        return Ok(json!({ "deferred": true }));
+    }
     client.commit().await?;
     Ok(json!({ "measured": measured, "failed": failed, "at": now,
                "orphansPurged": orphans,
@@ -9808,7 +9837,7 @@ pub(crate) async fn rename_entity(
     // показывала прежние имена, потому что читала старые ячейки.
     //
     // Правка документа мимо разбора — это правка, которой набор не увидит.
-    crate::store::reparse_all(pool, project).await?;
+    crate::watch::rebuilding(pool, project, async |lease| crate::store::reparse_all(pool, project, lease).await).await?;
     report["means"] = json!(if report["dropped"].as_i64().unwrap_or(0) > 0 {
         "документы разобраны заново; проекции устарели — позовите `reproject`. \
          ВНИМАНИЕ: снято строк — это склейка, названная словом `merge`"
@@ -13238,8 +13267,7 @@ async fn compute_next_step(
     project: &str,
     set_name: &str,
     process: &str,
-    record: bool,
-) -> Result<Value, crate::db::Fail> {
+) -> Result<(Value, Vec<(i32, String, String)>), crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let steps = client
         .query(
@@ -13251,11 +13279,11 @@ async fn compute_next_step(
         )
         .await?;
     if steps.is_empty() {
-        return Ok(json!({
+        return Ok((json!({
             "process": process,
             "at": Value::Null,
             "why": format!("процесса {process} в наборе {set_name} нет ни одной ступенью: отвечать нечем"),
-        }));
+        }), Vec::new()));
     }
 
     // Фаза набора открыта, пока не пройдены все ступени стороны `corpus`.
@@ -13409,23 +13437,7 @@ async fn compute_next_step(
         }
     }
 
-    if record {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
-        for (ord, state, detail) in &journal {
-            client
-                .execute(
-                    "INSERT INTO process_run (project_id, process, at, ord, state, detail)
-                     VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
-                    &[&project, &process, &now, ord, state, detail],
-                )
-                .await?;
-        }
-    }
-
-    Ok(json!({
+    Ok((json!({
         "process": process,
         "at": at,
         "passed": passed,
@@ -13458,7 +13470,7 @@ async fn compute_next_step(
             "skipped": skipped.len(),
             "why": "номер ступени — самая ранняя невыполненная, а не мера пройденного",
         }),
-    }))
+    }), journal))
 }
 
 /// Ступень, которая скачет: один и тот же номер отвечал по-разному.
@@ -13472,8 +13484,9 @@ pub(crate) async fn measure_process(
     project: &str,
     set_name: &str,
     process: &str,
+    since: i64,
 ) -> Result<Value, crate::db::Fail> {
-    let mut answer = compute_next_step(pool, project, set_name, process, true).await?;
+    let (mut answer, journal) = compute_next_step(pool, project, set_name, process).await?;
     // КРАСНЫЙ ГЕЙТ ТЕКУЩЕЙ ФАЗЫ — вне очереди ступеней.
     //
     // Ступени про гейты — шестая и одиннадцатая, а пятая спрашивает про открытые
@@ -13630,6 +13643,23 @@ pub(crate) async fn measure_process(
     let open = answer["corpusPhaseOpen"].as_bool().unwrap_or(true);
     let now = now_ms();
     let client = crate::db::conn(pool).await?;
+    // Вердикты ступеней и положение лестницы читают план и задачи — те же, что
+    // пересобираются, — и потому откладываются по тому же правилу, что круг
+    // гейтов. Проверка одна, после всех чтений и до первой записи: вердикты
+    // ступеней писались прежде прямо из диспетчера, раньше неё, и отложенный
+    // круг всё равно клал их в `process_run`, откуда их читает плитка лестницы.
+    if crate::watch::rebuilt_since(&*client, project, since).await? {
+        return Ok(json!({ "deferred": true }));
+    }
+    for (ord, state, detail) in &journal {
+        client
+            .execute(
+                "INSERT INTO process_run (project_id, process, at, ord, state, detail)
+                 VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
+                &[&project, &process, &now, ord, state, detail],
+            )
+            .await?;
+    }
     client
         .execute(
             "INSERT INTO process_position (project_id, process, at_ord, at_state, at_question,
@@ -14658,7 +14688,7 @@ async fn compute_phases(pool: &Pool, project: &str) -> Result<Value, crate::db::
 /// Считается после гейтов: состояние гейта фазы берётся у них. Пустое число
 /// документов или задач значит «фаза их не объявляет», и оно остаётся пустым:
 /// ноль сказал бы «объявила, и нет ни одной».
-pub(crate) async fn measure_phases(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn measure_phases(pool: &Pool, project: &str, since: i64) -> Result<Value, crate::db::Fail> {
     let computed = compute_phases(pool, project).await?;
     let empty = Vec::new();
     let list = computed["phases"].as_array().unwrap_or(&empty);
@@ -14681,6 +14711,11 @@ pub(crate) async fn measure_phases(pool: &Pool, project: &str) -> Result<Value, 
     client
         .execute("SELECT pg_advisory_xact_lock(hashtext('phases:' || $1))", &[&project])
         .await?;
+    // Счёт задач и документов фазы читается из плана — по тому же правилу, что
+    // круг гейтов, он не сохраняется, если читался посреди пересборки.
+    if crate::watch::rebuilt_since(&client, project, since).await? {
+        return Ok(json!({ "deferred": true }));
+    }
     client
         .execute("DELETE FROM phase_state WHERE project_id = $1", &[&project])
         .await?;

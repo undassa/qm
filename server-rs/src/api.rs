@@ -350,9 +350,13 @@ async fn with_own_projections(
 /// считаются в этом же сервере и сверены с ним до хеша упорядоченного дампа —
 /// на пустых таблицах, а не поверх донорских.
 pub(crate) async fn finish_write(app: &App, project: &str) -> Result<serde_json::Value, Failure> {
-    let before = crate::projector::rebuild_before(&app.pool, project).await?;
-    let subject = crate::reproject::reproject(&app.pool, project).await?;
-    let after = crate::projector::rebuild(&app.pool, project).await?;
+    let (before, subject, after) = crate::watch::rebuilding(&app.pool, project, async |lease| {
+        let before = crate::projector::rebuild_before(&app.pool, project, lease).await?;
+        let subject = crate::reproject::reproject(&app.pool, project, lease).await?;
+        let after = crate::projector::rebuild(&app.pool, project, lease).await?;
+        Ok::<_, Failure>((before, subject, after))
+    })
+    .await?;
     let generated = crate::projector::check_generated(&app.pool, project).await?;
     Ok(json!({ "before": before, "subject": subject, "after": after, "generated": generated }))
 }

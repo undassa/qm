@@ -398,7 +398,7 @@ pub(crate) async fn sweep_orphans(pool: &Pool, project: &str) -> Result<Value, c
 /// `unchanged` и правильно делает. Но правило разбора меняется отдельно от
 /// текста — как сменилось, когда ссылки стали адресовать сущность, — и тогда
 /// набору нужен проход, который перечитает старый текст новым правилом.
-pub(crate) async fn reparse_all(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn reparse_all(pool: &Pool, project: &str, _: &crate::watch::Lease) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let docs = client
         .query(

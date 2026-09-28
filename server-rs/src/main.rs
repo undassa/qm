@@ -26,6 +26,16 @@ fn required(names: &[&str]) -> String {
     std::process::exit(2);
 }
 
+/// Отказ подкоманды пересборки — уже словами: шаг называет себя сам, а
+/// через `From` приходит только то, что случилось до шагов, — аренда.
+struct Said(String);
+
+impl From<db::Fail> for Said {
+    fn from(e: db::Fail) -> Self {
+        Said(format!("аренда пересборки не взята: {}", e.says()))
+    }
+}
+
 #[tokio::main]
 async fn main() {
     // Логи — в stderr, и это не вкус. У подкоманды `mcp` stdout занят
@@ -232,14 +242,20 @@ async fn main() {
             eprintln!("mh-server rebuild: не задан MH_PROJECT — собирать нечего");
             std::process::exit(2);
         }
-        if let Err(e) = db::counting(projector::rebuild_before(&app.pool, &project)).await {
-            eprintln!("подготовка не прошла: {}", e.says());
-            std::process::exit(1);
-        }
-        match projector::rebuild(&app.pool, &project).await {
+        let (pool, project) = (&app.pool, project.as_str());
+        let built = watch::rebuilding(pool, project, async |lease| {
+            db::counting(projector::rebuild_before(pool, project, lease))
+                .await
+                .map_err(|e| Said(format!("подготовка не прошла: {}", e.says())))?;
+            projector::rebuild(pool, project, lease)
+                .await
+                .map_err(|e| Said(format!("сборка не прошла: {}", e.says())))
+        })
+        .await;
+        match built {
             Ok(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default()),
-            Err(e) => {
-                eprintln!("сборка не прошла: {}", e.says());
+            Err(Said(e)) => {
+                eprintln!("{e}");
                 std::process::exit(1);
             }
         }
@@ -256,45 +272,50 @@ async fn main() {
         }
         // Исход записывается и здесь: подкоманда — та же пересборка, и упавшая
         // она оставляет те же недособранные проекции.
-        match db::counting(reproject::reproject(&app.pool, &project)).await {
-            Ok(v) => {
-                projector::note_reproject(&app.pool, &project, true, "").await;
-                // ПАРА, А НЕ ПОЛОВИНА. Пересборка снимает из плана красные задачи
-                // и состояния — их кладёт СБОРКА, и между двумя командами база
-                // неполна. Дверь `mh call reproject` делает обе половины и всегда
-                // делала; подкоманда останавливалась на первой и печатала успех.
-                //
-                // Стоило дня: красные задачи «исчезли», пункт, читающий их,
-                // замолчал, и гейт от этого позеленел.
-                //
-                // Половина — по явному слову, и она говорит, чем это кончится.
-                let half = std::env::args().any(|a| a == "--half");
-                let after = if half {
-                    serde_json::json!({
-                        "warning": "СДЕЛАНА ПОЛОВИНА. В плане сейчас нет красных задач и \
-                                    состояний: их кладёт `mh-server rebuild`. Пока он не \
-                                    прогнан, всё прочитанное соврёт.",
-                    })
-                } else {
-                    if let Err(e) = db::counting(projector::rebuild_before(&app.pool, &project)).await {
-                        eprintln!("подготовка сборки не прошла: {}", e.says());
-                        std::process::exit(1);
-                    }
-                    match projector::rebuild(&app.pool, &project).await {
-                        Ok(r) => r,
-                        Err(e) => {
-                            eprintln!("сборка не прошла: {}", e.says());
-                            std::process::exit(1);
-                        }
-                    }
-                };
-                println!("{}", serde_json::to_string_pretty(
-                    &serde_json::json!({ "reproject": v, "rebuild": after })).unwrap_or_default());
-            }
-            Err(e) => {
-                let said = e.says();
-                projector::note_reproject(&app.pool, &project, false, &said).await;
-                eprintln!("пересборка не прошла: {said}");
+        let (pool, project) = (&app.pool, project.as_str());
+        let built = watch::rebuilding(pool, project, async |lease| {
+            let v = match db::counting(reproject::reproject(pool, project, lease)).await {
+                Ok(v) => {
+                    projector::note_reproject(pool, project, true, "").await;
+                    v
+                }
+                Err(e) => {
+                    let said = e.says();
+                    projector::note_reproject(pool, project, false, &said).await;
+                    return Err(Said(format!("пересборка не прошла: {said}")));
+                }
+            };
+            // ПАРА, А НЕ ПОЛОВИНА. Пересборка снимает из плана красные задачи
+            // и состояния — их кладёт СБОРКА, и между двумя командами база
+            // неполна. Дверь `mh call reproject` делает обе половины и всегда
+            // делала; подкоманда останавливалась на первой и печатала успех.
+            //
+            // Стоило дня: красные задачи «исчезли», пункт, читающий их,
+            // замолчал, и гейт от этого позеленел.
+            //
+            // Половина — по явному слову, и она говорит, чем это кончится.
+            let half = std::env::args().any(|a| a == "--half");
+            let after = if half {
+                serde_json::json!({
+                    "warning": "СДЕЛАНА ПОЛОВИНА. В плане сейчас нет красных задач и \
+                                состояний: их кладёт `mh-server rebuild`. Пока он не \
+                                прогнан, всё прочитанное соврёт.",
+                })
+            } else {
+                db::counting(projector::rebuild_before(pool, project, lease))
+                    .await
+                    .map_err(|e| Said(format!("подготовка сборки не прошла: {}", e.says())))?;
+                projector::rebuild(pool, project, lease)
+                    .await
+                    .map_err(|e| Said(format!("сборка не прошла: {}", e.says())))?
+            };
+            Ok(serde_json::json!({ "reproject": v, "rebuild": after }))
+        })
+        .await;
+        match built {
+            Ok(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default()),
+            Err(Said(e)) => {
+                eprintln!("{e}");
                 std::process::exit(1);
             }
         }
