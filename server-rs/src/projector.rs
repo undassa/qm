@@ -16,6 +16,38 @@ use serde_json::{json, Value};
 /// задача становится готовой оттого, что закрылась соседняя, и никто не
 /// переписал ей колонку. Поэтому «готова», «покрыто», «выполнен» — это `select`.
 const VIEWS: &str = r#"
+-- ПОСЛЕДНИЙ ПРОГОН, КОТОРЫЙ ЧТО-ТО ИЗМЕРИЛ, — одним местом на всех, кто
+-- спрашивает у прогона вердикт.
+--
+-- Прогон, упавший на сборке, пишется с чистого дерева одной строкой
+-- `build-failed`: проверок он не видел ни одной. Читатели брали «последний
+-- чистый» как `max(at) … NOT dirty` и читали такой прогон как «ни одна
+-- проверка не прошла»: 2026-09-26 пункт `ready-items-checked` дал 38 находок
+-- о 19 задачах, выдача задач встала на полчаса, а прогоном позже всё
+-- позеленело само (заявка 103). Сборка, которая не собралась, — это «не
+-- мерили», и ответ о проверках даёт последний прогон, где они были.
+--
+-- Правило одно, и это вид партий, а не «последний прогон»: первый прогон
+-- (`red-observed-failing`, с какого мига прибор мог видеть) и окно между
+-- посадками зеркала и тела спрашивают о том же. Партия, упавшая на сборке, в
+-- окне считалась наблюдением, и пункт держал находку, которую никакая работа
+-- набора снять не могла.
+--
+-- Партия прогона — строки с одним `at`: вердикт кроме `build-failed` хоть у
+-- одной из них и значит, что партия что-то измерила.
+--
+-- ПОТОЛОК НАЗВАН. Красный профиль идёт той же партией, и если основная сборка
+-- упала, а бинари `mirror_*` собрались, партия считается измерившей: читатель
+-- о проверках основного профиля получит «её в прогоне нет вовсе», то есть
+-- красное. Различить это можно только по имени бинаря (`ran_in`), а решать ли
+-- так — вопрос не этого вида.
+CREATE OR REPLACE VIEW test_run_measured AS
+  SELECT DISTINCT project_id, at FROM test_run
+   WHERE NOT dirty AND verdict <> 'build-failed';
+
+CREATE OR REPLACE VIEW test_run_last AS
+  SELECT project_id, max(at) AS at FROM test_run_measured GROUP BY project_id;
+
 CREATE OR REPLACE VIEW task_ready AS
   SELECT t.project_id, t.id AS task_id, t.milestone_id, t.state,
          NOT EXISTS (SELECT 1 FROM project_plan_task_deps d
@@ -6535,16 +6567,7 @@ pub(crate) async fn push_preflight(
     // порождённого: `fact_fresh` требует коммита у любого факта, а разбор
     // предполёта идёт по корпусу в базе и своего дерева не имеет. Без имени
     // коммита подача числилась протухшей навсегда и держала ступень лестницы.
-    let head: String = tx
-        .query_one(
-            "SELECT coalesce(max(commit_sha), '') FROM test_run
-              WHERE project_id = $1 AND NOT dirty
-                AND at = (SELECT max(at) FROM test_run WHERE project_id = $1 AND NOT dirty)",
-            &[&project],
-        )
-        .await
-        .map(|r| r.get(0))
-        .unwrap_or_default();
+    let head = known_head(&tx, project).await;
     tx.execute(
         "INSERT INTO fact_push (project_id, fact, at, actor, rows, commit_sha, dirty) VALUES ($1, 'preflight', $2, $3, $4, $5, false)
          ON CONFLICT (project_id, fact) DO UPDATE SET at = EXCLUDED.at, actor = EXCLUDED.actor,
@@ -7798,19 +7821,7 @@ pub(crate) async fn check_generated(pool: &Pool, project: &str) -> Result<Value,
     // факта — и без него сверка числилась протухшей навсегда, сколько бы раз
     // ни проходила. Ступень лестницы стояла на этом.
     //
-    // Берётся вершина последнего ЧИСТОГО прогона: это то состояние мира, про
-    // которое прибор вообще что-либо знает. Прогонов не было — имени нет, и
-    // факт честно остаётся несвежим: тогда о состоянии мира неизвестно ничего.
-    let head: String = client
-        .query_one(
-            "SELECT coalesce(max(commit_sha), '') FROM test_run
-              WHERE project_id = $1 AND NOT dirty
-                AND at = (SELECT max(at) FROM test_run WHERE project_id = $1 AND NOT dirty)",
-            &[&project],
-        )
-        .await
-        .map(|r| r.get(0))
-        .unwrap_or_default();
+    let head = known_head(&*client, project).await;
     client
         .execute(
             "INSERT INTO fact_push (project_id, fact, at, actor, rows, commit_sha, dirty) VALUES ($1,$2,$3,$4,$5,$6,false)
@@ -10626,16 +10637,19 @@ pub(crate) async fn test_status(
     let last = client
         .query_opt("SELECT max(at), max(at) FILTER (WHERE NOT dirty) FROM test_run WHERE project_id = $1", &[&project])
         .await?;
-    // СЧЁТ — ПО ПОСЛЕДНЕМУ ЧИСТОМУ ПРОГОНУ, а не по последнему вообще.
-    // Грязный прогон снят не со ствола, и выдавать его числа за состояние
-    // набора — то же враньё, от которого отгорожены пункты гейта: 21.09
-    // оборванный сброс дал партию из одной строки `build-failed`, и дверь
-    // отвечала «прогонов 1» на набор, где часом раньше прошло 756 проверок.
+    // СЧЁТ — ПО ПОСЛЕДНЕМУ ЧИСТОМУ ИЗМЕРИВШЕМУ ПРОГОНУ (`test_run_last`), а не
+    // по последнему вообще. Грязный прогон снят не со ствола, и выдавать его
+    // числа за состояние набора — то же враньё, от которого отгорожены пункты
+    // гейта: 21.09 оборванный сброс дал партию из одной строки `build-failed`,
+    // и дверь отвечала «прогонов 1» на набор, где часом раньше прошло 756
+    // проверок. Поимённый ответ двери обязан совпадать с тем, по чему судит
+    // гейт, — а гейт судит по тому же виду. Что сборка позже упала, видно по
+    // `cleanAt` новее `measuredAt`.
     let counts = client
         .query(
             "SELECT verdict, count(*) FROM test_run
               WHERE project_id = $1 AND NOT dirty
-                AND at = (SELECT max(at) FROM test_run WHERE project_id = $1 AND NOT dirty)
+                AND at = (SELECT at FROM test_run_last WHERE project_id = $1)
               GROUP BY verdict",
             &[&project],
         )
@@ -10644,11 +10658,15 @@ pub(crate) async fn test_status(
         .query(
             "SELECT DISTINCT check_name FROM test_run
               WHERE project_id = $1 AND NOT dirty AND verdict = 'failed'
-                AND at = (SELECT max(at) FROM test_run WHERE project_id = $1 AND NOT dirty)",
+                AND at = (SELECT at FROM test_run_last WHERE project_id = $1)",
             &[&project],
         )
         .await?;
     let (at, clean_at): (Option<i64>, Option<i64>) = (last.as_ref().and_then(|r| r.get(0)), last.as_ref().and_then(|r| r.get(1)));
+    let measured_at: i64 = client
+        .query_one("SELECT coalesce((SELECT at FROM test_run_last WHERE project_id = $1), 0)", &[&project])
+        .await?
+        .get(0);
     // Коммит того же прогона: «не то дерево» отличается от «не та проверка»
     // только им. `ran_in` здесь не перечисляется — это ИМЯ БИНАРЯ, а их у
     // набора две сотни; имя бинаря отвечается поимённо, рядом с вердиктом.
@@ -10656,7 +10674,7 @@ pub(crate) async fn test_status(
         .query(
             "SELECT DISTINCT commit_sha FROM test_run
               WHERE project_id = $1 AND NOT dirty
-                AND at = (SELECT max(at) FROM test_run WHERE project_id = $1 AND NOT dirty)
+                AND at = (SELECT at FROM test_run_last WHERE project_id = $1)
               ORDER BY 1",
             &[&project],
         )
@@ -10670,14 +10688,12 @@ pub(crate) async fn test_status(
                 "SELECT n,
                         (SELECT string_agg(DISTINCT r.verdict, ' ') FROM test_run r
                           WHERE r.project_id = $1 AND NOT r.dirty
-                            AND r.at = (SELECT max(at) FROM test_run
-                                         WHERE project_id = $1 AND NOT dirty)
+                            AND r.at = (SELECT at FROM test_run_last WHERE project_id = $1)
                             AND (r.check_name = n
                                  OR right(r.check_name, length(n) + 2) = '::' || n)),
                         (SELECT string_agg(DISTINCT r.ran_in, ' ') FROM test_run r
                           WHERE r.project_id = $1 AND NOT r.dirty
-                            AND r.at = (SELECT max(at) FROM test_run
-                                         WHERE project_id = $1 AND NOT dirty)
+                            AND r.at = (SELECT at FROM test_run_last WHERE project_id = $1)
                             AND (r.check_name = n
                                  OR right(r.check_name, length(n) + 2) = '::' || n)
                             AND r.ran_in <> '')
@@ -10701,13 +10717,33 @@ pub(crate) async fn test_status(
         )
     };
     Ok(json!({
-        "at": at.unwrap_or(0), "cleanAt": clean_at.unwrap_or(0),
+        "at": at.unwrap_or(0), "cleanAt": clean_at.unwrap_or(0), "measuredAt": measured_at,
         "commits": about.iter().map(|r| r.get::<_, String>(0)).collect::<std::collections::BTreeSet<_>>(),
         "counts": counts.iter().map(|r| (r.get::<_, String>(0), r.get::<_, i64>(1))).collect::<std::collections::BTreeMap<_, _>>(),
         "failed": failed.iter().map(|r| r.get::<_, String>(0)).collect::<Vec<_>>(),
         "names": by_name,
         "runs": counts.iter().map(|r| r.get::<_, i64>(1)).sum::<i64>(),
     }))
+}
+
+/// Вершина, которую знает прибор: коммит последнего ЧИСТОГО прогона — то
+/// состояние мира, про которое прибор вообще что-либо знает. Прогонов не было —
+/// имени нет, и факт честно остаётся несвежим.
+///
+/// Прогон, упавший на сборке, здесь годится, и `test_run_last` сюда не нужен:
+/// вопрос о вершине, а не о вердиктах проверок. Два читателя держали этот
+/// запрос копиями, и довод стоял лишь у одной.
+async fn known_head(client: &impl deadpool_postgres::GenericClient, project: &str) -> String {
+    client
+        .query_one(
+            "SELECT coalesce(max(commit_sha), '') FROM test_run
+              WHERE project_id = $1 AND NOT dirty
+                AND at = (SELECT max(at) FROM test_run WHERE project_id = $1 AND NOT dirty)",
+            &[&project],
+        )
+        .await
+        .map(|r| r.get(0))
+        .unwrap_or_default()
 }
 
 /// Пункты приёмки задачи — чек-лист из документа, выведенный строками.
@@ -13158,13 +13194,26 @@ pub(crate) async fn execute_method_upto(
         // `ADR-0107`, — и его же подсадка это и доказывала.
         //
         // Прогон берётся последний с ЧИСТОГО дерева: прогон на дереве с чужой
-        // правкой зеленит и краснит что угодно.
+        // правкой зеленит и краснит что угодно. И последний ИЗМЕРИВШИЙ
+        // (`test_run_last`): прогон, упавший на сборке, проверок не видел, и
+        // «её там нет» о нём — это «не мерили», а не «не зелена».
         "checks-green" => {
             let names: Vec<String> =
                 method.split_whitespace().map(str::to_owned).collect();
             if names.is_empty() {
                 return Verdict { state: "unknown", violations: 0, detail: vec![],
                     why: "заявление «проверки зелены» не называет ни одной проверки".into() };
+            }
+            match client
+                .query_one("SELECT EXISTS (SELECT 1 FROM test_run_last WHERE project_id = $1)", &[&project])
+                .await
+            {
+                Ok(r) if r.get::<_, bool>(0) => {}
+                Ok(_) => return Verdict { state: "unknown", violations: 0, detail: vec![],
+                    why: "прогонов с чистого дерева, где хоть что-то измерено, не было: \
+                          зелены ли проверки — неизвестно".into() },
+                Err(e) => return Verdict { state: "unknown", violations: 0, detail: vec![],
+                    why: format!("заявление не посчиталось: {}", crate::db::Says::says(&e)) },
             }
             // ИМЯ ИЩЕТСЯ И ПОЛНЫМ ПУТЁМ МОДУЛЯ. `nextest` печатает проверку из
             // `src` вместе с её модулем — `save::tests::bom_and_latin1_survive_the_save`, —
@@ -13186,16 +13235,14 @@ pub(crate) async fn execute_method_upto(
                     "SELECT n AS detail,
                             EXISTS (SELECT 1 FROM test_run r
                                      WHERE r.project_id = $1 AND NOT r.dirty
-                                       AND r.at = (SELECT max(at) FROM test_run
-                                                    WHERE project_id = $1 AND NOT dirty)
+                                       AND r.at = (SELECT at FROM test_run_last WHERE project_id = $1)
                                        AND (r.check_name = n
                                             OR right(r.check_name, length(n) + 2) = '::' || n)) AS была
                        FROM unnest($2::text[]) AS n
                       WHERE NOT EXISTS (
                             SELECT 1 FROM test_run r
                              WHERE r.project_id = $1 AND NOT r.dirty
-                               AND r.at = (SELECT max(at) FROM test_run
-                                            WHERE project_id = $1 AND NOT dirty)
+                               AND r.at = (SELECT at FROM test_run_last WHERE project_id = $1)
                                AND (r.check_name = n
                                     OR right(r.check_name, length(n) + 2) = '::' || n)
                                AND r.verdict = 'passed')
@@ -13205,8 +13252,7 @@ pub(crate) async fn execute_method_upto(
                          OR EXISTS (
                             SELECT 1 FROM test_run r
                              WHERE r.project_id = $1 AND NOT r.dirty
-                               AND r.at = (SELECT max(at) FROM test_run
-                                            WHERE project_id = $1 AND NOT dirty)
+                               AND r.at = (SELECT at FROM test_run_last WHERE project_id = $1)
                                AND (r.check_name = n
                                     OR right(r.check_name, length(n) + 2) = '::' || n)
                                AND r.verdict <> 'passed')
@@ -16063,6 +16109,128 @@ mod ready_item_names {
         }
         // Число без разделителя списком не является: «200 мс укладывается» — хвост.
         assert!(continues_an_item("200 мс укладывается в бюджет"));
+    }
+}
+
+/// Прогон, упавший на сборке, — «не мерили», а не «не прошли» (заявка 103).
+///
+/// Порча, которую ловит проверка: читатель берёт вердикт у последнего чистого
+/// прогона вообще, и партия из одной строки `build-failed` читается как «ни
+/// одна проверка не зелена» — или, у пункта про ствол, как «ни одна не упала».
+#[cfg(test)]
+mod test_run_last {
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn a_run_that_did_not_build_is_not_a_measurement() {
+        let url = std::env::var("MH_TEST_DB_URL").expect("MH_TEST_DB_URL: адрес пустой базы");
+        let apart = format!("{}{}", if url.contains('?') { '&' } else { '?' },
+                            "options=-c%20search_path%3Drun_last");
+        let pool = crate::db::pool(&format!("{url}{apart}"), 2).expect("пул тестовой базы");
+        {
+            let client = pool.get().await.expect("соединение с тестовой базой");
+            client
+                .batch_execute("DROP SCHEMA IF EXISTS run_last CASCADE; CREATE SCHEMA run_last;")
+                .await
+                .expect("своя схема заводится");
+        }
+        super::ensure(&pool).await.expect("схема встаёт на пустой базе");
+        let client = pool.get().await.expect("соединение");
+        // Набор «П»: прогон в 1 мерил, прогон в 2 не собрался. Набор «Н»:
+        // прогонов, которые что-то измерили, не было вовсе.
+        client
+            .batch_execute(
+                "INSERT INTO test_run (project_id, check_name, commit_sha, dirty, verdict, at)
+                 VALUES ('П', 'зелёная', 'a', false, 'passed', 1),
+                        ('П', 'упавшая', 'a', false, 'failed', 1),
+                        ('П', '(build)', 'b', false, 'build-failed', 2),
+                        ('Н', '(build)', 'b', false, 'build-failed', 2);
+                 INSERT INTO project_plan_versions (project_id, id) VALUES ('Н', 'v1'), ('П', 'v1');
+                 INSERT INTO project_plan_milestones (project_id, id, version_id, ord, title)
+                 VALUES ('Н', 'M1', 'v1', 1, 'веха'), ('П', 'M1', 'v1', 1, 'веха');
+                 INSERT INTO project_plan_tasks (project_id, id, milestone_id, ord, title, size, state, kind,
+                                                 entity_kind, entity_name)
+                 VALUES ('Н', 'T1', 'M1', 1, 'задача', '', 'closed', 'dev', 'task', 'T1'),
+                        ('П', 'T1', 'M1', 1, 'задача', '', 'closed', 'dev', 'task', 'T1');
+                 INSERT INTO task_ready_item (project_id, task_id, ord, check_id, text)
+                 VALUES ('Н', 'T1', 1, 'зелёная', '- [ ] `зелёная`'),
+                        ('П', 'T1', 1, 'упавшая', '- [ ] `упавшая`');",
+            )
+            .await
+            .expect("прогоны подсаживаются");
+
+        let v = super::execute_method(&client, "П", "checks-green", "зелёная").await;
+        assert_eq!((v.state, &v.detail), ("passed", &vec![]),
+                   "заявление о зелёной проверке судится по прогону, который её мерил");
+        let v = super::execute_method(&client, "Н", "checks-green", "зелёная").await;
+        assert_eq!(v.state, "unknown", "без измерившего прогона заявление — «неизвестно»: {:?}", v.detail);
+
+        let status = super::test_status(&pool, "П", "зелёная").await.expect("дверь test-run");
+        assert_eq!(status["counts"], serde_json::json!({ "passed": 1, "failed": 1 }),
+                   "дверь считает по измерившему прогону: {status}");
+        assert_eq!((status["measuredAt"].as_i64(), status["cleanAt"].as_i64()), (Some(1), Some(2)),
+                   "упавшая позже сборка видна по времени: {status}");
+
+        // Запрос пункта — тем же исполнителем, что у круга замера.
+        let rows = |sql: &'static str, project: &'static str| {
+            let client = &client;
+            async move { super::execute_method_upto(client, project, "query", sql, 200, 0).await.detail }
+        };
+        let trunk = rows(include_str!("../../instrument/gate/G3/test-trunk-green.sql"), "П").await;
+        assert!(!trunk.is_empty(), "падение измерившего прогона не заслоняется несобравшимся: {trunk:?}");
+        for (project, want) in [("П", 1), ("Н", 0)] {
+            let subject = client
+                .query(include_str!("../../instrument/gate/G3/test-trunk-green.subject.sql"), &[&project])
+                .await
+                .expect("предмет пункта исполняется");
+            assert_eq!(subject.len(), want, "предмет пункта про ствол — измерившие прогоны набора {project}");
+        }
+        let ready = rows(include_str!("../../instrument/gate/corpus/ready-items-checked.sql"), "П").await;
+        assert!(ready.iter().any(|d| d.contains("упала на стволе: упавшая")),
+                "падение измерившего прогона видно и пункту приёмки: {ready:?}");
+        let ready = rows(include_str!("../../instrument/gate/corpus/ready-items-checked.sql"), "Н").await;
+        assert!(ready.iter().any(|d| d.contains("где хоть что-то измерено")),
+                "без измерившего прогона пункт говорит «неизвестно»: {ready:?}");
+
+        // Красная фаза. «К»: зеркало закрыто в 200, тело в 400, между ними —
+        // только несобравшаяся партия (300): наблюдать было нечем, окно пусто.
+        // «М»: первая партия (50) не собралась, первая измерившая — 100, а
+        // зеркало закрыто в 70 — до того, как прибор мог что-либо видеть.
+        client
+            .batch_execute(
+                "INSERT INTO test_run (project_id, check_name, commit_sha, dirty, verdict, at)
+                 VALUES ('К', 'другая', 'a', false, 'passed', 100),
+                        ('К', '(build)', 'b', false, 'build-failed', 300),
+                        ('М', '(build)', 'a', false, 'build-failed', 50),
+                        ('М', 'другая', 'b', false, 'passed', 100);
+                 INSERT INTO project_plan_versions (project_id, id) VALUES ('К', 'v1'), ('М', 'v1');
+                 INSERT INTO project_plan_milestones (project_id, id, version_id, ord, title)
+                 VALUES ('К', 'M1', 'v1', 1, 'веха'), ('М', 'M1', 'v1', 1, 'веха');
+                 INSERT INTO project_plan_tasks (project_id, id, milestone_id, ord, title, size, state, kind,
+                                                 entity_kind, entity_name)
+                 SELECT p, id, 'M1', o, 'задача', '', 'closed', k, 'task', id
+                   FROM (VALUES ('К'), ('М')) AS n(p),
+                        (VALUES ('R-1', 1, 'red'), ('T-1', 2, 'dev')) AS t(id, o, k);
+                 INSERT INTO task_state (project_id, task_id, state, seen_at, closed_at)
+                 VALUES ('К', 'R-1', 'closed', 200, 200), ('К', 'T-1', 'closed', 400, 400),
+                        ('М', 'R-1', 'closed', 70, 70), ('М', 'T-1', 'closed', 150, 150);
+                 INSERT INTO red_task (project_id, id, parent_task, milestone)
+                 VALUES ('К', 'R-1', 'T-1', 'M1'), ('М', 'R-1', 'T-1', 'M1');
+                 INSERT INTO project_task_check (project_id, task_id, check_id, said_as)
+                 VALUES ('К', 'R-1', 'зеркало', 'красная фаза'), ('М', 'R-1', 'зеркало', 'красная фаза');",
+            )
+            .await
+            .expect("красная фаза подсаживается");
+        let red = include_str!("../../instrument/gate/corpus/red-observed-failing.sql");
+        let window = super::execute_method_upto(&client, "К", "query", red, 200, 0).await;
+        assert_eq!((window.state, &window.detail), ("passed", &vec![]),
+                   "несобравшаяся партия в окне — не наблюдение ({})", window.why);
+        let first = super::execute_method_upto(&client, "М", "query", red, 200, 0).await;
+        assert_eq!((first.state, &first.detail), ("passed", &vec![]),
+                   "граница наблюдения — первая измерившая партия ({})", first.why);
+
+        drop(client);
+        let client = pool.get().await.expect("соединение");
+        client.batch_execute("DROP SCHEMA IF EXISTS run_last CASCADE").await.expect("схема снимается");
     }
 }
 

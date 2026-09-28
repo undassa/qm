@@ -9,7 +9,10 @@
 --
 -- Граница названа фактом, а не послаблением: первый записанный прогон. Всё,
 -- что закрыто после него, судится полностью.
-WITH первый AS (SELECT min(at) AS at FROM test_run WHERE project_id = $1 AND NOT dirty)
+-- Первый прогон и окно ниже — из партий, которые что-то измерили
+-- (`test_run_measured`): прогон, упавший на сборке, ничего не видел, и ни
+-- границей наблюдения, ни наблюдением в окне быть не может (заявка 103).
+WITH первый AS (SELECT min(at) AS at FROM test_run_measured WHERE project_id = $1)
 SELECT t.id || ' — не наблюдалась красной: ' || c.check_id AS detail
   FROM project_plan_tasks t
   JOIN project_task_check c ON c.project_id = t.project_id AND c.task_id = t.id
@@ -62,8 +65,8 @@ SELECT t.id || ' — не наблюдалась красной: ' || c.check_id
              ON pts.project_id = $1 AND pts.task_id = pt.id AND pts.state = 'closed'
           WHERE rt.project_id = $1 AND lower(rt.id) = lower(t.id)
             AND NOT EXISTS (
-                  SELECT 1 FROM test_run w
-                   WHERE w.project_id = $1 AND NOT w.dirty
+                  SELECT 1 FROM test_run_measured w
+                   WHERE w.project_id = $1
                      AND w.at > coalesce(nullif(ts.closed_at, 0), ts.seen_at, 0)
                      AND w.at < coalesce(nullif(pts.closed_at, 0), pts.seen_at,
                                          9223372036854775807)))
