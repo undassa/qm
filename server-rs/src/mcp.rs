@@ -2225,12 +2225,9 @@ impl Mcp {
             }
             "requirement-add" => {
                 let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                let kind = args.get("kind").and_then(|v| v.as_str()).unwrap_or("FR");
-                let area = args.get("area").and_then(|v| v.as_str()).unwrap_or("");
-                let text = args.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                let priority = args.get("priority").and_then(|v| v.as_str()).unwrap_or("");
-                let title = args.get("title").and_then(|v| v.as_str()).unwrap_or("");
-                let measured = args.get("measuredBy").and_then(|v| v.as_str()).unwrap_or("");
+                let got = |n: &str| args.get(n).and_then(|v| v.as_str());
+                let (kind, area, text, priority, title, measured) =
+                    (got("kind"), got("area"), got("text"), got("priority"), got("title"), got("measuredBy"));
                 match crate::projector::declare_requirement(&self.pool, p, crate::projector::Requirement { id, kind, area, title, text, measured_by: measured, priority }, flag(args, "drop")).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),

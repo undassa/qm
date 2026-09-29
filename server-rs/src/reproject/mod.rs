@@ -27,7 +27,7 @@ mod traceability_said;
 mod needs;
 pub(crate) mod plan;
 mod plan_status;
-mod proof;
+pub(crate) mod proof;
 mod questions;
 mod risks;
 mod rows;

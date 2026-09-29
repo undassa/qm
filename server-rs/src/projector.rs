@@ -11907,14 +11907,19 @@ pub(crate) async fn declare_requirement_scope(
 }
 
 /// Поля требования, как их принимает дверь `requirement-add`.
+///
+/// Поле, которого дверь не получила, — `None`, и запись его не трогает: правка
+/// одного поля затирала пустотой остальные. Отказ «объявляйте без title»
+/// давал ровно это — пустые заголовок и способ доказательства до следующей
+/// пересборки.
 pub(crate) struct Requirement<'a> {
     pub id: &'a str,
-    pub kind: &'a str,
-    pub area: &'a str,
-    pub title: &'a str,
-    pub text: &'a str,
-    pub measured_by: &'a str,
-    pub priority: &'a str,
+    pub kind: Option<&'a str>,
+    pub area: Option<&'a str>,
+    pub title: Option<&'a str>,
+    pub text: Option<&'a str>,
+    pub measured_by: Option<&'a str>,
+    pub priority: Option<&'a str>,
 }
 
 pub(crate) async fn declare_requirement(pool: &Pool, project: &str, fields: Requirement<'_>, drop_it: bool) -> Result<Value, crate::db::Fail> {
@@ -11938,41 +11943,45 @@ pub(crate) async fn declare_requirement(pool: &Pool, project: &str, fields: Requ
                           "why": if gone > 0 { Value::Null }
                                  else { json!("снимается только объявленное: спроецированное уходит с документом") } }));
     }
-    if id.trim().is_empty() || (title.trim().is_empty() && text.trim().is_empty()) {
+    let said = |f: Option<&str>| f.is_some_and(|v| !v.trim().is_empty());
+    if id.trim().is_empty() || (!said(title) && !said(text)) {
         return Ok(json!({ "status": "empty", "why": "требование без имени и без формулировки не объявляется" }));
     }
     let client = crate::db::conn(pool).await?;
-    // Способ доказательства, объявленный поверх абзаца «Проверяется», жил до
-    // первой пересборки: дверь отвечала `hasCheck: true`, а следующая запись
-    // любого документа молча возвращала поле к тексту документа.
-    if !measured_by.trim().is_empty() {
-        let written_in: Option<String> = client
-            .query_opt(
-                "SELECT d.entity_kind || ' ' || d.entity_name FROM project_documents d
-                  WHERE d.project_id = $1 AND d.content LIKE '%**' || $2 || ' ·%'
-                    AND EXISTS (SELECT 1 FROM scheme($1) m WHERE m.role = 'marker.verified-by'
-                                 AND d.content LIKE '%' || m.value || '%')
-                  ORDER BY 1 LIMIT 1",
-                &[&project, &id],
-            )
-            .await?
-            .map(|r| r.get(0));
-        if let Some(doc) = written_in {
+    // Поле, которое пересборка берёт из документа, дверью не объявляется:
+    // объявленное жило бы до первой пересборки. Так было со способом
+    // доказательства поверх абзаца «Проверяется» — дверь отвечала
+    // `hasCheck: true`, а следующая запись любого документа молча возвращала
+    // поле к тексту, — и так стало с заголовком блока (undassa/mh#133).
+    // Какие поля и откуда — решает `written_in`, тем же чтением, что пересборка.
+    if said(title) || said(measured_by) {
+        let (title_in, measured_in) = crate::reproject::proof::written_in(&*client, project, id).await?;
+        if let (true, Some(doc)) = (said(measured_by), measured_in) {
             return Ok(json!({ "status": "written_in_document", "id": id,
-                "why": format!("требование {id} записано блоком в «{doc}», и способ доказательства — его абзац «Проверяется»: пересборка берёт поле оттуда. Правьте документ") }));
+                "why": format!("требование {id} записано блоком в «{doc}», и способ доказательства — его абзац «Проверяется»: пересборка берёт поле оттуда. Правьте документ; объявляйте без measuredBy") }));
+        }
+        if let (true, Some(doc)) = (said(title), title_in) {
+            return Ok(json!({ "status": "written_in_document", "id": id,
+                "why": format!("заголовок требования {id} — заголовок его блока в «{doc}», и пересборка \
+                                берёт поле оттуда. Правьте документ; объявляйте без title") }));
         }
     }
-    client
-        .execute(
+    let row = client
+        .query_one(
             "INSERT INTO project_requirements (project_id, id, kind, area, title, text, satisfied,
                                                priority, measured_by, entity_kind, entity_name, origin)
-             VALUES ($1,$2,$3,$4,$5,$6,false,$7,$8,'srs','','declared')
-             ON CONFLICT (project_id, id) DO UPDATE SET kind = EXCLUDED.kind, area = EXCLUDED.area,
-               title = EXCLUDED.title, text = EXCLUDED.text, priority = EXCLUDED.priority,
-               measured_by = EXCLUDED.measured_by, origin = 'declared'",
+             VALUES ($1,$2,coalesce($3,'FR'),coalesce($4,''),coalesce($5,''),coalesce($6,''),false,
+                     coalesce($7,''),coalesce($8,''),'srs','','declared')
+             ON CONFLICT (project_id, id) DO UPDATE SET
+               kind = coalesce($3, project_requirements.kind), area = coalesce($4, project_requirements.area),
+               title = coalesce($5, project_requirements.title), text = coalesce($6, project_requirements.text),
+               priority = coalesce($7, project_requirements.priority),
+               measured_by = coalesce($8, project_requirements.measured_by), origin = 'declared'
+             RETURNING kind, text, measured_by",
             &[&project, &id, &kind, &area, &title, &text, &priority, &measured_by],
         )
         .await?;
+    let (kind, text, measured_by): (String, String, String) = (row.get(0), row.get(1), row.get(2));
     // Требование без тела — заголовок, выданный за требование; без способа
     // проверки — намерение. Оба состояния называются, а не прячутся.
     Ok(json!({ "status": "declared", "id": id, "kind": kind,

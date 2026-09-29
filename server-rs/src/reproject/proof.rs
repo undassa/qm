@@ -35,8 +35,35 @@ static REQUIREMENT_CELL: Lazy<Regex> = Lazy::new(|| {
 static CHECK_CELL: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^\s*`(TC-([A-Z0-9]+)-\d+[a-z]?)`\s*$").expect("образец проверки"));
 static REQUIREMENT_BLOCK: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^\*\*((?:FR|NFR)-[A-Z0-9]+(?:-\d+[a-z]?)?)\s*·").expect("образец блока требования")
+    // Заголовок — до закрывающих звёзд той же строки; без них блок остаётся
+    // блоком, а заголовка у него нет.
+    Regex::new(r"^\*\*((?:FR|NFR)-[A-Z0-9]+(?:-\d+[a-z]?)?)\s*·(?:\s*(.*?)\s*\*\*)?").expect("образец блока требования")
 });
+
+/// Виды документов, объявляющие требования БЛОКАМИ `**FR-NN · заголовок**`:
+/// srs — функциональные и нефункциональные, ui-spec — `FR-UI-…` (у `tot-ade`
+/// все 56 блоков `FR-UI` стоят в ui-spec, в srs ни одного). Остальные виды
+/// блок только цитируют.
+///
+/// Перечень один на троих: пересборку заголовка, пересборку «Проверяется» и
+/// отказ `requirement-add` (`written_in`). Пока их было два, дверь смотрела
+/// заголовок только в srs, а способ доказательства — в любом документе, и одна
+/// принимала бы поле, которое пересборка тут же перепишет.
+pub(crate) const BLOCK_HOMES: &[&str] = &["srs", "ui-spec"];
+
+/// Заголовки блоков `**FR-NN · заголовок**` документа: имя и заголовок, первый
+/// по имени.
+pub(crate) fn block_titles(content: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for line in content.lines() {
+        let Some(m) = REQUIREMENT_BLOCK.captures(line.trim_start()) else { continue };
+        let Some(title) = m.get(2).map(|t| t.as_str()).filter(|t| !t.is_empty()) else { continue };
+        if !out.iter().any(|(id, _)| id == &m[1]) {
+            out.push((m[1].to_owned(), title.to_owned()));
+        }
+    }
+    out
+}
 
 /// Абзацы «Проверяется» документа: вид, имя, требование блока и текст после маркера.
 ///
@@ -136,6 +163,42 @@ fn declares_over(kind: &str, existing: Option<&String>, home: &str) -> bool {
         None => true,
         Some(had) => kind == home && had != home,
     }
+}
+
+/// Какие поля требования пересборка берёт из документа: документ, чей блок
+/// даёт заголовок, и документ, чей абзац «Проверяется» даёт способ
+/// доказательства. Читает тем же, чем пересборка, и в том же порядке: дверь,
+/// спрашивающая иначе, приняла бы поле, которое пересборка перепишет.
+pub(crate) async fn written_in(
+    client: &impl deadpool_postgres::GenericClient,
+    project: &str,
+    id: &str,
+) -> Result<(Option<String>, Option<String>), crate::db::Fail> {
+    let marker = crate::scheme::Terms::load_at(client, project).await?.one("marker.verified-by").map(str::to_owned);
+    let documents = client
+        .query(
+            "SELECT entity_kind, entity_name, content FROM project_documents
+              WHERE project_id = $1 AND entity_kind = ANY($2) ORDER BY entity_kind, entity_name",
+            &[&project, &BLOCK_HOMES],
+        )
+        .await?;
+    let (mut title, mut measured) = (None, None);
+    for r in &documents {
+        let (kind, name, content): (String, String, String) = (r.get(0), r.get(1), r.get(2));
+        let doc = format!("{kind} {name}");
+        if title.is_none() && block_titles(&content).iter().any(|(had, _)| had == id) {
+            title = Some(doc.clone());
+        }
+        if measured.is_none() {
+            if let Some(m) = marker.as_deref().filter(|m| content.contains(m)) {
+                if paragraphs_checks(kind, name, &content, m).iter()
+                    .any(|p| p.2.as_deref() == Some(id) && !p.3.is_empty()) {
+                    measured = Some(doc);
+                }
+            }
+        }
+    }
+    Ok((title, measured))
 }
 
 pub(crate) async fn project(
@@ -306,8 +369,9 @@ pub(crate) async fn project(
     for r in requirements.values() {
         tx.execute(
             // Заголовок, версия и сквозной признак здесь не перечислены, и это
-            // умышленно: их кладёт объявление, разбор их не выводит, и
-            // переписать их пустотой значило бы стереть прочитанное.
+            // умышленно: таблица их не несёт, и переписать их пустотой значило
+            // бы стереть прочитанное. Версию и сквозной признак кладёт
+            // объявление, заголовок — блок srs ниже (`block_titles`).
             "INSERT INTO project_requirements(project_id, id, kind, area, text,
                                               entity_kind, entity_name, satisfied,
                                               priority, measured_by, section_ord)
@@ -371,7 +435,10 @@ pub(crate) async fn project(
         None => Vec::new(),
     };
     let mut proven: HashMap<&str, &str> = HashMap::new();
-    for (_, _, requirement_id, text_of) in &paragraphs {
+    for (doc_kind, _, requirement_id, text_of) in &paragraphs {
+        if !BLOCK_HOMES.contains(&doc_kind.as_str()) {
+            continue;
+        }
         if let Some(id) = requirement_id {
             let was = proven.entry(id.as_str()).or_insert("");
             if was.is_empty() {
@@ -387,6 +454,75 @@ pub(crate) async fn project(
         )
         .await?;
     }
+    // ЗАГОЛОВОК БЛОКА — ИЗ ДОКУМЕНТА, как и его «Проверяется». Заголовок клала
+    // только дверь `requirement-add`, а пересборка выводила из блока одно поле
+    // способа доказательства. Замер 2026-09-28 на `tot-ade` (undassa/mh#133):
+    // заголовок NFR-19 в srs переписан (r144), после `reproject` `measured_by`
+    // новый, а `title` прежний — прежнего текста нет ни в srs, ни в поиске, а
+    // дверь правки отказывает словами «записано в srs, правьте документ».
+    //
+    // Берутся только виды `BLOCK_HOMES`: блок, повторённый цитатой в другом
+    // документе, не перебивает объявление.
+    //
+    // ПЕРВЫЙ ВЫВОД НЕ ДВИГАЕТ ОТМЕТКУ. У `tot-ade` все 148 заголовков srs
+    // кончаются точкой, и ни один из 148 объявленных заголовков с ними не
+    // совпадает (146 — только точкой). Заголовок входит в тело `entity_row`, и
+    // первая же пересборка поставила бы новую отметку всем 148 требованиям —
+    // ложно переоткрыв всё, что на них стоит, цепочкой до шести звеньев. Та же
+    // волна, что описана у `paragraphs_with_which_time`: правка поля проекцией —
+    // не правка записи. Пока отметка требования стоит на теле версии 3,
+    // заголовок, ставший ЕДИНСТВЕННОЙ разницей с отпечатком, принимается в
+    // отпечаток молча; другая разница рядом с ним — правка записи, и отметка
+    // двигается. Переход на версию 4 — в этой же транзакции, и перепись, и
+    // перевод остальных: пересборка, упавшая между ними, оставила бы окно, в
+    // котором настоящая правка заголовка тоже принялась бы молча. Отметки ниже
+    // версии 3 не трогаются: их доводит `stamp`, и шаг версии 3 обязан пройти
+    // по ним раньше.
+    let documents = tx
+        .query(
+            "SELECT content FROM project_documents WHERE project_id = $1 AND entity_kind = ANY($2)
+              ORDER BY entity_kind, entity_name",
+            &[&project, &BLOCK_HOMES],
+        )
+        .await?;
+    let mut titled: HashSet<String> = HashSet::new();
+    for r in &documents {
+        for (id, title) in block_titles(&r.get::<_, String>(0)) {
+            if !titled.insert(id.clone()) {
+                continue;
+            }
+            let before: Option<String> = tx
+                .query_opt(
+                    "SELECT md5(body) FROM entity_row WHERE project_id = $1 AND kind = 'requirement' AND id = $2",
+                    &[&project, &id],
+                )
+                .await?
+                .map(|r| r.get(0));
+            let moved = tx
+                .execute(
+                    "UPDATE project_requirements SET title = $3
+                      WHERE project_id = $1 AND id = $2 AND title IS DISTINCT FROM $3",
+                    &[&project, &id, &title],
+                )
+                .await?;
+            if moved > 0 {
+                tx.execute(
+                    "UPDATE entity_stamp st SET text_hash = md5(e.body), body_version = 4
+                       FROM entity_row e
+                      WHERE st.project_id = $1 AND st.kind = 'requirement' AND st.id = $2
+                        AND st.body_version = 3 AND st.text_hash = $3
+                        AND e.project_id = st.project_id AND e.kind = st.kind AND e.id = st.id",
+                    &[&project, &id, &before],
+                )
+                .await?;
+            }
+        }
+    }
+    tx.execute(
+        "UPDATE entity_stamp SET body_version = 4 WHERE project_id = $1 AND kind = 'requirement' AND body_version = 3",
+        &[&project],
+    )
+    .await?;
 
     // ── Проверка, названная самим требованием ────────────────────────────────
     //
@@ -692,6 +828,14 @@ pub(crate) async fn stamp(pool: &Pool, project: &str) -> Result<u64, crate::db::
         .await?;
     let changed = tx.execute(STAMP_CHANGED, &[&project, &now]).await?;
     paragraphs_with_which_time(&tx, project).await?;
+    // Версия 4 — заголовок блока в теле (см. «первый вывод не двигает отметку»
+    // в `project`). Отметки версии 3 переводит сама пересборка; здесь доходят
+    // те, что были ниже и только что прошли шаг версии 3.
+    tx.execute(
+        "UPDATE entity_stamp SET body_version = 4 WHERE project_id = $1 AND kind = 'requirement' AND body_version < 4",
+        &[&project],
+    )
+    .await?;
     tx.execute(STAMP_FRESH, &[&project, &now]).await?;
     tx.commit().await?;
     Ok(changed)
@@ -822,7 +966,7 @@ const STAMP_CHANGED: &str = "UPDATE entity_stamp st
    AND st.text_hash <> md5(e.body)";
 
 const STAMP_FRESH: &str = "INSERT INTO entity_stamp (project_id, kind, id, text_hash, created_at, updated_at, body_version)
-SELECT e.project_id, e.kind, e.id, md5(e.body), нач.когда, нач.когда, 3
+SELECT e.project_id, e.kind, e.id, md5(e.body), нач.когда, нач.когда, 4
   FROM entity_row e
  CROSS JOIN (SELECT coalesce(min(written_at), $2) AS когда
                FROM project_document_revisions WHERE project_id = $1) нач
@@ -831,7 +975,181 @@ ON CONFLICT (project_id, kind, id) DO NOTHING";
 
 #[cfg(test)]
 mod tests {
-    use super::paragraphs_checks;
+    use super::{block_titles, paragraphs_checks};
+
+    #[test]
+    fn a_block_heading_is_the_title_up_to_its_closing_stars() {
+        let doc = "**NFR-19 · Дополнение не задерживает кадр**\n*Проверяется:* бенч\n\n\
+                   **FR-14 · Скоуп.** — пояснение\n\n**FR-09 · без закрытия\n\n**NFR-19 · повтор**";
+        assert_eq!(block_titles(doc), vec![
+            ("NFR-19".to_owned(), "Дополнение не задерживает кадр".to_owned()),
+            ("FR-14".to_owned(), "Скоуп.".to_owned()),
+        ], "заголовок — до закрывающих звёзд, первый по имени; блок без них заголовка не даёт");
+    }
+
+    /// Случай undassa/mh#133: заголовок блока переписан, пересборка обязана
+    /// переписать и `title` требования, объявленного дверью. Блоки живут в srs
+    /// (NFR-19) и в ui-spec (`FR-UI-…`); цитаты — в `feature` и `story`, по обе
+    /// стороны от `srs` по алфавиту, и не побеждают ни в каком порядке чтения.
+    /// Первый вывод (у `tot-ade` заголовки отличались одной точкой) не двигает
+    /// отметку записи, если заголовок — единственная разница; правка заголовка
+    /// после него и заголовок вместе с другим полем — двигают. Отметка,
+    /// заведённая после перехода, и отметка ниже версии 3 тоже кончают версией
+    /// 4. Абзац «Проверяется» цитаты не становится способом доказательства.
+    /// Пустая строка, поданная двери, поле очищает — это договор `requirement-add`.
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn a_rewritten_heading_rewrites_the_title() {
+        let url = std::env::var("MH_TEST_DB_URL").expect("MH_TEST_DB_URL: адрес пустой базы");
+        let apart = format!("{}{}", if url.contains('?') { '&' } else { '?' },
+                            "options=-c%20search_path%3Dheading_title");
+        let pool = crate::db::pool(&format!("{url}{apart}"), 2).expect("пул тестовой базы");
+        pool.get().await.expect("соединение")
+            .batch_execute("DROP SCHEMA IF EXISTS heading_title CASCADE; CREATE SCHEMA heading_title;")
+            .await.expect("своя схема заводится");
+        crate::projector::ensure(&pool).await.expect("схема встаёт на пустой базе");
+        let declare = |id: &'static str, title: Option<&'static str>, text: Option<&'static str>| {
+            let pool = pool.clone();
+            async move {
+                crate::projector::declare_requirement(&pool, "p", crate::projector::Requirement {
+                    id, kind: None, area: None, title, text, measured_by: None, priority: None,
+                }, false).await.expect("ответ двери")
+            }
+        };
+        for (id, title) in [("NFR-19", "Дополнение отвечает в бюджете кадра"), ("FR-UI-01", "Кнопка видна"),
+                            ("FR-UI-02", "Поле ввода"), ("FR-UI-03", "Метка")] {
+            let v = declare(id, Some(title), Some("тело")).await;
+            assert_eq!(v["status"], "declared", "{v}");
+        }
+        // Способ доказательства и область объявлены до документов: иначе первая
+        // пересборка меняла бы и их, и отметка двигалась бы по законной причине.
+        for (id, measured_by, area) in [("NFR-19", Some("бенч `a`"), None), ("FR-UI-01", None, Some("экран"))] {
+            let v = crate::projector::declare_requirement(&pool, "p", crate::projector::Requirement {
+                id, kind: None, area, title: None, text: Some("тело"), measured_by, priority: None,
+            }, false).await.expect("ответ двери");
+            assert_eq!(v["status"], "declared", "{v}");
+        }
+        // Отметки — как у набора до правки: сняты с прежнего тела, версия 3.
+        // FR-UI-02 после отметки поправлен и по другому полю: его новая отметка
+        // законна, и молчаливая перепись её бы спрятала.
+        pool.get().await.expect("соединение")
+            .batch_execute(
+                "INSERT INTO project_documents (project_id, entity_kind, entity_name, content, content_hash,
+                                                bytes, revision, updated_at, updated_by)
+                 VALUES ('p', 'srs', '', E'# Требования\\n\\n**NFR-19 · Дополнение отвечает в бюджете кадра.**\\nТело.\\n*Проверяется:* бенч `a`\\n', '', 0, 1, 0, 't'),
+                        ('p', 'ui-spec', '', E'# Экраны\\n\\n**FR-UI-01 · Кнопка видна.**\\n\\n**FR-UI-02 · Поле ввода.**\\n\\n**FR-UI-03 · Метка**\\n', '', 0, 1, 0, 't'),
+                        ('p', 'feature', 'F-1', E'**NFR-19 · цитата в фиче.**\\n*Проверяется:* цитата-проверка\\n\\n**FR-UI-01 · цитата в фиче.**\\n', '', 0, 1, 0, 't'),
+                        ('p', 'story', 'S-1', E'**NFR-19 · цитата в истории.**\\n\\n**FR-UI-01 · цитата в истории.**\\n', '', 0, 1, 0, 't');
+                 INSERT INTO entity_stamp (project_id, kind, id, text_hash, created_at, updated_at, body_version)
+                 SELECT project_id, kind, id, md5(body), 1, 1, 3 FROM entity_row
+                  WHERE project_id = 'p' AND kind = 'requirement';
+                 UPDATE project_requirements SET priority = 'О' WHERE project_id = 'p' AND id = 'FR-UI-02';
+                 UPDATE entity_stamp SET body_version = 2 WHERE project_id = 'p' AND id = 'FR-UI-03';
+                 INSERT INTO scheme_term (project_id, role, value) VALUES ('p', 'marker.verified-by', 'Проверяется:');")
+            .await.expect("документы и отметки заводятся");
+        let read = |id: &'static str| {
+            let pool = pool.clone();
+            async move {
+                let client = pool.get().await.expect("соединение");
+                let title: String = client
+                    .query_one("SELECT title FROM project_requirements WHERE project_id = 'p' AND id = $1", &[&id])
+                    .await.expect("требование на месте").get(0);
+                let at: i64 = client
+                    .query_one("SELECT updated_at FROM entity_stamp WHERE project_id = 'p' AND kind = 'requirement'
+                                   AND id = $1", &[&id])
+                    .await.expect("отметка на месте").get(0);
+                (title, at)
+            }
+        };
+        let field = |id: &'static str, sql: &'static str| {
+            let pool = pool.clone();
+            async move {
+                pool.get().await.expect("соединение").query_one(sql, &[&id]).await.expect("поле читается")
+                    .get::<_, String>(0)
+            }
+        };
+        let version = |id: &'static str| {
+            let pool = pool.clone();
+            async move {
+                pool.get().await.expect("соединение")
+                    .query_one("SELECT body_version FROM entity_stamp WHERE project_id = 'p' AND kind = 'requirement'
+                                   AND id = $1", &[&id])
+                    .await.expect("отметка на месте").get::<_, i32>(0)
+            }
+        };
+        let rebuild = || {
+            let pool = pool.clone();
+            async move {
+                super::project(&pool, "p").await.expect("пересборка проходит");
+                super::stamp(&pool, "p").await.expect("отметки ставятся");
+            }
+        };
+
+        rebuild().await;
+        assert_eq!(read("NFR-19").await, ("Дополнение отвечает в бюджете кадра.".to_owned(), 1),
+                   "заголовок взят не из srs, или первый вывод сдвинул отметку записи");
+        assert_eq!(read("FR-UI-01").await, ("Кнопка видна.".to_owned(), 1),
+                   "заголовок взят не из ui-spec, или первый вывод сдвинул отметку записи");
+        let (title, at) = read("FR-UI-02").await;
+        assert_eq!(title, "Поле ввода.");
+        assert!(at > 1, "правка другого поля рядом с заголовком принята в отпечаток молча");
+        assert_eq!(field("NFR-19", "SELECT measured_by FROM project_requirements WHERE project_id = 'p' AND id = $1").await,
+                   "бенч `a`", "способом доказательства стал абзац цитаты");
+        assert_eq!(version("FR-UI-03").await, 4, "отметка ниже версии 3 не дошла до версии 4");
+
+        // Требование, заведённое после перехода: его отметка заводится сразу
+        // версией 4, и правка одного заголовка её двигает.
+        declare("NFR-20", Some("Новое"), Some("тело")).await;
+        pool.get().await.expect("соединение")
+            .batch_execute("UPDATE project_documents SET content = content || E'\\n**NFR-20 · Новое**\\n'
+                             WHERE project_id = 'p' AND entity_kind = 'srs'")
+            .await.expect("блок дописывается");
+        rebuild().await;
+        pool.get().await.expect("соединение")
+            .batch_execute("UPDATE entity_stamp SET updated_at = 1 WHERE project_id = 'p' AND id = 'NFR-20';
+                            UPDATE project_documents SET content = replace(content, 'NFR-20 · Новое', 'NFR-20 · Новое имя')
+                             WHERE project_id = 'p' AND entity_kind = 'srs'")
+            .await.expect("заголовок нового переписывается");
+        rebuild().await;
+        let (title, at) = read("NFR-20").await;
+        assert_eq!(title, "Новое имя");
+        assert!(at > 1, "правка заголовка требования, заведённого после перехода, принята молча");
+
+        pool.get().await.expect("соединение")
+            .batch_execute("UPDATE project_documents SET content = replace(content, 'отвечает в бюджете кадра', 'не задерживает кадр')
+                             WHERE project_id = 'p' AND entity_kind = 'srs'")
+            .await.expect("заголовок переписывается");
+        rebuild().await;
+        let (title, at) = read("NFR-19").await;
+        assert_eq!(title, "Дополнение не задерживает кадр.", "заголовок требования не взят из документа");
+        assert!(at > 1, "правка заголовка после первого вывода не сдвинула отметку");
+
+        // Заголовок поверх блока прожил бы до следующей пересборки — в любом
+        // объявляющем виде.
+        for id in ["NFR-19", "FR-UI-01"] {
+            let over = declare(id, Some("поверх документа"), Some("тело")).await;
+            assert_eq!(over["status"], "written_in_document", "заголовок поверх блока {id} принят: {over}");
+        }
+        // Способ доказательства поверх абзаца «Проверяется» — тот же случай.
+        let over = crate::projector::declare_requirement(&pool, "p", crate::projector::Requirement {
+            id: "NFR-19", kind: None, area: None, title: None, text: Some("тело"), measured_by: Some("поверх"), priority: None,
+        }, false).await.expect("ответ двери");
+        assert_eq!(over["status"], "written_in_document", "способ доказательства поверх абзаца принят: {over}");
+        // Объявление без заголовка, как советует отказ, не затирает выведенный.
+        let without = declare("NFR-19", None, Some("новое тело")).await;
+        assert_eq!(without["status"], "declared", "{without}");
+        assert_eq!(read("NFR-19").await.0, "Дополнение не задерживает кадр.", "объявление без title стёрло заголовок");
+        // Поданная пустая строка — «очистить», а не «не подано».
+        let cleared = crate::projector::declare_requirement(&pool, "p", crate::projector::Requirement {
+            id: "FR-UI-01", kind: None, area: Some(""), title: None, text: Some("тело"), measured_by: None, priority: None,
+        }, false).await.expect("ответ двери");
+        assert_eq!(cleared["status"], "declared", "{cleared}");
+        assert_eq!(field("FR-UI-01", "SELECT area FROM project_requirements WHERE project_id = 'p' AND id = $1").await,
+                   "", "пустая строка не очистила поле");
+
+        pool.get().await.expect("соединение")
+            .batch_execute("DROP SCHEMA IF EXISTS heading_title CASCADE").await.expect("схема снимается");
+    }
 
     #[test]
     fn paragraph_checks_whole_and_without_tail() {
