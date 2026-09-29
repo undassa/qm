@@ -8560,6 +8560,9 @@ pub(crate) struct Question<'a> {
     pub answer: &'a str,
     pub closed_by: &'a str,
     pub owner: bool,
+    /// Заменить вопрос, уже объявленный этим именем. Без признака занятое имя
+    /// отказано: см. `declare_question`.
+    pub replace: bool,
 }
 fn declared_answer_state(owner: bool, answer: &str) -> &'static str {
     if owner {
@@ -8591,7 +8594,7 @@ mod declared_answer_state_tests {
 }
 
 pub(crate) async fn declare_question(pool: &Pool, project: &str, fields: Question<'_>, drop_it: bool) -> Result<Value, crate::db::Fail> {
-    let Question { id, number, title, state, answer, closed_by, owner } = fields;
+    let Question { id, number, title, state, answer, closed_by, owner, replace } = fields;
     if id.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "вопрос без имени не объявляется" }));
     }
@@ -8611,19 +8614,36 @@ pub(crate) async fn declare_question(pool: &Pool, project: &str, fields: Questio
         Err(why) => return Ok(json!({ "status": "unknown_state", "why": why })),
     };
     let client = crate::db::conn(pool).await?;
+    // ЗАНЯТОЕ ИМЯ ОТКАЗАНО, ЕСЛИ ЗАМЕНА НЕ НАЗВАНА. Дверь писала вопрос целиком
+    // поверх любого с тем же именем. Замер 2026-09-28 на `tot-ade` (undassa/mh#131):
+    // сессия взяла «максимум + 1» из перечня, прочитанного несколько ходов назад,
+    // объявила Q-198 — а его уже объявила другая сессия, и решённый вопрос
+    // (заголовок, варианты, выбор, ответ) заменился молча. Истории у объявленных
+    // вопросов нет, и вернуть текст смогла только чужая локальная копия.
+    //
+    // Проверка — сама вставка (`DO NOTHING` без замены), а не чтение перед ней:
+    // две сессии, прочитавшие «имя свободно» одновременно, прошли бы обе.
+    //
+    // Вопрос, записанный документом, дверью не заменяется и с признаком: пересборка
+    // отдаёт имя документу и стёрла бы объявленное молча.
+    let written = if replace {
+        "ON CONFLICT (project_id, id) DO UPDATE SET number = EXCLUDED.number, title = EXCLUDED.title,
+           state = EXCLUDED.state, answer = EXCLUDED.answer,
+           answer_state = EXCLUDED.answer_state, has_answer = EXCLUDED.has_answer
+         WHERE project_questions.origin = 'declared'"
+    } else {
+        "ON CONFLICT (project_id, id) DO NOTHING"
+    };
     // Колонки вопроса объявлены проекцией; здесь заполняются те, что есть у
     // объявленного: остальное остаётся пустым и видно как пустое.
-    client.execute(
+    let n = client.execute(
         // Ответ и СОСТОЯНИЕ ответа — разные колонки. Прежде текст ответа
         // укладывался в состояние: вопрос выходил с состоянием ответа длиной в
         // полторы тысячи знаков и с пустым ответом.
-        "INSERT INTO project_questions (project_id, id, number, title, state, entity_kind, entity_name,
+        &format!("INSERT INTO project_questions (project_id, id, number, title, state, entity_kind, entity_name,
                                         answer, answer_state, has_answer, origin)
          VALUES ($1,$2,$3,$4,$5,'register','',$6,$7,$8,'declared')
-         ON CONFLICT (project_id, id) DO UPDATE SET number = EXCLUDED.number, title = EXCLUDED.title,
-           state = EXCLUDED.state, answer = EXCLUDED.answer,
-           answer_state = EXCLUDED.answer_state, has_answer = EXCLUDED.has_answer,
-           origin = 'declared'",
+         {written}"),
         // ОБЪЯВЛЕННОЕ СИЛЬНЕЕ ВЫВЕДЕННОГО. `owner` приходит словом зовущего,
         // `answered` выводится из того, что текст непуст, — и порядок, ставивший
         // вывод впереди слова, делал ложным обещание самой двери («owner:=true —
@@ -8641,6 +8661,31 @@ pub(crate) async fn declare_question(pool: &Pool, project: &str, fields: Questio
         &[&project, &id, &number, &title, &state, &answer,
           &declared_answer_state(owner, answer),
           &!answer.trim().is_empty()]).await?;
+    if n == 0 {
+        let held = client
+            .query_opt("SELECT origin, entity_kind, entity_name, title FROM project_questions
+                         WHERE project_id = $1 AND id = $2", &[&project, &id])
+            .await?;
+        // Имя было занято в миг вставки, а к чтению вопрос сняли. Отказ говорит
+        // ровно это: пустые вид и имя в «записан документом «»» звали бы править
+        // документ, которого нет.
+        let Some((origin, kind, name, was)) = held
+            .map(|r| (r.get::<_, String>(0), r.get::<_, String>(1), r.get::<_, String>(2), r.get::<_, String>(3)))
+        else {
+            return Ok(json!({ "status": "raced", "id": id,
+                "why": format!("вопрос {id} был занят в миг записи, а сейчас его нет: его сняли между \
+                                записью и чтением. Ничего не записано; повторите объявление") }));
+        };
+        if origin == "declared" {
+            return Ok(json!({ "status": "taken", "id": id, "title": was,
+                "why": format!("вопрос {id} уже объявлен («{was}»): ничего не записано. Новый вопрос — \
+                                под свободным именем; правка этого — `question-add id={id} replace:=true …` \
+                                со всеми полями, потому что запись заменяется целиком") }));
+        }
+        return Ok(json!({ "status": "written_in_document", "id": id, "title": was,
+            "why": format!("вопрос {id} записан документом «{kind} {name}»: ничего не записано. \
+                            Правится документ — `put-section kind={kind} id={name} …`") }));
+    }
     // СВЯЗЬ «ЧЕМ ЗАКРЫТ» — ЧАСТЬ ОТВЕТА, а не побочное действие. Вставка стояла
     // под `.ok()`: связь молча не писалась, а дверь всё равно отвечала
     // «declared». Спросивший получал слово о том, чего не произошло.
@@ -8657,6 +8702,71 @@ pub(crate) async fn declare_question(pool: &Pool, project: &str, fields: Questio
         }
     }
     Ok(json!({ "status": "declared", "id": id, "state": state, "closedBy": closed }))
+}
+
+/// Занятое имя вопроса отказано дверью, и отказ — `isError`.
+///
+/// Случай undassa/mh#131: `question-add id=Q-198` от второй сессии заменил
+/// решённый вопрос первой целиком, и дверь ответила «declared».
+#[cfg(test)]
+mod question_taken {
+    use serde_json::json;
+
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn an_add_over_a_taken_id_is_refused_and_changes_nothing() {
+        let url = std::env::var("MH_TEST_DB_URL").expect("MH_TEST_DB_URL: адрес пустой базы");
+        let apart = format!("{}{}", if url.contains('?') { '&' } else { '?' },
+                            "options=-c%20search_path%3Dquestion_taken");
+        let pool = crate::db::pool(&format!("{url}{apart}"), 2).expect("пул тестовой базы");
+        pool.get().await.expect("соединение")
+            .batch_execute("DROP SCHEMA IF EXISTS question_taken CASCADE; CREATE SCHEMA question_taken;")
+            .await.expect("своя схема заводится");
+        crate::projector::ensure(&pool).await.expect("схема встаёт на пустой базе");
+        let door = crate::mcp::Mcp {
+            pool: pool.clone(),
+            kinds: std::sync::Arc::new(crate::kinds::Kinds::from_db(&pool).await.expect("виды")),
+            project: "П".to_owned(),
+            author: "проба".to_owned(),
+        };
+        let title_of = |id: &'static str| {
+            let pool = pool.clone();
+            async move {
+                pool.get().await.expect("соединение")
+                    .query_one("SELECT title FROM project_questions WHERE project_id = 'П' AND id = $1", &[&id])
+                    .await.expect("вопрос на месте").get::<_, String>(0)
+            }
+        };
+
+        let first = door.call("question-add", &json!({ "id": "Q-198", "title": "решённый", "state": "decided",
+                                                        "answer": "ответ первой сессии" })).await;
+        assert_ne!(first["isError"], json!(true), "свободное имя объявляется: {first}");
+
+        let second = door.call("question-add", &json!({ "id": "Q-198", "title": "чужой новый" })).await;
+        assert_eq!(second["isError"], json!(true), "занятое имя принято: {second}");
+        let said = second["content"][0]["text"].as_str().unwrap_or("");
+        assert!(said.contains("replace:=true"), "отказ не называет дверь правки: {said}");
+        assert_eq!(title_of("Q-198").await, "решённый", "отказанная запись заменила вопрос");
+
+        let edit = door.call("question-add", &json!({ "id": "Q-198", "title": "правка", "replace": true })).await;
+        assert_ne!(edit["isError"], json!(true), "названная замена отказана: {edit}");
+        assert_eq!(title_of("Q-198").await, "правка", "названная замена не записана");
+
+        // Записанный документом не заменяется и с признаком: пересборка вернула бы
+        // имя документу и стёрла объявленное молча.
+        pool.get().await.expect("соединение")
+            .batch_execute("UPDATE project_questions SET origin = 'projected', entity_kind = 'register',
+                                   entity_name = 'open-questions' WHERE id = 'Q-198'")
+            .await.expect("вопрос переводится в записанный документом");
+        let over_doc = door.call("question-add", &json!({ "id": "Q-198", "title": "поверх", "replace": true })).await;
+        assert_eq!(over_doc["isError"], json!(true), "вопрос документа заменён дверью: {over_doc}");
+        let said = over_doc["content"][0]["text"].as_str().unwrap_or("");
+        assert!(said.contains("put-section"), "отказ не называет дверь правки документа: {said}");
+        assert_eq!(title_of("Q-198").await, "правка", "вопрос документа переписан");
+
+        pool.get().await.expect("соединение")
+            .batch_execute("DROP SCHEMA IF EXISTS question_taken CASCADE").await.expect("схема снимается");
+    }
 }
 
 pub(crate) async fn declare_task_requirement(
@@ -15479,7 +15589,7 @@ mod owner_queue {
             async move {
                 super::declare_question(&pool, "П", super::Question {
                     id: "Q-1", number: 1, title: "вопрос", state: "open",
-                    answer, closed_by: "", owner,
+                    answer, closed_by: "", owner, replace: true,
                 }, false).await.expect("вопрос объявляется");
                 super::sync_owner_questions(&pool, "П").await.expect("очередь сводится")
             }

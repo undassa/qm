@@ -484,12 +484,13 @@ impl Mcp {
                 "state": s("open · accepted · closed"), "mitigation": s("митигация"),
                 "trigger": s("признак срабатывания"), "owner": s("владелец"), "source": s("где записан") },
                 "required": ["id", "title"] } }));
-        tools.push(json!({ "name": "question-add", "description": "объявить вопрос прямо: имя, номер, заголовок, состояние, чем закрыт; owner:=true — решает владелец: вопрос не держит ступень 5 и встаёт в очередь пульта, ответ владельца — `asks state=done`",
+        tools.push(json!({ "name": "question-add", "description": "объявить вопрос прямо: имя, номер, заголовок, состояние, чем закрыт; занятое имя отказано — правка объявленного идёт с replace:=true; owner:=true — решает владелец: вопрос не держит ступень 5 и встаёт в очередь пульта, ответ владельца — `asks state=done`",
             "inputSchema": { "type": "object", "properties": { "id": s("имя, например OQ-01"),
                 "number": json!({"type":"integer"}), "title": s("о чём вопрос"),
                 "state": s("open · decided · closed"), "answer": s("ответ, если записан"),
                 "closedBy": s("решение, которым закрыт"),
                 "owner": json!({"type":"boolean","description":"решает владелец; объявление без него снимает пометку"}),
+                "replace": json!({"type":"boolean","description":"заменить объявленный вопрос с этим именем целиком; без него занятое имя отказано"}),
                 "drop": json!({"type":"boolean","description":"снять вопрос, а не объявить"}) },
                 "required": ["id", "title"] } }));
         tools.push(json!({ "name": "task-requirement-add", "description": "объявить, что задача несёт требование",
@@ -2144,8 +2145,11 @@ impl Mcp {
             "question-add" => {
                 let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
                 let number = num(args, "number").unwrap_or(0) as i32;
-                match crate::projector::declare_question(&self.pool, p, crate::projector::Question { id: &g("id"), number, title: &g("title"), state: &g("state"), answer: &g("answer"), closed_by: &g("closedBy"), owner: flag(args, "owner") }, flag(args, "drop")).await {
-                    Ok(v) => ok(v),
+                match crate::projector::declare_question(&self.pool, p, crate::projector::Question { id: &g("id"), number, title: &g("title"), state: &g("state"), answer: &g("answer"), closed_by: &g("closedBy"), owner: flag(args, "owner"), replace: flag(args, "replace") }, flag(args, "drop")).await {
+                    // Отказ — отказом, а не ответом с полем: «ничего не записано»
+                    // под `isError: false` читается записанным.
+                    Ok(v) if matches!(v["status"].as_str(), Some("declared" | "dropped")) => ok(v),
+                    Ok(v) => refusal(Miss::Refused(v.to_string())),
                     Err(e) => refusal(e.into()),
                 }
             }

@@ -83,7 +83,7 @@ export function Console({
     // Состояние `decided` — «решено владельцем»: ответ записан, но закрывает
     // вопрос решение, а не сам факт ответа.
     const r = await write(projectId, "question-add", {
-      id: a.id, title: a.title, state: "decided", answer: draft.trim(),
+      id: a.id, title: a.title, state: "decided", answer: draft.trim(), replace: true,
     });
     setBusy(false);
     if (!r.ok) { setBeef(r.why || "дверь не приняла ответ"); return; }

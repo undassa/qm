@@ -529,6 +529,21 @@ export const loadDocuments = (projectId: string) =>
  * Отказ двери — это ОТВЕТ, а не сбой: дверь объясняет, почему не приняла, и
  * объяснение надо показать человеку, а не проглотить.
  */
+/**
+ * Слово отказа из `message` конверта. Дверь, отказавшая по существу, кладёт
+ * туда свой ответ целиком — JSON с `why`, — и пульт показывал человеку сырой
+ * JSON вместо причины. Не JSON — значит, это уже слова.
+ */
+function whyOf(message: string | undefined): string | undefined {
+  if (message === undefined) return undefined;
+  try {
+    const inner = JSON.parse(message) as { why?: unknown };
+    return typeof inner?.why === "string" ? inner.why : message;
+  } catch {
+    return message;
+  }
+}
+
 export async function write(
   projectId: string,
   name: string,
@@ -547,7 +562,7 @@ export async function write(
   }
   const d = got as { why?: string; status?: string; error?: string; message?: string };
   if (!res.ok)
-    return { ok: false, why: d?.message ?? d?.why ?? d?.error ?? `сервер отказал (${res.status})`, got };
+    return { ok: false, why: whyOf(d?.message) ?? d?.why ?? d?.error ?? `сервер отказал (${res.status})`, got };
   // Дверь может принять запрос и отказать по существу — это тоже «не записано».
   const плохо = d?.status && !["declared", "written", "renamed", "ok", "dropped"].includes(d.status);
   return { ok: !плохо, why: плохо ? (d.why ?? d.status ?? "") : "", got };
