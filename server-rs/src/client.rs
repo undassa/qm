@@ -462,17 +462,69 @@ pub fn guard(door: &Door) -> i32 {
 /// в одиннадцатом — ровно тот дефект, который прибор ловит у наборов.
 fn push_facts(
     door: &Door,
+    sensed: &mut Sensed,
     fact: &str,
     facts: &[Value],
     head: &str,
     dirty: bool,
     read: usize,
-) -> Result<Value, String> {
-    let (out, _) = door.call(
+) -> Result<(), String> {
+    let (out, refused) = door.call(
         "code-facts-push",
         &json!({ "kind": fact, "facts": facts, "commit": head, "dirty": dirty, "read": read }),
     )?;
-    Ok(out)
+    let row = json!({ "fact": fact, "files": read, "found": facts.len(), "was": out["was"], "now": out["now"] });
+    sensed.take(fact, &out, refused, row);
+    Ok(())
+}
+
+/// Итог съёма: принятые подачи и отказанные, по виду.
+///
+/// Отказ подачи копится, а не обрывает съём: один отказанный вид не должен
+/// оставлять несвежими остальные. Но и снятым он не считается. Прежде признак
+/// отказа отбрасывался, и `mh sense` печатал `null` с кодом 0, а обходчик писал
+/// «снято N» — об отказе узнавали позже, по протухшему `fact_fresh` и
+/// покрасневшим пунктам гейта (undassa/mh#129).
+#[derive(Default)]
+struct Sensed {
+    rows: Vec<Value>,
+    refused: Vec<String>,
+}
+
+impl Sensed {
+    fn take(&mut self, fact: &str, out: &Value, refused: bool, row: Value) {
+        if refused {
+            // Отказ по сети приходит конвертом 502 `{"error":"upstream_error",
+            // "message":"<ответ двери>"}`. Ответ двери — JSON со статусом и
+            // причиной (`code-facts-push`) либо просто слова (`task-state-push`
+            // на пустой подаче); без разбора строка съёма показывала бы конверт
+            // целиком вместо причины.
+            let said = match out["message"].as_str() {
+                Some(m) => serde_json::from_str::<Value>(m).ok().filter(Value::is_object)
+                    .unwrap_or_else(|| json!({ "why": m })),
+                None => out.clone(),
+            };
+            let why = said["why"].as_str().map(str::to_owned).unwrap_or_else(|| said.to_string());
+            let status = said["status"].as_str().unwrap_or("отказ");
+            self.refused.push(format!("{fact} — {status}: {why}"));
+        } else {
+            self.rows.push(row);
+        }
+    }
+
+    fn finish(self, only: Option<&str>) -> Result<Value, String> {
+        if !self.refused.is_empty() {
+            return Err(format!("снято видов {}, отказано {}:\n{}",
+                               self.rows.len(), self.refused.len(), self.refused.join("\n")));
+        }
+        if self.rows.is_empty() {
+            return Err(match only {
+                Some(f) => format!("датчик {f} не объявлен: чем его снимать — не сказано"),
+                None => "ни один датчик не объявлен".to_owned(),
+            });
+        }
+        Ok(json!({ "sensed": self.rows }))
+    }
 }
 
 /// Корень дерева, с которого снимать: текущий каталог процесса.
@@ -517,7 +569,7 @@ pub fn sense(door: &Door, only: Option<&str>, root: &str) -> Result<Value, Strin
         .unwrap_or(true);
     let (specs, _) = door.call("sensor-specs", &json!({}))?;
     let empty = vec![];
-    let mut done = Vec::new();
+    let mut sensed = Sensed::default();
     for spec in specs["specs"].as_array().unwrap_or(&empty) {
         let fact = spec["fact"].as_str().unwrap_or("");
         if let Some(one) = only {
@@ -609,9 +661,7 @@ pub fn sense(door: &Door, only: Option<&str>, root: &str) -> Result<Value, Strin
                 }
             }
             let read_n = declared["holders"].as_array().map(|a| a.len()).unwrap_or(0);
-            let out = push_facts(door, fact, &facts, &head, dirty, read_n)?;
-            done.push(json!({ "fact": fact, "files": declared["holders"].as_array().map(|a| a.len()).unwrap_or(0),
-                              "found": facts.len(), "was": out["was"], "now": out["now"] }));
+            push_facts(door, &mut sensed, fact, &facts, &head, dirty, read_n)?;
             continue;
         }
 
@@ -621,7 +671,7 @@ pub fn sense(door: &Door, only: Option<&str>, root: &str) -> Result<Value, Strin
             // подачи. Без них `fact_fresh` отвечает «снят БЕЗ КОММИТА», и
             // `G4 · task-state-matches-history` держит находку, которую набору
             // не снять: писал-то харнес.
-            let (out, _) = door.call(
+            let (out, refused) = door.call(
                 "task-state-push",
                 &json!({ "states": states, "commit": head, "dirty": dirty }),
             )?;
@@ -631,8 +681,8 @@ pub fn sense(door: &Door, only: Option<&str>, root: &str) -> Result<Value, Strin
             // прежних ключей у него нет. `serde_json` отдаёт на отсутствующий
             // ключ `Null`, поэтому дефект выходил не отказом, а правдоподобной
             // строкой «было null стало null» в каждом съёме.
-            done.push(json!({ "fact": fact, "files": 0, "found": states.len(),
-                              "accepted": out["accepted"] }));
+            let row = json!({ "fact": fact, "files": 0, "found": states.len(), "accepted": out["accepted"] });
+            sensed.take(fact, &out, refused, row);
             continue;
         }
 
@@ -686,9 +736,7 @@ pub fn sense(door: &Door, only: Option<&str>, root: &str) -> Result<Value, Strin
                 .map(|(n, d)| json!({ "name": n, "detail": d }))
                 .collect();
             let read_n = facts.len();
-            let out = push_facts(door, fact, &facts, &head, dirty, read_n)?;
-            done.push(json!({ "fact": fact, "files": facts.len(), "found": facts.len(),
-                              "was": out["was"], "now": out["now"] }));
+            push_facts(door, &mut sensed, fact, &facts, &head, dirty, read_n)?;
             continue;
         }
         if how == "declared-lines" {
@@ -746,9 +794,7 @@ pub fn sense(door: &Door, only: Option<&str>, root: &str) -> Result<Value, Strin
                 .map(|(n, d)| json!({ "name": n, "detail": d }))
                 .collect();
             let read_n = facts.len();
-            let out = push_facts(door, fact, &facts, &head, dirty, read_n)?;
-            done.push(json!({ "fact": fact, "files": facts.len(), "found": facts.len(),
-                              "was": out["was"], "now": out["now"] }));
+            push_facts(door, &mut sensed, fact, &facts, &head, dirty, read_n)?;
             continue;
         }
         if how == "declared-paths" {
@@ -769,9 +815,7 @@ pub fn sense(door: &Door, only: Option<&str>, root: &str) -> Result<Value, Strin
                 .map(|(n, note)| json!({ "name": n, "detail": note }))
                 .collect();
             let read_n = facts.len();
-            let out = push_facts(door, fact, &facts, &head, dirty, read_n)?;
-            done.push(json!({ "fact": fact, "files": facts.len(), "found": facts.len(),
-                              "was": out["was"], "now": out["now"] }));
+            push_facts(door, &mut sensed, fact, &facts, &head, dirty, read_n)?;
             continue;
         }
         // Корней у датчика бывает несколько: правила именования смотрят и на
@@ -804,9 +848,7 @@ pub fn sense(door: &Door, only: Option<&str>, root: &str) -> Result<Value, Strin
                 .map(|p| json!({ "name": p.name, "detail": p.detail }))
                 .collect();
             let read_n = files.len();
-            let out = push_facts(door, fact, &facts, &head, dirty, read_n)?;
-            done.push(json!({ "fact": fact, "files": files.len(), "found": facts.len(),
-                              "was": out["was"], "now": out["now"] }));
+            push_facts(door, &mut sensed, fact, &facts, &head, dirty, read_n)?;
             continue;
         }
         if how == "contract-marks" {
@@ -819,9 +861,7 @@ pub fn sense(door: &Door, only: Option<&str>, root: &str) -> Result<Value, Strin
                 .map(|p| json!({ "name": p.name, "detail": p.detail }))
                 .collect();
             let read_n = files.len();
-            let out = push_facts(door, fact, &facts, &head, dirty, read_n)?;
-            done.push(json!({ "fact": fact, "files": files.len(), "found": facts.len(),
-                              "was": out["was"], "now": out["now"] }));
+            push_facts(door, &mut sensed, fact, &facts, &head, dirty, read_n)?;
             continue;
         }
 
@@ -839,9 +879,7 @@ pub fn sense(door: &Door, only: Option<&str>, root: &str) -> Result<Value, Strin
                 .map(|p| json!({ "name": p.name, "detail": p.detail }))
                 .collect();
             let read_n = files.len();
-            let out = push_facts(door, fact, &facts, &head, dirty, read_n)?;
-            done.push(json!({ "fact": fact, "files": files.len(), "found": facts.len(),
-                              "was": out["was"], "now": out["now"] }));
+            push_facts(door, &mut sensed, fact, &facts, &head, dirty, read_n)?;
             continue;
         }
 
@@ -861,9 +899,7 @@ pub fn sense(door: &Door, only: Option<&str>, root: &str) -> Result<Value, Strin
                 .map(|p| json!({ "name": p.name, "detail": p.detail }))
                 .collect();
             let read_n = files.len();
-            let out = push_facts(door, fact, &facts, &head, dirty, read_n)?;
-            done.push(json!({ "fact": fact, "files": files.len(), "found": facts.len(),
-                              "was": out["was"], "now": out["now"] }));
+            push_facts(door, &mut sensed, fact, &facts, &head, dirty, read_n)?;
             continue;
         }
 
@@ -905,9 +941,7 @@ pub fn sense(door: &Door, only: Option<&str>, root: &str) -> Result<Value, Strin
                 .collect();
             let facts = facts_of(&crate::repo_corpus::contract_vs_schema(&doc, &tables, &forced));
             let read_n = files.len();
-            let out = push_facts(door, fact, &facts, &head, dirty, read_n)?;
-            done.push(json!({ "fact": fact, "files": files.len(), "found": facts.len(),
-                              "was": out["was"], "now": out["now"] }));
+            push_facts(door, &mut sensed, fact, &facts, &head, dirty, read_n)?;
             continue;
         }
 
@@ -972,9 +1006,7 @@ pub fn sense(door: &Door, only: Option<&str>, root: &str) -> Result<Value, Strin
                 &enums, &checks, &contract_enums, &forced, &checks_tables));
             let facts = facts_of(&pairs);
             let read_n = files.len();
-            let out = push_facts(door, fact, &facts, &head, dirty, read_n)?;
-            done.push(json!({ "fact": fact, "files": files.len(), "found": facts.len(),
-                              "was": out["was"], "now": out["now"] }));
+            push_facts(door, &mut sensed, fact, &facts, &head, dirty, read_n)?;
             continue;
         }
         let mut names: Vec<(String, String, String)> = Vec::new();
@@ -1062,17 +1094,9 @@ pub fn sense(door: &Door, only: Option<&str>, root: &str) -> Result<Value, Strin
             .map(|(n, note, place)| json!({ "name": n, "detail": note, "place": place }))
             .collect();
         let read_n = files.len();
-        let out = push_facts(door, fact, &facts, &head, dirty, read_n)?;
-        done.push(json!({ "fact": fact, "files": files.len(), "found": facts.len(),
-                          "was": out["was"], "now": out["now"] }));
+        push_facts(door, &mut sensed, fact, &facts, &head, dirty, read_n)?;
     }
-    if done.is_empty() {
-        return Err(match only {
-            Some(f) => format!("датчик {f} не объявлен: чем его снимать — не сказано"),
-            None => "ни один датчик не объявлен".to_owned(),
-        });
-    }
-    Ok(json!({ "sensed": done }))
+    sensed.finish(only)
 }
 
 /// Секрето-подобное поле, стоящее ГОЛЫМ под `#[derive(Debug)]`.
@@ -1729,6 +1753,107 @@ fn holder_verdict(text: Option<&str>, req: &str) -> Option<String> {
         ));
     }
     None
+}
+
+/// Отказанная подача — не снятый вид, и съём о ней говорит (undassa/mh#129).
+///
+/// Проверяется весь путь `sense`: настоящий клиент ходит `curl` в поддельный
+/// сервер, отвечающий так, как отвечает настоящий, — отказ конвертом 502.
+#[cfg(test)]
+mod refused_push {
+    use serde_json::{json, Value};
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::sync::{Arc, Mutex};
+
+    /// Сервер на одно соединение за раз: `sensor-specs` отдаёт три вида,
+    /// `code-facts-push` отказывает виду `first` ответом двери JSON и принимает
+    /// остальные, `task-state-push` отказывает словами — как настоящий сервер.
+    fn fake_server(pushed: Arc<Mutex<Vec<String>>>) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("порт");
+        let url = format!("http://{}", listener.local_addr().expect("адрес"));
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut reader = BufReader::new(stream.try_clone().expect("поток"));
+                let mut line = String::new();
+                reader.read_line(&mut line).expect("строка запроса");
+                let path = line.split_whitespace().nth(1).unwrap_or("").to_owned();
+                let mut length = 0usize;
+                loop {
+                    let mut h = String::new();
+                    reader.read_line(&mut h).expect("заголовок");
+                    if h.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(v) = h.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = v.trim().parse().unwrap_or(0);
+                    }
+                }
+                let mut body = vec![0u8; length];
+                reader.read_exact(&mut body).expect("тело");
+                let args: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                let (code, answer) = if path.ends_with("/tool/sensor-specs") {
+                    (200, json!({ "specs": [
+                        { "fact": "first", "reads": "a.txt", "extract": "", "how": "files" },
+                        { "fact": "tasks", "reads": "a.txt", "how": "task-trailers",
+                          "extract": r"Task:\s*([A-Za-z0-9-]+)\s+(\w+)" },
+                        { "fact": "second", "reads": "a.txt", "extract": "", "how": "files" } ] }))
+                } else if path.ends_with("/tool/task-state-push") {
+                    pushed.lock().expect("замок").push("task-state-push".to_owned());
+                    (502, json!({ "error": "upstream_error", "message": "подача отказана: причина словами" }))
+                } else if path.ends_with("/tool/code-facts-push") {
+                    let kind = args["kind"].as_str().unwrap_or("").to_owned();
+                    pushed.lock().expect("замок").push(kind.clone());
+                    if kind == "first" {
+                        let door = json!({ "status": "empty_push_over_rows", "kind": kind, "was": 3,
+                                           "why": "подано ноль, прочитано ноль" });
+                        (502, json!({ "error": "upstream_error", "message": door.to_string() }))
+                    } else {
+                        (200, json!({ "kind": kind, "was": 0, "now": 1 }))
+                    }
+                } else {
+                    (404, json!({ "error": "not_found" }))
+                };
+                let text = answer.to_string();
+                let _ = write!(stream, "HTTP/1.1 {code} X\r\nContent-Type: application/json\r\n\
+                                        Content-Length: {}\r\nConnection: close\r\n\r\n{text}", text.len());
+            }
+        });
+        url
+    }
+
+    #[test]
+    fn a_refused_kind_is_named_and_does_not_stop_the_others() {
+        let pushed = Arc::new(Mutex::new(Vec::new()));
+        let url = fake_server(pushed.clone());
+        let root = std::env::temp_dir().join(format!("mh-refused-push-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("каталог");
+        std::fs::write(root.join("a.txt"), "есть").expect("файл");
+        // Дерево — репозиторий со стволом и закрывающим трейлером: без них вид
+        // `task-trailers` отказывает раньше подачи, и подача не проверяется.
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git").arg("-C").arg(&root)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+                .args(args).output().expect("git").status.success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "работа\n\nTask: M1-T1 closed"]);
+        let door = super::Door { url, project: "p".into(), secret: "s".into(), principal: "t".into() };
+
+        let said = super::sense(&door, None, root.to_str().expect("путь"));
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(*pushed.lock().expect("замок"),
+                   vec!["first".to_owned(), "task-state-push".to_owned(), "second".to_owned()],
+                   "после отказанного вида съём остановился");
+        let why = said.expect_err("съём с отказом ответил успехом");
+        assert!(why.contains("first — empty_push_over_rows: подано ноль, прочитано ноль"),
+                "отказ подачи фактов не называет вид и причину: {why}");
+        assert!(why.contains("tasks — отказ: подача отказана: причина словами"),
+                "отказ подачи состояний не называет вид и причину: {why}");
+        assert!(why.contains("снято видов 1, отказано 2"), "итог не считает снятые и отказанные: {why}");
+    }
 }
 
 #[cfg(test)]

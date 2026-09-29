@@ -1799,6 +1799,10 @@ impl Mcp {
                 let snapshot = crate::projector::Snapshot { commit: &commit, dirty, reads: read };
                 match crate::projector::push_code_facts(
                     &self.pool, p, &fact_kind, &list, &self.author, snapshot).await {
+                    // Отказ подачи — `isError`, а не ответ с полем `status`: по
+                    // признаку отказа судят `mh sense` и обходчик, и без него
+                    // отказанный вид считался снятым (undassa/mh#129).
+                    Ok(v) if v.get("status").is_some() => refusal(Miss::Refused(v.to_string())),
                     Ok(mut v) => {
                         if crate::reproject::relations::FACT_KINDS.contains(&fact_kind.as_str()) {
                             match crate::reproject::relations::project(&self.pool, p).await {
@@ -3377,6 +3381,43 @@ impl Mcp {
 
     }
 
+}
+
+/// Отказанная подача фактов — `isError` двери (undassa/mh#129): без признака
+/// `mh sense` и обходчик считали отказанный вид снятым.
+#[cfg(test)]
+mod refused_facts {
+    use serde_json::json;
+
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn an_empty_push_over_rows_is_an_error_of_the_door() {
+        let url = std::env::var("MH_TEST_DB_URL").expect("MH_TEST_DB_URL: адрес пустой базы");
+        let apart = format!("{}{}", if url.contains('?') { '&' } else { '?' },
+                            "options=-c%20search_path%3Drefused_facts");
+        let pool = crate::db::pool(&format!("{url}{apart}"), 2).expect("пул тестовой базы");
+        pool.get().await.expect("соединение")
+            .batch_execute("DROP SCHEMA IF EXISTS refused_facts CASCADE; CREATE SCHEMA refused_facts;")
+            .await.expect("своя схема заводится");
+        crate::projector::ensure(&pool).await.expect("схема встаёт на пустой базе");
+        let door = super::Mcp {
+            pool: pool.clone(),
+            kinds: std::sync::Arc::new(crate::kinds::Kinds::from_db(&pool).await.expect("виды")),
+            project: "p".to_owned(),
+            author: "проба".to_owned(),
+        };
+        let first = door.call("code-facts-push", &json!({ "kind": "probe", "read": 1,
+            "facts": [{ "name": "a", "detail": "есть" }] })).await;
+        assert_ne!(first["isError"], json!(true), "подача принята не была: {first}");
+
+        let empty = door.call("code-facts-push", &json!({ "kind": "probe", "read": 0, "facts": [] })).await;
+        assert_eq!(empty["isError"], json!(true), "отказанная подача ответила успехом: {empty}");
+        assert!(empty["content"][0]["text"].as_str().unwrap_or("").contains("empty_push_over_rows"),
+                "отказ не называет причину: {empty}");
+
+        pool.get().await.expect("соединение")
+            .batch_execute("DROP SCHEMA IF EXISTS refused_facts CASCADE").await.expect("схема снимается");
+    }
 }
 
 #[cfg(test)]
