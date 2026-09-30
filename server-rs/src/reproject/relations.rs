@@ -63,10 +63,15 @@ fn checks_in<'a>(line: &str, res: &[Regex], caveats: &'a [String]) -> (Vec<Strin
 /// прогона к прогону разным.
 type Dropped<K> = std::collections::BTreeMap<K, std::collections::BTreeSet<String>>;
 
-/// Слова, как их читает автор: «слово «a»» или «слова «a», «b»».
+/// Слова, как их читает автор: «снята словом «a»» / «словами «a», «b»».
+///
+/// Без «в строке»: слова одного имени собраны со всех его строк, и «в строке
+/// слова «было», «отвергнут»» отправляло автора искать строку, где стоят оба.
+/// Без «оговорки»: снимают и слова отказа (`word.elsewhere`), а они не
+/// оговорка.
 fn said_by(words: &std::collections::BTreeSet<String>) -> String {
     let quoted: Vec<String> = words.iter().map(|w| format!("«{w}»")).collect();
-    format!("{} {}", if quoted.len() == 1 { "слово" } else { "слова" }, quoted.join(", "))
+    format!("{} {}", if quoted.len() == 1 { "словом" } else { "словами" }, quoted.join(", "))
 }
 
 pub(crate) const FACT_KINDS: [&str; 7] =
@@ -549,7 +554,8 @@ mod dropped_check {
                 "INSERT INTO scheme_term (project_id, role, value) VALUES
                    ('p', 'id.check', '\\b[mv][0-9]+_t[0-9]+[a-z]?_[a-z0-9_]+\\b'),
                    ('p', 'word.caveat', 'отвергнут'), ('p', 'word.caveat', 'было'), ('p', 'word.caveat', 'прежн'),
-                   ('p', 'section.proof', 'Чем доказывается'), ('p', 'field.red-checks', 'Какие');
+                   ('p', 'section.proof', 'Чем доказывается'), ('p', 'field.red-checks', 'Какие'),
+                   ('p', 'word.elsewhere', 'здесь не закрыва'), ('p', 'id.task', '^[TR]-[0-9]+$');
                  INSERT INTO project_plan_versions (project_id, id) VALUES ('p', 'v1');
                  INSERT INTO project_plan_milestones (project_id, id, version_id, ord, title)
                  VALUES ('p', 'M1', 'v1', 1, 'веха');
@@ -584,7 +590,8 @@ mod dropped_check {
                  SELECT 'p', f, (extract(epoch from now()) * 1000)::bigint, 'c', false
                    FROM unnest(ARRAY['written-tc', 'test-name']) f;
                  INSERT INTO task_ready_item (project_id, task_id, ord, check_id, text)
-                 VALUES ('p', 'T-1', 1, 'm1_t1_b_kept', '- [ ] `m1_t1_b_kept`');",
+                 VALUES ('p', 'T-1', 1, 'm1_t1_b_kept', '- [ ] `m1_t1_b_kept`'),
+                        ('p', 'T-1', 2, 'm1_t1_b_kept', '- [ ] `m1_t1_b_kept` здесь не закрывается: закрывает R-1');",
             )
             .await
             .expect("набор подсаживается");
@@ -597,20 +604,25 @@ mod dropped_check {
         let pair = run(include_str!("../../../instrument/gate/G3/red-checks-match-parent.sql")).await;
         assert_eq!(pair.first().map(String::as_str),
                    Some("R-1 — разошёлся с родителем T-1: не хватает —, лишние m1_t1_a_denied; \
-                         T-1: `m1_t1_a_denied` не засчитана: в строке слово «отвергнут»; \
-                         T-1: `m1_t1_d_twice` не засчитана: в строке слова «было», «отвергнут»"),
+                         T-1: `m1_t1_a_denied` не засчитана: снята словом «отвергнут»; \
+                         T-1: `m1_t1_d_twice` не засчитана: снята словами «было», «отвергнут»"),
                    "пара называет снятые имена и все слова, которые их сняли: {pair:?}");
         let red = run(include_str!("../../../instrument/gate/G2/red-task-complete.sql")).await;
-        assert!(red.iter().any(|d| d == "R-2 — имена перечня сняты словом оговорки: \
-                                         `m1_t1_a_denied` — в строке слова «отвергнут», «прежн»"),
+        assert!(red.iter().any(|d| d == "R-2 — имена перечня сняты: `m1_t1_a_denied` — словами «отвергнут», «прежн»"),
                 "пустая связь при непустом перечне называет слово, а не образец: {red:?}");
         assert!(!red.iter().any(|d| d.starts_with("R-2 — ни одно имя")), "образец тут ни при чём: {red:?}");
         let closed = run(include_str!("../../../instrument/gate/G4/closed-unwritten.sql")).await;
-        assert_eq!(closed, vec!["T-1 закрыта, а `m1_t1_b_kept` не найдена: в строке комментария слово «было»"],
+        assert_eq!(closed, vec!["T-1 закрыта, а `m1_t1_b_kept` не найдена: в комментарии имя снято словом «было»"],
                    "имя из строки комментария названо со словом, а не «не написана»");
         let ready = run(include_str!("../../../instrument/gate/corpus/ready-items-checked.sql")).await;
-        assert!(ready.iter().any(|d| d == "T-1 — `m1_t1_b_kept` не найдена: в строке комментария слово «было»"),
+        assert!(ready.iter().any(|d| d == "T-1 — `m1_t1_b_kept` не найдена: в комментарии имя снято словом «было»"),
                 "пункт приёмки говорит то же: {ready:?}");
+        // Пункт 2 переадресован к закрытой R-1: долг его ветвью, и она обязана
+        // сказать, что имя в комментарии есть, но снято.
+        assert!(ready.iter().any(|d| d == "T-1 — 1 пунктов переадресовано (R-1), все адресаты закрыты, \
+                                           а m1_t1_b_kept так и не доказан: комментарий его называет, \
+                                           но имя снято словом «было»"),
+                "переадресованный пункт называет снятое имя со словом: {ready:?}");
 
         let seen = crate::projector::links_of(&pool, "p", "task", "T-1").await.expect("связи задачи");
         let (checks, dropped) = (seen["sets"]["checks"].to_string(), seen["sets"]["droppedChecks"].to_string());

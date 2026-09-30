@@ -951,8 +951,9 @@ CREATE TABLE IF NOT EXISTS project_task_check (
 -- Без этой записи снятое имя просто отсутствовало, и пункт, которому его не
 -- хватило, называл следствие: на `tot-ade` 30.09 четыре круга правок искали
 -- причину «лишней» проверки в красной паре, а причиной было «отвергнута» в
--- ячейке родителя. `words` — готовая к чтению фраза: «слово «a»» или
--- «слова «a», «b»», все слова со всех строк этого места.
+-- ячейке родителя. `words` — готовая к чтению фраза: «словом «a»» или
+-- «словами «a», «b»», все слова со всех строк этого места. Без «в строке»:
+-- слова могли прийти из разных строк.
 CREATE TABLE IF NOT EXISTS project_check_dropped (
   project_id text NOT NULL, task_id text NOT NULL, check_id text NOT NULL,
   said_as text NOT NULL, words text NOT NULL,
@@ -7172,7 +7173,7 @@ pub(crate) async fn links_at(
             // иначе каждый пункт, читающий проверки задачи, видел бы только
             // пропажу. Набор свой, а не строки в `checks`: счёт связей сущности
             // читает `checks` как число доказывающих проверок.
-            ("droppedChecks", "SELECT d.check_id, d.said_as || ' · не засчитана: в строке ' || d.words, 'check'
+            ("droppedChecks", "SELECT d.check_id, d.said_as || ' · не засчитана: снята ' || d.words, 'check'
                                  FROM project_check_dropped d
                                 WHERE d.project_id = $1 AND d.task_id = $2 ORDER BY d.check_id"),
             // Ребро, объявленное дверью, документ не называет: без пометки его

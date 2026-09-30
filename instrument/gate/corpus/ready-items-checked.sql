@@ -246,7 +246,7 @@ UNION ALL
 -- Имя, которое строка комментария назвала, а слово оговорки сняло, названо со
 -- словом: «нет среди прочитанного» про него неправда, и автор искал бы
 -- ненаписанную проверку вместо слова в своей строке.
-SELECT t.id || coalesce(' — `' || wd.check_id || '` не найдена: в строке комментария ' || wd.words,
+SELECT t.id || coalesce(' — `' || wd.check_id || '` не найдена: в комментарии имя снято ' || wd.words,
                         ' — проверки пункта приёмки нет среди прочитанного датчиком: ' || r.check_id)
   FROM project_plan_tasks t
   JOIN task_ready_item r ON r.project_id = t.project_id AND r.task_id = t.id
@@ -297,7 +297,7 @@ UNION ALL
 -- сценария, и пять несделанных дел выглядели одинаково.
 SELECT а.task_id || ' — ' || count(*) || ' пунктов переадресовано (' || string_agg(DISTINCT а.кому, ', ')
        || '), все адресаты закрыты, а ' || а.check_id || ' так и не доказан'
-       || coalesce((SELECT ': строка комментария его называет, но сняло ' || wd.words
+       || coalesce((SELECT ': комментарий его называет, но имя снято ' || wd.words
                       FROM project_written_check_dropped wd
                      WHERE wd.project_id = $1 AND wd.check_id = а.check_id), '')
   FROM адресат а
