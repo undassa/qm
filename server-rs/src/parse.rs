@@ -86,11 +86,21 @@ pub(crate) static STRIKE: Lazy<Regex> = Lazy::new(|| Regex::new(r"~~([^~]*)~~").
 static SPACES: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+").unwrap());
 
 pub(crate) fn strip_markup(raw: &str) -> String {
+    STRIKE.replace_all(&marked(raw), "$1").trim().to_owned()
+}
+
+/// Текст без разметки, КРОМЕ зачёркивания.
+///
+/// Зачёркнутое имя — снятое (`ids::said`, `relations::checks_in`), а
+/// `strip_markup` зачёркивание стирает: ячейка и поле хранят `value` уже без
+/// него. Читатель, решающий, названо ли имя живым, берёт `raw` через эту
+/// функцию; иначе `~~имя~~` в «Чем доказывается» или в перечне красной пары
+/// не снимало ничего — ревью нашло это на ветке, где сама пометка вводилась.
+pub(crate) fn marked(raw: &str) -> String {
     let s = LINK.replace_all(raw, "$1");
     let s = CODE_SPAN.replace_all(&s, "$1");
     let s = BOLD.replace_all(&s, "$1");
     let s = ITALIC.replace_all(&s, "$1$2");
-    let s = STRIKE.replace_all(&s, "$1");
     s.trim().to_owned()
 }
 

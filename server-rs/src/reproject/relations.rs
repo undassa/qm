@@ -53,9 +53,6 @@ fn checks_in(line: &str, res: &[Regex]) -> (Vec<String>, Vec<String>) {
     (live, struck)
 }
 
-/// Причина снятия, как её читает автор в находке: «снята зачёркиванием».
-const STRUCK: &str = "зачёркиванием";
-
 pub(crate) const FACT_KINDS: [&str; 7] =
     ["code-file", "crate-manifest", "repo-file", "requirement-op", "test-fn", "tree-file", "written-tc"];
 
@@ -184,7 +181,7 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<usize, crate::
     // `all` ровно поэтому, и это верная форма для обоих.
     let proof = if !terms.all("section.proof").is_empty() { client
         .query(
-            "SELECT t.id, c.value FROM project_plan_tasks t
+            "SELECT t.id, c.raw FROM project_plan_tasks t
                JOIN project_document_sections s
                  ON s.project_id = t.project_id AND s.entity_kind = t.entity_kind
                     AND s.entity_name = t.entity_name AND s.title = ANY($2)
@@ -198,8 +195,10 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<usize, crate::
         .await? } else { Vec::new() };
     let mut task_check: Vec<(String, String, &str)> = Vec::new();
     let mut dropped: std::collections::BTreeSet<(String, String, &str)> = Default::default();
-    let mut take = |task: String, line: &str, how: &'static str| {
-        let (names, struck) = checks_in(line, &check_res);
+    // Читается `raw`, а не `value`: разбор стирает зачёркивание из `value`, и
+    // снятие по нему не срабатывало бы никогда.
+    let mut take = |task: String, raw: &str, how: &'static str| {
+        let (names, struck) = checks_in(&crate::parse::marked(raw), &check_res);
         task_check.extend(names.into_iter().map(|n| (task.clone(), n, how)));
         dropped.extend(struck.into_iter().map(|n| (task.clone(), n, how)));
     };
@@ -208,7 +207,7 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<usize, crate::
     }
     let red = if !terms.all("field.red-checks").is_empty() { client
         .query(
-            "SELECT t.id, f.value FROM project_plan_tasks t
+            "SELECT t.id, f.value_raw FROM project_plan_tasks t
                JOIN project_document_fields f
                  ON f.project_id = t.project_id AND f.entity_kind = t.entity_kind
                     AND f.entity_name = t.entity_name AND f.name = ANY($2)
@@ -391,13 +390,13 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<usize, crate::
                    &[&project, t, c, &how.to_string()]).await?;
     }
     for (t, c, how) in &dropped {
-        tx.execute("INSERT INTO project_check_dropped(project_id, task_id, check_id, said_as, words)
-                    VALUES ($1,$2,$3,$4,$5)",
-                   &[&project, t, c, &how.to_string(), &STRUCK]).await?;
+        tx.execute("INSERT INTO project_check_dropped(project_id, task_id, check_id, said_as)
+                    VALUES ($1,$2,$3,$4)",
+                   &[&project, t, c, &how.to_string()]).await?;
     }
     for c in &written_dropped {
-        tx.execute("INSERT INTO project_written_check_dropped(project_id, check_id, words) VALUES ($1,$2,$3)",
-                   &[&project, c, &STRUCK]).await?;
+        tx.execute("INSERT INTO project_written_check_dropped(project_id, check_id) VALUES ($1,$2)",
+                   &[&project, c]).await?;
     }
     for (path, dir, base, prefix) in &code_files {
         tx.execute("INSERT INTO project_code_file(project_id, path, dir, base, prefix)
@@ -502,6 +501,10 @@ mod dropped_check {
         // которые прежде её снимали, и засчитана. Красная R-1 перечисляет все
         // три, красная R-2 — одну зачёркнутую `a_denied`. Комментарий кода
         // называет `b_kept` только зачёркнутой, `d_twice` — со словом.
+        //
+        // Ячейки и поля кладёт НАСТОЯЩИЙ разбор документа (`store::put`), а не
+        // рука: разбор стирает `~~` из `value`, и подсаженное прямо в `value`
+        // зачёркивание проверяло форму, которой в базе не бывает.
         client
             .batch_execute(
                 "INSERT INTO scheme_term (project_id, role, value) VALUES
@@ -519,19 +522,6 @@ mod dropped_check {
                  INSERT INTO project_documents (project_id, entity_kind, entity_name, content, content_hash,
                                                 bytes, revision, updated_at, updated_by)
                  SELECT 'p', 'task', n, '', '', 0, 1, 0, 't' FROM unnest(ARRAY['T-1', 'R-1', 'R-2']) n;
-                 INSERT INTO project_document_sections (project_id, ord, level, title, anchor,
-                                                        first_block, last_block, entity_kind, entity_name)
-                 VALUES ('p', 1, 2, 'Чем доказывается', 'a', 1, 3, 'task', 'T-1');
-                 INSERT INTO project_document_cells (project_id, block_ord, row_ord, col, raw, value,
-                                                     entity_kind, entity_name)
-                 VALUES ('p', 2, 1, 0, '', '~~m1_t1_a_denied~~ — запись в закрытое отвергнута', 'task', 'T-1'),
-                        ('p', 2, 2, 0, '', 'm1_t1_b_kept — ответ тот же', 'task', 'T-1'),
-                        ('p', 2, 3, 0, '', '~~m1_t1_b_kept~~ — как было', 'task', 'T-1'),
-                        ('p', 2, 4, 0, '', 'm1_t1_d_twice — запись отвергнута, как было', 'task', 'T-1');
-                 INSERT INTO project_document_fields (project_id, section_ord, ord, name, shape,
-                                                      value_raw, value, entity_kind, entity_name)
-                 VALUES ('p', 1, 1, 'Какие', 'row', '', 'm1_t1_a_denied, m1_t1_b_kept, m1_t1_d_twice', 'task', 'R-1'),
-                        ('p', 1, 1, 'Какие', 'row', '', '~~m1_t1_a_denied~~ — по-прежнему отвергнута', 'task', 'R-2');
                  INSERT INTO code_fact (project_id, kind, name, detail)
                  VALUES ('p', 'written-tc', 'a.rs:1', '// ~~m1_t1_b_kept~~ — как было'),
                         ('p', 'written-tc', 'a.rs:2', '// m1_t1_c_other'),
@@ -547,6 +537,19 @@ mod dropped_check {
             )
             .await
             .expect("набор подсаживается");
+        for (name, content) in [
+            ("T-1", "# T-1\n\n## Чем доказывается\n\n| Проверка | Что |\n|---|---|\n\
+                     | ~~`m1_t1_a_denied`~~ | запись в закрытое отвергнута |\n\
+                     | `m1_t1_b_kept` | ответ тот же |\n\
+                     | ~~`m1_t1_b_kept`~~ | как было |\n\
+                     | `m1_t1_d_twice` | запись отвергнута, как было |\n"),
+            ("R-1", "# R-1\n\n## Пара\n\n- **Какие:** `m1_t1_a_denied`, `m1_t1_b_kept`, `m1_t1_d_twice`\n"),
+            ("R-2", "# R-2\n\n## Пара\n\n- **Какие:** ~~`m1_t1_a_denied`~~ — по-прежнему отвергнута\n"),
+        ] {
+            let put = crate::store::put(&pool, "p", crate::store::Document { kind: "task", name, content }, "t", None, 1)
+                .await.expect("документ пишется");
+            assert_eq!(put["status"], "written", "{name}: {put}");
+        }
         super::project(&pool, "p").await.expect("связи пересобираются");
         let run = |sql: &'static str| {
             let client = &client;
@@ -555,8 +558,8 @@ mod dropped_check {
 
         let pair = run(include_str!("../../../instrument/gate/G3/red-checks-match-parent.sql")).await;
         assert_eq!(pair.first().map(String::as_str),
-                   Some("R-1 — разошёлся с родителем T-1: не хватает —, лишние m1_t1_a_denied \
-                         (имя, помянутое убранным, зачеркните: ~~имя~~); \
+                   Some("R-1 — разошёлся с родителем T-1: не хватает —, лишние m1_t1_a_denied; \
+                         помянутое убранным зачеркните в перечне R-1: ~~`m1_t1_a_denied`~~; \
                          T-1: `m1_t1_a_denied` не засчитана: снята зачёркиванием"),
                    "пара называет зачёркнутое имя, а слова рядом с `d_twice` её не снимают: {pair:?}");
         let red = run(include_str!("../../../instrument/gate/G2/red-task-complete.sql")).await;
@@ -581,6 +584,32 @@ mod dropped_check {
         assert!(!checks.contains("не засчитана"), "счёт проверок не растёт от снятых: {checks}");
         assert!(dropped.contains("m1_t1_a_denied") && !dropped.contains("m1_t1_b_kept"),
                 "снятые стоят своим набором, засчитанная соседней строкой — нет: {dropped}");
+
+        // Поле «Требования» экрана — третий читатель, берущий `value_raw`: тем
+        // же настоящим разбором зачёркнутое `FR-01` снято, `FR-02` засчитано.
+        client
+            .batch_execute(
+                "INSERT INTO scheme_term (project_id, role, value) VALUES ('p', 'field.requirements', 'Требования');
+                 INSERT INTO project_screens (project_id, id, title, entity_kind, entity_name, area)
+                 VALUES ('p', 'SCR-T-01', 'экран', 'screen', 'SCR-T-01', '');
+                 INSERT INTO project_documents (project_id, entity_kind, entity_name, content, content_hash,
+                                                bytes, revision, updated_at, updated_by)
+                 VALUES ('p', 'screen', 'SCR-T-01', '', '', 0, 1, 0, 't');",
+            )
+            .await
+            .expect("экран подсаживается");
+        let put = crate::store::put(&pool, "p", crate::store::Document {
+            kind: "screen", name: "SCR-T-01",
+            content: "# SCR-T-01 · экран\n\n## Состав\n\n- **Требования:** ~~`FR-01`~~, `FR-02`\n",
+        }, "t", None, 1).await.expect("экран пишется");
+        assert_eq!(put["status"], "written", "{put}");
+        super::super::surface::project(&pool, "p").await.expect("поверхности пересобираются");
+        let reqs: Vec<String> = client
+            .query("SELECT requirement_id FROM project_screen_requirements
+                     WHERE project_id = 'p' AND screen_id = 'SCR-T-01' ORDER BY 1", &[])
+            .await.expect("требования экрана")
+            .iter().map(|r| r.get(0)).collect();
+        assert_eq!(reqs, ["FR-02"], "зачёркнутое в поле экрана снято, незачёркнутое засчитано");
     }
 }
 

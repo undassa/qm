@@ -29,7 +29,7 @@ UNION ALL
 -- но автор его зачеркнул — «ни одно имя не подошло» было бы про такую пару
 -- неправдой, и исполнитель правил бы образец вместо зачёркивания.
 SELECT t.id || ' — имена перечня сняты: '
-       || string_agg('`' || d.check_id || '` — ' || d.words, '; ' ORDER BY d.check_id)
+       || string_agg('`' || d.check_id || '` — зачёркиванием', '; ' ORDER BY d.check_id)
   FROM project_plan_tasks t
   JOIN project_check_dropped d ON d.project_id = t.project_id AND d.task_id = t.id
  WHERE t.project_id = $1 AND t.kind = 'red'

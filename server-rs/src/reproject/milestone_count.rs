@@ -61,8 +61,10 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<usize, crate::
             let Some(after) = content.split(marker.as_str()).nth(1) else { continue };
             let block = after.split("</details>").next().unwrap_or("");
             let mut names = std::collections::HashSet::new();
+            // Зачёркнутое не считается: тот же блок `plan.rs` читает через
+            // `ids::said`, и счёт, включающий снятое, разошёлся бы с составом.
             for line in block.lines() {
-                for id in super::ids::expand(line) {
+                for id in super::ids::said(line) {
                     names.insert(id);
                 }
             }

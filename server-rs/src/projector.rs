@@ -947,22 +947,30 @@ CREATE TABLE IF NOT EXISTS project_task_check (
   said_as text NOT NULL,
   PRIMARY KEY (project_id, task_id, check_id, said_as));
 
--- Имя проверки, которое строка назвала зачёркнутым, — с причиной. Без этой
--- записи снятое имя просто отсутствовало, и пункт, которому его не хватило,
--- называл следствие: на `tot-ade` 30.09 четыре круга правок искали причину
--- «лишней» проверки в красной паре. `words` — готовая к чтению причина
--- («зачёркиванием»), которую пункты вставляют после «снята».
+-- Имя проверки, которое строка назвала зачёркнутым. Без этой записи снятое
+-- имя просто отсутствовало, и пункт, которому его не хватило, называл
+-- следствие: на `tot-ade` 30.09 четыре круга правок искали причину «лишней»
+-- проверки в красной паре. Причина одна — зачёркивание, — и пункты пишут её
+-- сами.
+--
+-- `words` держала слова оговорки, пока имя снимали словами, и теперь не
+-- читается и не пишется. Она оставлена с умолчанием, а не снята: прежний
+-- двоичный, возвращённый откатом, пишет и читает её — четыре пункта и дверь
+-- связей, — и без колонки падал бы на каждой пересборке.
 CREATE TABLE IF NOT EXISTS project_check_dropped (
   project_id text NOT NULL, task_id text NOT NULL, check_id text NOT NULL,
-  said_as text NOT NULL, words text NOT NULL,
+  said_as text NOT NULL, words text NOT NULL DEFAULT '',
   PRIMARY KEY (project_id, task_id, check_id, said_as));
+ALTER TABLE project_check_dropped ALTER COLUMN words SET DEFAULT '';
 
 -- То же для строки комментария кода: задачи у неё нет, и ключ — имя, как у
 -- `project_written_check`. Без записи `closed-unwritten` и пункт приёмки
--- называли такую проверку «не найдена», хотя строка её называет.
+-- называли такую проверку «не найдена», хотя строка её называет. `words` —
+-- как выше.
 CREATE TABLE IF NOT EXISTS project_written_check_dropped (
-  project_id text NOT NULL, check_id text NOT NULL, words text NOT NULL,
+  project_id text NOT NULL, check_id text NOT NULL, words text NOT NULL DEFAULT '',
   PRIMARY KEY (project_id, check_id));
+ALTER TABLE project_written_check_dropped ALTER COLUMN words SET DEFAULT '';
 
 -- Файл кода, разобранный ОДИН раз: каталог, имя, приставка до подчёркивания.
 -- Правило «однокоренные файлы — это подкаталог» группирует по колонкам, а не
@@ -7186,7 +7194,7 @@ pub(crate) async fn links_at(
             // иначе каждый пункт, читающий проверки задачи, видел бы только
             // пропажу. Набор свой, а не строки в `checks`: счёт связей сущности
             // читает `checks` как число доказывающих проверок.
-            ("droppedChecks", "SELECT d.check_id, d.said_as || ' · не засчитана: снята ' || d.words, 'check'
+            ("droppedChecks", "SELECT d.check_id, d.said_as || ' · не засчитана: снята зачёркиванием', 'check'
                                  FROM project_check_dropped d
                                 WHERE d.project_id = $1 AND d.task_id = $2 ORDER BY d.check_id"),
             // Ребро, объявленное дверью, документ не называет: без пометки его

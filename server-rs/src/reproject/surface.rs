@@ -239,7 +239,7 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize,
     {
         let rows = client
             .query(
-                "SELECT f.entity_name, f.value, s.id FROM project_document_fields f
+                "SELECT f.entity_name, f.value_raw, s.id FROM project_document_fields f
                    JOIN project_screens s ON s.project_id = f.project_id
                         AND s.entity_kind = f.entity_kind AND s.entity_name = f.entity_name
                   WHERE f.project_id = $1 AND f.entity_kind = 'screen' AND f.name = $2",
@@ -249,7 +249,9 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize,
         let mut out = Vec::new();
         let mut seen = std::collections::HashSet::new();
         for r in &rows {
-            let value: String = r.get(1);
+            // `value_raw`: разбор стирает зачёркивание из `value`, и снятое
+            // имя читалось бы живым.
+            let value = crate::parse::marked(&r.get::<_, String>(1));
             let screen: String = r.get(2);
             for line in value.lines() {
                 for name in super::ids::said(line) {
