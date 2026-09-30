@@ -1173,8 +1173,12 @@ fn imported_types(text: &str) -> Vec<String> {
 /// (undassa/mh#121, #66).
 fn named_in(rx: &regex::Regex, short: &str, text: &str) -> Vec<(String, String, String)> {
     let mut seen = std::collections::HashSet::new();
+    // Имя — первая УЧАСТВОВАВШАЯ группа, а не группа 1. Образец `test-name` у
+    // tot-ade — выбор из двух ветвей (`fn x(` и `test("x"`), и для веб-проверки
+    // группа 1 не участвует: брался весь отрывок `test("ui_08_…"`, и 30.09 три
+    // проверки закрытого зеркала V5-T102 «не нашлись», остановив выдачу задач.
     rx.captures_iter(text)
-        .filter_map(|c| c.get(1).or_else(|| c.get(0)).map(|m| m.as_str().to_owned()))
+        .filter_map(|c| c.iter().skip(1).flatten().next().or_else(|| c.get(0)).map(|m| m.as_str().to_owned()))
         .filter(|name| seen.insert(name.clone()))
         .map(|name| (name, format!("названо в {short}"), short.to_owned()))
         .collect()
@@ -2095,6 +2099,15 @@ mod places {
             ("76528515".to_owned(), "названо в a.rs".to_owned(), "a.rs".to_owned()),
             ("76528515".to_owned(), "названо в b.rs".to_owned(), "b.rs".to_owned()),
         ]);
+    }
+
+    /// Образец с выбором ветвей отдаёт имя из той группы, что совпала.
+    #[test]
+    fn the_name_is_the_group_that_matched() {
+        let rx = regex::Regex::new(r#"(?:fn|def) ([a-z0-9_]+)\s*\(|\b(?:test|it)\(\s*['"`]([a-z0-9_]+)['"`]"#).expect("образец");
+        let text = "fn a_rust_check() {}\ntest(\"a_web_check\", async () => {});\n";
+        let names: Vec<_> = named_in(&rx, "x", text).into_iter().map(|(n, _, _)| n).collect();
+        assert_eq!(names, ["a_rust_check", "a_web_check"]);
     }
 }
 
