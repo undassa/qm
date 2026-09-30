@@ -116,6 +116,59 @@ pub async fn reproject(pool: &Pool, project: &str, _: &crate::watch::Lease) -> R
     Ok(Value::Object(done))
 }
 
+/// Каждая транзакция пересборки берёт замок набора до своего коммита.
+///
+/// Замок, забытый в одном шаге, ничем не виден, пока две пересборки не сойдутся
+/// на нём разом: так было у `relations`, у фаз и у фич, и дважды это находили
+/// только отказом на живом наборе. Шаги `reproject/` берутся все, каким бы ни
+/// был новый файл; вне каталога — писатели проекций, которых зовут по имени.
+#[cfg(test)]
+mod every_step_holds {
+    const OUTSIDE: [&str; 3] = ["rebuild_before", "rebuild", "sync_owner_questions"];
+
+    /// Сколько открытий транзакции не берут `db::hold` до своего коммита.
+    fn unheld(src: &str) -> usize {
+        // Образцы собраны из частей: иначе эта проверка нашла бы сама себя.
+        let (open, commit, hold) = ([".transaction", "()"].concat(), [".commit", "()"].concat(), ["db::hold", "("].concat());
+        src.match_indices(&open)
+            .filter(|(at, _)| {
+                let rest = &src[at + open.len()..];
+                let end = rest.find(&commit).unwrap_or(rest.len());
+                !rest[..end].contains(&hold)
+            })
+            .count()
+    }
+
+    fn body<'a>(src: &'a str, name: &str) -> &'a str {
+        let start = src.find(&format!("fn {name}(")).unwrap_or_else(|| panic!("`{name}` на месте"));
+        let end = src[start..].find("\n}\n").map_or(src.len(), |e| start + e);
+        &src[start..end]
+    }
+
+    #[test]
+    fn every_projection_transaction_takes_the_set_lock() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut missing = Vec::new();
+        let mut seen = 0;
+        for entry in std::fs::read_dir(root.join("reproject")).expect("каталог шагов") {
+            let path = entry.expect("файл шага").path();
+            let src = std::fs::read_to_string(&path).expect("текст шага");
+            seen += src.matches(&[".transaction", "()"].concat()).count();
+            if unheld(&src) > 0 {
+                missing.push(path.display().to_string());
+            }
+        }
+        let projector = std::fs::read_to_string(root.join("projector.rs")).expect("текст projector.rs");
+        for name in OUTSIDE {
+            if unheld(body(&projector, name)) > 0 {
+                missing.push(format!("projector::{name}"));
+            }
+        }
+        assert!(seen > 20, "транзакций в шагах {seen}: скан смотрит не туда");
+        assert!(missing.is_empty(), "транзакция без `db::hold` до коммита: {missing:?}");
+    }
+}
+
 /// Две пересборки одного набора разом — как у сессий, что чувствуют и
 /// сливают параллельно.
 ///

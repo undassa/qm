@@ -3629,6 +3629,11 @@ ALTER TABLE owner_ask ADD COLUMN IF NOT EXISTS delivered_at bigint;
 -- записи в очереди прятала бы вопрос — ступень 5 его пропускает, а владелец не
 -- видит.
 ALTER TABLE owner_ask ADD COLUMN IF NOT EXISTS question_id text NOT NULL DEFAULT '';
+-- Открытая запись на вопрос — одна: вторая значила бы, что владельцу один
+-- вопрос поставлен дважды. Замерено 30.09 перед заведением: открытых повторов
+-- в базе ноль.
+CREATE UNIQUE INDEX IF NOT EXISTS owner_ask_open_question ON owner_ask (project_id, question_id)
+  WHERE state = 'open' AND question_id <> '';
 
 CREATE INDEX IF NOT EXISTS task_run_event_by_run ON task_run_event (project_id, run_id, at DESC);
 CREATE INDEX IF NOT EXISTS task_run_message_by_run ON task_run_message (project_id, run_id, at);
@@ -10599,7 +10604,11 @@ pub(crate) async fn list_asks(pool: &Pool, project: &str, state: &str, limit: i6
 /// очередь снова. Вопрос, закрытый в наборе или снятый с владельца, закрывает
 /// свою запись.
 pub(crate) async fn sync_owner_questions(pool: &Pool, project: &str) -> Result<u64, crate::db::Fail> {
-    let client = crate::db::conn(pool).await?;
+    let mut connection = crate::db::conn(pool).await?;
+    let client = connection.transaction().await?;
+    // Сторож «открытой записи ещё нет» — чтение, и две пересборки разом оба
+    // видели бы её отсутствие: владельцу один вопрос ставился бы дважды.
+    crate::db::hold(&client, "projection", project).await?;
     let now = now_ms();
     let asked = client
         .execute(
@@ -10641,6 +10650,7 @@ pub(crate) async fn sync_owner_questions(pool: &Pool, project: &str) -> Result<u
             &[&project, &now],
         )
         .await?;
+    client.commit().await?;
     Ok(asked)
 }
 

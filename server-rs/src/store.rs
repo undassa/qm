@@ -402,7 +402,7 @@ pub(crate) async fn reparse_all(pool: &Pool, project: &str, _: &crate::watch::Le
     let client = crate::db::conn(pool).await?;
     let docs = client
         .query(
-            "SELECT entity_kind, entity_name, content FROM project_documents
+            "SELECT entity_kind, entity_name FROM project_documents
               WHERE project_id = $1 ORDER BY entity_kind, entity_name",
             &[&project],
         )
@@ -411,9 +411,24 @@ pub(crate) async fn reparse_all(pool: &Pool, project: &str, _: &crate::watch::Le
     let mut done = 0usize;
     let mut uneven: Vec<String> = Vec::new();
     for d in &docs {
-        let (kind, name, content): (String, String, String) = (d.get(0), d.get(1), d.get(2));
+        let (kind, name): (String, String) = (d.get(0), d.get(1));
         let mut c = crate::db::conn(pool).await?;
         let tx = c.transaction().await?;
+        // Текст читается здесь, под замком строки, как у `put`, а не одним
+        // запросом заранее: правка, прошедшая посреди прохода, иначе получала
+        // бы разбор прежнего текста, а две записи разбора одного документа
+        // разом сносили и вставляли бы его строки наперегонки.
+        let Some(row) = tx
+            .query_opt(
+                "SELECT content FROM project_documents
+                  WHERE project_id = $1 AND entity_kind = $2 AND entity_name = $3 FOR UPDATE",
+                &[&project, &kind, &name],
+            )
+            .await?
+        else {
+            continue;
+        };
+        let content: String = row.get(0);
         let torn = write_structure(&tx, project, &kind, &name, &content).await?;
         tx.commit().await?;
         done += 1;
