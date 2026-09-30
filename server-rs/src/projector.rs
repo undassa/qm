@@ -947,6 +947,16 @@ CREATE TABLE IF NOT EXISTS project_task_check (
   said_as text NOT NULL,
   PRIMARY KEY (project_id, task_id, check_id, said_as));
 
+-- Имя проверки, которое строка назвала, а слово оговорки сняло, — со словом.
+-- Без этой записи снятое имя просто отсутствовало, и пункт, которому его не
+-- хватило, называл следствие: на `tot-ade` 30.09 четыре круга правок искали
+-- причину «лишней» проверки в красной паре, а причиной было «отвергнута» в
+-- ячейке родителя. `task_id` пуст у строки комментария кода: у неё нет задачи.
+CREATE TABLE IF NOT EXISTS project_check_dropped (
+  project_id text NOT NULL, task_id text NOT NULL, check_id text NOT NULL,
+  said_as text NOT NULL, word text NOT NULL,
+  PRIMARY KEY (project_id, task_id, check_id, said_as));
+
 -- Файл кода, разобранный ОДИН раз: каталог, имя, приставка до подчёркивания.
 -- Правило «однокоренные файлы — это подкаталог» группирует по колонкам, а не
 -- режет имя в запросе на каждом прогоне.
@@ -7148,8 +7158,14 @@ pub(crate) async fn links_at(
                                 FROM task_requirement r
                                 LEFT JOIN project_requirements q ON q.project_id = r.project_id AND q.id = r.requirement_id
                                WHERE r.project_id = $1 AND r.task_id = $2 ORDER BY r.requirement_id"),
+            // Снятое словом имя стоит среди засчитанных со своей причиной: иначе
+            // каждый пункт, читающий проверки задачи, видел бы только пропажу.
             ("checks", "SELECT c.check_id, c.said_as, 'check' FROM project_task_check c
-                         WHERE c.project_id = $1 AND c.task_id = $2 ORDER BY c.check_id"),
+                         WHERE c.project_id = $1 AND c.task_id = $2
+                        UNION ALL
+                        SELECT d.check_id, d.said_as || ' · не засчитана: в строке слово «' || d.word || '»', 'check'
+                          FROM project_check_dropped d
+                         WHERE d.project_id = $1 AND d.task_id = $2 ORDER BY 1"),
             // Ребро, объявленное дверью, документ не называет: без пометки его
             // искали в «Зависит от» и не находили.
             ("dependsOn", "SELECT d.depends_on, coalesce(left(t.title, 90), '')
