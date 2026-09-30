@@ -2004,7 +2004,19 @@ const CLOSING: &str = r#"Ревью задачи {task} чистое. Остал
 
 #[cfg(test)]
 mod tests {
-    use super::{cut, regression, verdict_of, Worker};
+    use super::{cut, regression, verdict_of, Config, Worker};
+
+    /// Набор без поля drive ведётся как прежде; false выключает только прогоны.
+    #[test]
+    fn a_bundle_drives_unless_it_says_otherwise() {
+        let c: Config = serde_json::from_str(
+            r#"{"projects":[{"name":"a","project":"p","repo":"/r"},
+                            {"name":"b","project":"q","repo":"/s","drive":false}]}"#,
+        )
+        .expect("разбор runner.json");
+        assert!(c.projects[0].drive, "набор без поля drive обязан вестись, как до поля");
+        assert!(!c.projects[1].drive, "drive: false обязан выключать ведение прогонов");
+    }
     use std::collections::HashMap;
 
     fn items(pairs: &[(&str, Option<&str>)]) -> HashMap<String, (Option<String>, String)> {
