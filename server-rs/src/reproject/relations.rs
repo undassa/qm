@@ -80,7 +80,7 @@ pub(crate) const FACT_KINDS: [&str; 7] =
 pub(crate) async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fail> {
     let mut connection = crate::db::conn(pool).await?;
     let tx = connection.transaction().await?;
-    tx.execute("SELECT pg_advisory_xact_lock(hashtext('relations:' || $1))", &[&project]).await?;
+    crate::db::hold(&tx, "projection", project).await?;
     let client = &tx;
     // Слова схемы — из словаря, не из кода. Роль без слова НЕ подставляет
     // пустое: пустое совпало бы со всем подряд. Такая связь просто не

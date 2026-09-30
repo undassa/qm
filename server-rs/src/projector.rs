@@ -4116,6 +4116,7 @@ pub async fn ensure(pool: &Pool) -> Result<(), crate::db::Fail> {
 pub async fn rebuild_before(pool: &Pool, project: &str, _: &crate::watch::Lease) -> Result<Value, crate::db::Fail> {
     let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
+    crate::db::hold(&tx, "projection", project).await?;
 
     tx.execute("DELETE FROM task_requirements_declared WHERE project_id = $1", &[&project]).await?;
     let declared = tx
@@ -4261,6 +4262,7 @@ pub async fn rebuild(pool: &Pool, project: &str, _: &crate::watch::Lease) -> Res
     // этом уже показал 20 неизвестных вместо 1758 и выглядел правдой.
     let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
+    crate::db::hold(&tx, "projection", project).await?;
 
     // ── Событие сущности ─────────────────────────────────────────────────────
     // Правило: вопрос ведёт журнал таблицей с шапкой «Дата · Событие · Кем».
@@ -6076,6 +6078,7 @@ pub(crate) async fn push_task_state(
     }
     let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
+    crate::db::hold(&tx, "task_state", project).await?;
     // Подача полная, а не добавочная: задача, исчезнувшая из подачи, потеряла
     // трейлер, и держать её прежнее состояние значило бы помнить отменённое.
     // Уходят поэтому ТОЛЬКО отсутствующие в подаче, а не все подряд.
@@ -6367,6 +6370,7 @@ pub(crate) async fn push_code_facts(
     let Snapshot { commit, dirty, reads } = snapshot;
     let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
+    crate::db::hold(&tx, "code_fact", project).await?;
     let before = tx
         .query_one("SELECT count(*) FROM code_fact WHERE project_id = $1 AND kind = $2", &[&project, &kind])
         .await?
@@ -6579,6 +6583,7 @@ pub(crate) async fn push_preflight(
 ) -> Result<Value, crate::db::Fail> {
     let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
+    crate::db::hold(&tx, "preflight_verdict", project).await?;
     let before = tx
         .query_one("SELECT count(*) FROM preflight_verdict WHERE project_id = $1", &[&project])
         .await?
@@ -6698,6 +6703,7 @@ pub(crate) async fn push_worktrees(
 ) -> Result<Value, crate::db::Fail> {
     let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
+    crate::db::hold(&tx, "task_worktree", project).await?;
     let before = tx
         .query_one("SELECT count(*) FROM task_worktree WHERE project_id = $1", &[&project])
         .await?
@@ -15094,9 +15100,7 @@ pub(crate) async fn measure_phases(pool: &Pool, project: &str, since: i64) -> Re
     // читателю как измерение.
     let mut connection = crate::db::conn(pool).await?;
     let client = connection.transaction().await?;
-    client
-        .execute("SELECT pg_advisory_xact_lock(hashtext('phases:' || $1))", &[&project])
-        .await?;
+    crate::db::hold(&client, "phases", project).await?;
     // Счёт задач и документов фазы читается из плана — по тому же правилу, что
     // круг гейтов, он не сохраняется, если читался посреди пересборки.
     if crate::watch::rebuilt_since(&client, project, since).await? {

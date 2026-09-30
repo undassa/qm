@@ -335,6 +335,7 @@ pub(crate) async fn project(
 
     let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
+    crate::db::hold(&tx, "projection", project).await?;
     tx.execute("DELETE FROM project_checks WHERE project_id = $1 AND origin = 'projected'", &[&project]).await?;
     // ССЫЛКА ИЗ ТЕКСТА ТРЕБОВАНИЯ — отдельной строкой, а не растворённая в
     // связи документа. Имена берутся ОБЪЯВЛЕННЫМ раскрывателем `ids::plain`,
@@ -822,6 +823,7 @@ pub(crate) async fn project(
 pub(crate) async fn stamp(pool: &Pool, project: &str) -> Result<u64, crate::db::Fail> {
     let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
+    crate::db::hold(&tx, "projection", project).await?;
     let now = crate::projector::now_ms();
     tx.execute(STAMP_MIGRATION, &[&project, &now]).await?;
     tx.execute("UPDATE entity_stamp SET body_version = 2 WHERE project_id = $1 AND body_version < 2", &[&project])

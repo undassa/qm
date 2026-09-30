@@ -92,6 +92,7 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize)
     }
 
     let tx = client.transaction().await?;
+    crate::db::hold(&tx, "projection", project).await?;
     tx.execute("DELETE FROM project_article_references WHERE project_id = $1", &[&project]).await?;
     tx.execute("DELETE FROM project_articles WHERE project_id = $1 AND origin = 'projected'", &[&project]).await?;
     // Статья, которую документ ГОВОРИТ, обновляется из документа — даже если её

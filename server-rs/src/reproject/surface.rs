@@ -270,6 +270,7 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize,
         Vec::new()
     };
     let tx = client.transaction().await?;
+    crate::db::hold(&tx, "projection", project).await?;
     // «Связи выводятся всегда» — было правдой, пока связь нельзя было объявить.
     // Дверь `story-requirement-add` появилась, и снос целиком стал стирать её
     // запись каждой пересборкой: дверь отвечала «записано», а до следующего

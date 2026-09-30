@@ -62,6 +62,7 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<usize, crate::
 
     let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
+    crate::db::hold(&tx, "projection", project).await?;
     tx.execute("DELETE FROM project_plan_status WHERE project_id = $1", &[&project]).await?;
     for (task, milestone, state, commit) in &out {
         tx.execute(

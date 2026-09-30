@@ -108,6 +108,7 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize)
 
     let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
+    crate::db::hold(&tx, "projection", project).await?;
     tx.execute("DELETE FROM project_need_stories WHERE project_id = $1", &[&project]).await?;
     tx.execute("DELETE FROM project_needs WHERE project_id = $1", &[&project]).await?;
     for (id, number, text, sides, sources, priority, theme, section) in &needs {

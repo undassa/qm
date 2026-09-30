@@ -171,6 +171,7 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<usize, crate::
     drop(client);
     let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
+    crate::db::hold(&tx, "projection", project).await?;
     // Поверхность контракта HTTP приходит датчиком: она в репозитории, а не в
     // наборе, и удалять её здесь нечем.
     tx.execute(

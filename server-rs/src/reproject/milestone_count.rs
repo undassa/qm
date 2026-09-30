@@ -75,6 +75,7 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<usize, crate::
     drop(client);
     let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
+    crate::db::hold(&tx, "projection", project).await?;
     tx.execute("DELETE FROM project_milestone_count WHERE project_id = $1", &[&project]).await?;
     for (m, what, said, listed) in &rows {
         tx.execute(

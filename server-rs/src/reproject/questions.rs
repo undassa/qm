@@ -158,6 +158,7 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<usize, crate::
 
     let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
+    crate::db::hold(&tx, "projection", project).await?;
     tx.execute("DELETE FROM project_questions WHERE project_id = $1 AND origin = 'projected'", &[&project]).await?;
     // ОБЪЯВЛЕННОЕ ТЕМ ЖЕ ИМЕНЕМ ПОГЛОЩАЕТСЯ ДОКУМЕНТОМ. Чистка снимала только
     // строки происхождения `projected`, а объявленная дверью оставалась — и

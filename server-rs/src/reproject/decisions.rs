@@ -336,6 +336,7 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize,
 
     let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
+    crate::db::hold(&tx, "projection", project).await?;
     // Своё — стирается, объявленное — нет: дверь `decision-link-add` пишет
     // `origin='declared'`, и снос целиком стирал её запись каждой пересборкой.
     tx.execute("DELETE FROM project_decision_links WHERE project_id = $1 AND origin = 'projected'",

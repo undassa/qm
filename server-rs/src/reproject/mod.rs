@@ -115,3 +115,62 @@ pub async fn reproject(pool: &Pool, project: &str, _: &crate::watch::Lease) -> R
     done.insert("owner_questions_asked".into(), json!(crate::projector::sync_owner_questions(pool, project).await?));
     Ok(Value::Object(done))
 }
+
+/// Две пересборки одного набора разом — как у сессий, что чувствуют и
+/// сливают параллельно.
+///
+/// Порча, которую ловит проверка: транзакция пересборки без замка набора
+/// (`db::hold`). Обе сносят прежние фичи, обе вставляют, и вторая падает
+/// «duplicate key value violates unique constraint "project_features_pkey"».
+/// Гоняется шаг фич, а не вся `reproject`: часть её таблиц заводит прежняя
+/// схема, а не `projector::ensure`, и на пустой базе вся пересборка не встаёт.
+#[cfg(test)]
+mod concurrent {
+    use crate::db::Says;
+
+    const P: &str = "p";
+    const SCHEMA: &str = "reproject_concurrent";
+
+    async fn run(pool: &deadpool_postgres::Pool) -> Result<(usize, usize, usize), crate::db::Fail> {
+        super::runs::project(pool, P).await
+    }
+
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn two_reprojections_of_one_set_both_succeed() {
+        let url = std::env::var("MH_TEST_DB_URL").expect("MH_TEST_DB_URL: адрес пустой базы");
+        let apart = format!("{}options=-c%20search_path%3D{SCHEMA}", if url.contains('?') { '&' } else { '?' });
+        let pool = crate::db::pool(&format!("{url}{apart}"), 8).expect("пул тестовой базы");
+        pool.get().await.expect("соединение")
+            .batch_execute(&format!("DROP SCHEMA IF EXISTS {SCHEMA} CASCADE; CREATE SCHEMA {SCHEMA};"))
+            .await.expect("своя схема заводится");
+        crate::projector::ensure(&pool).await.expect("схема встаёт на пустой базе");
+        // Фич столько, чтобы вставка шла дольше, чем расходятся старты двух
+        // пересборок: иначе они не пересекаются и гонки не видно.
+        pool.get().await.expect("соединение")
+            .execute(
+                "INSERT INTO project_documents (project_id, entity_kind, entity_name, content, content_hash,
+                                                bytes, revision, updated_at, updated_by)
+                 SELECT $1, 'feature', 'F-' || n, '# Фича ' || n, '', 0, 1, 0, 't'
+                   FROM generate_series(1, 300) n",
+                &[&P],
+            )
+            .await.expect("фичи заводятся");
+        run(&pool).await.map_err(|e| e.says()).expect("первая пересборка");
+        for round in 0..10 {
+            let (a, b) = tokio::join!(run(&pool), run(&pool));
+            for out in [a, b] {
+                if let Err(e) = out {
+                    panic!("круг {round}: пересборка разом с другой упала: {}", e.says());
+                }
+            }
+        }
+        let features: i64 = pool.get().await.expect("соединение")
+            .query_one("SELECT count(*) FROM project_features WHERE project_id = $1", &[&P])
+            .await.expect("счёт").get(0);
+        assert_eq!(features, 300, "по фиче на документ, без повторов и пропусков");
+        pool.get().await.expect("соединение")
+            .batch_execute(&format!("DROP SCHEMA IF EXISTS {SCHEMA} CASCADE"))
+            .await.expect("схема снимается");
+    }
+}

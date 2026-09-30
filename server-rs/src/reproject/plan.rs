@@ -272,6 +272,7 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize,
         tasks.iter().map(|t| (t.0.to_lowercase(), t.0.clone())).collect();
     let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
+    crate::db::hold(&tx, "projection", project).await?;
     // Версия БЫЛА вершиной каскада, и удаление её уносило этапы, задачи и
     // зависимости — включая объявленные ручкой, которых ни один документ не
     // называет. Так пропадали 77 задач трека проверок и 338 зависимостей:
@@ -437,7 +438,8 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize,
 async fn tree_leaves(pool: &Pool, project: &str) -> Result<usize, crate::db::Fail> {
     let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
-    let terms = crate::scheme::Terms::load(pool, project).await?;
+    crate::db::hold(&tx, "projection", project).await?;
+    let terms = crate::scheme::Terms::load_at(&tx, project).await?;
     let rows = tx
         .query(
             "SELECT t.id, d.content FROM project_plan_tasks t
@@ -504,6 +506,7 @@ pub(crate) async fn after(pool: &Pool, project: &str) -> Result<serde_json::Valu
 pub(crate) async fn deps(pool: &Pool, project: &str) -> Result<usize, crate::db::Fail> {
     let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
+    crate::db::hold(&tx, "projection", project).await?;
     let known: HashMap<String, String> = tx
         .query("SELECT id FROM project_plan_tasks WHERE project_id = $1", &[&project])
         .await?
@@ -605,6 +608,7 @@ pub(crate) fn depth(ids: &[String], edges: &[(String, String)]) -> Vec<Option<i3
 pub(crate) async fn waves(pool: &Pool, project: &str) -> Result<usize, crate::db::Fail> {
     let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
+    crate::db::hold(&tx, "projection", project).await?;
     let ids: Vec<String> = tx
         .query("SELECT id FROM project_plan_tasks WHERE project_id = $1 ORDER BY milestone_id, ord, id",
                &[&project])

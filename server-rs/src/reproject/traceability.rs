@@ -48,6 +48,7 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<usize, crate::
 
     let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
+    crate::db::hold(&tx, "projection", project).await?;
     tx.execute("DELETE FROM project_traceability_claims WHERE project_id = $1", &[&project]).await?;
     for (area, title, requirements, described, in_contract, in_code) in &claims {
         tx.execute(

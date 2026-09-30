@@ -218,6 +218,7 @@ pub(crate) async fn project(
 
     let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
+    crate::db::hold(&tx, "projection", project).await?;
     // Объявленное дверью `feature-story-add` переживает пересборку — но не саму
     // фичу. Фича выводится целиком и при исчезновении из документов уходит; её
     // объявленная связь оставалась висеть и считалась в `feature-matches-stories`

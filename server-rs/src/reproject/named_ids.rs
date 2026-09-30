@@ -173,6 +173,7 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<usize, crate::
     drop(client);
     let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
+    crate::db::hold(&tx, "projection", project).await?;
     // Вставка ПАЧКАМИ, а не по строке. Здесь тринадцать тысяч имён, и запрос на
     // каждое — тринадцать тысяч обращений к базе: сорок две секунды из сорока
     // трёх, что занимала вся пересборка набора. Работа та же, ожидание — нет.
