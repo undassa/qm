@@ -292,6 +292,121 @@ pub fn github_slug(url: &str) -> Option<String> {
     (!owner.is_empty() && !name.is_empty() && !name.contains('/')).then(|| format!("{owner}/{name}"))
 }
 
+/// Каталоги профиля сборки, где cargo копит выход каждой сборки и ничего не
+/// убирает сам.
+const SWEPT: &[&str] = &["deps", ".fingerprint", "build", "incremental"];
+
+/// Самое позднее изменение внутри записи и её вес — без хода по ссылкам.
+///
+/// ВОЗРАСТ КАТАЛОГА — ЭТО ВОЗРАСТ НОВЕЙШЕГО ФАЙЛА В НЁМ, А НЕ ЕГО СОБСТВЕННЫЙ.
+/// Cargo переписывает файлы `.fingerprint/<единица>/` на месте, и время самого
+/// каталога от этого не двигается: замер 2026-09-30 на пробном крейте —
+/// после пересборки файлы внутри новые, каталог старый. Судя по каталогу,
+/// уборка сносила бы отпечаток только что собранной единицы.
+fn newest_and_size(path: &std::path::Path) -> (std::time::SystemTime, u64) {
+    let Ok(meta) = std::fs::symlink_metadata(path) else { return (std::time::SystemTime::UNIX_EPOCH, 0) };
+    let mut newest = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    let mut size = if meta.is_file() { meta.len() } else { 0 };
+    if meta.is_dir() {
+        for entry in std::fs::read_dir(path).into_iter().flatten().flatten() {
+            let (n, s) = newest_and_size(&entry.path());
+            newest = newest.max(n);
+            size += s;
+        }
+    }
+    (newest, size)
+}
+
+/// Что в каталоге сборки дерева прогона старше `cutoff`: путь и вес. Только
+/// выбор — удаляет `sweep_runner_target`.
+///
+/// НИЧЕГО ВНЕ `<дерево>/target` ВЫБРАНО НЕ БУДЕТ, И ЭТО ПРОВЕРЯЕТСЯ ПО
+/// РАЗРЕШЁННОМУ ПУТИ. `target` бывает ссылкой в общий каталог сборки, а
+/// профиль или `deps` — ссылкой куда угодно; удаление по такому пути снесло бы
+/// чужую сборку. Ссылки не выбираются и не обходятся ни на каком уровне, а
+/// каталог, в котором выбираем, обязан лежать под разрешённым `target`, а тот
+/// — под разрешённым деревом.
+fn stale_artefacts(
+    tree: &std::path::Path,
+    target: &std::path::Path,
+    cutoff: std::time::SystemTime,
+) -> Vec<(std::path::PathBuf, u64)> {
+    let (Ok(tree), Ok(root)) = (tree.canonicalize(), target.canonicalize()) else { return Vec::new() };
+    if !root.starts_with(&tree) || root == tree {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for profile in std::fs::read_dir(&root).into_iter().flatten().flatten() {
+        for kind in SWEPT {
+            let dir = profile.path().join(kind);
+            let is_real_dir = std::fs::symlink_metadata(profile.path()).is_ok_and(|m| m.is_dir())
+                && std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir());
+            if !is_real_dir || !dir.canonicalize().is_ok_and(|d| d.starts_with(&root) && d != root) {
+                continue;
+            }
+            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if std::fs::symlink_metadata(&path).map_or(true, |m| m.file_type().is_symlink()) {
+                    continue;
+                }
+                let (newest, size) = newest_and_size(&path);
+                if newest < cutoff {
+                    out.push((path, size));
+                }
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Убрать из каталога сборки дерева прогона всё, чего не коснулась сборка,
+/// начатая в `started`.
+///
+/// ЗАЧЕМ. Cargo не убирает выход прежних сборок, и дерево прогона копило его
+/// с каждой вершины ствола: заявка 151 — у tot-ade 60 ГБ, затем 56 ГБ за
+/// полдня 2026-09-30, `/opt` заполнен до 96 %; удаление файлов старше шести
+/// часов освобождало 43–48 ГБ за раз, и cargo пересобирал недостающее.
+///
+/// ЗОВЁТСЯ ТОЛЬКО ПОСЛЕ ПРОГОНА И В ТОЙ ЖЕ ЗАДАЧЕ, ЧТО ЕГО ВЕЛА, — поэтому
+/// сборки в дереве в это время нет по построению: следующий прогон начнётся не
+/// раньше, чем эта задача вернётся. Позвать уборку отдельным циклом значило бы
+/// удалять из-под идущей сборки.
+///
+/// ПОТОЛОК НАЗВАН: единицу, которую сборка сочла свежей, cargo не
+/// переписывает, и её время остаётся старым — замер 2026-09-30 на пробном
+/// крейте: после пересборки приложения `libdep-*.rlib` сохранил прежнее время.
+/// Уборка снимет и её, и следующий прогон соберёт её заново. Это цена
+/// пересборки, а не порча: чего нет, cargo собирает сам.
+///
+/// Отказ уборки прогона не роняет: замер уже записан, а место — забота
+/// следующего захода. Всё сказанное — в журнал, с освобождённым объёмом.
+fn sweep_runner_target(name: &str, tree: &str, cwd: &str, started: std::time::SystemTime) {
+    // Секунда запаса: время файла ставится грубыми часами ядра и может
+    // отставать от `SystemTime::now()` на тик, а тогда файл, записанный сразу
+    // после начала, выглядел бы старше него.
+    let cutoff = started - std::time::Duration::from_secs(1);
+    let target = std::path::Path::new(cwd).join("target");
+    let (mut freed, mut removed, mut failed) = (0u64, 0usize, 0usize);
+    for (path, size) in stale_artefacts(std::path::Path::new(tree), &target, cutoff) {
+        let gone = if path.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
+        match gone {
+            Ok(()) => {
+                freed += size;
+                removed += 1;
+            }
+            Err(e) => {
+                failed += 1;
+                println!("{name} · уборка сборки: {} не удалён: {e}", path.display());
+            }
+        }
+    }
+    println!(
+        "{name} · уборка сборки: удалено {removed}, освобождено {} МБ, отказов {failed}",
+        freed / (1024 * 1024)
+    );
+}
+
 /// Прогон работы, годный в факт о стволе набора.
 #[derive(Debug, PartialEq)]
 pub struct TrunkRun {
@@ -876,6 +991,7 @@ impl Worker {
         // вершине: на прежней снимать нечего.
         self.sense_tree(bundle, &root).await;
         println!("{} · тесты: прогон на {head}", bundle.name);
+        let started = std::time::SystemTime::now();
         let (mut rows, ok) = Self::profile(&cwd, &spec.cmd).await?;
         if rows.is_empty() && !ok {
             // Не собралось: ни одной проверки не увидели — факт об этом тоже
@@ -933,6 +1049,10 @@ impl Worker {
             // одну из двух сторон. Названо обоими: у обоих исходов одно
             // следствие — пульт показывает прежний замер.
             .map_err(|e| format!("прогон не дошёл до пульта (запись или отметка): {e:?}"))?;
+        let (name, tree, dir) = (bundle.name.clone(), root.clone(), cwd.clone());
+        if let Err(e) = tokio::task::spawn_blocking(move || sweep_runner_target(&name, &tree, &dir, started)).await {
+            println!("{} · уборка сборки не завершилась: {e}", bundle.name);
+        }
         let mut v = self.test_status(&bundle.project).await;
         v["recorded"] = json!(recorded);
         v["commit"] = json!(head);
@@ -1709,6 +1829,56 @@ mod tests {
     /// Отказ git — ОТКАЗ, а не пустой вывод. На этом различии стоит вся
     /// запись прогона: не отличив их, прогонщик мерил чужое дерево и
     /// записывал замер как правду о стволе.
+    #[test]
+    fn the_sweep_chooses_exactly_the_old_and_nothing_outside_target() {
+        use std::time::{Duration, SystemTime};
+        let tmp = std::env::temp_dir().join(format!("mh-sweep-{}", std::process::id()));
+        std::fs::remove_dir_all(&tmp).ok();
+        let (tree, outside) = (tmp.join("tree"), tmp.join("outside"));
+        let (deps, prints) = (tree.join("target/debug/deps"), tree.join("target/debug/.fingerprint"));
+        for d in [&deps, &prints.join("old-1"), &prints.join("rewritten-2"), &outside.join("debug/deps")] {
+            std::fs::create_dir_all(d).expect("каталог заводится");
+        }
+        let old = SystemTime::now() - Duration::from_secs(2 * 3600);
+        let age = |p: &std::path::Path| {
+            std::fs::File::open(p).and_then(|f| f.set_modified(old)).expect("время ставится");
+        };
+        for f in [deps.join("libold.rlib"), deps.join("libnew.rlib"), prints.join("old-1/lib"),
+                  prints.join("rewritten-2/lib"), outside.join("stale"), outside.join("debug/deps/libold.rlib")] {
+            std::fs::write(&f, b"x").expect("файл пишется");
+        }
+        for p in [deps.join("libold.rlib"), prints.join("old-1/lib"), prints.join("old-1"),
+                  outside.join("stale"), outside.join("debug/deps/libold.rlib"), outside.join("debug/deps")] {
+            age(&p);
+        }
+        // Файл переписан сборкой, каталог остался старым — так cargo ведёт
+        // отпечаток пересобранной единицы.
+        age(&prints.join("rewritten-2"));
+        std::os::unix::fs::symlink(outside.join("stale"), deps.join("link-out")).expect("ссылка заводится");
+        std::os::unix::fs::symlink(outside.join("debug"), tree.join("target/linked-profile")).expect("ссылка заводится");
+        let cutoff = SystemTime::now() - Duration::from_secs(3600);
+
+        let chosen: Vec<_> = super::stale_artefacts(&tree, &tree.join("target"), cutoff)
+            .into_iter()
+            .map(|(p, _)| p.strip_prefix(tree.canonicalize().unwrap()).unwrap().to_owned())
+            .collect();
+        assert_eq!(
+            chosen,
+            vec![std::path::PathBuf::from("target/debug/.fingerprint/old-1"),
+                 std::path::PathBuf::from("target/debug/deps/libold.rlib")],
+            "выбрано ровно старое: не новое, не переписанный отпечаток, не ссылки наружу"
+        );
+
+        let other = tmp.join("other-tree");
+        std::fs::create_dir_all(&other).expect("каталог заводится");
+        std::os::unix::fs::symlink(&outside, other.join("target")).expect("ссылка заводится");
+        assert!(
+            super::stale_artefacts(&other, &other.join("target"), cutoff).is_empty(),
+            "`target`, ведущий вон из дерева, не убирается вовсе"
+        );
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
     #[test]
     fn a_refusing_git_is_not_an_empty_answer() {
         // Каталог — СВОЙ у каждого прогона. Общее имя в `/tmp` делало пробу
