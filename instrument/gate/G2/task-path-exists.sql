@@ -37,7 +37,7 @@ SELECT 'датчик файлов дерева «repo-file» ' || fact_gap($1, '
                 WHERE l.project_id = $1 AND l.is_path AND NOT l.exempt)
 UNION ALL
 SELECT l.task_id || ' — ' || l.path || ': среди прочитанного датчиком такого пути нет. '
-       || 'Каталога нет среди отслеживаемого git: его нет в дереве либо он не закоммичен; '
+       || 'Каталога нет в дереве либо он не закоммичен; '
        || 'если свеж только `code-file`, он ещё мог лечь вне его образцов — покажет `sensor-specs`' AS detail
   FROM project_task_tree_leaf l
  WHERE l.project_id = $1 AND (fact_fresh($1, 'repo-file') OR fact_fresh($1, 'code-file'))
