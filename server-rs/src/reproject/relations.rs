@@ -506,7 +506,6 @@ mod dropped_check {
             .batch_execute(
                 "INSERT INTO scheme_term (project_id, role, value) VALUES
                    ('p', 'id.check', '\\b[mv][0-9]+_t[0-9]+[a-z]?_[a-z0-9_]+\\b'),
-                   ('p', 'word.caveat', 'отвергнут'), ('p', 'word.caveat', 'было'), ('p', 'word.caveat', 'прежн'),
                    ('p', 'section.proof', 'Чем доказывается'), ('p', 'field.red-checks', 'Какие'),
                    ('p', 'word.elsewhere', 'здесь не закрыва'), ('p', 'id.task', '^[TR]-[0-9]+$');
                  INSERT INTO project_plan_versions (project_id, id) VALUES ('p', 'v1');
