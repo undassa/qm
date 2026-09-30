@@ -267,72 +267,103 @@ pub fn test_lines(text: &str) -> Vec<(String, String, String)> {
 /// СНАЧАЛА TERM, И ЭТО НЕ ВЕЖЛИВОСТЬ. nextest держит каждый тест в своей
 /// группе процессов и гасит их сам, получив TERM; KILL ему этого не даёт, и
 /// зависший тест оставался бы сиротой вне нашей группы — с тем же замком
-/// каталога сборки, ради которого команду и убивают.
-const TERM_GRACE_S: u64 = 5;
+/// каталога сборки, ради которого команду и убивают. Пятнадцать секунд —
+/// потому что nextest, получив TERM, сам ждёт свои тесты около десяти, прежде
+/// чем убить их; добей мы его раньше, его тесты остались бы сиротами.
+const TERM_GRACE_S: u64 = 15;
 
-/// Вывод команды с потолком времени; `None` — потолок вышел.
+/// Вывод команды с потолком времени; `None` — потолок вышел. `input` уходит
+/// потомку на ввод; пустой — ввода нет вовсе.
 ///
 /// ПО ИСТЕЧЕНИИ ГАСИТСЯ ВСЯ ГРУППА ПРОЦЕССОВ, А НЕ ТОЛЬКО ЗАПУЩЕННЫЙ.
 /// Брошенный `tokio::time::timeout` будущий вывод процесса не убивает: cargo
 /// жил бы дальше и держал замок каталога сборки, и следующий прогон ждал бы
 /// его. Одного `kill_on_drop` мало: профиль идёт через `bash -c "( … )"`, и
 /// убит был бы только bash, а cargo под ним осиротел бы. Поэтому своя группа
-/// и сигнал по ней: TERM, а по истечении `TERM_GRACE_S` — KILL.
+/// и `put_out` по ней.
 ///
-/// Ввод пустой: `.output()` давал его сам, а `spawn()` наследует ввод
-/// воркера, и при запуске из терминала потомок в фоновой группе ловил бы
-/// SIGTTIN.
-async fn output_within(mut cmd: tokio::process::Command, limit_s: u64) -> std::io::Result<Option<std::process::Output>> {
-    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0).kill_on_drop(true);
+/// Без ввода — `Stdio::null()`: `spawn()` наследует ввод воркера, и при
+/// запуске из терминала потомок в фоновой группе ловил бы SIGTTIN.
+///
+/// Отказ чтения вывода — отказ, а не пустой вывод: обрезанный вывод лёг бы
+/// записью как обычный прогон.
+async fn output_within(
+    mut cmd: tokio::process::Command,
+    limit_s: u64,
+    input: &[u8],
+) -> std::io::Result<Option<std::process::Output>> {
+    let stdin = if input.is_empty() { Stdio::null() } else { Stdio::piped() };
+    cmd.stdin(stdin).stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0).kill_on_drop(true);
     let mut child = cmd.spawn()?;
-    let group = child.id();
     let (mut out, mut err) = (drain(child.stdout.take()), drain(child.stderr.take()));
+    let mut feed = child.stdin.take();
     let done = async {
+        if let Some(pipe) = feed.as_mut() {
+            pipe.write_all(input).await?;
+        }
+        // Ввод закрывается сразу: потомок, читающий его до конца, иначе ждал бы.
+        drop(feed.take());
         let status = child.wait().await?;
-        Ok::<_, std::io::Error>(std::process::Output {
+        Ok(std::process::Output {
             status,
-            stdout: (&mut out).await.unwrap_or_default(),
-            stderr: (&mut err).await.unwrap_or_default(),
+            stdout: (&mut out).await.map_err(std::io::Error::other)??,
+            stderr: (&mut err).await.map_err(std::io::Error::other)??,
         })
     };
-    if let Ok(output) = tokio::time::timeout(std::time::Duration::from_secs(limit_s), done).await {
-        return output.map(Some);
-    }
-    if let Some(group) = group {
-        let signal = |sig: &str| {
-            std::process::Command::new("kill")
-                .args([sig, "--", &format!("-{group}")])
-                .stderr(Stdio::null())
-                .status()
-                .is_ok_and(|s| s.success())
-        };
-        signal("-TERM");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(TERM_GRACE_S);
-        // Вожака пожинаем сами: зомби числится в группе, и без этого группа
-        // выглядела бы живой до конца отсрочки.
-        while child.try_wait().is_ok() && signal("-0") {
-            if std::time::Instant::now() >= deadline {
-                if !signal("-KILL") {
-                    println!("группа {group} после потолка не добита");
-                }
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-    }
+    let result = tokio::time::timeout(std::time::Duration::from_secs(limit_s), done).await;
+    // Трубы читаются, пока их держит хоть кто-то, а держать их может и
+    // процесс, ушедший из группы: без `abort` воркер ждал бы его вечно.
     out.abort();
     err.abort();
-    Ok(None)
+    match result {
+        Ok(Ok(output)) => Ok(Some(output)),
+        Ok(Err(e)) => {
+            put_out(&mut child, std::time::Duration::from_secs(TERM_GRACE_S)).await;
+            Err(e)
+        }
+        Err(_) => {
+            put_out(&mut child, std::time::Duration::from_secs(TERM_GRACE_S)).await;
+            Ok(None)
+        }
+    }
+}
+
+/// Погасить группу потомка: TERM, а если через `grace` она жива — KILL.
+/// Группа — та, которую потомок завёл при запуске (`process_group(0)`).
+async fn put_out(child: &mut tokio::process::Child, grace: std::time::Duration) {
+    let Some(group) = child.id() else { return };
+    let signal = |sig: &str| {
+        std::process::Command::new("kill")
+            .args([sig, "--", &format!("-{group}")])
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    signal("-TERM");
+    let deadline = std::time::Instant::now() + grace;
+    // Вожака пожинаем сами: зомби числится в группе, и без этого группа
+    // выглядела бы живой до конца отсрочки.
+    while child.try_wait().is_ok() && signal("-0") {
+        if std::time::Instant::now() >= deadline {
+            if !signal("-KILL") {
+                println!("группа {group} после потолка не добита");
+            }
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
 }
 
 /// Прочесть трубу потомка до конца в своей задаче.
-fn drain<R: tokio::io::AsyncRead + Unpin + Send + 'static>(pipe: Option<R>) -> tokio::task::JoinHandle<Vec<u8>> {
+fn drain<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
+    pipe: Option<R>,
+) -> tokio::task::JoinHandle<std::io::Result<Vec<u8>>> {
     tokio::spawn(async move {
         let mut b = Vec::new();
         if let Some(mut p) = pipe {
-            tokio::io::AsyncReadExt::read_to_end(&mut p, &mut b).await.ok();
+            tokio::io::AsyncReadExt::read_to_end(&mut p, &mut b).await?;
         }
-        b
+        Ok(b)
     })
 }
 
@@ -341,7 +372,7 @@ fn drain<R: tokio::io::AsyncRead + Unpin + Send + 'static>(pipe: Option<R>) -> t
 async fn gh(path: &str) -> Result<String, String> {
     let mut run = tokio::process::Command::new("gh");
     run.args(["api", path]);
-    let out = match output_within(run, 120).await {
+    let out = match output_within(run, 120, b"").await {
         Ok(Some(o)) => o,
         Ok(None) => return Err(format!("gh api {path} не уложился в 120 с")),
         Err(e) => return Err(format!("gh не завёлся: {e}")),
@@ -683,54 +714,15 @@ impl Worker {
         if !session.is_empty() {
             cmd.arg("--resume").arg(session);
         }
-        cmd.current_dir(&bundle.repo)
-            .env("MH_PROJECT", &bundle.project)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
-            Err(e) => return (format!("сессия не завелась: {e}"), session.to_owned(), true),
-        };
-        if let Some(mut stdin) = child.stdin.take() {
-            if stdin.write_all(prompt.as_bytes()).await.is_err() {
-                let _ = child.kill().await;
-                return ("сессия не приняла ввод".into(), session.to_owned(), true);
-            }
-        }
-        // Ждём вручную, а не wait_with_output: таймаут обязан убить процесс,
-        // иначе осиротевший claude продолжил бы править дерево, а воркер
-        // завёл бы вторую сессию рядом. Вывод читаем параллельно ожиданием.
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-        let out_task = tokio::spawn(async move {
-            let mut b = Vec::new();
-            if let Some(mut s) = stdout {
-                tokio::io::AsyncReadExt::read_to_end(&mut s, &mut b).await.ok();
-            }
-            b
-        });
-        let err_task = tokio::spawn(async move {
-            let mut b = Vec::new();
-            if let Some(mut s) = stderr {
-                tokio::io::AsyncReadExt::read_to_end(&mut s, &mut b).await.ok();
-            }
-            b
-        });
-        let out = match tokio::time::timeout(std::time::Duration::from_secs(LIMIT_S), child.wait()).await {
-            Err(_) => {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                let _ = out_task.await;
-                let _ = err_task.await;
-                return (format!("сессия не уложилась в {LIMIT_S} с"), session.to_owned(), true);
-            }
-            Ok(Err(e)) => return (format!("сессия не ответила: {e}"), session.to_owned(), true),
-            Ok(Ok(status)) => {
-                let stdout = out_task.await.unwrap_or_default();
-                let stderr = err_task.await.unwrap_or_default();
-                (status, stdout, stderr)
-            }
+        cmd.current_dir(&bundle.repo).env("MH_PROJECT", &bundle.project);
+        // Через `output_within`: потолок обязан погасить claude вместе с его
+        // командами — иначе осиротевший claude или его cargo продолжили бы
+        // править дерево и держать замок сборки, а воркер завёл бы вторую
+        // сессию рядом (mh#154).
+        let out = match output_within(cmd, LIMIT_S, prompt.as_bytes()).await {
+            Ok(Some(o)) => (o.status, o.stdout, o.stderr),
+            Ok(None) => return (format!("сессия не уложилась в {LIMIT_S} с"), session.to_owned(), true),
+            Err(e) => return (format!("сессия не ответила: {e}"), session.to_owned(), true),
         };
         let (status, stdout, stderr) = out;
         {
@@ -976,7 +968,7 @@ impl Worker {
     async fn cargo_list(cwd: &str) -> Result<Vec<std::path::PathBuf>, String> {
         let mut cmd = tokio::process::Command::new("cargo");
         cmd.args(CARGO_LIST).current_dir(cwd).env("CARGO_TERM_COLOR", "never");
-        let out = match output_within(cmd, TEST_TIMEOUT_S).await {
+        let out = match output_within(cmd, TEST_TIMEOUT_S, b"").await {
             Ok(Some(o)) => o,
             Ok(None) => return Err(format!("запрос перечня не уложился в {TEST_TIMEOUT_S} с")),
             Err(e) => return Err(format!("запрос перечня не завёлся: {e}")),
@@ -1010,7 +1002,7 @@ impl Worker {
         let joined = format!("( {} ) 2>&1", cmd);
         let mut run = tokio::process::Command::new("bash");
         run.args(["-c", &joined]).current_dir(cwd).env("CARGO_TERM_COLOR", "never");
-        let out = match output_within(run, TEST_TIMEOUT_S).await {
+        let out = match output_within(run, TEST_TIMEOUT_S, b"").await {
             Ok(Some(o)) => o,
             Ok(None) => return Err(format!("прогон не уложился в {TEST_TIMEOUT_S} с")),
             Err(e) => return Err(format!("прогон не завёлся: {e}")),
@@ -2207,7 +2199,7 @@ mod tests {
         let pidfile = tmp.join("pid");
         let mut cmd = tokio::process::Command::new("bash");
         cmd.args(["-c", &format!("( sleep 60 & echo $! > {} ; wait )", pidfile.display())]);
-        assert!(super::output_within(cmd, 1).await.expect("команда заводится").is_none(), "потолок вышел");
+        assert!(super::output_within(cmd, 1, b"").await.expect("команда заводится").is_none(), "потолок вышел");
         let pid = std::fs::read_to_string(&pidfile).expect("внук записал себя");
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         let alive = std::path::Path::new(&format!("/proc/{}", pid.trim())).exists();
@@ -2218,6 +2210,44 @@ mod tests {
         assert!(!alive, "внук {} пережил потолок", pid.trim());
     }
 
+    /// Обычный путь отдаёт вывод обоих потоков и код выхода целиком.
+    #[tokio::test]
+    async fn a_command_within_its_limit_gives_its_output_and_code() {
+        let mut cmd = tokio::process::Command::new("bash");
+        cmd.args(["-c", "echo o; echo e >&2; exit 3"]);
+        let out = super::output_within(cmd, 5, b"").await.expect("команда заводится").expect("уложилась");
+        assert_eq!((out.stdout.as_slice(), out.stderr.as_slice(), out.status.code()), (&b"o\n"[..], &b"e\n"[..], Some(3)));
+    }
+
+    /// Ввод доходит до потомка и закрывается: `cat` кончается сам.
+    #[tokio::test]
+    async fn the_input_reaches_the_command_and_ends() {
+        let cmd = tokio::process::Command::new("cat");
+        let prompt = "просьба сессии".as_bytes();
+        let out = super::output_within(cmd, 5, prompt).await.expect("команда заводится").expect("уложилась");
+        assert_eq!(out.stdout, prompt);
+    }
+
+    /// Трубу держит процесс, ушедший из группы: потолок всё равно кончает
+    /// ожидание, а не ждёт конца чужого процесса.
+    #[tokio::test]
+    async fn a_pipe_held_outside_the_group_does_not_hold_the_worker() {
+        let tmp = std::env::temp_dir().join(format!("mh-held-pipe-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).expect("каталог заводится");
+        let pidfile = tmp.join("pid");
+        let mut cmd = tokio::process::Command::new("bash");
+        cmd.args(["-c", &format!("setsid sleep 20 & echo $! > {}; exit 0", pidfile.display())]);
+        let begun = std::time::Instant::now();
+        let out = super::output_within(cmd, 1, b"").await.expect("команда заводится");
+        let took = begun.elapsed();
+        if let Ok(pid) = std::fs::read_to_string(&pidfile) {
+            std::process::Command::new("kill").args(["-KILL", pid.trim()]).status().ok();
+        }
+        std::fs::remove_dir_all(&tmp).ok();
+        assert!(out.is_none(), "вывод не дочитан — это потолок, а не ответ");
+        assert!(took < std::time::Duration::from_secs(5), "ожидание кончилось через {took:?}");
+    }
+
     /// Группа, глухая к TERM, добивается KILL по истечении отсрочки.
     #[tokio::test]
     async fn a_group_deaf_to_term_is_killed_after_the_grace() {
@@ -2226,7 +2256,11 @@ mod tests {
         let pidfile = tmp.join("pid");
         let mut cmd = tokio::process::Command::new("bash");
         cmd.args(["-c", &format!("trap '' TERM; sleep 60 & echo $! > {}; wait", pidfile.display())]);
-        assert!(super::output_within(cmd, 1).await.expect("команда заводится").is_none(), "потолок вышел");
+        let mut child = cmd.process_group(0).kill_on_drop(true).spawn().expect("команда заводится");
+        while std::fs::read_to_string(&pidfile).map_or(true, |p| !p.ends_with('\n')) {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        super::put_out(&mut child, std::time::Duration::from_secs(1)).await;
         let pid = std::fs::read_to_string(&pidfile).expect("внук записал себя");
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         let alive = std::path::Path::new(&format!("/proc/{}", pid.trim())).exists();
@@ -2246,12 +2280,12 @@ mod tests {
         std::fs::create_dir_all(&tmp).expect("каталог заводится");
         let pidfile = tmp.join("pid");
         let script = format!(
-            "setsid sleep 60 & p=$!; echo $p > {}; trap 'kill -TERM -- -$p; exit' TERM; wait",
+            "trap 'kill -TERM -- -$p; exit' TERM; setsid sleep 60 & p=$!; echo $p > {}; wait",
             pidfile.display()
         );
         let mut cmd = tokio::process::Command::new("bash");
         cmd.args(["-c", &script]);
-        assert!(super::output_within(cmd, 1).await.expect("команда заводится").is_none(), "потолок вышел");
+        assert!(super::output_within(cmd, 1, b"").await.expect("команда заводится").is_none(), "потолок вышел");
         let pid = std::fs::read_to_string(&pidfile).expect("внук записал себя");
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         let alive = std::path::Path::new(&format!("/proc/{}", pid.trim())).exists();
