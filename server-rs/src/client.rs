@@ -568,6 +568,7 @@ pub fn sense(door: &Door, only: Option<&str>, root: &str) -> Result<Value, Strin
         .map(|s| !s.trim().is_empty())
         .unwrap_or(true);
     let (specs, _) = door.call("sensor-specs", &json!({}))?;
+    let tracked = tracked(&root)?;
     let empty = vec![];
     let mut sensed = Sensed::default();
     for spec in specs["specs"].as_array().unwrap_or(&empty) {
@@ -757,7 +758,7 @@ pub fn sense(door: &Door, only: Option<&str>, root: &str) -> Result<Value, Strin
                 let text = match std::fs::read_to_string(format!("{root}/{path}")) {
                     Ok(t) => t,
                     Err(_) => {
-                        let hits = find_by_name(&root, &path);
+                        let hits = find_by_name(&root, &tracked, &path);
                         match hits.len() {
                             0 => {
                                 names.push((key, "файла нет в репозитории".to_owned()));
@@ -818,15 +819,7 @@ pub fn sense(door: &Door, only: Option<&str>, root: &str) -> Result<Value, Strin
             push_facts(door, &mut sensed, fact, &facts, &head, dirty, read_n)?;
             continue;
         }
-        // Корней у датчика бывает несколько: правила именования смотрят и на
-        // `backend/crates`, и на `backend/bin`, и на `frontend/src`. Три датчика
-        // ради одного правила развели бы одно правило по трём объявлениям.
-        let mut files: Vec<String> = Vec::new();
-        for one in reads.split_whitespace() {
-            files.extend(walk(&root, one));
-        }
-        files.sort();
-        files.dedup();
+        let files = reach(&root, &tracked, fact, reads);
 
         if how == "contract-head" {
             let mut pairs = Vec::new();
@@ -1266,77 +1259,129 @@ fn secret_fields(text: &str, field_re: &str, declared: &[String]) -> Vec<(String
     out
 }
 
+/// Файлы дерева, как их знает git: отслеживаемые и лежащие на диске.
+///
+/// ЧТО НЕ ФАЙЛ ПРОЕКТА, РЕШАЕТ `.gitignore` НАБОРА, А НЕ ПЕРЕЧЕНЬ В ХАРНЕСЕ.
+/// Прежний обход шёл по диску и пропускал `.git`, `node_modules`, `target`,
+/// `dist`, `.venv` — перечень, знавший лишь часть чужого мусора. У `tot-ade` в
+/// корне лежат `.vault` — ссылка на весь волт документов — и `.tot` с
+/// артефактами прогонов; обход по диску с образцом `**` ушёл бы в оба, а
+/// `web/node_modules` набор не игнорирует вовсе. Отслеживаемое — ровно то, что
+/// лежит в коммите, чей `head` подаётся вместе с фактом.
+///
+/// Отказ вместо пустого списка: ноль файлов читался бы «таких файлов нет».
+fn tracked(root: &str) -> Result<Vec<String>, String> {
+    let out = std::process::Command::new("git")
+        .args(["-C", root, "ls-files", "-z"])
+        .output()
+        .map_err(|e| format!("git ls-files не запустился: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("git ls-files: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    // Удалённый, но не закоммиченный файл git ещё числит, а на диске его нет.
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .split('\0')
+        .filter(|p| !p.is_empty() && std::path::Path::new(root).join(p).is_file())
+        .map(str::to_owned)
+        .collect())
+}
+
+/// Файлы, которые датчик читает: объявленные образцы по дереву git.
+///
+/// `repo-file` ОБЪЯВЛЕНИЮ НЕ ПОДЧИНЯЕТСЯ. Пункты `G2` читают его как «файлы
+/// дерева», и путь вне него для них — «такого пути нет». Перечень каталогов,
+/// который набор ведёт руками, отстаёт от дерева: у `tot-ade` он не знал
+/// корневой `tests/` (заявка 111, выдача задач стояла), потом `web/`, а
+/// `vendor/` не знал никогда. Каждое отставание — ложная находка на
+/// существующем файле.
+fn reach(root: &str, tracked: &[String], fact: &str, reads: &str) -> Vec<String> {
+    let reads = if fact == "repo-file" { "**" } else { reads };
+    // Корней у датчика бывает несколько: правила именования смотрят и на
+    // `backend/crates`, и на `backend/bin`, и на `frontend/src`. Три датчика
+    // ради одного правила развели бы одно правило по трём объявлениям.
+    let mut files: Vec<String> = reads.split_whitespace().flat_map(|one| walk(root, tracked, one)).collect();
+    files.sort();
+    files.dedup();
+    files
+}
+
+/// Файлы дерева с таким путём-хвостом. Голое имя из набора разрешается им.
+fn find_by_name(root: &str, tracked: &[String], tail: &str) -> Vec<String> {
+    let want = format!("/{tail}");
+    tracked.iter().filter(|p| format!("/{p}").ends_with(&want)).map(|p| format!("{root}/{p}")).collect()
+}
+
 /// Обход по простому образцу: `backend/**/*.rs`, `backend/api/openapi.yaml`.
 ///
 /// Свой, а не библиотекой: клиента носят по чужим машинам, и одна зависимость
 /// ради двух звёздочек дороже той пользы, что она даёт.
-/// Файлы дерева с таким путём-хвостом. Голое имя из набора разрешается им.
-fn find_by_name(root: &str, tail: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut stack = vec![std::path::PathBuf::from(root)];
-    let want = format!("/{tail}");
-    while let Some(d) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&d) else { continue };
-        for e in entries.flatten() {
-            let p = e.path();
-            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if matches!(name, ".git" | "node_modules" | "target" | "dist") {
-                continue;
-            }
-            if p.is_dir() {
-                stack.push(p);
-            } else if p.display().to_string().ends_with(&want) {
-                out.push(p.display().to_string());
-            }
-        }
-    }
-    out.sort();
-    out
+fn walk(root: &str, tracked: &[String], pattern: &str) -> Vec<String> {
+    let Some(star) = pattern.find('*') else {
+        return tracked.iter().filter(|p| *p == pattern).map(|p| format!("{root}/{p}")).collect();
+    };
+    let dir = &pattern[..pattern[..star].rfind('/').map(|j| j + 1).unwrap_or(0)];
+    let rest = &pattern[dir.len()..];
+    // Хвост сверяется с ПУТЁМ, а не с именем файла: у образца
+    // `backend/crates/*/Cargo.toml` хвост — `/Cargo.toml`, и ни одно имя файла
+    // им не кончается. Датчик отвечал нулём, и ноль читался как «таких файлов
+    // нет».
+    let suffix = rest.rsplit('*').next().unwrap_or("");
+    // Спуск нужен не только при `**`: у образца `crates/*/Cargo.toml` искомое
+    // лежит уровнем ниже, и без спуска обход возвращал ноль.
+    let deep = rest.contains("**") || rest.contains('/');
+    tracked
+        .iter()
+        .filter(|p| p.strip_prefix(dir).is_some_and(|tail| deep || !tail.contains('/')) && p.ends_with(suffix))
+        .map(|p| format!("{root}/{p}"))
+        .collect()
 }
 
-fn walk(root: &str, pattern: &str) -> Vec<String> {
-    let full = format!("{root}/{pattern}");
-    let (dir, rest) = match full.find('*') {
-        Some(i) => {
-            let cut = full[..i].rfind('/').map(|j| j + 1).unwrap_or(0);
-            (full[..cut].to_owned(), full[cut..].to_owned())
+#[cfg(test)]
+mod tree_reach {
+    /// Дерево `tot-ade` в малом: объявление `repo-file` знает `crates/**` и
+    /// корень, а файлы лежат ещё в корневом `tests/` и в `web/`. Рядом — то,
+    /// чего в фактах быть не должно: сборка и артефакты прогонов под
+    /// `.gitignore` и `node_modules`, который набор не игнорирует, но и не
+    /// коммитит.
+    #[test]
+    fn repo_file_is_every_tracked_file_and_nothing_else() {
+        let root = std::env::temp_dir().join(format!("mh-tree-reach-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let put = |rel: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().expect("каталог")).expect("каталог");
+            std::fs::write(p, "x").expect("файл");
+        };
+        let ours = ["Cargo.toml", "crates/tot-core/Cargo.toml", "crates/tot-core/src/lib.rs",
+                    "tests/support/fixture_guard.rs", "web/package.json", "web/src/main.ts"];
+        for rel in ours.iter().chain(&[".gitignore", "target/debug/tot", ".tot/run.json",
+                                       "web/node_modules/vite/index.js"]) {
+            put(rel);
         }
-        None => return if std::path::Path::new(&full).is_file() { vec![full] } else { vec![] },
-    };
-    let suffix = rest.rsplit('*').next().unwrap_or("").to_owned();
-    let mut out = Vec::new();
-    let mut stack = vec![std::path::PathBuf::from(&dir)];
-    while let Some(d) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&d) else { continue };
-        for e in entries.flatten() {
-            let p = e.path();
-            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            // Пропускается ТО, ЧТО НЕ ЧАСТЬ дерева, а не всё точечное:
-            // `.github` и `.sqlx` — такие же каталоги проекта, как остальные, и
-            // задача вправе называть их местом для кода. Прежний пропуск всего
-            // точечного делал их невидимыми, и `task-path-exists` краснел
-            // на существующем.
-            if matches!(name, ".git" | "node_modules" | "target" | "dist" | ".venv") {
-                continue;
-            }
-            if p.is_dir() {
-                // Спуск нужен не только при `**`: у образца `crates/*/Cargo.toml`
-                // искомое лежит уровнем ниже, и без спуска обход возвращал ноль
-                // — а ноль читался как «таких файлов нет».
-                if rest.contains("**") || rest.contains('/') {
-                    stack.push(p);
-                }
-            } else if suffix.is_empty() || p.display().to_string().ends_with(&suffix) {
-                // Хвост сверяется с ПУТЁМ, а не с именем файла: у образца
-                // `backend/crates/*/Cargo.toml` хвост — `/Cargo.toml`, и ни одно
-                // имя файла им не кончается. Датчик отвечал нулём, и ноль
-                // читался как «таких файлов нет».
-                out.push(p.display().to_string());
-            }
-        }
+        std::fs::write(root.join(".gitignore"), "/target\n/.tot\n").expect("файл");
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git").arg("-C").arg(&root)
+                .args(args).output().expect("git").status.success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["add", ".gitignore"]);
+        git(&["add"].iter().chain(&ours).copied().collect::<Vec<_>>());
+
+        let at = root.to_str().expect("путь");
+        let tracked = super::tracked(at).expect("дерево git");
+        let short = |files: Vec<String>| -> Vec<String> {
+            files.iter().map(|f| f.strip_prefix(&format!("{at}/")).unwrap_or(f).to_owned()).collect()
+        };
+        let repo = short(super::reach(at, &tracked, "repo-file", "Cargo.toml crates/**"));
+        let manifests = short(super::reach(at, &tracked, "crate-manifest", "crates/*/Cargo.toml"));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let mut want: Vec<String> = ours.iter().chain(&[".gitignore"]).map(|s| (*s).to_owned()).collect();
+        want.sort();
+        assert_eq!(repo, want, "repo-file читает не всё отслеживаемое или лишнее");
+        assert_eq!(manifests, ["crates/tot-core/Cargo.toml"], "прочие датчики обязаны держаться образца");
     }
-    out.sort();
-    out
 }
 
 /// Поставлен ли файл установкой: её шапка несёт имя и описание в кавычках.
@@ -1838,6 +1883,7 @@ mod refused_push {
             assert!(ok, "git {args:?}");
         };
         git(&["init", "-q", "-b", "main"]);
+        git(&["add", "a.txt"]);
         git(&["commit", "-q", "--allow-empty", "-m", "работа\n\nTask: M1-T1 closed"]);
         let door = super::Door { url, project: "p".into(), secret: "s".into(), principal: "t".into() };
 
