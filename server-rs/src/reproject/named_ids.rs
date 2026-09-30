@@ -5,8 +5,8 @@
 //! что документ врёт.
 //!
 //! Раскрывается перечень тем же раскрывателем, что и везде: `FR-SIT-04, 07, 09`
-//! — три имени, а не одно. Строка с оговоркой («удалено», «прежнее имя»)
-//! называет имя ради истории, и это законно; оговорка помечается колонкой.
+//! — три имени, а не одно. Зачёркнутое имя (`~~FR-01~~`) названо
+//! ради истории, и это законно; снятие помечается колонкой.
 //!
 //! ГДЕ имя названо — тоже колонка. Имя первой ячейкой строки таблицы документ
 //! объявляет СВОИМ: так перечисляют состав. То же имя в прозе («тот же принцип,
@@ -16,18 +16,78 @@
 
 /// Строка упоминания имени: вид, имя, где сказано и чем помечено.
 type NamedIdRow = (String, String, String, bool, bool, bool, Option<i32>);
+/// Имя одного документа: имя, снято ли, из перечня ли, первой ли ячейкой, раздел.
+type Named = (String, bool, bool, bool, Option<i32>);
+
+/// Имена документа и голые числа его строк-перечней.
+///
+/// Снятым имя считается, только когда ЗАЧЁРКНУТО само (`~~FR-STP-11~~`), —
+/// см. `ids::said`. Прежде снимали слова оговорки из словаря набора
+/// (`word.caveat`: «удал», «отмен», «отвергнут», «было»…) в строке и в
+/// заголовке раздела, и имя в строке «отмена прогона — `FR-71`» считалось
+/// помянутым убранным. Имя, названное документом и живым, и зачёркнутым,
+/// живое: документ утверждает его существование хотя бы раз, и брать первое
+/// попавшееся значило бы решать порядком строк.
+fn scan(content: &str) -> (Vec<Named>, Vec<(String, String)>) {
+    let mut named: Vec<Named> = Vec::new();
+    let mut hidden: Vec<(String, String)> = Vec::new();
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut seen_hidden = std::collections::HashSet::new();
+    // Обход по БЛОКАМ, а не по строкам: блок знает свой `ord`, а ord
+    // блока-заголовка и есть ord его секции — тот же, каким она лежит в
+    // `project_document_sections`. Без этого связь остаётся на уровне
+    // документа: «ui-spec называет SCR-SHELL-01» при сорока килобайтах и
+    // двадцати шести секциях.
+    let parsed = crate::parse::parse_document(content);
+    let mut section: Option<i32> = None;
+    for block in &parsed.blocks {
+        if block.kind == "heading" {
+            section = Some(block.ord);
+        }
+        for line in block.raw.lines() {
+            // Голое число, оставшееся в строке-перечне: запись прячет имя
+            // формой, которой раскрыватель не знает. Строка обязана СОДЕРЖАТЬ
+            // хотя бы одно имя — иначе это не перечень, а проза с числом, и
+            // «§8.1» или «п.3» стали бы находками.
+            let exists_name = !super::ids::plain(line).is_empty();
+            for n in super::ids::hidden_numbers(line).into_iter().filter(|_| exists_name) {
+                if seen_hidden.insert(n.clone()) {
+                    hidden.push((n, line.trim().chars().take(90).collect::<String>()));
+                }
+            }
+            // Две формы одной строки: написанное целиком и раскрытое из
+            // перечня. Правило указателя читает первую, правило покрытия — обе.
+            let written = super::ids::plain(line);
+            let heading = super::ids::heading_cell(line);
+            let live = super::ids::said(line);
+            for id in super::ids::expand(line) {
+                let caveated = !live.contains(&id);
+                let from_range = !written.contains(&id);
+                let heads_row = heading.contains(&id);
+                match seen.get(&id) {
+                    // Имя, названное документом дважды — прозой и таблицей, —
+                    // названо и таблицей. Брать первое попавшееся значило бы
+                    // терять состав из-за порядка строк в файле.
+                    Some(&i) => {
+                        named[i].1 &= caveated;
+                        named[i].3 |= heads_row;
+                    }
+                    None => {
+                        seen.insert(id.clone(), named.len());
+                        named.push((id, caveated, from_range, heads_row, section));
+                    }
+                }
+            }
+        }
+    }
+    (named, hidden)
+}
 
 use deadpool_postgres::Pool;
 use regex::Regex;
 
 pub(crate) async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
-    let caveats: Vec<String> = client
-        .query("SELECT value FROM scheme($1) WHERE role = 'word.caveat'", &[&project])
-        .await?
-        .iter()
-        .map(|r| r.get::<_, String>(0))
-        .collect();
     let docs = client
         .query(
             "SELECT entity_kind, entity_name, content FROM project_documents WHERE project_id = $1",
@@ -35,69 +95,18 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<usize, crate::
         )
         .await?;
 
-    let low_caveats: Vec<String> = caveats.iter().map(|c| c.to_lowercase()).collect();
-    let says_caveat = |text: &str| -> bool {
-        let low = text.to_lowercase();
-        low_caveats.iter().any(|c| low.contains(c.as_str()))
-    };
     let mut rows: Vec<NamedIdRow> = Vec::new();
     let mut hidden: Vec<(String, String, String, String)> = Vec::new();
-    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    let mut seen_hidden = std::collections::HashSet::new();
     for d in &docs {
         let kind: String = d.get(0);
         let name: String = d.get(1);
         let content: String = d.get(2);
-        // Оговорка бывает трёх видов, и все три законны: слово в самой строке,
-        // зачёркивание, и оговорённый ЗАГОЛОВОК — он накрывает свой раздел до
-        // следующего заголовка того же уровня. Читать только строку значит
-        // требовать оговорки в каждой строке раздела «Что удалено».
-        // Обход по БЛОКАМ, а не по строкам: блок знает свой `ord`, а ord
-        // блока-заголовка и есть ord его секции — тот же, каким она лежит в
-        // `project_document_sections`. Без этого связь остаётся на уровне
-        // документа: «ui-spec называет SCR-SHELL-01» при сорока килобайтах и
-        // двадцати шести секциях.
-        let parsed = crate::parse::parse_document(&content);
-        let mut section_caveat = false;
-        let mut section: Option<i32> = None;
-        for block in &parsed.blocks {
-            if block.kind == "heading" {
-                section = Some(block.ord);
-                section_caveat = says_caveat(&block.raw);
-            }
-            for line in block.raw.lines() {
-            let caveated = section_caveat || line.contains("~~") || says_caveat(line);
-            // Голое число, оставшееся в строке-перечне: запись прячет имя
-            // формой, которой раскрыватель не знает. Строка обязана СОДЕРЖАТЬ
-            // хотя бы одно имя — иначе это не перечень, а проза с числом, и
-            // «§8.1» или «п.3» стали бы находками.
-            let exists_name = !super::ids::plain(line).is_empty();
-            for n in super::ids::hidden_numbers(line).into_iter().filter(|_| exists_name) {
-                let key = format!("{kind}\u{1}{name}\u{1}голое {n}");
-                if seen_hidden.insert(key) {
-                    hidden.push((kind.clone(), name.clone(), n, line.trim().chars().take(90).collect::<String>()));
-                }
-            }
-            // Две формы одной строки: написанное целиком и раскрытое из
-            // перечня. Правило указателя читает первую, правило покрытия — обе.
-            let written = super::ids::plain(line);
-            let heading = super::ids::heading_cell(line);
-            for id in super::ids::expand(line) {
-                let from_range = !written.contains(&id);
-                let heads_row = heading.contains(&id);
-                let key = format!("{kind}\u{1}{name}\u{1}{id}");
-                match seen.get(&key) {
-                    // Имя, названное документом дважды — прозой и таблицей, —
-                    // названо и таблицей. Брать первое попавшееся значило бы
-                    // терять состав из-за порядка строк в файле.
-                    Some(&i) => { if heads_row { rows[i].5 = true } }
-                    None => {
-                        seen.insert(key, rows.len());
-                        rows.push((kind.clone(), name.clone(), id, caveated, from_range, heads_row, section));
-                    }
-                }
-            }
-            }
+        let (named, bare) = scan(&content);
+        for (id, caveated, from_range, heads_row, section) in named {
+            rows.push((kind.clone(), name.clone(), id, caveated, from_range, heads_row, section));
+        }
+        for (n, line) in bare {
+            hidden.push((kind.clone(), name.clone(), n, line));
         }
     }
 
@@ -285,6 +294,17 @@ fn named_before(elem: &Regex, line: &str, at: usize) -> String {
 mod tests {
     use super::named_before;
     use regex::Regex;
+
+    /// Слово в строке и в заголовке раздела имени не снимает; зачёркивание
+    /// снимает только своё имя; имя, названное живым хоть раз, живое.
+    #[test]
+    fn only_a_struck_name_is_caveated() {
+        let doc = "# Что удалено\n\nОтмена прогона: FR-71\n\n~~FR-72~~ · FR-73\n\n~~FR-74~~\n\nFR-74 вернулось\n";
+        let caveated: Vec<(String, bool)> = super::scan(doc).0.into_iter().map(|n| (n.0, n.1)).collect();
+        let want: Vec<(String, bool)> = [("FR-71", false), ("FR-72", true), ("FR-73", false), ("FR-74", false)]
+            .iter().map(|(i, c)| ((*i).to_owned(), *c)).collect();
+        assert_eq!(caveated, want);
+    }
 
     /// Фикстура — живые фразы четырнадцати адресов, прочитанных глазами.
     ///

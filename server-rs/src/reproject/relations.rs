@@ -30,49 +30,31 @@ pub(crate) fn check_ids(terms: &crate::scheme::Terms) -> Vec<Regex> {
     if own.is_empty() { vec![CHECK_ID.clone()] } else { own }
 }
 
-/// Имена проверок в строке — по всем объявленным образцам — и слово, которое
-/// их сняло.
+/// Имена проверок в строке — по всем объявленным образцам: названные живыми и
+/// зачёркнутые.
 ///
-/// Снятое имя не считается: зачёркнутое `~~`имя`~~` помянуто как убранное, и
-/// связь по нему поехала бы. Словарь уже знает `word.caveat`, и разбор проверок
-/// обязан его спрашивать.
+/// СНИМАЕТ ИМЯ ТОЛЬКО ЗАЧЁРКИВАНИЕ НА НЁМ САМОМ, слова вокруг не решают
+/// ничего. Прежде имя снимали слова словаря набора — `word.caveat` («удал»,
+/// «отмен», «отвергнут», «прежн», «было»…) и `word.elsewhere` («здесь не
+/// закрыва»), — а ими же описывают поведение продукта. На `tot-ade` 30.09
+/// ячейка M5-T146 «…запись через неё в закрытое отвергнута» потеряла имя
+/// проверки, `red-checks-match-parent` четыре круга называл его «лишним», и за
+/// один вечер так сработало пять раз: предмет проверки писал ей вердикт выбором
+/// слова. Прежнее `~~` снимало всю строку; теперь только зачёркнутое имя.
 ///
-/// НО СЛОВО ОГОВОРКИ ВОЗВРАЩАЕТСЯ ВМЕСТЕ С ИМЕНАМИ, а не глотает их молча. Слова
-/// — обычные основы («отвергнут», «прежн», «было»), и ими же описывают
-/// поведение продукта. На `tot-ade` 30.09 ячейка доказательства M5-T146
-/// «…запись через неё в закрытое отвергнута» потеряла имя проверки, и
-/// `red-checks-match-parent` четыре круга правок называл его «лишним» у
-/// красной пары: пункт видел следствие, причины не видел никто. Снятое имя
-/// обязано дойти до автора вместе со словом, которое его сняло.
-///
-/// Слова отдаются ВСЕ, а не первое. Соседняя ячейка той же задачи несла два
-/// («по-прежнему отвергнута»): назови одно, и автор, убрав его, получил бы
-/// ещё один круг на втором.
-fn checks_in<'a>(line: &str, res: &[Regex], caveats: &'a [String]) -> (Vec<String>, Vec<&'a str>) {
-    if line.contains("~~") {
-        return (Vec::new(), Vec::new());
-    }
-    let names = res.iter().flat_map(|re| re.find_iter(line).map(|m| m.as_str().to_owned())).collect();
-    let low = line.to_lowercase();
-    (names, caveats.iter().filter(|c| low.contains(&c.to_lowercase())).map(String::as_str).collect())
+/// Зачёркнутое имя возвращается, а не пропадает: пункт, которому его не
+/// хватило, обязан назвать причину.
+fn checks_in(line: &str, res: &[Regex]) -> (Vec<String>, Vec<String>) {
+    let find = |text: &str| -> Vec<String> {
+        res.iter().flat_map(|re| re.find_iter(text).map(|m| m.as_str().to_owned())).collect()
+    };
+    let live = find(&crate::parse::STRIKE.replace_all(line, ""));
+    let struck = find(line).into_iter().filter(|n| !live.contains(n)).collect();
+    (live, struck)
 }
 
-/// Снятые словом: ключ места — слова, собранные со всех строк этого места.
-/// Упорядоченные множества, потому что имя, снятое в двух строках разными
-/// словами, иначе называлось бы тем словом, чья строка пришла первой, — от
-/// прогона к прогону разным.
-type Dropped<K> = std::collections::BTreeMap<K, std::collections::BTreeSet<String>>;
-
-/// Слова, как их читает автор: «снята словом «a»» / «словами «a», «b»».
-///
-/// Без «в строке»: слова одного имени собраны со всех его строк, и «в строке
-/// слова «было», «отвергнут»» отправляло автора искать строку, где стоят оба.
-/// Без «оговорки»: снимают и слова отказа (`word.elsewhere`), а они не
-/// оговорка.
-fn said_by(words: &std::collections::BTreeSet<String>) -> String {
-    let quoted: Vec<String> = words.iter().map(|w| format!("«{w}»")).collect();
-    format!("{} {}", if quoted.len() == 1 { "словом" } else { "словами" }, quoted.join(", "))
-}
+/// Причина снятия, как её читает автор в находке: «снята зачёркиванием».
+const STRUCK: &str = "зачёркиванием";
 
 pub(crate) const FACT_KINDS: [&str; 7] =
     ["code-file", "crate-manifest", "repo-file", "requirement-op", "test-fn", "tree-file", "written-tc"];
@@ -87,21 +69,6 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<usize, crate::
     // считается, и её отсутствие видно перечнем ниже.
     let terms = crate::scheme::Terms::load_at(client, project).await?;
     let check_res = check_ids(&terms);
-    // СЛОВО ОТКАЗА СНИМАЕТ ИМЯ ТАК ЖЕ, КАК СЛОВО ОГОВОРКИ.
-    //
-    // `word.caveat` снимает снятое — «удалён», «отвергнут». `word.elsewhere`
-    // снимает переадресованное — «здесь не закрывается: закрывает `Y`». Для
-    // связи это одно и то же: строка называет имя, ничего им не обещая, и
-    // считать её объявлением значит объявить сделанным чужое.
-    //
-    // Датчик `written-tc` берёт ЛЮБУЮ строку комментария с ключом `TC-…`.
-    // Значит строка «сценарий `TC-X` здесь не закрывается» объявляла бы
-    // сценарий написанным — и гасила бы находку о нём. Замер 21.09: таких
-    // строк в наборе ноль, то есть сторож ничего не двигает сегодня и
-    // закрывает класс наперёд. Поставлен он потому, что правка, которая такую
-    // строку заводит, уже написана и лежит в очереди на слияние.
-    let mut caveats: Vec<String> = terms.all("word.caveat").to_vec();
-    caveats.extend(terms.all("word.elsewhere").iter().cloned());
     let missing = terms.missing(&[
         "field.task-contract-ops", "field.red-parent", "field.red-checks",
         "section.proof", "word.not-a-subject", "path.crate-home",
@@ -135,17 +102,11 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<usize, crate::
     let mut checks: Vec<String> = Vec::new();
     // У строки комментария нет задачи: её снятое имя ключуется самим именем,
     // как и написанная проверка.
-    let mut written_dropped: Dropped<String> = Dropped::new();
+    let mut written_dropped: std::collections::BTreeSet<String> = Default::default();
     for r in &written {
-        let line: String = r.get(0);
-        let (names, words) = checks_in(&line, &check_res, &caveats);
-        if words.is_empty() {
-            checks.extend(names);
-        } else {
-            for n in names {
-                written_dropped.entry(n).or_default().extend(words.iter().map(|w| (*w).to_owned()));
-            }
-        }
+        let (names, struck) = checks_in(r.get::<_, &str>(0), &check_res);
+        checks.extend(names);
+        written_dropped.extend(struck);
     }
     checks.sort();
     checks.dedup();
@@ -236,16 +197,11 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<usize, crate::
         )
         .await? } else { Vec::new() };
     let mut task_check: Vec<(String, String, &str)> = Vec::new();
-    let mut dropped: Dropped<(String, String, &str)> = Dropped::new();
+    let mut dropped: std::collections::BTreeSet<(String, String, &str)> = Default::default();
     let mut take = |task: String, line: &str, how: &'static str| {
-        let (names, words) = checks_in(line, &check_res, &caveats);
-        for n in names {
-            if words.is_empty() {
-                task_check.push((task.clone(), n, how));
-            } else {
-                dropped.entry((task.clone(), n, how)).or_default().extend(words.iter().map(|w| (*w).to_owned()));
-            }
-        }
+        let (names, struck) = checks_in(line, &check_res);
+        task_check.extend(names.into_iter().map(|n| (task.clone(), n, how)));
+        dropped.extend(struck.into_iter().map(|n| (task.clone(), n, how)));
     };
     for r in &proof {
         take(r.get(0), r.get::<_, String>(1).as_str(), "доказательство");
@@ -267,8 +223,8 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<usize, crate::
     // места. Замер 30.09 на `tot-ade`: тринадцать строк комментариев сняты
     // словом, и у всех тринадцати имя засчитано соседней строкой — назови их
     // все, и автор получил бы тринадцать ложных тревог.
-    dropped.retain(|(task, check, how), _| !task_check.iter().any(|(t, c, h)| t == task && c == check && h == how));
-    written_dropped.retain(|check, _| !checks.contains(check));
+    dropped.retain(|(task, check, how)| !task_check.iter().any(|(t, c, h)| t == task && c == check && h == how));
+    written_dropped.retain(|check| !checks.contains(check));
 
     // Родитель красной задачи: имя из поля «Родительская задача», сведённое к
     // существующей задаче. Не первые два знака имени — их разбирают глазами.
@@ -434,14 +390,14 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<usize, crate::
                     VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING",
                    &[&project, t, c, &how.to_string()]).await?;
     }
-    for ((t, c, how), words) in &dropped {
+    for (t, c, how) in &dropped {
         tx.execute("INSERT INTO project_check_dropped(project_id, task_id, check_id, said_as, words)
                     VALUES ($1,$2,$3,$4,$5)",
-                   &[&project, t, c, &how.to_string(), &said_by(words)]).await?;
+                   &[&project, t, c, &how.to_string(), &STRUCK]).await?;
     }
-    for (c, words) in &written_dropped {
+    for c in &written_dropped {
         tx.execute("INSERT INTO project_written_check_dropped(project_id, check_id, words) VALUES ($1,$2,$3)",
-                   &[&project, c, &said_by(words)]).await?;
+                   &[&project, c, &STRUCK]).await?;
     }
     for (path, dir, base, prefix) in &code_files {
         tx.execute("INSERT INTO project_code_file(project_id, path, dir, base, prefix)
@@ -504,34 +460,33 @@ fn ancestors(file: &str) -> Vec<String> {
 mod checks_in {
     use regex::Regex;
 
-    /// Строки ячеек M5-T146 с `tot-ade`: имя снято словом из описания
-    /// поведения. Имя обязано вернуться вместе со ВСЕМИ словами строки, а не
-    /// пропасть и не прийти с одним из двух.
+    /// Строки ячеек M5-T146 с `tot-ade`: слова описания поведения («отвергнута»,
+    /// «по-прежнему») имени не снимают; снимает только зачёркивание, и только
+    /// зачёркнутое имя, а не соседей по строке.
     #[test]
-    fn a_caveat_word_returns_the_name_with_the_word() {
+    fn only_a_struck_name_is_dropped() {
         let res = [Regex::new(r"\b[mv][0-9]+_t[0-9]+[a-z]?_[a-z0-9_]+\b").expect("образец")];
-        let caveats = ["прежн".to_owned(), "отвергнут".to_owned()];
+        let none = Vec::<String>::new();
         let line = "m5_t146_a_symlink_gets_no_rule_of_its_own — запись через неё в закрытое отвергнута";
-        assert_eq!(super::checks_in(line, &res, &caveats),
-                   (vec!["m5_t146_a_symlink_gets_no_rule_of_its_own".to_owned()], vec!["отвергнут"]));
-        let line = "m5_t146_a_closed_subtree_stays_closed_beside_a_file — запись по-прежнему отвергнута";
-        assert_eq!(super::checks_in(line, &res, &caveats).1, vec!["прежн", "отвергнут"]);
-        assert_eq!(super::checks_in("m5_t146_b_plain — ссылка правила не получает", &res, &caveats),
-                   (vec!["m5_t146_b_plain".to_owned()], vec![]));
-        assert_eq!(super::checks_in("~~m5_t146_c_gone~~", &res, &caveats), (Vec::<String>::new(), vec![]),
-                   "зачёркнутое имя снято самим автором и не называется");
+        assert_eq!(super::checks_in(line, &res),
+                   (vec!["m5_t146_a_symlink_gets_no_rule_of_its_own".to_owned()], none.clone()));
+        let line = "m5_t146_a_kept — запись по-прежнему отвергнута, отмена удалена, здесь не закрывается";
+        assert_eq!(super::checks_in(line, &res), (vec!["m5_t146_a_kept".to_owned()], none.clone()));
+        assert_eq!(super::checks_in("~~m5_t146_c_gone~~ · m5_t146_d_live", &res),
+                   (vec!["m5_t146_d_live".to_owned()], vec!["m5_t146_c_gone".to_owned()]),
+                   "зачёркнутое снято и названо, незачёркнутый сосед засчитан");
     }
 }
 
-/// Имя, снятое словом оговорки или отказа, видно каждому пункту, которому его не хватило,
-/// вместе со словами. Прежде оно просто отсутствовало, и пункт называл
+/// Зачёркнутое имя видно каждому пункту, которому его не хватило, вместе с
+/// причиной. Прежде оно просто отсутствовало, и пункт называл
 /// следствие: «лишние» у красной пары, «перечень не подошёл под образцы»,
 /// «не найдена среди прочитанного датчиком».
 #[cfg(test)]
 mod dropped_check {
     #[tokio::test]
     #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
-    async fn a_caveat_dropped_name_surfaces_with_its_word() {
+    async fn a_struck_name_surfaces_and_words_drop_nothing() {
         let url = std::env::var("MH_TEST_DB_URL").expect("MH_TEST_DB_URL: адрес пустой базы");
         let apart = format!("{}{}", if url.contains('?') { '&' } else { '?' },
                             "options=-c%20search_path%3Ddropped_check");
@@ -541,14 +496,12 @@ mod dropped_check {
             .await.expect("своя схема заводится");
         crate::projector::ensure(&pool).await.expect("схема встаёт на пустой базе");
         let client = pool.get().await.expect("соединение");
-        // Родитель T-1: `a_denied` снята «отвергнута»; `b_kept` названа чисто и
-        // ещё раз со словом «было» — засчитана соседней строкой, и называть её
-        // снятой было бы ложью; `d_twice` снята в двух строках разными словами,
-        // и названы обязаны быть оба, в одном порядке при любом порядке строк.
-        // Красная R-1 перечисляет `a_denied` и `b_kept`, красная R-2 — одну
-        // `a_denied` с двумя словами в строке. Комментарий кода называет
-        // `b_kept` только со словом «было», а написанной там числится одна
-        // `c_other`.
+        // Родитель T-1: `a_denied` зачёркнута; `b_kept` названа чисто и ещё раз
+        // зачёркнутой — засчитана соседней строкой, и называть её снятой было
+        // бы ложью; `d_twice` стоит рядом со словами «отвергнута», «было»,
+        // которые прежде её снимали, и засчитана. Красная R-1 перечисляет все
+        // три, красная R-2 — одну зачёркнутую `a_denied`. Комментарий кода
+        // называет `b_kept` только зачёркнутой, `d_twice` — со словом.
         client
             .batch_execute(
                 "INSERT INTO scheme_term (project_id, role, value) VALUES
@@ -572,18 +525,18 @@ mod dropped_check {
                  VALUES ('p', 1, 2, 'Чем доказывается', 'a', 1, 3, 'task', 'T-1');
                  INSERT INTO project_document_cells (project_id, block_ord, row_ord, col, raw, value,
                                                      entity_kind, entity_name)
-                 VALUES ('p', 2, 1, 0, '', 'm1_t1_a_denied — запись в закрытое отвергнута', 'task', 'T-1'),
+                 VALUES ('p', 2, 1, 0, '', '~~m1_t1_a_denied~~ — запись в закрытое отвергнута', 'task', 'T-1'),
                         ('p', 2, 2, 0, '', 'm1_t1_b_kept — ответ тот же', 'task', 'T-1'),
-                        ('p', 2, 3, 0, '', 'm1_t1_b_kept — как было', 'task', 'T-1'),
-                        ('p', 2, 4, 0, '', 'm1_t1_d_twice — запись отвергнута', 'task', 'T-1'),
-                        ('p', 2, 5, 0, '', 'm1_t1_d_twice — как было', 'task', 'T-1');
+                        ('p', 2, 3, 0, '', '~~m1_t1_b_kept~~ — как было', 'task', 'T-1'),
+                        ('p', 2, 4, 0, '', 'm1_t1_d_twice — запись отвергнута, как было', 'task', 'T-1');
                  INSERT INTO project_document_fields (project_id, section_ord, ord, name, shape,
                                                       value_raw, value, entity_kind, entity_name)
-                 VALUES ('p', 1, 1, 'Какие', 'row', '', 'm1_t1_a_denied, m1_t1_b_kept', 'task', 'R-1'),
-                        ('p', 1, 1, 'Какие', 'row', '', 'm1_t1_a_denied — по-прежнему отвергнута', 'task', 'R-2');
+                 VALUES ('p', 1, 1, 'Какие', 'row', '', 'm1_t1_a_denied, m1_t1_b_kept, m1_t1_d_twice', 'task', 'R-1'),
+                        ('p', 1, 1, 'Какие', 'row', '', '~~m1_t1_a_denied~~ — по-прежнему отвергнута', 'task', 'R-2');
                  INSERT INTO code_fact (project_id, kind, name, detail)
-                 VALUES ('p', 'written-tc', 'a.rs:1', '// m1_t1_b_kept — как было'),
-                        ('p', 'written-tc', 'a.rs:2', '// m1_t1_c_other');
+                 VALUES ('p', 'written-tc', 'a.rs:1', '// ~~m1_t1_b_kept~~ — как было'),
+                        ('p', 'written-tc', 'a.rs:2', '// m1_t1_c_other'),
+                        ('p', 'written-tc', 'a.rs:3', '// m1_t1_d_twice — отвергнута');
                  INSERT INTO sensor (project_id, fact, stale_after_ms, declared_at)
                  VALUES ('p', 'written-tc', 1000000000000, 0), ('p', 'test-name', 1000000000000, 0);
                  INSERT INTO fact_push (project_id, fact, at, commit_sha, dirty)
@@ -603,26 +556,26 @@ mod dropped_check {
 
         let pair = run(include_str!("../../../instrument/gate/G3/red-checks-match-parent.sql")).await;
         assert_eq!(pair.first().map(String::as_str),
-                   Some("R-1 — разошёлся с родителем T-1: не хватает —, лишние m1_t1_a_denied; \
-                         T-1: `m1_t1_a_denied` не засчитана: снята словом «отвергнут»; \
-                         T-1: `m1_t1_d_twice` не засчитана: снята словами «было», «отвергнут»"),
-                   "пара называет снятые имена и все слова, которые их сняли: {pair:?}");
+                   Some("R-1 — разошёлся с родителем T-1: не хватает —, лишние m1_t1_a_denied \
+                         (имя, помянутое убранным, зачеркните: ~~имя~~); \
+                         T-1: `m1_t1_a_denied` не засчитана: снята зачёркиванием"),
+                   "пара называет зачёркнутое имя, а слова рядом с `d_twice` её не снимают: {pair:?}");
         let red = run(include_str!("../../../instrument/gate/G2/red-task-complete.sql")).await;
-        assert!(red.iter().any(|d| d == "R-2 — имена перечня сняты: `m1_t1_a_denied` — словами «отвергнут», «прежн»"),
-                "пустая связь при непустом перечне называет слово, а не образец: {red:?}");
+        assert!(red.iter().any(|d| d == "R-2 — имена перечня сняты: `m1_t1_a_denied` — зачёркиванием"),
+                "пустая связь при непустом перечне называет зачёркивание, а не образец: {red:?}");
         assert!(!red.iter().any(|d| d.starts_with("R-2 — ни одно имя")), "образец тут ни при чём: {red:?}");
         let closed = run(include_str!("../../../instrument/gate/G4/closed-unwritten.sql")).await;
-        assert_eq!(closed, vec!["T-1 закрыта, а `m1_t1_b_kept` не найдена: в комментарии имя снято словом «было»"],
-                   "имя из строки комментария названо со словом, а не «не написана»");
+        assert_eq!(closed, vec!["T-1 закрыта, а `m1_t1_b_kept` не найдена: в комментарии имя снято зачёркиванием"],
+                   "зачёркнутое в комментарии названо причиной, а не «не написана»; слово не снимает ничего");
         let ready = run(include_str!("../../../instrument/gate/corpus/ready-items-checked.sql")).await;
-        assert!(ready.iter().any(|d| d == "T-1 — `m1_t1_b_kept` не найдена: в комментарии имя снято словом «было»"),
+        assert!(ready.iter().any(|d| d == "T-1 — `m1_t1_b_kept` не найдена: в комментарии имя снято зачёркиванием"),
                 "пункт приёмки говорит то же: {ready:?}");
         // Пункт 2 переадресован к закрытой R-1: долг его ветвью, и она обязана
         // сказать, что имя в комментарии есть, но снято.
         assert!(ready.iter().any(|d| d == "T-1 — 1 пунктов переадресовано (R-1), все адресаты закрыты, \
                                            а m1_t1_b_kept так и не доказан: комментарий его называет, \
-                                           но имя снято словом «было»"),
-                "переадресованный пункт называет снятое имя со словом: {ready:?}");
+                                           но имя снято зачёркиванием"),
+                "переадресованный пункт называет снятое имя с причиной: {ready:?}");
 
         let seen = crate::projector::links_of(&pool, "p", "task", "T-1").await.expect("связи задачи");
         let (checks, dropped) = (seen["sets"]["checks"].to_string(), seen["sets"]["droppedChecks"].to_string());
