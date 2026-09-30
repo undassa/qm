@@ -126,15 +126,23 @@ pub async fn reproject(pool: &Pool, project: &str, _: &crate::watch::Lease) -> R
 mod every_step_holds {
     const OUTSIDE: [&str; 3] = ["rebuild_before", "rebuild", "sync_owner_questions"];
 
-    /// Сколько открытий транзакции не берут `db::hold` до своего коммита.
+    /// Сколько открытий транзакции не начинаются с замка `projection`.
+    ///
+    /// Замок обязан быть ПЕРВЫМ действием и именно с этим именем. Замок после
+    /// сноса снова открывает гонку `project_features_pkey`: снос уже прошёл
+    /// без него. Замок со своим именем не сцепляется с остальными шагами, а
+    /// 200 взаимоблокировок держались на том, что шаги пишут одни строки.
+    /// Строки комментария пропускаются и замком не считаются.
     fn unheld(src: &str) -> usize {
         // Образцы собраны из частей: иначе эта проверка нашла бы сама себя.
-        let (open, commit, hold) = ([".transaction", "()"].concat(), [".commit", "()"].concat(), ["db::hold", "("].concat());
+        let open = [".transaction", "()"].concat();
+        let (lock, name) = (["crate::db::hold", "(&"].concat(), ["\"projection\"", ", project).await?;"].concat());
         src.match_indices(&open)
             .filter(|(at, _)| {
-                let rest = &src[at + open.len()..];
-                let end = rest.find(&commit).unwrap_or(rest.len());
-                !rest[..end].contains(&hold)
+                let mut lines = src[at + open.len()..].lines();
+                let opened = lines.next().unwrap_or("").trim() == ".await?;";
+                let first = lines.map(str::trim).find(|l| !l.is_empty() && !l.starts_with("//")).unwrap_or("");
+                !(opened && first.starts_with(&lock) && first.ends_with(&name))
             })
             .count()
     }
@@ -165,7 +173,7 @@ mod every_step_holds {
             }
         }
         assert!(seen > 20, "транзакций в шагах {seen}: скан смотрит не туда");
-        assert!(missing.is_empty(), "транзакция без `db::hold` до коммита: {missing:?}");
+        assert!(missing.is_empty(), "транзакция не начинается с замка `projection`: {missing:?}");
     }
 }
 
