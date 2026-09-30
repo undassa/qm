@@ -301,7 +301,18 @@ pub fn github_slug(url: &str) -> Option<String> {
 /// единицы. Старые сеансы в нём убирает сам rustc.
 const SWEPT: &[&str] = &["deps", ".fingerprint", "build"];
 
-/// Пути выхода, которые cargo назвал за прогон: `filenames` сообщений
+/// Команда перечня: то, что прогон собрал, называет сам cargo.
+///
+/// СВОЙ ЗАПРОС, А НЕ ВЫВОД РЕЦЕПТА НАБОРА. Рецепты печатают что хотят: у
+/// tot-ade `just test` идёт через nextest без json, и уборка, ждавшая json от
+/// рецепта, не шла бы там никогда. nextest собирает тестовые единицы тем же
+/// `cargo test --no-run`, а после прогона всё уже собрано, так что запрос
+/// идёт секунды и ничего не строит. `--all-features` — потому что с ним
+/// собирают рецепты tot-ade (`M5-T45`); у крейта без признаков он ничего не
+/// меняет. Набор, собирающий иначе, увидит здесь сборку и отказ уборки.
+const CARGO_LIST: &[&str] = &["test", "--workspace", "--all-features", "--no-run", "--message-format=json"];
+
+/// Пути выхода, которые назвал запрос перечня: `filenames` сообщений
 /// `compiler-artifact` и `out_dir` у `build-script-executed`.
 ///
 /// ПЕРЕЧЕНЬ, А НЕ ВРЕМЯ ФАЙЛА, ГОВОРИТ, ЧТО ЖИВО. Единицу, которую сборка
@@ -311,20 +322,34 @@ const SWEPT: &[&str] = &["deps", ".fingerprint", "build"];
 /// все ~330 сторонних крейтов tot-ade после каждого прогона, и каждый прогон
 /// собирал бы их заново. В перечень свежие единицы входят (`"fresh":true`).
 ///
-/// Пусто — команда шла без `--message-format=json`, и тогда судить нечем.
-fn cargo_artefacts(text: &str) -> Vec<std::path::PathBuf> {
+/// ЕДИНИЦА, СОБРАННАЯ ЗАПРОСОМ (`"fresh":false`), — ОТКАЗ. Значит, запрос
+/// собирает не то, что прогон, или дерево сдвинулось, и перечень не говорит
+/// о прогоне. Пустой перечень — тоже отказ: судить нечем.
+///
+/// Читается только stdout: json cargo пишет туда, и строка, разрезанная
+/// выводом stderr в общей трубе, выпала бы из перечня.
+fn cargo_listing(stdout: &str) -> Result<Vec<std::path::PathBuf>, String> {
     let mut out = Vec::new();
-    for line in text.lines().filter(|l| l.starts_with('{')) {
-        let Ok(msg) = serde_json::from_str::<Value>(line) else { continue };
+    for line in stdout.lines().filter(|l| l.starts_with('{')) {
+        let msg = serde_json::from_str::<Value>(line).map_err(|e| format!("строка перечня не разобрана: {e}"))?;
         match msg["reason"].as_str() {
-            Some("compiler-artifact") => out.extend(
-                msg["filenames"].as_array().into_iter().flatten().filter_map(Value::as_str).map(Into::into),
-            ),
+            Some("compiler-artifact") => {
+                if msg["fresh"].as_bool() != Some(true) {
+                    return Err(format!(
+                        "запрос перечня собрал `{}` — перечень не о прогоне",
+                        msg["package_id"].as_str().unwrap_or("?")
+                    ));
+                }
+                out.extend(msg["filenames"].as_array().into_iter().flatten().filter_map(Value::as_str).map(Into::into));
+            }
             Some("build-script-executed") => out.extend(msg["out_dir"].as_str().map(Into::into)),
             _ => {}
         }
     }
-    out
+    if out.is_empty() {
+        return Err("перечень cargo пуст".into());
+    }
+    Ok(out)
 }
 
 /// Хеш единицы в имени записи сборки: `libdep-c05783f808fda616.rlib`,
@@ -484,9 +509,6 @@ fn sweep_runner_target(
         freed / (1024 * 1024)
     );
 }
-
-/// Строки проверок, успех команды и перечень выхода cargo.
-type Profile = (Vec<(String, String, String)>, bool, Vec<std::path::PathBuf>);
 
 /// Прогон работы, годный в факт о стволе набора.
 #[derive(Debug, PartialEq)]
@@ -868,7 +890,28 @@ impl Worker {
     /// Ненулевой код выхода у красного профиля — норма: `just red` обязан
     /// упасть. Поэтому «не собралось» здесь распознаётся по ПУСТОМУ разбору, а
     /// не по коду выхода.
-    async fn profile(cwd: &str, cmd: &str) -> Result<Profile, String> {
+    /// Перечень выхода сборки из дерева прогона — `CARGO_LIST` и `cargo_listing`.
+    async fn cargo_list(cwd: &str) -> Result<Vec<std::path::PathBuf>, String> {
+        let run = tokio::process::Command::new("cargo")
+            .args(CARGO_LIST)
+            .current_dir(cwd)
+            .env("CARGO_TERM_COLOR", "never")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output();
+        let out = match tokio::time::timeout(std::time::Duration::from_secs(TEST_TIMEOUT_S), run).await {
+            Err(_) => return Err(format!("запрос перечня не уложился в {TEST_TIMEOUT_S} с")),
+            Ok(Err(e)) => return Err(format!("запрос перечня не завёлся: {e}")),
+            Ok(Ok(o)) => o,
+        };
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr);
+            return Err(format!("запрос перечня отказал: {}", cut(err.trim(), 400)));
+        }
+        cargo_listing(&String::from_utf8_lossy(&out.stdout))
+    }
+
+    async fn profile(cwd: &str, cmd: &str) -> Result<(Vec<(String, String, String)>, bool), String> {
         // ОДИН ПОТОК, А НЕ ДВА СКЛЕЕННЫХ. `cargo` печатает `Running tests/<файл>`
         // в stderr, а `test <имя> ... ok` — в stdout. Прежде оба читались
         // порознь и склеивались подряд: все имена бинарей оказывались ПОСЛЕ
@@ -888,7 +931,7 @@ impl Worker {
             Ok(Ok(o)) => o,
         };
         let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-        Ok((test_lines(&text), out.status.success(), cargo_artefacts(&text)))
+        Ok((test_lines(&text), out.status.success()))
     }
 
     /// Состояния задач — со ствола, каждый час, а не когда сессия вспомнит.
@@ -1073,10 +1116,7 @@ impl Worker {
         self.sense_tree(bundle, &root).await;
         println!("{} · тесты: прогон на {head}", bundle.name);
         let started = std::time::SystemTime::now();
-        let (mut rows, ok, mut listed) = Self::profile(&cwd, &spec.cmd).await?;
-        // Уборке судить только по полному перечню: единицы, собранные
-        // профилем без перечня, выглядели бы мёртвыми.
-        let mut whole = !listed.is_empty();
+        let (mut rows, ok) = Self::profile(&cwd, &spec.cmd).await?;
         if rows.is_empty() && !ok {
             // Не собралось: ни одной проверки не увидели — факт об этом тоже
             // факт, иначе красное сборки неотличимо от «не гоняли».
@@ -1093,18 +1133,13 @@ impl Worker {
                 // находки, так и держит, а причина выглядит как «набор не
                 // сделал». Число рядом с именем профиля отличает «снято ноль»
                 // от «не звали».
-                Ok((red, _, red_listed)) => {
+                Ok((red, _)) => {
                     println!("{} · красный профиль: {} проверок", bundle.name, red.len());
                     rows.extend(red);
-                    whole &= !red_listed.is_empty();
-                    listed.extend(red_listed);
                 }
                 // Красный профиль не роняет запись обычного: половина замера
                 // лучше, чем ни одной, и молчание о ней хуже обеих.
-                Err(why) => {
-                    whole = false;
-                    println!("{} · красный профиль не снят: {why}", bundle.name);
-                }
+                Err(why) => println!("{} · красный профиль не снят: {why}", bundle.name),
             }
         }
         if rows.is_empty() {
@@ -1140,13 +1175,16 @@ impl Worker {
             .map_err(|e| format!("прогон не дошёл до пульта (запись или отметка): {e:?}"))?;
         if dirty_after {
             println!("{} · уборка сборки не идёт: в дереве работал кто-то ещё", bundle.name);
-        } else if !whole {
-            println!("{} · уборка сборки не идёт: нет перечня cargo (`--message-format=json`)", bundle.name);
         } else {
-            let (name, tree, dir) = (bundle.name.clone(), root.clone(), cwd.clone());
-            let sweep = move || sweep_runner_target(&name, &tree, &dir, started, &listed);
-            if let Err(e) = tokio::task::spawn_blocking(sweep).await {
-                println!("{} · уборка сборки не завершилась: {e}", bundle.name);
+            match Self::cargo_list(&cwd).await {
+                Err(why) => println!("{} · уборка сборки не идёт: {why}", bundle.name),
+                Ok(listed) => {
+                    let (name, tree, dir) = (bundle.name.clone(), root.clone(), cwd.clone());
+                    let sweep = move || sweep_runner_target(&name, &tree, &dir, started, &listed);
+                    if let Err(e) = tokio::task::spawn_blocking(sweep).await {
+                        println!("{} · уборка сборки не завершилась: {e}", bundle.name);
+                    }
+                }
             }
         }
         let mut v = self.test_status(&bundle.project).await;
@@ -2026,24 +2064,39 @@ mod tests {
         std::fs::remove_dir_all(&tmp).ok();
     }
 
-    /// Перечень берётся из сообщений cargo, свежие единицы в нём есть.
+    /// Перечень — из stdout запроса cargo; свежие единицы в нём есть, а
+    /// собранная запросом единица или пустой вывод — отказ.
     #[test]
-    fn cargo_names_fresh_artefacts_and_build_outputs() {
-        let text = concat!(
-            "   Compiling app v0.1.0\n",
-            r#"{"reason":"compiler-artifact","fresh":true,"filenames":["/t/debug/deps/libdep-c05783f808fda616.rlib"]}"#, "\n",
-            r#"{"reason":"build-script-executed","out_dir":"/t/debug/build/dep-0469e4080376578f/out"}"#, "\n",
-            r#"{"reason":"compiler-message","message":{}}"#, "\n",
-            "test a ... ok\n",
+    fn the_cargo_listing_names_fresh_artefacts_and_refuses_a_build() {
+        let fresh = concat!(
+            r#"{"reason":"compiler-artifact","package_id":"dep 0.1.0","fresh":true,"filenames":["/t/debug/build/dep-5da9ee4087ba1b89/build-script-build"]}"#, "\n",
+            r#"{"reason":"build-script-executed","package_id":"dep 0.1.0","out_dir":"/t/debug/build/dep-0469e4080376578f/out"}"#, "\n",
+            r#"{"reason":"compiler-artifact","package_id":"dep 0.1.0","fresh":true,"filenames":["/t/debug/deps/libdep-c05783f808fda616.rlib","/t/debug/deps/libdep-c05783f808fda616.rmeta"]}"#, "\n",
+            r#"{"reason":"compiler-artifact","package_id":"app 0.1.0","fresh":true,"filenames":["/t/debug/deps/app-c23c86af9c2c3f98"],"executable":"/t/debug/deps/app-c23c86af9c2c3f98"}"#, "\n",
+            r#"{"reason":"build-finished","success":true}"#, "\n",
         );
+        let paths: Vec<String> = super::cargo_listing(fresh)
+            .expect("свежий перечень читается")
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
         assert_eq!(
-            super::cargo_artefacts(text),
-            vec![
-                std::path::PathBuf::from("/t/debug/deps/libdep-c05783f808fda616.rlib"),
-                std::path::PathBuf::from("/t/debug/build/dep-0469e4080376578f/out"),
+            paths,
+            [
+                "/t/debug/build/dep-5da9ee4087ba1b89/build-script-build",
+                "/t/debug/build/dep-0469e4080376578f/out",
+                "/t/debug/deps/libdep-c05783f808fda616.rlib",
+                "/t/debug/deps/libdep-c05783f808fda616.rmeta",
+                "/t/debug/deps/app-c23c86af9c2c3f98",
             ]
         );
-        assert!(super::cargo_artefacts("test a ... ok\n").is_empty(), "без json перечня нет");
+        let built = fresh.replacen(r#""package_id":"app 0.1.0","fresh":true"#, r#""package_id":"app 0.1.0","fresh":false"#, 1);
+        let refused = super::cargo_listing(&built);
+        assert!(
+            refused.as_ref().is_err_and(|why| why.contains("app 0.1.0")),
+            "единица, собранная запросом, — отказ с её именем, а вышло {refused:?}"
+        );
+        assert!(super::cargo_listing("").is_err(), "пустой вывод — отказ, а не пустой перечень");
     }
 
     fn row(name: &str, verdict: &str, binary: &str) -> (String, String, String) {
