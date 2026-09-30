@@ -1,6 +1,7 @@
 -- Прогон — последний чистый, где что-то измерено (`test_run_last`). Прогон,
 -- упавший на сборке, падений не несёт, и взятый отсюда он делал ствол зелёным
--- на пустом месте (заявка 103).
+-- на пустом месте (заявка 103). Строки — своих партий (`test_run_trunk`):
+-- падение с раннера CI — наблюдение красной фазы, а не поломка этого ствола.
 WITH best AS (SELECT at FROM test_run_last WHERE project_id = $1)
 -- ИСКЛЮЧЕНИЕ НИЖЕ ОПИРАЕТСЯ НА ДАТЧИК, И БЕЗ НЕГО ПУНКТ НЕ УТВЕРЖДАЕТ.
 --
@@ -13,11 +14,11 @@ WITH best AS (SELECT at FROM test_run_last WHERE project_id = $1)
 SELECT 'датчик «test-name» ' || fact_gap($1, 'test-name')
        || ': отличить падение красной фазы от поломки ствола нечем — неизвестно, и это не зелёное' AS detail
  WHERE NOT fact_fresh($1, 'test-name')
-   AND EXISTS (SELECT 1 FROM test_run r, best
+   AND EXISTS (SELECT 1 FROM test_run_trunk r, best
                 WHERE r.project_id = $1 AND NOT r.dirty AND r.at = best.at AND r.verdict = 'failed')
 UNION ALL
 SELECT 'упала на стволе: ' || r.check_name
-  FROM test_run r, best
+  FROM test_run_trunk r, best
  WHERE r.project_id = $1 AND NOT r.dirty AND r.at = best.at AND r.verdict = 'failed'
    AND fact_fresh($1, 'test-name')
    -- Проверку, которую ещё напишет НЕЗАКРЫТАЯ задача, поломкой ствола не зовут:

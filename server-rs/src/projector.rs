@@ -41,8 +41,19 @@ const VIEWS: &str = r#"
 -- о проверках основного профиля получит «её в прогоне нет вовсе», то есть
 -- красное. Различить это можно только по имени бинаря (`ran_in`), а решать ли
 -- так — вопрос не этого вида.
+--
+-- ПАРТИЯ CI СЮДА НЕ ВХОДИТ. Она снята с другой платформы и несёт лишь те
+-- проверки, что гоняет её задание; последней партией ствола она объявила бы
+-- все прочие проверки отсутствующими — `checks-green`, `test-trunk-green`,
+-- `ready-items-checked` и дверь `test-run` покраснели бы разом. Падение с неё
+-- видит один читатель — `red-observed-failing`, спрашивающий `test_run`
+-- напрямую. Граница — вид `test_run_trunk`, а не условие в каждом читателе:
+-- условие, забытое в одном, и было бы той дырой.
+CREATE OR REPLACE VIEW test_run_trunk AS
+  SELECT * FROM test_run WHERE platform = '';
+
 CREATE OR REPLACE VIEW test_run_measured AS
-  SELECT DISTINCT project_id, at FROM test_run
+  SELECT DISTINCT project_id, at FROM test_run_trunk
    WHERE NOT dirty AND verdict <> 'build-failed';
 
 CREATE OR REPLACE VIEW test_run_last AS
@@ -1674,6 +1685,46 @@ CREATE INDEX IF NOT EXISTS test_run_by_check ON test_run (project_id, check_name
 -- Имя приходит даром: `cargo test` печатает `Running tests/<файл>.rs (…)`
 -- перед блоком каждого бинаря, и разбор его просто выбрасывал.
 ALTER TABLE test_run ADD COLUMN IF NOT EXISTS ran_in text NOT NULL DEFAULT '';
+-- НА КАКОЙ ПЛАТФОРМЕ СНЯТО: пусто — прогон харнеса на его собственной машине,
+-- имя — журнал работы CI, объявленной набором (`ci-job-add`).
+--
+-- Колонка нужна, потому что вторая сторона смотрит на другое. Проверка под
+-- `#![cfg(windows)]` на Linux собирается пустой, и пара `V5-T135` навсегда
+-- держала `red-observed-failing`: падение видел только раннер Windows. Но
+-- партия CI — это горстка проверок, и стань она «последним прогоном ствола»,
+-- каждая проверка вне её читалась бы отсутствующей, то есть красной.
+-- Отсюда `test_run_trunk` ниже: партии, про которые спрашивают «как ствол
+-- сейчас», — только свои.
+ALTER TABLE test_run ADD COLUMN IF NOT EXISTS platform text NOT NULL DEFAULT '';
+
+-- ГДЕ НАБОР ГОНЯЕТ ТО, ЧЕГО ЗДЕСЬ НЕ СОБРАТЬ: репозиторий, файл работы, имя
+-- задания и платформа. Объявляется ИСТОЧНИК, а не вердикт: журнал читает и
+-- разбирает харнес сам, двери, принимающей «упала» со слов, нет — иначе
+-- красная фаза снова доказывалась бы прозой.
+CREATE TABLE IF NOT EXISTS project_ci_job (
+  project_id text NOT NULL,
+  repo       text NOT NULL,
+  workflow   text NOT NULL,
+  job        text NOT NULL,
+  platform   text NOT NULL CHECK (platform <> ''),
+  note       text NOT NULL DEFAULT '',
+  PRIMARY KEY (project_id, workflow, job));
+
+-- Прогоны CI, уже взятые: без памяти о них журнал каждого прогона качался и
+-- записывался бы заново на каждом заходе, раз в пять минут. Память — в базе,
+-- а не в воркере: перезапуск и второй экземпляр иначе взяли бы то же дважды.
+--
+-- Пустая платформа запрещена и здесь, а не только у объявления: отметка
+-- пишется одной транзакцией со строками партии, и партия CI без платформы
+-- легла бы своими строками в `test_run_trunk` — ровно та подмена ствола,
+-- от которой он заведён.
+CREATE TABLE IF NOT EXISTS ci_run_taken (
+  project_id text   NOT NULL,
+  run_id     bigint NOT NULL,
+  actor      text   NOT NULL,
+  platform   text   NOT NULL CHECK (platform <> ''),
+  at         bigint NOT NULL,
+  PRIMARY KEY (project_id, run_id, actor));
 
 CREATE TABLE IF NOT EXISTS chat_message (
   id           bigserial PRIMARY KEY,
@@ -9496,6 +9547,50 @@ pub(crate) async fn declare_sensor_spec(pool: &Pool, project: &str, fields: Sens
     Ok(json!({ "status": "declared", "fact": fact, "reads": reads, "how": how }))
 }
 
+/// Поля объявления задания CI, как их принимает дверь `ci-job-add`.
+pub(crate) struct CiJob<'a> {
+    pub repo: &'a str,
+    pub workflow: &'a str,
+    pub job: &'a str,
+    pub platform: &'a str,
+    pub note: &'a str,
+}
+
+/// Объявить задание CI, чей журнал несёт прогон проверок другой платформы.
+///
+/// Дверь принимает АДРЕС журнала, а не вердикт: что упало, харнес вынет сам
+/// тем же разбором, что и у своего прогона. Принимай она «упала» со слов,
+/// `red-observed-failing` снова судил бы прозу коммита.
+pub(crate) async fn declare_ci_job(pool: &Pool, project: &str, fields: CiJob<'_>, drop_it: bool) -> Result<Value, crate::db::Fail> {
+    let CiJob { repo, workflow, job, platform, note } = fields;
+    if workflow.trim().is_empty() || job.trim().is_empty() {
+        return Ok(json!({ "status": "nameless", "why": "задание CI называется файлом работы и именем задания" }));
+    }
+    let client = crate::db::conn(pool).await?;
+    if drop_it {
+        let gone = client.execute("DELETE FROM project_ci_job WHERE project_id = $1 AND workflow = $2 AND job = $3",
+                                  &[&project, &workflow, &job]).await?;
+        return Ok(json!({ "status": if gone > 0 { "dropped" } else { "not_found" }, "workflow": workflow, "job": job }));
+    }
+    // Адрес читает `gh api repos/<repo>/…`: без косой черты он уйдёт в пустоту,
+    // и отказ всплыл бы лишь в журнале воркера, раз в пять минут.
+    if repo.split('/').filter(|s| !s.trim().is_empty()).count() != 2 {
+        return Ok(json!({ "status": "bad_repo", "repo": repo, "why": "репозиторий пишется как владелец/имя" }));
+    }
+    // Пустая платформа значит «машина харнеса», и партия из журнала стала бы
+    // последним прогоном ствола — см. `test_run_trunk`.
+    if platform.trim().is_empty() {
+        return Ok(json!({ "status": "no_platform", "why": "платформа обязательна: пустая означает прогон самого харнеса" }));
+    }
+    client.execute(
+        "INSERT INTO project_ci_job (project_id, repo, workflow, job, platform, note)
+         VALUES ($1,$2,$3,$4,$5,$6)
+         ON CONFLICT (project_id, workflow, job) DO UPDATE SET repo = EXCLUDED.repo,
+           platform = EXCLUDED.platform, note = EXCLUDED.note",
+        &[&project, &repo, &workflow, &job, &platform, &note]).await?;
+    Ok(json!({ "status": "declared", "repo": repo, "workflow": workflow, "job": job, "platform": platform }))
+}
+
 /// Объявлено дверью и не написано документом.
 ///
 /// `question-list` отдавал имена, по которым `get` отказывает: сущность
@@ -10664,11 +10759,15 @@ pub(crate) async fn add_run_event(
 ///
 /// Хранится одна строка на проверку — самое свежее чистое падение; рост
 /// ограничен числом проверок, которые хоть раз падали.
+///
+/// ПЛАТФОРМЫ СЧИТАЮТСЯ ПОРОЗНЬ, как чистые и грязные. Задание CI, гоняющее ту
+/// же проверку, что и харнес, двадцатью партиями вымело бы её строку из
+/// последней партии харнеса — и `checks-green` прочёл бы «её там нет вовсе».
 const TEST_RUN_PRUNE: &str = "DELETE FROM test_run t
           WHERE t.project_id = $1
             AND (SELECT count(*) FROM test_run k
                   WHERE k.project_id = t.project_id AND k.check_name = t.check_name
-                    AND k.dirty = t.dirty AND k.at >= t.at) > 20
+                    AND k.dirty = t.dirty AND k.platform = t.platform AND k.at >= t.at) > 20
             AND NOT (NOT t.dirty AND t.verdict = 'failed'
                      AND NOT EXISTS (SELECT 1 FROM test_run f
                                       WHERE f.project_id = t.project_id AND f.check_name = t.check_name
@@ -10679,20 +10778,40 @@ const TEST_RUN_PRUNE: &str = "DELETE FROM test_run t
 /// по двадцати последним на проверку, кроме самого свежего чистого падения —
 /// «наблюдалась красной до кода» требует прошлого, и зелёные прогоны его не
 /// вытесняют (`TEST_RUN_PRUNE`).
+///
+/// `ci` пуст у прогона харнеса; у партии из журнала CI это платформа её
+/// задания и номер прогона GitHub (см. `test_run_trunk`).
 pub(crate) async fn record_test_runs(
     pool: &Pool, project: &str, commit: &str, rows: &[(String, String, String)], actor: &str,
-    dirty: bool,
+    dirty: bool, ci: Option<(&str, i64)>,
 ) -> Result<Value, crate::db::Fail> {
+    let platform = ci.map_or("", |(p, _)| p);
     let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
     // Одно время на ПАРТИЮ: иначе пятьсот вставок растянутся на миллисекунды,
     // и «последний прогон» по max(at) увидит лишь хвост партии.
     let at = now_ms();
+    // ВЗЯТЫЙ ПРОГОН CI ОТМЕЧАЕТСЯ В ТОЙ ЖЕ ТРАНЗАКЦИИ, ЧТО И ЕГО СТРОКИ. Порознь
+    // отказ между ними давал бы либо партию без отметки — её взяли бы снова, —
+    // либо отметку без партии, и падение пропало бы навсегда. Второй воркер
+    // (сине-зелёная смена) упирается в тот же ключ и ничего не пишет.
+    if let Some((_, run)) = ci {
+        let fresh = tx
+            .execute(
+                "INSERT INTO ci_run_taken (project_id, run_id, actor, platform, at) VALUES ($1,$2,$3,$4,$5)
+                 ON CONFLICT (project_id, run_id, actor) DO NOTHING",
+                &[&project, &run, &actor, &platform, &at],
+            )
+            .await?;
+        if fresh == 0 {
+            return Ok(json!({ "kind": "test-run", "recorded": 0, "already": run }));
+        }
+    }
     for (check, verdict, binary) in rows {
         tx.execute(
-            "INSERT INTO test_run (project_id, check_name, commit_sha, dirty, verdict, at, actor, ran_in)
-             VALUES ($1,$2,$3,$8,$4,$5,$6,$7)",
-            &[&project, check, &commit, verdict, &at, &actor, binary, &dirty],
+            "INSERT INTO test_run (project_id, check_name, commit_sha, dirty, verdict, at, actor, ran_in, platform)
+             VALUES ($1,$2,$3,$8,$4,$5,$6,$7,$9)",
+            &[&project, check, &commit, verdict, &at, &actor, binary, &dirty, &platform],
         )
         .await?;
     }
@@ -10738,6 +10857,9 @@ pub(crate) async fn record_test_runs(
 ///
 /// Коммит чистого прогона называется здесь же: «не то дерево» отличается от
 /// «не та проверка» только им.
+///
+/// Всё — из `test_run_trunk`: дверь обязана отвечать о том же, о чём судит
+/// гейт, а партия CI о стволе целиком не говорит.
 pub(crate) async fn test_status(
     pool: &Pool,
     project: &str,
@@ -10745,7 +10867,7 @@ pub(crate) async fn test_status(
 ) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let last = client
-        .query_opt("SELECT max(at), max(at) FILTER (WHERE NOT dirty) FROM test_run WHERE project_id = $1", &[&project])
+        .query_opt("SELECT max(at), max(at) FILTER (WHERE NOT dirty) FROM test_run_trunk WHERE project_id = $1", &[&project])
         .await?;
     // СЧЁТ — ПО ПОСЛЕДНЕМУ ЧИСТОМУ ИЗМЕРИВШЕМУ ПРОГОНУ (`test_run_last`), а не
     // по последнему вообще. Грязный прогон снят не со ствола, и выдавать его
@@ -10757,7 +10879,7 @@ pub(crate) async fn test_status(
     // `cleanAt` новее `measuredAt`.
     let counts = client
         .query(
-            "SELECT verdict, count(*) FROM test_run
+            "SELECT verdict, count(*) FROM test_run_trunk
               WHERE project_id = $1 AND NOT dirty
                 AND at = (SELECT at FROM test_run_last WHERE project_id = $1)
               GROUP BY verdict",
@@ -10766,7 +10888,7 @@ pub(crate) async fn test_status(
         .await?;
     let failed = client
         .query(
-            "SELECT DISTINCT check_name FROM test_run
+            "SELECT DISTINCT check_name FROM test_run_trunk
               WHERE project_id = $1 AND NOT dirty AND verdict = 'failed'
                 AND at = (SELECT at FROM test_run_last WHERE project_id = $1)",
             &[&project],
@@ -10782,7 +10904,7 @@ pub(crate) async fn test_status(
     // набора две сотни; имя бинаря отвечается поимённо, рядом с вердиктом.
     let about = client
         .query(
-            "SELECT DISTINCT commit_sha FROM test_run
+            "SELECT DISTINCT commit_sha FROM test_run_trunk
               WHERE project_id = $1 AND NOT dirty
                 AND at = (SELECT at FROM test_run_last WHERE project_id = $1)
               ORDER BY 1",
@@ -10796,12 +10918,12 @@ pub(crate) async fn test_status(
         let rows = client
             .query(
                 "SELECT n,
-                        (SELECT string_agg(DISTINCT r.verdict, ' ') FROM test_run r
+                        (SELECT string_agg(DISTINCT r.verdict, ' ') FROM test_run_trunk r
                           WHERE r.project_id = $1 AND NOT r.dirty
                             AND r.at = (SELECT at FROM test_run_last WHERE project_id = $1)
                             AND (r.check_name = n
                                  OR right(r.check_name, length(n) + 2) = '::' || n)),
-                        (SELECT string_agg(DISTINCT r.ran_in, ' ') FROM test_run r
+                        (SELECT string_agg(DISTINCT r.ran_in, ' ') FROM test_run_trunk r
                           WHERE r.project_id = $1 AND NOT r.dirty
                             AND r.at = (SELECT at FROM test_run_last WHERE project_id = $1)
                             AND (r.check_name = n
@@ -10843,12 +10965,16 @@ pub(crate) async fn test_status(
 /// Прогон, упавший на сборке, здесь годится, и `test_run_last` сюда не нужен:
 /// вопрос о вершине, а не о вердиктах проверок. Два читателя держали этот
 /// запрос копиями, и довод стоял лишь у одной.
+///
+/// Партия CI здесь не годится: её коммит — вершина, какой была при запуске
+/// задания, а не та, что прибор снял сам, и свежесть фактов мерилась бы чужим
+/// заходом.
 async fn known_head(client: &impl deadpool_postgres::GenericClient, project: &str) -> String {
     client
         .query_one(
-            "SELECT coalesce(max(commit_sha), '') FROM test_run
+            "SELECT coalesce(max(commit_sha), '') FROM test_run_trunk
               WHERE project_id = $1 AND NOT dirty
-                AND at = (SELECT max(at) FROM test_run WHERE project_id = $1 AND NOT dirty)",
+                AND at = (SELECT max(at) FROM test_run_trunk WHERE project_id = $1 AND NOT dirty)",
             &[&project],
         )
         .await
@@ -13316,6 +13442,9 @@ pub(crate) async fn execute_method_upto(
         // правкой зеленит и краснит что угодно. И последний ИЗМЕРИВШИЙ
         // (`test_run_last`): прогон, упавший на сборке, проверок не видел, и
         // «её там нет» о нём — это «не мерили», а не «не зелена».
+        //
+        // Строки — из `test_run_trunk`: партия CI несёт горстку проверок, и
+        // совпади её время с последней партией, прочие прочлись бы «нет вовсе».
         "checks-green" => {
             let names: Vec<String> =
                 method.split_whitespace().map(str::to_owned).collect();
@@ -13352,14 +13481,14 @@ pub(crate) async fn execute_method_upto(
             match client
                 .query(
                     "SELECT n AS detail,
-                            EXISTS (SELECT 1 FROM test_run r
+                            EXISTS (SELECT 1 FROM test_run_trunk r
                                      WHERE r.project_id = $1 AND NOT r.dirty
                                        AND r.at = (SELECT at FROM test_run_last WHERE project_id = $1)
                                        AND (r.check_name = n
                                             OR right(r.check_name, length(n) + 2) = '::' || n)) AS была
                        FROM unnest($2::text[]) AS n
                       WHERE NOT EXISTS (
-                            SELECT 1 FROM test_run r
+                            SELECT 1 FROM test_run_trunk r
                              WHERE r.project_id = $1 AND NOT r.dirty
                                AND r.at = (SELECT at FROM test_run_last WHERE project_id = $1)
                                AND (r.check_name = n
@@ -13369,7 +13498,7 @@ pub(crate) async fn execute_method_upto(
                          -- зелены ОБЕ: одного прохода довольно было бы, чтобы
                          -- упавший однофамилец уехал незамеченным.
                          OR EXISTS (
-                            SELECT 1 FROM test_run r
+                            SELECT 1 FROM test_run_trunk r
                              WHERE r.project_id = $1 AND NOT r.dirty
                                AND r.at = (SELECT at FROM test_run_last WHERE project_id = $1)
                                AND (r.check_name = n
@@ -16353,6 +16482,114 @@ mod test_run_last {
     }
 }
 
+/// Партия из журнала CI доказывает красную фазу и не судит о стволе.
+///
+/// Порча, которую ловит проверка: партия CI — горстка проверок — становится
+/// последним прогоном ствола, и каждая проверка вне её читается «нет вовсе»:
+/// `checks-green`, `test-trunk-green`, `ready-items-checked` и дверь `test-run`
+/// краснеют разом. Обратная порча — падение с раннера не видно пункту
+/// `red-observed-failing`, и пара под `#![cfg(windows)]` держит выдачу навсегда.
+#[cfg(test)]
+mod ci_batch {
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn a_ci_batch_proves_the_red_phase_and_leaves_the_trunk_alone() {
+        let url = std::env::var("MH_TEST_DB_URL").expect("MH_TEST_DB_URL: адрес пустой базы");
+        let apart = format!("{}{}", if url.contains('?') { '&' } else { '?' },
+                            "options=-c%20search_path%3Dci_batch");
+        let pool = crate::db::pool(&format!("{url}{apart}"), 4).expect("пул тестовой базы");
+        {
+            let client = pool.get().await.expect("соединение с тестовой базой");
+            client
+                .batch_execute("DROP SCHEMA IF EXISTS ci_batch CASCADE; CREATE SCHEMA ci_batch;")
+                .await
+                .expect("своя схема заводится");
+        }
+        super::ensure(&pool).await.expect("схема встаёт на пустой базе");
+        let client = pool.get().await.expect("соединение");
+        // Своя партия в 1000 мерила две проверки ствола. Зеркало `R-1` закрыто
+        // в 2000, тело `T-2` не закрыто: окно открыто, пункт судит. Проверка
+        // зеркала под `cfg(windows)` в своей партии не шла вовсе.
+        client
+            .batch_execute(
+                "INSERT INTO test_run (project_id, check_name, commit_sha, dirty, verdict, at, ran_in)
+                 VALUES ('Ц', 'зелёная', 'a', false, 'passed', 1000, 'plain.rs'),
+                        ('Ц', 'другая', 'a', false, 'passed', 1000, 'plain.rs');
+                 INSERT INTO project_plan_versions (project_id, id) VALUES ('Ц', 'v1');
+                 INSERT INTO project_plan_milestones (project_id, id, version_id, ord, title)
+                 VALUES ('Ц', 'M1', 'v1', 1, 'веха');
+                 INSERT INTO project_plan_tasks (project_id, id, milestone_id, ord, title, size, state, kind,
+                                                 entity_kind, entity_name)
+                 VALUES ('Ц', 'R-1', 'M1', 1, 'зеркало', '', 'closed', 'red', 'task', 'R-1'),
+                        ('Ц', 'T-1', 'M1', 2, 'задача', '', 'closed', 'dev', 'task', 'T-1'),
+                        ('Ц', 'T-2', 'M1', 3, 'тело', '', 'not_started', 'dev', 'task', 'T-2');
+                 INSERT INTO task_state (project_id, task_id, state, seen_at, closed_at)
+                 VALUES ('Ц', 'R-1', 'closed', 2000, 2000);
+                 INSERT INTO red_task (project_id, id, parent_task, milestone) VALUES ('Ц', 'R-1', 'T-2', 'M1');
+                 INSERT INTO project_task_check (project_id, task_id, check_id, said_as)
+                 VALUES ('Ц', 'R-1', 'окно_отзыв', 'красная фаза');
+                 INSERT INTO task_ready_item (project_id, task_id, ord, check_id, text)
+                 VALUES ('Ц', 'T-1', 1, 'зелёная', '- [ ] `зелёная`');",
+            )
+            .await
+            .expect("набор подсаживается");
+
+        let red = include_str!("../../instrument/gate/corpus/red-observed-failing.sql");
+        let trunk_sql = include_str!("../../instrument/gate/G3/test-trunk-green.sql");
+        let ready_sql = include_str!("../../instrument/gate/corpus/ready-items-checked.sql");
+        let run = |sql: &'static str| {
+            let client = &client;
+            async move { super::execute_method_upto(client, "Ц", "query", sql, 200, 0).await }
+        };
+        let before = run(red).await;
+        assert_eq!(before.detail, vec!["R-1 — не наблюдалась красной: окно_отзыв".to_owned()],
+                   "без партии CI падения видеть неоткуда ({})", before.why);
+        let trunk_before = run(trunk_sql).await.detail;
+        let ready_before = run(ready_sql).await.detail;
+        let status_before = super::test_status(&pool, "Ц", "зелёная другая").await.expect("дверь test-run");
+
+        // Партия CI: одна проверка, упавшая, в бинаре БЕЗ `mirror_` — просочись
+        // она в «последний прогон», пункт про ствол назвал бы её поломкой.
+        let rows = vec![("окно_отзыв".to_owned(), "failed".to_owned(), "windows_only.rs".to_owned())];
+        super::record_test_runs(&pool, "Ц", "c", &rows, "ci:probe.yml/win", false, Some(("windows", 7)))
+            .await
+            .expect("партия CI пишется");
+        let again = super::record_test_runs(&pool, "Ц", "c", &rows, "ci:probe.yml/win", false, Some(("windows", 7)))
+            .await
+            .expect("повтор отвечает, а не падает");
+        assert_eq!(again["recorded"], 0, "взятый прогон не пишется дважды: {again}");
+        let empty = super::record_test_runs(&pool, "Ц", "c", &rows, "ci:probe.yml/win", false, Some(("", 8))).await;
+        assert!(empty.is_err(), "партия CI без платформы легла бы в ствол — база обязана отказать");
+
+        let after = run(red).await;
+        assert_eq!((after.state, &after.detail), ("passed", &vec![]),
+                   "падение с раннера — наблюдение красной фазы ({})", after.why);
+
+        let v = super::execute_method(&client, "Ц", "checks-green", "зелёная другая").await;
+        assert_eq!((v.state, &v.detail), ("passed", &vec![]),
+                   "партия CI не делает проверки ствола отсутствующими");
+        let v = super::execute_method(&client, "Ц", "checks-green", "окно_отзыв").await;
+        assert_eq!(v.state, "failed", "о стволе проверка CI по-прежнему не мерена: {:?}", v.detail);
+        assert_eq!(run(trunk_sql).await.detail, trunk_before, "пункт про ствол партии CI не видит");
+        assert_eq!(run(ready_sql).await.detail, ready_before, "пункт приёмки партии CI не видит");
+        let subject = client
+            .query(include_str!("../../instrument/gate/G3/test-trunk-green.subject.sql"), &[&"Ц"])
+            .await
+            .expect("предмет пункта исполняется");
+        assert_eq!(subject.iter().map(|r| r.get::<_, i64>(0)).collect::<Vec<_>>(), vec![1000],
+                   "последней партией ствола остаётся своя");
+        let status = super::test_status(&pool, "Ц", "зелёная другая").await.expect("дверь test-run");
+        for key in ["measuredAt", "cleanAt", "counts", "commits", "names", "failed"] {
+            assert_eq!(status[key], status_before[key], "дверь test-run о стволе не сдвинулась: {key}");
+        }
+        assert_eq!(super::known_head(&client, "Ц").await, "a", "вершина прибора — своя партия");
+
+        drop(client);
+        let client = pool.get().await.expect("соединение");
+        client.batch_execute("DROP SCHEMA IF EXISTS ci_batch CASCADE").await.expect("схема снимается");
+    }
+}
+
 #[cfg(test)]
 mod test_run_prune {
     use super::TEST_RUN_PRUNE;
@@ -16377,7 +16614,8 @@ mod test_run_prune {
             "CREATE TABLE public.test_run (
                id serial PRIMARY KEY, project_id text NOT NULL, check_name text NOT NULL,
                commit_sha text NOT NULL DEFAULT '', dirty boolean NOT NULL DEFAULT true,
-               verdict text NOT NULL, at bigint NOT NULL, actor text NOT NULL DEFAULT '');
+               verdict text NOT NULL, at bigint NOT NULL, actor text NOT NULL DEFAULT '',
+               platform text NOT NULL DEFAULT '');
              INSERT INTO public.test_run (project_id, check_name, dirty, verdict, at)
                VALUES ('p', 'red_check', false, 'failed', 2), ('p', 'red_check', false, 'failed', 1),
                       ('p', 'red_check', true, 'failed', 50), ('q', 'red_check', false, 'failed', 60);

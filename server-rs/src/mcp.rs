@@ -583,6 +583,11 @@ impl Mcp {
             "inputSchema": { "type": "object", "properties": { "skip": s("строка, которую датчик не считает находкой — образец"), "allow": s("места, где правило не действует — образцы пути через пробел"), "fact": s("род факта"),
                 "reads": s("что читать: backend/**/*.rs"), "extract": s("образец: пустой — факт о самом файле"),
                 "note": s("зачем"), "how": s("extract · files · secret-fields · declared-paths · lines · domain-vs-check · contract-vs-schema · task-trailers"), "drop": json!({"type":"boolean"}) }, "required": ["fact"] } }));
+        tools.push(json!({ "name": "ci-job-add", "description": "объявить задание CI, чей журнал несёт прогон проверок другой платформы: харнес сам читает журналы его прогонов на стволе и пишет упавшие как наблюдение красной фазы. Вердиктов дверь не принимает",
+            "inputSchema": { "type": "object", "properties": { "repo": s("репозиторий GitHub: владелец/имя"),
+                "workflow": s("файл работы: probe-windows.yml"), "job": s("имя задания в работе"),
+                "platform": s("платформа раннера: windows"), "note": s("зачем"),
+                "drop": json!({"type":"boolean"}) }, "required": ["workflow", "job"] } }));
         tools.push(json!({ "name": "sensor-specs", "description": "чем снимать факты: объявленные датчики",
             "inputSchema": { "type": "object", "properties": {} } }));
         tools.push(json!({ "name": "donors", "description": "донорские деревья и сторожа: что здесь не наше и чем это держится",
@@ -901,7 +906,7 @@ impl Mcp {
         "put", "put-section", "rm", "document-add", "reparse", "reproject", "sweep",
         "task-state-push", "code-facts-push", "skills-push", "preflight-push", "worktree-push",
         "task-plan-push",
-        "blame-set", "derived-copy-set", "counts-sync", "frozen-tree-set", "scheme-term-set", "orphans-purge", "surface-source-add", "sensor-spec-add", "agent-set", "donor-add", "guard-add", "method-set", "sensor-declare", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "version-close", "gate-selftest",
+        "blame-set", "derived-copy-set", "counts-sync", "frozen-tree-set", "scheme-term-set", "orphans-purge", "surface-source-add", "sensor-spec-add", "ci-job-add", "agent-set", "donor-add", "guard-add", "method-set", "sensor-declare", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "version-close", "gate-selftest",
         "author-set", "screen-area-set", "skill-set", "version-freeze",
         "links-rewrite", "links-retarget", "entity-rename", "entity-confirm", "term-retire",
     ];
@@ -2316,6 +2321,13 @@ impl Mcp {
             "sensor-spec-add" => {
                 let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
                 match crate::projector::declare_sensor_spec(&self.pool, p, crate::projector::SensorSpec { fact: &g("fact"), reads: &g("reads"), extract: &g("extract"), note: &g("note"), how: &g("how"), skip: &g("skip"), allow: &g("allow") }, flag(args, "drop")).await {
+                    Ok(v) => ok(v),
+                    Err(e) => refusal(e.into()),
+                }
+            }
+            "ci-job-add" => {
+                let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
+                match crate::projector::declare_ci_job(&self.pool, p, crate::projector::CiJob { repo: &g("repo"), workflow: &g("workflow"), job: &g("job"), platform: &g("platform"), note: &g("note") }, flag(args, "drop")).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),
                 }

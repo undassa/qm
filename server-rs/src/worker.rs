@@ -64,6 +64,9 @@ const LIMIT_S: u64 = 1800;
 const SILENCE_LIMIT: i32 = 3;
 const CIRCLES: i32 = 5; // потолок кругов починки — правило харнеса
 
+static GH_STAMP: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z ").unwrap());
+
 static MARKER: Lazy<Regex> = Lazy::new(|| {
     // Маркеры контракта дословны (заглавными). Порядок — по тяжести: DRIFT
     // встаёт всегда, NEEDS FIX важнее случайного слова PLAN в прозе.
@@ -151,6 +154,125 @@ fn fld<'a>(v: &'a Value, key: &str, who: &str) -> &'a Value {
         println!("{who}: в ответе двери нет поля `{key}` — читают не то, что отвечают");
     }
     &v[key]
+}
+
+/// Строки прогона — из текста, который напечатал `cargo test` либо nextest.
+///
+/// ОДНА ФУНКЦИЯ НА ВСЕ ИСТОЧНИКИ, И ЭТО НЕ ЭКОНОМИЯ. Прогон харнеса и журнал
+/// работы GitHub Actions печатают одно и то же, и разбор, списанный копией,
+/// однажды разошёлся бы с оригиналом: `red-observed-failing` судит по имени
+/// проверки, и имя, вынутое иначе, — это другая проверка.
+///
+/// Журнал работы GitHub предваряет каждую строку временем
+/// (`2026-09-29T22:56:47.5896990Z test … ... FAILED`), а первую ещё и BOM;
+/// без их снятия `strip_prefix("test ")` не узнаёт ни одной строки, и
+/// разбор отвечает «проверок ноль» — неотличимо от несобравшегося.
+pub fn test_lines(text: &str) -> Vec<(String, String, String)> {
+    let lines: Vec<&str> = text
+        .lines()
+        .map(|l| {
+            let l = l.trim_start_matches('\u{feff}');
+            GH_STAMP.find(l).map_or(l, |m| &l[m.end()..])
+        })
+        .collect();
+    let mut rows: Vec<(String, String, String)> = Vec::new();
+    // ДВА ФОРМАТА, И ГЛАВНЫЙ — NEXTEST.
+    //
+    // «Упало на стволе» определяет не харнес, а сам набор своим рецептом:
+    // `just test` у `tot-ade` — это `cargo nextest ... -E 'not
+    // binary(/^mirror_/)'`. Прогонщик, меряющий другой командой, изобретает
+    // красноту, которой у набора нет: под `cargo test` проверки делят один
+    // процесс, и `the_door_counts_what_is_born_deeper_in_the_tree` ложно
+    // краснела — её собственная шапка это и говорит, с замером.
+    //
+    // У nextest связь «проверка ↔ бинарь» — ОДНА СТРОКА, а не порядок строк:
+    //     PASS [0.002s] (1/313) tot-core::mirror_foo s8_ac_6_имя
+    // Склеить её нечем, и разбору нечего терять между потоками.
+    for line in &lines {
+        let t = line.trim_start();
+        let Some((head, rest)) = t.split_once(char::is_whitespace) else { continue };
+        let verdict = match head {
+            "PASS" => "passed",
+            "FAIL" => "failed",
+            "SKIP" => "ignored",
+            _ => continue,
+        };
+        // Хвост после `[время]` и необязательного `(n/N)`: два слова —
+        // «крейт::бинарь» и имя проверки.
+        let tail = rest.rsplit(']').next().unwrap_or("").trim_start();
+        let tail = tail.strip_prefix('(').map_or(tail, |x| {
+            x.split_once(')').map_or(tail, |(_, after)| after.trim_start())
+        });
+        let mut parts = tail.split_whitespace();
+        let (Some(binary), Some(name)) = (parts.next(), parts.next()) else { continue };
+        if parts.next().is_some() {
+            continue;
+        }
+        rows.push((
+            name.to_owned(),
+            verdict.to_owned(),
+            binary.rsplit("::").next().unwrap_or(binary).to_owned(),
+        ));
+    }
+    // ЧЕМ ШЛА ПРОВЕРКА. `cargo test` печатает `Running tests/<файл>.rs (…)`
+    // перед блоком каждого бинаря. Прежде разбор эту строку пропускал, и
+    // «упала» становилось неотличимо от «обязана падать»: зеркало красной
+    // фазы падает по построению, а пункт про ствол звал это поломкой.
+    //
+    // Раннер Windows печатает путь обратной чертой — `Running
+    // tests\mirror_revoke_takes_the_refusals_off.rs` (прогон `36642293742`), —
+    // и по одной `/` бинарём стал бы весь путь: граница зеркал `mirror_`
+    // сравнивает начало имени и такой бинарь не узнала бы.
+    let mut binary = String::new();
+    for line in &lines {
+        if let Some(rest) = line.trim_start().strip_prefix("Running ") {
+            binary = rest
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or("")
+                .to_owned();
+            continue;
+        }
+        let rest = line.strip_prefix("test ").unwrap_or("");
+        let Some((name, tail)) = rest.split_once(" ... ") else { continue };
+        let name = name.trim();
+        if name.is_empty() || name == "result:" {
+            continue;
+        }
+        let verdict = if tail.starts_with("ok") {
+            "passed"
+        } else if tail.starts_with("FAILED") {
+            "failed"
+        } else if tail.starts_with("ignored") {
+            "ignored"
+        } else {
+            continue;
+        };
+        rows.push((name.to_owned(), verdict.to_owned(), binary.clone()));
+    }
+    rows
+}
+
+/// `gh api <путь>` — с отказом словом, а не пустой строкой: пустой ответ
+/// разобрался бы в «проверок ноль» и лёг отметкой «прогон взят».
+async fn gh(path: &str) -> Result<String, String> {
+    let run = tokio::process::Command::new("gh").args(["api", path]).output();
+    let out = match tokio::time::timeout(std::time::Duration::from_secs(120), run).await {
+        Err(_) => return Err(format!("gh api {path} не уложился в 120 с")),
+        Ok(Err(e)) => return Err(format!("gh не завёлся: {e}")),
+        Ok(Ok(o)) => o,
+    };
+    if !out.status.success() {
+        return Err(format!("gh api {path} отказал: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+async fn gh_json(path: &str) -> Result<Value, String> {
+    serde_json::from_str(&gh(path).await?).map_err(|e| format!("gh api {path}: ответ не разобран: {e}"))
 }
 
 pub struct Worker {
@@ -291,8 +413,106 @@ impl Worker {
                 Ok(None) => {}
                 Err(e) => println!("{} · тесты: {e}", bundle.name),
             }
+            self.take_ci_jobs(&bundle).await;
             tokio::time::sleep(std::time::Duration::from_secs(TEST_TICK_S)).await;
         }
+    }
+
+    /// Журналы заданий CI, объявленных набором (`ci-job-add`).
+    ///
+    /// ПАДЕНИЕ СНИМАЕТСЯ ТАМ, ГДЕ ОНО ВОЗМОЖНО. Проверка под `#![cfg(windows)]`
+    /// на этой машине собирается пустой, и `red-observed-failing` держал пару
+    /// `V5-T135` без выхода: падение `m5_t135_revoke_takes_the_refusals_off_too`
+    /// видел лишь раннер Windows (прогон `36642293742`), а записать его было
+    /// некому. Журнал харнес качает и разбирает сам — `test_lines`, как свой.
+    ///
+    /// Берутся только прогоны ствола — ветка по умолчанию и не `pull_request`:
+    /// строки CI — такие же факты о стволе, как свои, а прогон с ветки
+    /// доказывал бы красную фазу чужим деревом. Прогон, взятый однажды, не
+    /// берётся снова (`ci_run_taken`), даже если в журнале не нашлось ни одной
+    /// проверки: несобравшееся задание — это «не мерили», и мерить его журнал
+    /// заново нечего.
+    async fn take_ci_jobs(&self, bundle: &Bundle) {
+        let jobs = match crate::db::conn(&self.pool).await {
+            Ok(c) => c
+                .query("SELECT repo, workflow, job, platform FROM project_ci_job WHERE project_id = $1 ORDER BY 2, 3",
+                       &[&bundle.project])
+                .await
+                .map_err(|e| format!("{e}")),
+            Err(e) => Err(format!("{e:?}")),
+        };
+        let jobs = match jobs {
+            Ok(j) => j,
+            Err(why) => return println!("{} · CI: объявления не читаются: {why}", bundle.name),
+        };
+        for r in jobs {
+            let (repo, workflow, job, platform): (String, String, String, String) = (r.get(0), r.get(1), r.get(2), r.get(3));
+            let actor = format!("ci:{workflow}/{job}");
+            match self.take_ci_job(&bundle.project, &repo, &workflow, &job, &platform, &actor).await {
+                Ok(0) => {}
+                Ok(n) => println!("{} · CI {actor}: взято прогонов {n}", bundle.name),
+                Err(why) => println!("{} · CI {actor}: {why}", bundle.name),
+            }
+        }
+    }
+
+    async fn take_ci_job(
+        &self, project: &str, repo: &str, workflow: &str, job: &str, platform: &str, actor: &str,
+    ) -> Result<usize, String> {
+        let about = gh_json(&format!("repos/{repo}")).await?;
+        let trunk = about["default_branch"].as_str().filter(|b| !b.is_empty())
+            .ok_or_else(|| format!("у {repo} не названа ветка по умолчанию"))?
+            .to_owned();
+        let runs = gh_json(&format!(
+            "repos/{repo}/actions/workflows/{workflow}/runs?branch={trunk}&status=completed&per_page=20"
+        ))
+        .await?;
+        let client = crate::db::conn(&self.pool).await.map_err(|e| format!("{e:?}"))?;
+        let mut taken = 0;
+        for run in runs["workflow_runs"].as_array().into_iter().flatten() {
+            let (Some(id), Some(sha)) = (run["id"].as_i64(), run["head_sha"].as_str()) else { continue };
+            if run["head_branch"].as_str() != Some(trunk.as_str()) || run["event"].as_str() == Some("pull_request") {
+                continue;
+            }
+            let seen: bool = client
+                .query_one(
+                    "SELECT EXISTS (SELECT 1 FROM ci_run_taken WHERE project_id = $1 AND run_id = $2 AND actor = $3)",
+                    &[&project, &id, &actor],
+                )
+                .await
+                .map_err(|e| format!("{e}"))?
+                .get(0);
+            if seen {
+                continue;
+            }
+            // Отказ одного прогона не держит остальные: журнал старше девяноста
+            // дней GitHub уже не отдаёт, и `?` здесь запер бы за ним все новые.
+            let rows = match Self::ci_job_rows(repo, id, job).await {
+                Ok(rows) => rows,
+                Err(why) => {
+                    println!("{project} · CI {actor}: прогон {id} не взят: {why}");
+                    continue;
+                }
+            };
+            crate::projector::record_test_runs(&self.pool, project, sha, &rows, actor, false, Some((platform, id)))
+                .await
+                .map_err(|e| format!("прогон {id} не записан: {e:?}"))?;
+            taken += 1;
+        }
+        Ok(taken)
+    }
+
+    /// Строки прогона из журнала одного задания. Задания с таким именем в
+    /// прогоне нет — строк нет: его не запускали, и мерить нечего.
+    async fn ci_job_rows(repo: &str, run: i64, job: &str) -> Result<Vec<(String, String, String)>, String> {
+        let jobs = gh_json(&format!("repos/{repo}/actions/runs/{run}/jobs?per_page=100")).await?;
+        let Some(id) = jobs["jobs"].as_array().into_iter().flatten()
+            .find(|j| j["name"].as_str() == Some(job))
+            .and_then(|j| j["id"].as_i64())
+        else {
+            return Ok(Vec::new());
+        };
+        Ok(test_lines(&gh(&format!("repos/{repo}/actions/jobs/{id}/logs")).await?))
     }
 
     /// Своё дерево прогона: `<репозиторий>-mh-runner`, рядом, а не внутри.
@@ -361,7 +581,6 @@ impl Worker {
     /// упасть. Поэтому «не собралось» здесь распознаётся по ПУСТОМУ разбору, а
     /// не по коду выхода.
     async fn profile(cwd: &str, cmd: &str) -> Result<(Vec<(String, String, String)>, bool), String> {
-        let mut rows: Vec<(String, String, String)> = Vec::new();
         // ОДИН ПОТОК, А НЕ ДВА СКЛЕЕННЫХ. `cargo` печатает `Running tests/<файл>`
         // в stderr, а `test <имя> ... ok` — в stdout. Прежде оба читались
         // порознь и склеивались подряд: все имена бинарей оказывались ПОСЛЕ
@@ -381,79 +600,7 @@ impl Worker {
             Ok(Ok(o)) => o,
         };
         let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-        // ДВА ФОРМАТА, И ГЛАВНЫЙ — NEXTEST.
-        //
-        // «Упало на стволе» определяет не харнес, а сам набор своим рецептом:
-        // `just test` у `tot-ade` — это `cargo nextest ... -E 'not
-        // binary(/^mirror_/)'`. Прогонщик, меряющий другой командой, изобретает
-        // красноту, которой у набора нет: под `cargo test` проверки делят один
-        // процесс, и `the_door_counts_what_is_born_deeper_in_the_tree` ложно
-        // краснела — её собственная шапка это и говорит, с замером.
-        //
-        // У nextest связь «проверка ↔ бинарь» — ОДНА СТРОКА, а не порядок строк:
-        //     PASS [0.002s] (1/313) tot-core::mirror_foo s8_ac_6_имя
-        // Склеить её нечем, и разбору нечего терять между потоками.
-        for line in text.lines() {
-            let t = line.trim_start();
-            let Some((head, rest)) = t.split_once(char::is_whitespace) else { continue };
-            let verdict = match head {
-                "PASS" => "passed",
-                "FAIL" => "failed",
-                "SKIP" => "ignored",
-                _ => continue,
-            };
-            // Хвост после `[время]` и необязательного `(n/N)`: два слова —
-            // «крейт::бинарь» и имя проверки.
-            let tail = rest.rsplit(']').next().unwrap_or("").trim_start();
-            let tail = tail.strip_prefix('(').map_or(tail, |x| {
-                x.split_once(')').map_or(tail, |(_, after)| after.trim_start())
-            });
-            let mut parts = tail.split_whitespace();
-            let (Some(binary), Some(name)) = (parts.next(), parts.next()) else { continue };
-            if parts.next().is_some() {
-                continue;
-            }
-            rows.push((
-                name.to_owned(),
-                verdict.to_owned(),
-                binary.rsplit("::").next().unwrap_or(binary).to_owned(),
-            ));
-        }
-        // ЧЕМ ШЛА ПРОВЕРКА. `cargo test` печатает `Running tests/<файл>.rs (…)`
-        // перед блоком каждого бинаря. Прежде разбор эту строку пропускал, и
-        // «упала» становилось неотличимо от «обязана падать»: зеркало красной
-        // фазы падает по построению, а пункт про ствол звал это поломкой.
-        let mut binary = String::new();
-        for line in text.lines() {
-            if let Some(rest) = line.trim_start().strip_prefix("Running ") {
-                binary = rest
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("")
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or("")
-                    .to_owned();
-                continue;
-            }
-            let rest = line.strip_prefix("test ").unwrap_or("");
-            let Some((name, tail)) = rest.split_once(" ... ") else { continue };
-            let name = name.trim();
-            if name.is_empty() || name == "result:" {
-                continue;
-            }
-            let verdict = if tail.starts_with("ok") {
-                "passed"
-            } else if tail.starts_with("FAILED") {
-                "failed"
-            } else if tail.starts_with("ignored") {
-                "ignored"
-            } else {
-                continue;
-            };
-            rows.push((name.to_owned(), verdict.to_owned(), binary.clone()));
-        }
-        Ok((rows, out.status.success()))
+        Ok((test_lines(&text), out.status.success()))
     }
 
     /// Состояния задач — со ствола, каждый час, а не когда сессия вспомнит.
@@ -612,10 +759,14 @@ impl Worker {
         // (сборку убил systemd-oomd, кончился диск) не перемеряется до
         // `TEST_REDO_S`, и всё это время читатели вердиктов судят по прошлому
         // измерившему прогону (`test_run_last`).
+        //
+        // Партия CI на той же голове замером не считается: она гоняла горстку
+        // проверок, и прогон харнеса, пропущенный из-за неё, оставил бы ствол
+        // без измерения на шесть часов.
         let fresh = match crate::db::conn(&self.pool).await {
             Ok(c) => c
                 .query_one(
-                    "SELECT count(*) FROM test_run WHERE project_id = $1 AND commit_sha = $2 AND NOT dirty AND at > $3",
+                    "SELECT count(*) FROM test_run_trunk WHERE project_id = $1 AND commit_sha = $2 AND NOT dirty AND at > $3",
                     &[&bundle.project, &head, &(crate::projector::now_ms() - (TEST_REDO_S as i64) * 1000)],
                 )
                 .await
@@ -692,7 +843,7 @@ impl Worker {
             println!("{} · тесты: дерево испачкали во время прогона — запись помечена грязной", bundle.name);
         }
         let recorded = rows.len() as i64;
-        crate::projector::record_test_runs(&self.pool, &bundle.project, &head, &rows, "mh-runner", dirty_after)
+        crate::projector::record_test_runs(&self.pool, &bundle.project, &head, &rows, "mh-runner", dirty_after, None)
             .await
             // Отказ здесь значит ЛИБО незаписанный прогон, ЛИБО записанный без
             // отметки «пересчитать»; различать их сообщением было бы враньём в
@@ -1492,5 +1643,60 @@ mod tests {
         let status = Worker::git(&path, &["status", "--porcelain"]).expect("чистый статус читается");
         assert_eq!(status.trim(), "", "пустой вывод — это по-прежнему успех, а не отказ");
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    fn row(name: &str, verdict: &str, binary: &str) -> (String, String, String) {
+        (name.to_owned(), verdict.to_owned(), binary.to_owned())
+    }
+
+    /// Nextest: вердикт, бинарь и имя — одной строкой, `крейт::` снимается.
+    #[test]
+    fn nextest_lines_carry_their_binary() {
+        let text = "        PASS [   0.002s] (1/313) tot-core::mirror_foo s8_ac_6_имя\n\
+                    \x20       FAIL [   0.010s] (2/313) tot-core::lib save::tests::bom_survives\n\
+                    \x20       SKIP [   0.000s] (3/313) tot-core::slow slow_one\n\
+                    \x20       PASS [   0.002s] лишнее слово здесь\n";
+        assert_eq!(super::test_lines(text), vec![
+            row("s8_ac_6_имя", "passed", "mirror_foo"),
+            row("save::tests::bom_survives", "failed", "lib"),
+            row("slow_one", "ignored", "slow"),
+        ]);
+    }
+
+    /// `cargo test`: бинарь — из предшествующей `Running`, итог блока не
+    /// проверка.
+    #[test]
+    fn cargo_test_lines_take_the_binary_from_running() {
+        let text = "     Running tests/mirror_x.rs (target/debug/deps/mirror_x-1a2b)\n\
+                    test a_red_one ... FAILED\n\
+                    test a_green_one ... ok\n\
+                    test result: FAILED. 1 passed; 1 failed\n\
+                    \x20    Running tests/plain.rs (target/debug/deps/plain-3c4d)\n\
+                    test skipped_one ... ignored, нужна сеть\n";
+        assert_eq!(super::test_lines(text), vec![
+            row("a_red_one", "failed", "mirror_x.rs"),
+            row("a_green_one", "passed", "mirror_x.rs"),
+            row("skipped_one", "ignored", "plain.rs"),
+        ]);
+    }
+
+    /// Журнал работы GitHub: BOM, время перед каждой строкой, CRLF и путь
+    /// Windows. Строки — дословно из прогона `36642293742` пары `V5-T135`;
+    /// без снятия времени разбор отвечал «проверок ноль».
+    #[test]
+    fn a_github_job_log_parses_like_a_local_run() {
+        let text = "\u{feff}2026-09-29T22:54:42.7396393Z Current runner version: '2.328.0'\r\n\
+                    2026-09-29T22:56:47.5592055Z      Running tests\\mirror_revoke_takes_the_refusals_off.rs (target\\debug\\deps\\mirror_revoke_takes_the_refusals_off-1c368eaaebb7b3a5.exe)\r\n\
+                    2026-09-29T22:56:47.5656672Z running 1 test\r\n\
+                    2026-09-29T22:56:47.5896990Z test m5_t135_revoke_takes_the_refusals_off_too ... FAILED\r\n\
+                    2026-09-29T22:56:47.5901204Z     m5_t135_revoke_takes_the_refusals_off_too\r\n\
+                    2026-09-29T22:56:47.5903487Z test result: FAILED. 0 passed; 1 failed; 0 ignored\r\n\
+                    2026-09-29T22:56:48.0000000Z         PASS [   0.002s] (1/2) tot-core::mirror_foo s8_ac_6_имя\r\n";
+        assert_eq!(super::test_lines(text), vec![
+            row("s8_ac_6_имя", "passed", "mirror_foo"),
+            row("m5_t135_revoke_takes_the_refusals_off_too", "failed", "mirror_revoke_takes_the_refusals_off.rs"),
+        ]);
+        // Строка, где время стоит не в начале, — не журнал GitHub: её не трогают.
+        assert!(super::test_lines("note 2026-09-29T22:56:47.5Z test x ... ok\n").is_empty());
     }
 }
