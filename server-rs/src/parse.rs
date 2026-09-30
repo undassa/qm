@@ -82,7 +82,7 @@ static ROW_FIELD: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\s*\*\*([^*]+?)\*\*\s
 static CODE_SPAN: Lazy<Regex> = Lazy::new(|| Regex::new(r"`([^`]*)`").unwrap());
 static BOLD: Lazy<Regex> = Lazy::new(|| Regex::new(r"\*\*([^*]*)\*\*").unwrap());
 static ITALIC: Lazy<Regex> = Lazy::new(|| Regex::new(r"(^|[^*])\*([^*]+)\*").unwrap());
-static STRIKE: Lazy<Regex> = Lazy::new(|| Regex::new(r"~~([^~]*)~~").unwrap());
+pub(crate) static STRIKE: Lazy<Regex> = Lazy::new(|| Regex::new(r"~~([^~]*)~~").unwrap());
 static SPACES: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+").unwrap());
 
 pub(crate) fn strip_markup(raw: &str) -> String {

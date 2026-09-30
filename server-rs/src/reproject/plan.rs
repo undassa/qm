@@ -102,8 +102,8 @@ pub(crate) async fn titles(pool: &Pool, project: &str) -> Result<HashMap<String,
 pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize, usize, usize), crate::db::Fail> {
     let named = super::runs::named_of_kinds(pool, project, &["version", "milestone", "task"]).await?;
     // Блок «Требования» этапа — свёрнутый `<details>`. Читается он целиком и
-    // построчно, мимо строк с оговоркой об удалении: имя в такой строке
-    // названо, чтобы сказать, что его больше нет.
+    // построчно, мимо зачёркнутых имён: такое имя названо, чтобы сказать,
+    // что его больше нет.
     let terms = crate::scheme::Terms::load(pool, project).await?;
     let milestone_requirements: Vec<(String, String)> = {
         let client = crate::db::conn(pool).await?;
@@ -123,10 +123,7 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize,
             let Some(block) = content.split(marker).nth(1) else { continue };
             let block = block.split("</details>").next().unwrap_or("");
             for line in block.lines() {
-                if super::runs::gone(line) {
-                    continue;
-                }
-                for name in super::ids::expand(line) {
+                for name in super::ids::said(line) {
                     if !name.starts_with("FR-") {
                         continue;
                     }
@@ -167,10 +164,7 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize,
                 let Some(block) = content.split(marker).nth(1) else { continue };
                 let block = block.split("</details>").next().unwrap_or("");
                 for line in block.lines() {
-                    if super::runs::gone(line) {
-                        continue;
-                    }
-                    for name in super::ids::expand(line) {
+                    for name in super::ids::said(line) {
                         if seen.insert(format!("{milestone} {row_kind} {name}")) {
                             out.push((milestone.clone(), row_kind.to_owned(), name));
                         }

@@ -69,18 +69,8 @@ pub(crate) async fn named_of_kinds(
     Ok(rows.iter().map(|r| (r.get(0), r.get(1))).collect())
 }
 
-/// Оговорка об удалении: имя в такой строке названо, чтобы сказать, что его
-/// больше нет.
-pub(crate) fn gone(line: &str) -> bool {
-    GONE.is_match(line)
-}
-
 /// Строка прогона: имя, этап, задача, заголовок и признаки записи.
 type RunRow = (String, String, String, String, String, String, bool, bool, i32, bool);
-
-static GONE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)удал|отмен|снят|прежн|историч|устар|не существ").expect("образец оговорки")
-});
 
 pub(crate) async fn project(
     pool: &Pool,
@@ -154,14 +144,10 @@ pub(crate) async fn project(
         for r in &rows {
             let feature: String = r.get(0);
             let value: String = r.get(1);
-            // Построчно и мимо оговорок. «`FR-STP-11…13` удалены» — это не
-            // называние требования, а запись о его удалении: посчитать её
-            // связью значит завести шесть связей на то, чего нет.
-            let named: Vec<String> = value
-                .lines()
-                .filter(|l| !gone(l))
-                .flat_map(super::ids::expand)
-                .collect();
+            // «~~`FR-STP-11…13`~~ удалены» — не называние требования, а запись
+            // о его удалении: посчитать её связью значит завести шесть связей
+            // на то, чего нет.
+            let named: Vec<String> = value.lines().flat_map(super::ids::said).collect();
             for name in named {
                 // Только `FR`. Нефункциональные требования сквозные: они не
                 // принадлежат фиче и не обязаны быть в ней названы, а связь

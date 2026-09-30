@@ -252,10 +252,7 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize,
             let value: String = r.get(1);
             let screen: String = r.get(2);
             for line in value.lines() {
-                if super::runs::gone(line) {
-                    continue;
-                }
-                for name in super::ids::expand(line) {
+                for name in super::ids::said(line) {
                     if !(name.starts_with("FR-") || name.starts_with("NFR-")) {
                         continue;
                     }
