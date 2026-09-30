@@ -5699,10 +5699,11 @@ pub(crate) async fn gate(
                     m.insert("kind".into(), json!(r.get::<_, Option<String>>(3).unwrap_or_default()));
                     m.insert("means".into(), json!(r.get::<_, Option<String>>(6).unwrap_or_default()));
                     m.insert("owner".into(), json!(r.get::<_, Option<String>>(9).unwrap_or_default()));
-                    // Довод пустого предмета — только при пустом предмете. Рядом с
-                    // вердиктом, померенным по сущностям, он читался как причина
-                    // этого вердикта; там замер несёт `subjectRows`.
-                    if m.get("subjectRows") == Some(&json!(0)) {
+                    // Довод пустого предмета — при пустом предмете или вместе с
+                    // текстами правила. Рядом с вердиктом, померенным по сущностям,
+                    // он читался как причина этого вердикта; там замер несёт
+                    // `subjectRows`.
+                    if sql || m.get("subjectRows") == Some(&json!(0)) {
                         m.insert("subjectWhy".into(), json!(r.get::<_, Option<String>>(12).unwrap_or_default()));
                     }
                     // Тексты отдаются только по просьбе: три четверти ответа —
@@ -13713,7 +13714,7 @@ async fn compute_next_step(
 
         // ПУСТОЙ ПРЕДМЕТ — не «пройдено». Ступень «в плане документов не
         // осталось ненаписанных» проходилась потому, что плана нет вовсе.
-        let verdict = if subject_empty(&client, project, &subject_query).await {
+        let verdict = if subject_rows(&client, project, &subject_query).await == Some(0) {
             Verdict {
                 state: "unknown",
                 violations: 0,
@@ -14093,21 +14094,18 @@ pub(crate) async fn measure_process(
 /// множество не ломается подсадкой.
 ///
 /// Предмет ОБЪЯВЛЯЕТСЯ. Не объявлен — проверять нечего, и ступень отвечает как
-/// прежде: выводить предмет из запроса значило бы гадать.
-async fn subject_empty(
+/// прежде: выводить предмет из запроса значило бы гадать. Тогда строк `None`.
+async fn subject_rows(
     client: &deadpool_postgres::Client,
     project: &str,
     subject_query: &str,
-) -> bool {
+) -> Option<usize> {
     if subject_query.trim().is_empty() {
-        return false;
+        return None;
     }
-    match client.query(subject_query, &[&project]).await {
-        Ok(rows) => rows.is_empty(),
-        // Запрос предмета, который не исполнился, — не «предмет пуст». Судит
-        // тогда сам способ, и его отказ будет виден своим словом.
-        Err(_) => false,
-    }
+    // Запрос предмета, который не исполнился, — не «предмет пуст». Судит
+    // тогда сам способ, и его отказ будет виден своим словом.
+    client.query(subject_query, &[&project]).await.ok().map(|rows| rows.len())
 }
 
 /// Кто и чем виноват: поля двери `blame-set`.
@@ -14218,7 +14216,8 @@ pub(crate) async fn process_state(
         // номера, что у обходчика, читали бы соседнее поле.
         let subject_query: String = r.get(11);
         let subject_why: String = r.get(12);
-        let empty = subject_empty(&client, project, &subject_query).await;
+        let rows = subject_rows(&client, project, &subject_query).await;
+        let empty = rows == Some(0);
         // Находки отдаются ЦЕЛИКОМ. Пятёрка хороша там, где ответ читают мельком;
         // эту ручку открывают затем, чтобы чинить, и «нарушений 76, показано 5»
         // — это работа по половине предмета вслепую.
@@ -14227,7 +14226,7 @@ pub(crate) async fn process_state(
         } else {
             Some(execute_method_upto(&*client, project, &method_kind, &method, 200, 0).await)
         };
-        out.push(json!({
+        let mut step = json!({
             "ord": ord,
             "question": r.get::<_, String>(1),
             "methodKind": method_kind,
@@ -14241,10 +14240,6 @@ pub(crate) async fn process_state(
             "touches": r.get::<_, String>(8),
             "workRun": r.get::<_, String>(10),
             "subjectQuery": subject_query,
-            // Объявление ступени отдаётся ЦЕЛИКОМ: довод пустого предмета доезжал
-            // только внутри `why`, и то лишь когда предмет и вправду пуст. Правило
-            // читается, а не собирается обратно из объяснений.
-            "subjectWhy": subject_why.clone(),
             "computed": match &verdict {
                 Some(v) => v.state,
                 None if skipped => "skipped",
@@ -14258,10 +14253,23 @@ pub(crate) async fn process_state(
                 None => if subject_why.trim().is_empty() {
                     "предмет ступени пуст: мерить нечего, и это не «пройдено»".to_owned()
                 } else {
-                    subject_why
+                    subject_why.clone()
                 },
             },
-        }));
+        });
+        // Довод пустого предмета — только при пустом предмете. Рядом с
+        // `passed`, померенным по сущностям, он читался как причина вердикта,
+        // как у пункта гейта (семь пунктов G4 в tot-ade). Объявление целиком
+        // читается в `instrument/ladder.json`, откуда ступени и заводятся.
+        if let Some(m) = step.as_object_mut() {
+            if let Some(n) = rows {
+                m.insert("subjectRows".into(), json!(n));
+                if n == 0 {
+                    m.insert("subjectWhy".into(), json!(subject_why));
+                }
+            }
+        }
+        out.push(step);
     }
     Ok(json!({
         "process": process,
@@ -16873,7 +16881,13 @@ mod fact_places {
 /// tot-ade разработчик назвал пустыми, хотя они мерились по коду.
 #[cfg(test)]
 mod subject_why_only_when_empty {
-    use serde_json::json;
+    use serde_json::{json, Value};
+
+    fn find(list: &Value, key: &str, id: Value) -> Value {
+        list.as_array().expect("перечень").iter()
+            .find(|i| i[key] == id).cloned()
+            .unwrap_or_else(|| panic!("нет {key}={id}: {list}"))
+    }
 
     #[tokio::test]
     #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
@@ -16887,22 +16901,30 @@ mod subject_why_only_when_empty {
                             CREATE SCHEMA subject_why_only_when_empty;")
             .await.expect("своя схема заводится");
         crate::projector::ensure(&pool).await.expect("схема встаёт на пустой базе");
+        let pass = "SELECT 1 WHERE $1::text IS NULL";
+        let three = "SELECT g FROM generate_series(1, 3) g WHERE $1::text IS NOT NULL";
         pool.get().await.expect("соединение")
-            .batch_execute(
+            .batch_execute(&format!(
                 "DELETE FROM gate_item;
                  INSERT INTO gate_item (phase, id, item, kind, query, subject_query, subject_why) VALUES
-                   ('G4', 'measured', 'по сущностям', 'query', 'SELECT 1 WHERE $1::text IS NULL',
-                    'SELECT g FROM generate_series(1, 3) g WHERE $1::text IS NOT NULL', 'протокола нет'),
-                   ('G4', 'vacuous', 'ни о чём', 'query', 'SELECT 1 WHERE $1::text IS NULL',
-                    'SELECT 1 WHERE $1::text IS NULL', 'протокола нет');")
-            .await.expect("пункты заводятся");
+                   ('G4', 'measured', 'по сущностям', 'query', '{pass}', '{three}', 'протокола нет'),
+                   ('G4', 'vacuous', 'ни о чём', 'query', '{pass}', '{pass}', 'протокола нет'),
+                   ('G4', 'broken', 'предмет упал', 'query', '{pass}',
+                    'SELECT x FROM нет_таблицы WHERE $1::text IS NULL', 'протокола нет'),
+                   ('G4', 'bare', 'без предмета', 'query', '{pass}', '', '');
+                 INSERT INTO harness_process (set_name, name) VALUES ('godzy', 'проба');
+                 INSERT INTO harness_process_step (set_name, process, ord, question, method_kind,
+                                                   method, owner_kind, touches, subject_query, subject_why)
+                 VALUES ('godzy', 'проба', 1, 'по сущностям', 'query', '{pass}', 'none', 'corpus',
+                         '{three}', 'плана нет'),
+                        ('godzy', 'проба', 2, 'ни о чём', 'query', '{pass}', 'none', 'corpus',
+                         '{pass}', 'плана нет'),
+                        ('godzy', 'проба', 3, 'предмет упал', 'query', '{pass}', 'none', 'corpus',
+                         'SELECT x FROM нет_таблицы WHERE $1::text IS NULL', 'плана нет');"))
+            .await.expect("пункты и ступени заводятся");
         crate::projector::measure_gates(&pool, "П", 0).await.expect("круг замера");
         let out = crate::projector::gate(&pool, "П", Some("G4"), false).await.expect("дверь гейта");
-        let item = |id: &str| {
-            out["gates"][0]["items"].as_array().expect("пункты гейта").iter()
-                .find(|i| i["id"] == json!(id)).cloned()
-                .unwrap_or_else(|| panic!("нет пункта {id}: {out}"))
-        };
+        let item = |id: &str| find(&out["gates"][0]["items"], "id", json!(id));
 
         let measured = item("measured");
         assert_eq!(measured["computed"], json!("passed"), "{measured}");
@@ -16913,6 +16935,35 @@ mod subject_why_only_when_empty {
         assert_eq!(vacuous["computed"], json!("passed"), "пустой предмет больше не проходит: {vacuous}");
         assert_eq!(vacuous["subjectRows"], json!(0), "{vacuous}");
         assert_eq!(vacuous["subjectWhy"], json!("протокола нет"), "{vacuous}");
+
+        // Упавший запрос предмета и необъявленный предмет строк не имеют:
+        // ноль там был бы выдуманным «предмет пуст».
+        for id in ["broken", "bare"] {
+            let it = item(id);
+            assert!(it.get("subjectRows").is_none(), "строки предмета у «{id}»: {it}");
+            assert!(it.get("subjectWhy").is_none(), "довод пустоты у «{id}»: {it}");
+        }
+        assert_eq!(item("broken")["computed"], json!("unknown"), "{}", item("broken"));
+
+        // Тексты правила по просьбе — правило целиком, и довод в нём.
+        let full = crate::projector::gate(&pool, "П", Some("G4"), true).await.expect("дверь гейта с текстами");
+        let measured = find(&full["gates"][0]["items"], "id", json!("measured"));
+        assert_eq!(measured["subjectWhy"], json!("протокола нет"), "правило без довода: {measured}");
+
+        // Дверь ступеней — тот же вопрос, тот же ответ.
+        let steps = crate::projector::process_state(&pool, "П", "проба").await.expect("дверь ступеней");
+        let measured = find(&steps["steps"], "ord", json!(1));
+        assert_eq!(measured["computed"], json!("passed"), "{measured}");
+        assert_eq!(measured["subjectRows"], json!(3), "{measured}");
+        assert!(measured.get("subjectWhy").is_none(), "довод пустоты у померенной ступени: {measured}");
+        let vacuous = find(&steps["steps"], "ord", json!(2));
+        assert_eq!(vacuous["subjectRows"], json!(0), "{vacuous}");
+        assert_eq!(vacuous["subjectWhy"], json!("плана нет"), "{vacuous}");
+        // Упавший запрос предмета — не «предмет пуст»: судит сам способ.
+        let broken = find(&steps["steps"], "ord", json!(3));
+        assert_eq!(broken["computed"], json!("passed"), "упавший предмет подменил вердикт способа: {broken}");
+        assert!(broken.get("subjectRows").is_none(), "строки у упавшего предмета: {broken}");
+        assert!(broken.get("subjectWhy").is_none(), "довод пустоты у упавшего предмета: {broken}");
 
         pool.get().await.expect("соединение")
             .batch_execute("DROP SCHEMA IF EXISTS subject_why_only_when_empty CASCADE")
