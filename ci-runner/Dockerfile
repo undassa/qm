@@ -33,7 +33,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # воркфлоу нельзя: `runner` получает sudo только на `pg_ctlcluster`, и так и
 # должно остаться — шаг с `apt-get` валил бы все Linux-работы.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl git jq tar gzip unzip sudo \
+      ca-certificates curl git jq tar gzip xz-utils unzip sudo \
       build-essential pkg-config libssl-dev \
       postgresql postgresql-contrib \
       openssh-server openssh-client \
@@ -61,6 +61,28 @@ RUN set -eux; \
     echo "listen_addresses = 'localhost'" >> "$conf/postgresql.conf"; \
     echo "runner ALL=(ALL) NOPASSWD: /usr/bin/pg_ctlcluster" > /etc/sudoers.d/pg; \
     chmod 440 /etc/sudoers.d/pg
+
+# Node и системные библиотеки Chromium — веб-проверки tot-ade (`M5-T99`: Svelte,
+# `just web-test` под Playwright с настоящим движком браузера). Node берётся
+# официальным архивом с nodejs.org со сверкой sha256, а не пакетом дистрибутива:
+# у Ubuntu 24.04 он 18-й, а набор зафиксировал 22-й. Библиотеки ОС для Chromium
+# ставит сам Playwright (`install-deps`) — от root и только при сборке образа:
+# у пользователя `runner` sudo нет и не будет. Сам браузер качает
+# `npx playwright install chromium` в свой кеш уже в работе (карточка `M5-T99`).
+# Версии — те, что назвал исполнитель `M5-T95`/`M5-T99` 2026-09-30.
+ARG NODE_VERSION=22.22.1
+ARG NODE_SHA256=9a6bc82f9b491279147219f6a18add1e18424dce90d41d2a5fcd69d4924ba3aa
+ARG PLAYWRIGHT_VERSION=1.63.0
+RUN set -eux; \
+    curl -fsSL -o /tmp/node.tar.xz \
+      "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz"; \
+    echo "${NODE_SHA256}  /tmp/node.tar.xz" | sha256sum -c -; \
+    tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1; \
+    rm /tmp/node.tar.xz; \
+    node --version; \
+    apt-get update; \
+    npx -y "playwright@${PLAYWRIGHT_VERSION}" install-deps chromium; \
+    rm -rf /var/lib/apt/lists/* /root/.npm
 
 # Вторая группа — затем, чтобы проверка «сохранение не теряет группу файла»
 # могла упасть: она меняет группу файла на другую группу пользователя, и у
