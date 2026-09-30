@@ -295,6 +295,10 @@ async fn output_within(
     let stdin = if input.is_empty() { Stdio::null() } else { Stdio::piped() };
     cmd.stdin(stdin).stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0).kill_on_drop(true);
     let mut child = cmd.spawn()?;
+    // Номер группы — сейчас, до ожидания: после `wait()` tokio номера
+    // потомка не отдаёт, а вышедший вожак может оставить в группе тех, кто
+    // держит его вывод (claude кончился, его фоновая команда жива).
+    let group = child.id();
     let (mut out, mut err) = (drain(child.stdout.take()), drain(child.stderr.take()));
     let mut feed = child.stdin.take();
     let done = async {
@@ -318,20 +322,21 @@ async fn output_within(
     match result {
         Ok(Ok(output)) => Ok(Some(output)),
         Ok(Err(e)) => {
-            put_out(&mut child, std::time::Duration::from_secs(TERM_GRACE_S)).await;
+            put_out(&mut child, group, std::time::Duration::from_secs(TERM_GRACE_S)).await;
             Err(e)
         }
         Err(_) => {
-            put_out(&mut child, std::time::Duration::from_secs(TERM_GRACE_S)).await;
+            put_out(&mut child, group, std::time::Duration::from_secs(TERM_GRACE_S)).await;
             Ok(None)
         }
     }
 }
 
-/// Погасить группу потомка: TERM, а если через `grace` она жива — KILL.
-/// Группа — та, которую потомок завёл при запуске (`process_group(0)`).
-async fn put_out(child: &mut tokio::process::Child, grace: std::time::Duration) {
-    let Some(group) = child.id() else { return };
+/// Погасить группу `group`, которую потомок завёл при запуске
+/// (`process_group(0)`): TERM, а если через `grace` она жива — KILL.
+/// `child` — её вожак, его пожинаем по ходу.
+async fn put_out(child: &mut tokio::process::Child, group: Option<u32>, grace: std::time::Duration) {
+    let Some(group) = group else { return };
     let signal = |sig: &str| {
         std::process::Command::new("kill")
             .args([sig, "--", &format!("-{group}")])
@@ -2248,6 +2253,27 @@ mod tests {
         assert!(took < std::time::Duration::from_secs(5), "ожидание кончилось через {took:?}");
     }
 
+    /// Вожак вышел, а его внук в той же группе держит вывод: потолок гасит
+    /// внука. Номер группы снимается до ожидания — после `wait()` tokio
+    /// номера потомка уже не отдаёт.
+    #[tokio::test]
+    async fn a_grandchild_outliving_its_leader_is_put_out() {
+        let tmp = std::env::temp_dir().join(format!("mh-outlived-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).expect("каталог заводится");
+        let pidfile = tmp.join("pid");
+        let mut cmd = tokio::process::Command::new("bash");
+        cmd.args(["-c", &format!("sleep 30 & echo $! > {}; exit 0", pidfile.display())]);
+        assert!(super::output_within(cmd, 1, b"").await.expect("команда заводится").is_none(), "потолок вышел");
+        let pid = std::fs::read_to_string(&pidfile).expect("внук записал себя");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let alive = std::path::Path::new(&format!("/proc/{}", pid.trim())).exists();
+        if alive {
+            std::process::Command::new("kill").args(["-KILL", pid.trim()]).status().ok();
+        }
+        std::fs::remove_dir_all(&tmp).ok();
+        assert!(!alive, "внук {} пережил вышедшего вожака и потолок", pid.trim());
+    }
+
     /// Группа, глухая к TERM, добивается KILL по истечении отсрочки.
     #[tokio::test]
     async fn a_group_deaf_to_term_is_killed_after_the_grace() {
@@ -2260,7 +2286,8 @@ mod tests {
         while std::fs::read_to_string(&pidfile).map_or(true, |p| !p.ends_with('\n')) {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        super::put_out(&mut child, std::time::Duration::from_secs(1)).await;
+        let group = child.id();
+        super::put_out(&mut child, group, std::time::Duration::from_secs(1)).await;
         let pid = std::fs::read_to_string(&pidfile).expect("внук записал себя");
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         let alive = std::path::Path::new(&format!("/proc/{}", pid.trim())).exists();
