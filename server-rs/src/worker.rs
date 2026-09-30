@@ -261,14 +261,40 @@ pub fn test_lines(text: &str) -> Vec<(String, String, String)> {
     rows
 }
 
+/// Вывод команды с потолком времени; `None` — потолок вышел.
+///
+/// ПО ИСТЕЧЕНИИ УБИВАЕТСЯ ВСЯ ГРУППА ПРОЦЕССОВ, А НЕ ТОЛЬКО ЗАПУЩЕННЫЙ.
+/// Брошенный `tokio::time::timeout` будущий вывод процесса не убивает: cargo
+/// жил бы дальше и держал замок каталога сборки, и следующий прогон ждал бы
+/// его. Одного `kill_on_drop` мало: профиль идёт через `bash -c "( … )"`, и
+/// убит был бы только bash, а cargo под ним осиротел бы. Поэтому своя группа
+/// и `kill` по ней.
+async fn output_within(mut cmd: tokio::process::Command, limit_s: u64) -> std::io::Result<Option<std::process::Output>> {
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0).kill_on_drop(true);
+    let child = cmd.spawn()?;
+    let group = child.id();
+    match tokio::time::timeout(std::time::Duration::from_secs(limit_s), child.wait_with_output()).await {
+        Ok(out) => out.map(Some),
+        Err(_) => {
+            if let Some(group) = group {
+                if let Err(e) = std::process::Command::new("kill").args(["-KILL", "--", &format!("-{group}")]).status() {
+                    println!("группа {group} после потолка не убита: {e}");
+                }
+            }
+            Ok(None)
+        }
+    }
+}
+
 /// `gh api <путь>` — с отказом словом, а не пустой строкой: пустой ответ
 /// разобрался бы в «проверок ноль» и лёг отметкой «прогон взят».
 async fn gh(path: &str) -> Result<String, String> {
-    let run = tokio::process::Command::new("gh").args(["api", path]).output();
-    let out = match tokio::time::timeout(std::time::Duration::from_secs(120), run).await {
-        Err(_) => return Err(format!("gh api {path} не уложился в 120 с")),
-        Ok(Err(e)) => return Err(format!("gh не завёлся: {e}")),
-        Ok(Ok(o)) => o,
+    let mut run = tokio::process::Command::new("gh");
+    run.args(["api", path]);
+    let out = match output_within(run, 120).await {
+        Ok(Some(o)) => o,
+        Ok(None) => return Err(format!("gh api {path} не уложился в 120 с")),
+        Err(e) => return Err(format!("gh не завёлся: {e}")),
     };
     if !out.status.success() {
         return Err(format!("gh api {path} отказал: {}", String::from_utf8_lossy(&out.stderr).trim()));
@@ -456,6 +482,22 @@ fn stale_artefacts(
     }
     out.sort();
     Ok(out)
+}
+
+/// Убирать ли после прогона, и по какому перечню. `listing` — ответ запроса
+/// перечня, `None` — запрос не задавали.
+///
+/// Грязное дерево — отказ при любом перечне: в дереве мог работать чужой
+/// cargo (замер 2026-09-21 у проверки чистоты после прогона), и удаление шло
+/// бы из-под его сборки. Отказ запроса — отказ уборки с его причиной.
+fn sweep_list(
+    dirty_after: bool,
+    listing: Option<Result<Vec<std::path::PathBuf>, String>>,
+) -> Result<Vec<std::path::PathBuf>, String> {
+    if dirty_after {
+        return Err("в дереве во время прогона работал кто-то ещё".into());
+    }
+    listing.unwrap_or_else(|| Err("перечень cargo не спрошен".into()))
 }
 
 /// Убрать из каталога сборки дерева прогона выход, которого прогон, начатый
@@ -877,6 +919,25 @@ impl Worker {
         Ok(tree)
     }
 
+    /// Перечень выхода сборки из дерева прогона для уборки.
+    ///
+    /// Отказ здесь — отказ уборки, а не прогона: прогон уже записан, и
+    /// без перечня судить, что живо, нечем (довод у `cargo_listing`).
+    async fn cargo_list(cwd: &str) -> Result<Vec<std::path::PathBuf>, String> {
+        let mut cmd = tokio::process::Command::new("cargo");
+        cmd.args(CARGO_LIST).current_dir(cwd).env("CARGO_TERM_COLOR", "never");
+        let out = match output_within(cmd, TEST_TIMEOUT_S).await {
+            Ok(Some(o)) => o,
+            Ok(None) => return Err(format!("запрос перечня не уложился в {TEST_TIMEOUT_S} с")),
+            Err(e) => return Err(format!("запрос перечня не завёлся: {e}")),
+        };
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr);
+            return Err(format!("запрос перечня отказал: {}", cut(err.trim(), 400)));
+        }
+        cargo_listing(&String::from_utf8_lossy(&out.stdout))
+    }
+
     /// Один профиль прогона: команда, её вывод и разобранные строки.
     ///
     /// ПРОФИЛЕЙ ДВА, И ВТОРОЙ ОБЯЗАТЕЛЕН. `just test` исключает зеркала, поэтому
@@ -890,27 +951,6 @@ impl Worker {
     /// Ненулевой код выхода у красного профиля — норма: `just red` обязан
     /// упасть. Поэтому «не собралось» здесь распознаётся по ПУСТОМУ разбору, а
     /// не по коду выхода.
-    /// Перечень выхода сборки из дерева прогона — `CARGO_LIST` и `cargo_listing`.
-    async fn cargo_list(cwd: &str) -> Result<Vec<std::path::PathBuf>, String> {
-        let run = tokio::process::Command::new("cargo")
-            .args(CARGO_LIST)
-            .current_dir(cwd)
-            .env("CARGO_TERM_COLOR", "never")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output();
-        let out = match tokio::time::timeout(std::time::Duration::from_secs(TEST_TIMEOUT_S), run).await {
-            Err(_) => return Err(format!("запрос перечня не уложился в {TEST_TIMEOUT_S} с")),
-            Ok(Err(e)) => return Err(format!("запрос перечня не завёлся: {e}")),
-            Ok(Ok(o)) => o,
-        };
-        if !out.status.success() {
-            let err = String::from_utf8_lossy(&out.stderr);
-            return Err(format!("запрос перечня отказал: {}", cut(err.trim(), 400)));
-        }
-        cargo_listing(&String::from_utf8_lossy(&out.stdout))
-    }
-
     async fn profile(cwd: &str, cmd: &str) -> Result<(Vec<(String, String, String)>, bool), String> {
         // ОДИН ПОТОК, А НЕ ДВА СКЛЕЕННЫХ. `cargo` печатает `Running tests/<файл>`
         // в stderr, а `test <имя> ... ok` — в stdout. Прежде оба читались
@@ -918,17 +958,12 @@ impl Worker {
         // всех имён проверок, и разбор, ведущий текущий бинарь, не видел ни
         // одного вовремя. Порядок здесь и есть связь, и рвался он склейкой.
         let joined = format!("( {} ) 2>&1", cmd);
-        let run = tokio::process::Command::new("bash")
-            .args(["-c", &joined])
-            .current_dir(cwd)
-            .env("CARGO_TERM_COLOR", "never")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output();
-        let out = match tokio::time::timeout(std::time::Duration::from_secs(TEST_TIMEOUT_S), run).await {
-            Err(_) => return Err(format!("прогон не уложился в {TEST_TIMEOUT_S} с")),
-            Ok(Err(e)) => return Err(format!("прогон не завёлся: {e}")),
-            Ok(Ok(o)) => o,
+        let mut run = tokio::process::Command::new("bash");
+        run.args(["-c", &joined]).current_dir(cwd).env("CARGO_TERM_COLOR", "never");
+        let out = match output_within(run, TEST_TIMEOUT_S).await {
+            Ok(Some(o)) => o,
+            Ok(None) => return Err(format!("прогон не уложился в {TEST_TIMEOUT_S} с")),
+            Err(e) => return Err(format!("прогон не завёлся: {e}")),
         };
         let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         Ok((test_lines(&text), out.status.success()))
@@ -1173,17 +1208,14 @@ impl Worker {
             // одну из двух сторон. Названо обоими: у обоих исходов одно
             // следствие — пульт показывает прежний замер.
             .map_err(|e| format!("прогон не дошёл до пульта (запись или отметка): {e:?}"))?;
-        if dirty_after {
-            println!("{} · уборка сборки не идёт: в дереве работал кто-то ещё", bundle.name);
-        } else {
-            match Self::cargo_list(&cwd).await {
-                Err(why) => println!("{} · уборка сборки не идёт: {why}", bundle.name),
-                Ok(listed) => {
-                    let (name, tree, dir) = (bundle.name.clone(), root.clone(), cwd.clone());
-                    let sweep = move || sweep_runner_target(&name, &tree, &dir, started, &listed);
-                    if let Err(e) = tokio::task::spawn_blocking(sweep).await {
-                        println!("{} · уборка сборки не завершилась: {e}", bundle.name);
-                    }
+        let listing = if dirty_after { None } else { Some(Self::cargo_list(&cwd).await) };
+        match sweep_list(dirty_after, listing) {
+            Err(why) => println!("{} · уборка сборки не идёт: {why}", bundle.name),
+            Ok(listed) => {
+                let (name, tree, dir) = (bundle.name.clone(), root.clone(), cwd.clone());
+                let sweep = move || sweep_runner_target(&name, &tree, &dir, started, &listed);
+                if let Err(e) = tokio::task::spawn_blocking(sweep).await {
+                    println!("{} · уборка сборки не завершилась: {e}", bundle.name);
                 }
             }
         }
@@ -2097,6 +2129,40 @@ mod tests {
             "единица, собранная запросом, — отказ с её именем, а вышло {refused:?}"
         );
         assert!(super::cargo_listing("").is_err(), "пустой вывод — отказ, а не пустой перечень");
+    }
+
+    /// Уборка идёт только по чистому дереву и ответившему запросу перечня;
+    /// каждый отказ называет свою причину.
+    #[test]
+    fn the_sweep_runs_only_on_a_clean_tree_with_a_listing() {
+        let list = || vec![std::path::PathBuf::from("/t/debug/deps/libdep-c05783f808fda616.rlib")];
+        assert_eq!(super::sweep_list(false, Some(Ok(list()))), Ok(list()));
+        let dirty = super::sweep_list(true, Some(Ok(list())));
+        assert!(
+            dirty.as_ref().is_err_and(|why| why.contains("кто-то ещё")),
+            "грязное дерево — отказ даже с перечнем, а вышло {dirty:?}"
+        );
+        for why in ["запрос перечня не уложился в 1800 с", "запрос перечня отказал: error"] {
+            assert_eq!(super::sweep_list(false, Some(Err(why.into()))), Err(why.into()), "причина запроса доходит");
+        }
+        assert!(super::sweep_list(false, None).is_err(), "неспрошенный перечень — отказ");
+    }
+
+    /// Потолок времени убивает и внуков: cargo под `bash -c "( … )"` не
+    /// переживает прогон, упавший по времени.
+    #[tokio::test]
+    async fn a_timed_out_command_takes_its_grandchildren_along() {
+        let tmp = std::env::temp_dir().join(format!("mh-within-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).expect("каталог заводится");
+        let pidfile = tmp.join("pid");
+        let mut cmd = tokio::process::Command::new("bash");
+        cmd.args(["-c", &format!("( sleep 60 & echo $! > {} ; wait )", pidfile.display())]);
+        assert!(super::output_within(cmd, 1).await.expect("команда заводится").is_none(), "потолок вышел");
+        let pid = std::fs::read_to_string(&pidfile).expect("внук записал себя");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let alive = std::path::Path::new(&format!("/proc/{}", pid.trim())).exists();
+        std::fs::remove_dir_all(&tmp).ok();
+        assert!(!alive, "внук {} пережил потолок", pid.trim());
     }
 
     fn row(name: &str, verdict: &str, binary: &str) -> (String, String, String) {
