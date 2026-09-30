@@ -5371,19 +5371,29 @@ pub(crate) async fn measure_gates(pool: &Pool, project: &str, since: i64) -> Res
         // прогонялась. Есть сущности — пункт мерится, и красное только чинится.
         let subject: String = r.get(5);
         let subject_rows = if subject.trim().is_empty() {
-            Ok(1)
+            Ok(None)
         } else {
-            client.query(subject.as_str(), &[&project]).await.map(|rows| rows.len())
+            client.query(subject.as_str(), &[&project]).await.map(|rows| Some(rows.len()))
         };
+        // ЧИСЛО СТРОК ПРЕДМЕТА ЛОЖИТСЯ В ЗАМЕР. Без него дверь не отличала
+        // зелёное по пятидесяти сущностям от зелёного по пустому предмету и
+        // печатала довод пустоты рядом с обоими: семь пунктов G4 в tot-ade,
+        // померенных по коду, прочитаны разработчиком как «зелено ни о чём».
         let entry = match subject_rows {
-            Ok(0) => {
+            Ok(Some(0)) => {
                 let w: String = r.get(6);
-                json!({ "computed": "passed", "violations": 0, "detail": [],
+                json!({ "computed": "passed", "violations": 0, "detail": [], "subjectRows": 0,
                         "why": if w.trim().is_empty() {
                             "сущностей пункта в проекте нет: проверять нечего".to_owned()
                         } else { w } })
             }
-            Ok(_) => measure_item(&client, project, &kind, query.as_deref(), r).await?,
+            Ok(n) => {
+                let mut e = measure_item(&client, project, &kind, query.as_deref(), r).await?;
+                if let (Some(n), Some(m)) = (n, e.as_object_mut()) {
+                    m.insert("subjectRows".into(), json!(n));
+                }
+                e
+            }
             // Запрос предмета, который не исполнился, — не «предмет пуст» и не
             // повод мерить: транзакция после ошибки прервана до точки возврата.
             Err(e) => json!({ "computed": "unknown",
@@ -5689,7 +5699,12 @@ pub(crate) async fn gate(
                     m.insert("kind".into(), json!(r.get::<_, Option<String>>(3).unwrap_or_default()));
                     m.insert("means".into(), json!(r.get::<_, Option<String>>(6).unwrap_or_default()));
                     m.insert("owner".into(), json!(r.get::<_, Option<String>>(9).unwrap_or_default()));
-                    m.insert("subjectWhy".into(), json!(r.get::<_, Option<String>>(12).unwrap_or_default()));
+                    // Довод пустого предмета — только при пустом предмете. Рядом с
+                    // вердиктом, померенным по сущностям, он читался как причина
+                    // этого вердикта; там замер несёт `subjectRows`.
+                    if m.get("subjectRows") == Some(&json!(0)) {
+                        m.insert("subjectWhy".into(), json!(r.get::<_, Option<String>>(12).unwrap_or_default()));
+                    }
                     // Тексты отдаются только по просьбе: три четверти ответа —
                     // это они, а спрашивают их редко. Довод у сигнатуры.
                     if sql {
@@ -16850,5 +16865,57 @@ mod fact_places {
         }
         client.batch_execute("DROP SCHEMA IF EXISTS fact_places CASCADE; DROP SCHEMA IF EXISTS fact_places_other CASCADE")
             .await.expect("схемы снимаются");
+    }
+}
+
+/// Довод пустого предмета печатался рядом с каждым вердиктом, и зелёное по
+/// пятидесяти сущностям читалось как зелёное ни о чём: семь пунктов G4 в
+/// tot-ade разработчик назвал пустыми, хотя они мерились по коду.
+#[cfg(test)]
+mod subject_why_only_when_empty {
+    use serde_json::json;
+
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn a_measured_pass_carries_rows_and_an_empty_one_carries_its_reason() {
+        let url = std::env::var("MH_TEST_DB_URL").expect("MH_TEST_DB_URL: адрес пустой базы");
+        let apart = format!("{}{}", if url.contains('?') { '&' } else { '?' },
+                            "options=-c%20search_path%3Dsubject_why_only_when_empty");
+        let pool = crate::db::pool(&format!("{url}{apart}"), 2).expect("пул тестовой базы");
+        pool.get().await.expect("соединение")
+            .batch_execute("DROP SCHEMA IF EXISTS subject_why_only_when_empty CASCADE;
+                            CREATE SCHEMA subject_why_only_when_empty;")
+            .await.expect("своя схема заводится");
+        crate::projector::ensure(&pool).await.expect("схема встаёт на пустой базе");
+        pool.get().await.expect("соединение")
+            .batch_execute(
+                "DELETE FROM gate_item;
+                 INSERT INTO gate_item (phase, id, item, kind, query, subject_query, subject_why) VALUES
+                   ('G4', 'measured', 'по сущностям', 'query', 'SELECT 1 WHERE $1::text IS NULL',
+                    'SELECT g FROM generate_series(1, 3) g WHERE $1::text IS NOT NULL', 'протокола нет'),
+                   ('G4', 'vacuous', 'ни о чём', 'query', 'SELECT 1 WHERE $1::text IS NULL',
+                    'SELECT 1 WHERE $1::text IS NULL', 'протокола нет');")
+            .await.expect("пункты заводятся");
+        crate::projector::measure_gates(&pool, "П", 0).await.expect("круг замера");
+        let out = crate::projector::gate(&pool, "П", Some("G4"), false).await.expect("дверь гейта");
+        let item = |id: &str| {
+            out["gates"][0]["items"].as_array().expect("пункты гейта").iter()
+                .find(|i| i["id"] == json!(id)).cloned()
+                .unwrap_or_else(|| panic!("нет пункта {id}: {out}"))
+        };
+
+        let measured = item("measured");
+        assert_eq!(measured["computed"], json!("passed"), "{measured}");
+        assert_eq!(measured["subjectRows"], json!(3), "{measured}");
+        assert!(measured.get("subjectWhy").is_none(), "довод пустоты у померенного: {measured}");
+
+        let vacuous = item("vacuous");
+        assert_eq!(vacuous["computed"], json!("passed"), "пустой предмет больше не проходит: {vacuous}");
+        assert_eq!(vacuous["subjectRows"], json!(0), "{vacuous}");
+        assert_eq!(vacuous["subjectWhy"], json!("протокола нет"), "{vacuous}");
+
+        pool.get().await.expect("соединение")
+            .batch_execute("DROP SCHEMA IF EXISTS subject_why_only_when_empty CASCADE")
+            .await.expect("схема снимается");
     }
 }
