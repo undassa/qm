@@ -16,10 +16,28 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Без него `lint` падал кодом 127, а `fmt-check` молча получал пустой список
 # пакетов и проверял не то, что должен: `python3` внутри `$(…)` `set -e` не
 # ловит. Хостовый раннер GitHub его имел, и при переезде на свой он пропал.
+# `openssh-server` и `openssh-client` — удалённая половина матрицы `NFR-10`
+# (`Q-165`, форма `4а`). Решение владельца 2026-09-24: sshd поднимается ОБЫЧНЫМ
+# ПРОЦЕССОМ в этом же контейнере, без root, на высоком порту, вход тем же
+# пользователем `runner` — правил `sudoers` это не добавляет, вложенного движка
+# контейнеров не требует. Тот же приём, что у postgres рядом: сервер ставится в
+# образ, а не просится блоком `services:`.
+#
+# Поднимает его сама проверка `nfr_10_process_tree_on_every_target_os`: свой ключ,
+# свой конфиг, свой каталог в `/tmp`. Без этих двух пакетов она красна — и красна
+# честно: зелёная оттого, что механизма нет, она была бы неотличима от проверки,
+# ничего не спросившей.
+# `libwebkit2gtk-4.1-dev`, `libsoup-3.0-dev`, `libgtk-3-dev` — окно tot-ade
+# (`tot-window`, Tauri) входит в воркспейс, и любая сборка `--workspace` на Linux
+# линкует WebKitGTK (решение держателя Q-214, 2026-09-30). Ставить их шагом
+# воркфлоу нельзя: `runner` получает sudo только на `pg_ctlcluster`, и так и
+# должно остаться — шаг с `apt-get` валил бы все Linux-работы.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl git jq tar gzip unzip sudo \
       build-essential pkg-config libssl-dev \
       postgresql postgresql-contrib \
+      openssh-server openssh-client \
+      libwebkit2gtk-4.1-dev libsoup-3.0-dev libgtk-3-dev \
       python3 \
  && rm -rf /var/lib/apt/lists/*
 
