@@ -67,6 +67,7 @@ const КОЛОНКА: Record<string, [string, string]> = {
   priority: ["приоритет", "priority"],
   satisfied: ["удовлетворено", "satisfied"],
   checks: ["пров.", "chk"],
+  droppedChecks: ["снято", "dropped"],
   stories: ["ист.", "sty"],
   tasks: ["зад.", "tsk"],
   needs: ["потр.", "need"],

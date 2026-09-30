@@ -23,6 +23,18 @@ SELECT t.id || ' — ни одно имя в перечне не подошло 
                                 AND f.name IN (SELECT value FROM scheme($1) WHERE role = 'field.red-checks') AND trim(f.value) <> ''
  WHERE t.project_id = $1 AND t.kind = 'red'
    AND NOT EXISTS (SELECT 1 FROM project_task_check c WHERE c.project_id = t.project_id AND c.task_id = t.id)
+   AND NOT EXISTS (SELECT 1 FROM project_check_dropped d WHERE d.project_id = t.project_id AND d.task_id = t.id)
+UNION ALL
+-- У ПУСТОЙ СВЯЗИ ПРИ НЕПУСТОМ ПЕРЕЧНЕ ДВЕ ПРИЧИНЫ. Имя подошло под образец,
+-- но в строке стоит слово оговорки — «ни одно имя не подошло» было бы про
+-- такую пару неправдой, и исполнитель правил бы образец вместо слова.
+SELECT t.id || ' — имена перечня сняты словом оговорки: '
+       || string_agg('`' || d.check_id || '` — в строке ' || d.words, '; ' ORDER BY d.check_id)
+  FROM project_plan_tasks t
+  JOIN project_check_dropped d ON d.project_id = t.project_id AND d.task_id = t.id
+ WHERE t.project_id = $1 AND t.kind = 'red'
+   AND NOT EXISTS (SELECT 1 FROM project_task_check c WHERE c.project_id = t.project_id AND c.task_id = t.id)
+ GROUP BY t.id
 UNION ALL
 SELECT t.id || ' — нет раздела «Признак готовности»' FROM project_plan_tasks t WHERE t.project_id = $1 AND t.kind = 'red' AND NOT EXISTS (SELECT 1 FROM project_document_sections s WHERE s.project_id = t.project_id AND s.entity_kind = t.entity_kind AND s.entity_name = t.entity_name AND s.title = 'Признак готовности')
 UNION ALL

@@ -31,6 +31,7 @@ import sys
 # сама таблица фактов. Список снимается оттуда: `grep 'INSERT INTO project_'`.
 ИСТОЧНИКИ = (
     "code_fact",
+    "project_check_dropped",
     "project_code_dir",
     "project_code_file",
     "project_crate",
@@ -38,6 +39,7 @@ import sys
     "project_task_check",
     "project_task_operation",
     "project_written_check",
+    "project_written_check_dropped",
 )
 
 # Отрицательная позиция: пункт краснеет ОТ ОТСУТСТВИЯ записи, а не от наличия.

@@ -243,9 +243,14 @@ SELECT t.id || ' — заявлений «проверки зелены» не �
    AND t.kind = 'dev' AND t.state = 'closed' AND NOT r.done AND r.check_id = ''
  GROUP BY t.project_id, t.id
 UNION ALL
-SELECT t.id || ' — проверки пункта приёмки нет среди прочитанного датчиком: ' || r.check_id
+-- Имя, которое строка комментария назвала, а слово оговорки сняло, названо со
+-- словом: «нет среди прочитанного» про него неправда, и автор искал бы
+-- ненаписанную проверку вместо слова в своей строке.
+SELECT t.id || coalesce(' — `' || wd.check_id || '` не найдена: в строке комментария ' || wd.words,
+                        ' — проверки пункта приёмки нет среди прочитанного датчиком: ' || r.check_id)
   FROM project_plan_tasks t
   JOIN task_ready_item r ON r.project_id = t.project_id AND r.task_id = t.id
+  LEFT JOIN project_written_check_dropped wd ON wd.project_id = t.project_id AND wd.check_id = r.check_id
  WHERE t.project_id = $1 AND fact_fresh($1, 'test-name') AND fact_fresh($1, 'written-tc')
    AND t.kind = 'dev' AND t.state = 'closed' AND NOT r.done
    AND r.check_id <> ''
@@ -292,6 +297,9 @@ UNION ALL
 -- сценария, и пять несделанных дел выглядели одинаково.
 SELECT а.task_id || ' — ' || count(*) || ' пунктов переадресовано (' || string_agg(DISTINCT а.кому, ', ')
        || '), все адресаты закрыты, а ' || а.check_id || ' так и не доказан'
+       || coalesce((SELECT ': строка комментария его называет, но сняло ' || wd.words
+                      FROM project_written_check_dropped wd
+                     WHERE wd.project_id = $1 AND wd.check_id = а.check_id), '')
   FROM адресат а
  WHERE fact_fresh($1, 'written-tc') AND а.check_id <> ''
    -- Хоть один адресат ОТКРЫТ — долг у него, и он не просрочен.
