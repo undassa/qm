@@ -67,9 +67,11 @@ RUN set -eux; \
 # официальным архивом с nodejs.org со сверкой sha256, а не пакетом дистрибутива:
 # у Ubuntu 24.04 он 18-й, а набор зафиксировал 22-й. Библиотеки ОС для Chromium
 # ставит сам Playwright (`install-deps`) — от root и только при сборке образа:
-# у пользователя `runner` sudo нет и не будет. Сам браузер качает
+# sudo на apt у `runner` нет и не будет. Сам браузер качает
 # `npx playwright install chromium` в свой кеш уже в работе (карточка `M5-T99`).
-# Версии — те, что назвал исполнитель `M5-T95`/`M5-T99` 2026-09-30.
+# PLAYWRIGHT_VERSION обязана равняться версии `@playwright/test` в
+# `web/package-lock.json` tot-ade: перечень библиотек ОС зависит от версии, и
+# при расхождении браузер из работы падает там, без подсказки на этот образ.
 ARG NODE_VERSION=22.22.1
 ARG NODE_SHA256=9a6bc82f9b491279147219f6a18add1e18424dce90d41d2a5fcd69d4924ba3aa
 ARG PLAYWRIGHT_VERSION=1.63.0
