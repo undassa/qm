@@ -75,7 +75,9 @@ async fn main() {
         for bundle in &config.projects {
             // Круг не должен уносить воркер: следующий круг важнее.
             worker.chats(bundle).await;
-            worker.drive_runs(bundle).await;
+            if bundle.drive {
+                worker.drive_runs(bundle).await;
+            }
         }
         tokio::time::sleep(std::time::Duration::from_secs(mh_server::worker::TICK_S)).await;
     }

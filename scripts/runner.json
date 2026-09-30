@@ -13,7 +13,8 @@
         "cmd": "just test",
         "dir": "",
         "red": "just red"
-      }
+      },
+      "drive": false
     }
   ]
 }
