@@ -67,6 +67,8 @@ const CIRCLES: i32 = 5; // потолок кругов починки — пра
 static GH_STAMP: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z ").unwrap());
 
+static ANSI: Lazy<Regex> = Lazy::new(|| Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]").unwrap());
+
 static MARKER: Lazy<Regex> = Lazy::new(|| {
     // Маркеры контракта дословны (заглавными). Порядок — по тяжести: DRIFT
     // встаёт всегда, NEEDS FIX важнее случайного слова PLAN в прозе.
@@ -166,9 +168,12 @@ fn fld<'a>(v: &'a Value, key: &str, who: &str) -> &'a Value {
 /// Журнал работы GitHub предваряет каждую строку временем
 /// (`2026-09-29T22:56:47.5896990Z test … ... FAILED`), а первую ещё и BOM;
 /// без их снятия `strip_prefix("test ")` не узнаёт ни одной строки, и
-/// разбор отвечает «проверок ноль» — неотличимо от несобравшегося.
+/// разбор отвечает «проверок ноль» — неотличимо от несобравшегося. Цвет
+/// снимается по той же причине: задание с `CARGO_TERM_COLOR=always` печатает
+/// `test x ... \e[31mFAILED\e[0m`, и вердикт не узнавался.
 pub fn test_lines(text: &str) -> Vec<(String, String, String)> {
-    let lines: Vec<&str> = text
+    let plain = ANSI.replace_all(text, "");
+    let lines: Vec<&str> = plain
         .lines()
         .map(|l| {
             let l = l.trim_start_matches('\u{feff}');
@@ -273,6 +278,55 @@ async fn gh(path: &str) -> Result<String, String> {
 
 async fn gh_json(path: &str) -> Result<Value, String> {
     serde_json::from_str(&gh(path).await?).map_err(|e| format!("gh api {path}: ответ не разобран: {e}"))
+}
+
+/// `владелец/имя` из адреса `origin`, если он на GitHub.
+pub fn github_slug(url: &str) -> Option<String> {
+    let url = url.trim();
+    let path = ["git@github.com:", "ssh://git@github.com/", "https://github.com/", "http://github.com/"]
+        .iter()
+        .find_map(|p| url.strip_prefix(p))?;
+    let path = path.trim_end_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let (owner, name) = path.split_once('/')?;
+    (!owner.is_empty() && !name.is_empty() && !name.contains('/')).then(|| format!("{owner}/{name}"))
+}
+
+/// Прогон работы, годный в факт о стволе набора.
+#[derive(Debug, PartialEq)]
+pub struct TrunkRun {
+    pub id: i64,
+    pub attempt: i64,
+    pub sha: String,
+    pub started: String,
+}
+
+/// Прогон ствола — ветка по умолчанию, коммит из САМОГО репозитория набора и
+/// событие не от запроса на слияние; иначе `None`.
+///
+/// Имя ветки само по себе ничего не доказывает: форк держит свой `main`, и
+/// его прогон приходит в тот же список с `head_branch = main`. Прогон
+/// `pull_request_target` исполняется в контексте ствола, но по чужому коду.
+/// Любой из них закрыл бы красную фазу падением, которого в наборе не было.
+pub fn trunk_run(run: &Value, repo: &str, trunk: &str) -> Option<TrunkRun> {
+    if run["head_branch"].as_str() != Some(trunk)
+        || matches!(run["event"].as_str(), None | Some("pull_request" | "pull_request_target"))
+        || !run["head_repository"]["full_name"].as_str()?.eq_ignore_ascii_case(repo)
+    {
+        return None;
+    }
+    Some(TrunkRun {
+        id: run["id"].as_i64()?,
+        attempt: run["run_attempt"].as_i64()?,
+        sha: run["head_sha"].as_str()?.to_owned(),
+        started: run["run_started_at"].as_str()?.to_owned(),
+    })
+}
+
+/// Лежит ли коммит на `origin/<ствол>` дерева набора. Неизвестный коммит —
+/// «нет»: доказать нечем.
+fn on_trunk(root: &str, sha: &str, trunk: &str) -> bool {
+    Worker::git(root, &["merge-base", "--is-ancestor", sha, &format!("origin/{trunk}")]).is_ok()
 }
 
 pub struct Worker {
@@ -413,7 +467,6 @@ impl Worker {
                 Ok(None) => {}
                 Err(e) => println!("{} · тесты: {e}", bundle.name),
             }
-            self.take_ci_jobs(&bundle).await;
             tokio::time::sleep(std::time::Duration::from_secs(TEST_TICK_S)).await;
         }
     }
@@ -426,29 +479,43 @@ impl Worker {
     /// видел лишь раннер Windows (прогон `36642293742`), а записать его было
     /// некому. Журнал харнес качает и разбирает сам — `test_lines`, как свой.
     ///
-    /// Берутся только прогоны ствола — ветка по умолчанию и не `pull_request`:
-    /// строки CI — такие же факты о стволе, как свои, а прогон с ветки
-    /// доказывал бы красную фазу чужим деревом. Прогон, взятый однажды, не
-    /// берётся снова (`ci_run_taken`), даже если в журнале не нашлось ни одной
-    /// проверки: несобравшееся задание — это «не мерили», и мерить его журнал
-    /// заново нечего.
+    /// СВОЙ ЦИКЛ, А НЕ ХВОСТ НАБЛЮДАТЕЛЯ ПРОГОНОВ. Наблюдатель заводится лишь у
+    /// набора с разделом `test`; у `myack` в `scripts/runner.json` его нет, и
+    /// дверь отвечала бы «объявлено», а взятия не случалось бы никогда.
+    pub async fn ci_watch(self: std::sync::Arc<Self>, bundle: Bundle) {
+        loop {
+            self.take_ci_jobs(&bundle).await;
+            tokio::time::sleep(std::time::Duration::from_secs(TEST_TICK_S)).await;
+        }
+    }
+
     async fn take_ci_jobs(&self, bundle: &Bundle) {
         let jobs = match crate::db::conn(&self.pool).await {
             Ok(c) => c
-                .query("SELECT repo, workflow, job, platform FROM project_ci_job WHERE project_id = $1 ORDER BY 2, 3",
+                .query("SELECT workflow, job, platform FROM project_ci_job WHERE project_id = $1 ORDER BY 1, 2",
                        &[&bundle.project])
                 .await
                 .map_err(|e| format!("{e}")),
             Err(e) => Err(format!("{e:?}")),
         };
         let jobs = match jobs {
+            Ok(j) if j.is_empty() => return,
             Ok(j) => j,
             Err(why) => return println!("{} · CI: объявления не читаются: {why}", bundle.name),
         };
+        // Репозиторий — из `origin` дерева набора, того же, по которому ниже
+        // сверяется ствол; объявить его рукой нельзя (см. `project_ci_job`).
+        let repo = match Self::git(&bundle.repo, &["remote", "get-url", "origin"]) {
+            Ok(url) => match github_slug(&url) {
+                Some(r) => r,
+                None => return println!("{} · CI: `origin` не на GitHub: {}", bundle.name, url.trim()),
+            },
+            Err(why) => return println!("{} · CI: {why}", bundle.name),
+        };
         for r in jobs {
-            let (repo, workflow, job, platform): (String, String, String, String) = (r.get(0), r.get(1), r.get(2), r.get(3));
+            let (workflow, job, platform): (String, String, String) = (r.get(0), r.get(1), r.get(2));
             let actor = format!("ci:{workflow}/{job}");
-            match self.take_ci_job(&bundle.project, &repo, &workflow, &job, &platform, &actor).await {
+            match self.take_ci_job(bundle, &repo, &workflow, &job, &platform, &actor).await {
                 Ok(0) => {}
                 Ok(n) => println!("{} · CI {actor}: взято прогонов {n}", bundle.name),
                 Err(why) => println!("{} · CI {actor}: {why}", bundle.name),
@@ -457,7 +524,7 @@ impl Worker {
     }
 
     async fn take_ci_job(
-        &self, project: &str, repo: &str, workflow: &str, job: &str, platform: &str, actor: &str,
+        &self, bundle: &Bundle, repo: &str, workflow: &str, job: &str, platform: &str, actor: &str,
     ) -> Result<usize, String> {
         let about = gh_json(&format!("repos/{repo}")).await?;
         let trunk = about["default_branch"].as_str().filter(|b| !b.is_empty())
@@ -467,17 +534,19 @@ impl Worker {
             "repos/{repo}/actions/workflows/{workflow}/runs?branch={trunk}&status=completed&per_page=20"
         ))
         .await?;
+        // Ответ без перечня — отказ, а не «прогонов нет»: иначе опечатка в
+        // имени файла работы молчала бы вечно, как пустой список.
+        let list = runs["workflow_runs"].as_array()
+            .ok_or_else(|| format!("в ответе о прогонах {workflow} нет `workflow_runs`: {}", cut(&runs.to_string(), 300)))?;
         let client = crate::db::conn(&self.pool).await.map_err(|e| format!("{e:?}"))?;
-        let mut taken = 0;
-        for run in runs["workflow_runs"].as_array().into_iter().flatten() {
-            let (Some(id), Some(sha)) = (run["id"].as_i64(), run["head_sha"].as_str()) else { continue };
-            if run["head_branch"].as_str() != Some(trunk.as_str()) || run["event"].as_str() == Some("pull_request") {
-                continue;
-            }
+        let (mut taken, mut fetched) = (0, false);
+        for run in list {
+            let Some(r) = trunk_run(run, repo, &trunk) else { continue };
             let seen: bool = client
                 .query_one(
-                    "SELECT EXISTS (SELECT 1 FROM ci_run_taken WHERE project_id = $1 AND run_id = $2 AND actor = $3)",
-                    &[&project, &id, &actor],
+                    "SELECT EXISTS (SELECT 1 FROM ci_run_taken
+                                     WHERE project_id = $1 AND run_id = $2 AND run_attempt = $3 AND actor = $4)",
+                    &[&bundle.project, &r.id, &r.attempt, &actor],
                 )
                 .await
                 .map_err(|e| format!("{e}"))?
@@ -485,18 +554,42 @@ impl Worker {
             if seen {
                 continue;
             }
+            // КОММИТ ОБЯЗАН ЛЕЖАТЬ НА СТВОЛЕ НАБОРА, а не только называться им:
+            // имя ветки в ответе GitHub — слова прогона. Докачивается ствол раз
+            // за заход и лишь когда коммита не нашлось: свежий прогон обычно
+            // новее, чем знает общий чекаут. Не на стволе — не берётся и не
+            // отмечается: после докачки он может там оказаться.
+            if !on_trunk(&bundle.repo, &r.sha, &trunk) && !fetched {
+                fetched = true;
+                if let Err(why) = Self::git(&bundle.repo, &["fetch", "origin", "--quiet"]) {
+                    println!("{} · CI: ствол не докачан: {why}", bundle.name);
+                }
+            }
+            if !on_trunk(&bundle.repo, &r.sha, &trunk) {
+                println!("{} · CI {actor}: прогон {} не взят: коммит {} не на origin/{trunk}", bundle.name, r.id, r.sha);
+                continue;
+            }
             // Отказ одного прогона не держит остальные: журнал старше девяноста
             // дней GitHub уже не отдаёт, и `?` здесь запер бы за ним все новые.
-            let rows = match Self::ci_job_rows(repo, id, job).await {
+            let rows = match Self::ci_job_rows(repo, r.id, job).await {
                 Ok(rows) => rows,
                 Err(why) => {
-                    println!("{project} · CI {actor}: прогон {id} не взят: {why}");
+                    println!("{} · CI {actor}: прогон {} не взят: {why}", bundle.name, r.id);
                     continue;
                 }
             };
-            crate::projector::record_test_runs(&self.pool, project, sha, &rows, actor, false, Some((platform, id)))
+            // Взятый без строк прогон больше не перечитывается — и молчать об
+            // этом нельзя: «задание не собралось» и «разбор не узнал журнал»
+            // выглядят одинаково, пока их не назвали.
+            if rows.is_empty() {
+                println!("{} · CI {actor}: прогон {} взят без проверок: в журнале задания «{job}» \
+                          нет строк прогона (не собралось, не запускалось либо формат не узнан)",
+                         bundle.name, r.id);
+            }
+            let ci = crate::projector::CiRun { platform, run: r.id, attempt: r.attempt, started: &r.started };
+            crate::projector::record_test_runs(&self.pool, &bundle.project, &r.sha, &rows, actor, false, Some(ci))
                 .await
-                .map_err(|e| format!("прогон {id} не записан: {e:?}"))?;
+                .map_err(|e| format!("прогон {} не записан: {e:?}", r.id))?;
             taken += 1;
         }
         Ok(taken)
@@ -506,10 +599,9 @@ impl Worker {
     /// прогоне нет — строк нет: его не запускали, и мерить нечего.
     async fn ci_job_rows(repo: &str, run: i64, job: &str) -> Result<Vec<(String, String, String)>, String> {
         let jobs = gh_json(&format!("repos/{repo}/actions/runs/{run}/jobs?per_page=100")).await?;
-        let Some(id) = jobs["jobs"].as_array().into_iter().flatten()
-            .find(|j| j["name"].as_str() == Some(job))
-            .and_then(|j| j["id"].as_i64())
-        else {
+        let list = jobs["jobs"].as_array()
+            .ok_or_else(|| format!("в ответе о заданиях прогона {run} нет `jobs`"))?;
+        let Some(id) = list.iter().find(|j| j["name"].as_str() == Some(job)).and_then(|j| j["id"].as_i64()) else {
             return Ok(Vec::new());
         };
         Ok(test_lines(&gh(&format!("repos/{repo}/actions/jobs/{id}/logs")).await?))
@@ -758,20 +850,11 @@ impl Worker {
         // же голове сборка упадёт снова — это и довод; но случайное падение
         // (сборку убил systemd-oomd, кончился диск) не перемеряется до
         // `TEST_REDO_S`, и всё это время читатели вердиктов судят по прошлому
-        // измерившему прогону (`test_run_last`).
-        //
-        // Партия CI на той же голове замером не считается: она гоняла горстку
-        // проверок, и прогон харнеса, пропущенный из-за неё, оставил бы ствол
-        // без измерения на шесть часов.
+        // измерившему прогону (`test_run_last`). Партия CI замером вершины не
+        // считается — довод у `head_measured_since`.
+        let since = crate::projector::now_ms() - (TEST_REDO_S as i64) * 1000;
         let fresh = match crate::db::conn(&self.pool).await {
-            Ok(c) => c
-                .query_one(
-                    "SELECT count(*) FROM test_run_trunk WHERE project_id = $1 AND commit_sha = $2 AND NOT dirty AND at > $3",
-                    &[&bundle.project, &head, &(crate::projector::now_ms() - (TEST_REDO_S as i64) * 1000)],
-                )
-                .await
-                .map(|r| r.get::<_, i64>(0) > 0)
-                .unwrap_or(false),
+            Ok(c) => crate::projector::head_measured_since(&*c, &bundle.project, &head, since).await.unwrap_or(false),
             Err(_) => false,
         };
         if fresh {
@@ -1698,5 +1781,77 @@ mod tests {
         ]);
         // Строка, где время стоит не в начале, — не журнал GitHub: её не трогают.
         assert!(super::test_lines("note 2026-09-29T22:56:47.5Z test x ... ok\n").is_empty());
+    }
+
+    /// Цветной вывод (`CARGO_TERM_COLOR=always`): без снятия цвета вердикт не
+    /// узнавался, и прогон отмечался взятым без единой строки.
+    #[test]
+    fn colored_output_is_parsed_like_plain() {
+        let text = "2026-09-29T22:56:47.5592055Z \x1b[1m\x1b[92m     Running\x1b[0m tests\\mirror_x.rs (x.exe)\n\
+                    2026-09-29T22:56:47.5896990Z test red_one ... \x1b[31mFAILED\x1b[0m\n\
+                    2026-09-29T22:56:47.6000000Z         \x1b[32;1mPASS\x1b[0m [   0.002s] tot-core::plain green_one\n";
+        assert_eq!(super::test_lines(text), vec![
+            row("green_one", "passed", "plain"),
+            row("red_one", "failed", "mirror_x.rs"),
+        ]);
+    }
+
+    #[test]
+    fn origin_names_its_github_repo() {
+        for url in ["git@github.com:tot-space/tot-ade.git", "https://github.com/tot-space/tot-ade",
+                    "https://github.com/tot-space/tot-ade.git\n", "ssh://git@github.com/tot-space/tot-ade.git"] {
+            assert_eq!(super::github_slug(url).as_deref(), Some("tot-space/tot-ade"), "{url}");
+        }
+        for url in ["/srv/git/tot-ade.git", "git@gitlab.com:tot-space/tot-ade.git", "https://github.com/tot-space"] {
+            assert_eq!(super::github_slug(url), None, "{url}");
+        }
+    }
+
+    /// Прогон годится в факт о стволе, только если он со ствола САМОГО набора.
+    /// Порча, которую ловит проверка: форк с веткой `main` или
+    /// `pull_request_target` закрывают красную фазу падением не из набора.
+    #[test]
+    fn only_a_trunk_run_of_the_project_itself_is_taken() {
+        let run = |branch: &str, event: &str, from: &str| serde_json::json!({
+            "id": 36642293742_i64, "run_attempt": 2, "head_sha": "6009f67", "run_started_at": "2026-09-29T22:54:37Z",
+            "head_branch": branch, "event": event, "head_repository": { "full_name": from },
+        });
+        assert_eq!(
+            super::trunk_run(&run("main", "workflow_dispatch", "tot-space/tot-ade"), "tot-space/tot-ade", "main"),
+            Some(super::TrunkRun { id: 36642293742, attempt: 2, sha: "6009f67".into(),
+                                   started: "2026-09-29T22:54:37Z".into() }),
+        );
+        for (branch, event, from) in [("main", "push", "someone/tot-ade"),
+                                      ("main", "pull_request_target", "tot-space/tot-ade"),
+                                      ("main", "pull_request", "tot-space/tot-ade"),
+                                      ("v5-t135-revoke-takes-refusals", "workflow_dispatch", "tot-space/tot-ade")] {
+            assert_eq!(super::trunk_run(&run(branch, event, from), "tot-space/tot-ade", "main"), None,
+                       "{branch} · {event} · {from}");
+        }
+    }
+
+    /// Коммит прогона должен лежать на `origin/<ствол>`: коммит с ветки, как
+    /// у прогона `36642293742`, не берётся, даже если GitHub назвал ветку стволом.
+    #[test]
+    fn a_commit_off_the_trunk_is_not_on_it() {
+        let tmp = std::env::temp_dir().join(format!("mh-on-trunk-{}", std::process::id()));
+        std::fs::remove_dir_all(&tmp).ok();
+        std::fs::create_dir_all(&tmp).expect("каталог заводится");
+        let path = tmp.to_string_lossy().into_owned();
+        let git = |args: &[&str]| Worker::git(&path, args).expect("git в пробе");
+        git(&["init", "--quiet", "-b", "main"]);
+        let commit = |msg: &str| {
+            git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--quiet", "--allow-empty", "-m", msg]);
+            git(&["rev-parse", "HEAD"]).trim().to_owned()
+        };
+        let trunk = commit("ствол");
+        git(&["update-ref", "refs/remotes/origin/main", &trunk]);
+        git(&["checkout", "--quiet", "-b", "side"]);
+        let side = commit("ветка");
+        assert!(super::on_trunk(&path, &trunk, "main"), "коммит ствола на стволе");
+        assert!(!super::on_trunk(&path, &side, "main"), "коммит ветки — нет");
+        assert!(!super::on_trunk(&path, "0000000000000000000000000000000000000000", "main"),
+                "неизвестный коммит — нет: доказать нечем");
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }

@@ -583,8 +583,8 @@ impl Mcp {
             "inputSchema": { "type": "object", "properties": { "skip": s("строка, которую датчик не считает находкой — образец"), "allow": s("места, где правило не действует — образцы пути через пробел"), "fact": s("род факта"),
                 "reads": s("что читать: backend/**/*.rs"), "extract": s("образец: пустой — факт о самом файле"),
                 "note": s("зачем"), "how": s("extract · files · secret-fields · declared-paths · lines · domain-vs-check · contract-vs-schema · task-trailers"), "drop": json!({"type":"boolean"}) }, "required": ["fact"] } }));
-        tools.push(json!({ "name": "ci-job-add", "description": "объявить задание CI, чей журнал несёт прогон проверок другой платформы: харнес сам читает журналы его прогонов на стволе и пишет упавшие как наблюдение красной фазы. Вердиктов дверь не принимает",
-            "inputSchema": { "type": "object", "properties": { "repo": s("репозиторий GitHub: владелец/имя"),
+        tools.push(json!({ "name": "ci-job-add", "description": "объявить задание CI, чей журнал несёт прогон проверок другой платформы: харнес сам читает журналы его прогонов на стволе и пишет упавшие как наблюдение красной фазы. Вердиктов дверь не принимает, репозиторий тоже: он берётся из `origin` дерева набора",
+            "inputSchema": { "type": "object", "properties": {
                 "workflow": s("файл работы: probe-windows.yml"), "job": s("имя задания в работе"),
                 "platform": s("платформа раннера: windows"), "note": s("зачем"),
                 "drop": json!({"type":"boolean"}) }, "required": ["workflow", "job"] } }));
@@ -2327,7 +2327,7 @@ impl Mcp {
             }
             "ci-job-add" => {
                 let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
-                match crate::projector::declare_ci_job(&self.pool, p, crate::projector::CiJob { repo: &g("repo"), workflow: &g("workflow"), job: &g("job"), platform: &g("platform"), note: &g("note") }, flag(args, "drop")).await {
+                match crate::projector::declare_ci_job(&self.pool, p, crate::projector::CiJob { workflow: &g("workflow"), job: &g("job"), platform: &g("platform"), note: &g("note") }, flag(args, "drop")).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),
                 }

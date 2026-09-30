@@ -67,6 +67,8 @@ async fn main() {
         if bundle.test.is_some() {
             tokio::spawn(worker.clone().test_watch(bundle.clone()));
         }
+        // Взятие журналов CI — у КАЖДОГО набора: раздел `test` ему не нужен.
+        tokio::spawn(worker.clone().ci_watch(bundle.clone()));
     }
     println!("воркер пульта: наборов {}, круг {} с", config.projects.len(), mh_server::worker::TICK_S);
     loop {

@@ -1697,13 +1697,17 @@ ALTER TABLE test_run ADD COLUMN IF NOT EXISTS ran_in text NOT NULL DEFAULT '';
 -- сейчас», — только свои.
 ALTER TABLE test_run ADD COLUMN IF NOT EXISTS platform text NOT NULL DEFAULT '';
 
--- ГДЕ НАБОР ГОНЯЕТ ТО, ЧЕГО ЗДЕСЬ НЕ СОБРАТЬ: репозиторий, файл работы, имя
--- задания и платформа. Объявляется ИСТОЧНИК, а не вердикт: журнал читает и
--- разбирает харнес сам, двери, принимающей «упала» со слов, нет — иначе
--- красная фаза снова доказывалась бы прозой.
+-- ГДЕ НАБОР ГОНЯЕТ ТО, ЧЕГО ЗДЕСЬ НЕ СОБРАТЬ: файл работы, имя задания и
+-- платформа. Объявляется ИСТОЧНИК, а не вердикт: журнал читает и разбирает
+-- харнес сам, двери, принимающей «упала» со слов, нет — иначе красная фаза
+-- снова доказывалась бы прозой.
+--
+-- РЕПОЗИТОРИЯ ЗДЕСЬ НЕТ, И ЭТО ЗАЩИТА, А НЕ УПУЩЕНИЕ. Объявленный рукой, он
+-- мог быть чужим или форком, где проверка того же имени «падает» по заказу,
+-- — и красная фаза закрылась бы падением, которого в наборе не было. Воркер
+-- берёт репозиторий из `origin` того же дерева, по которому сверяет ствол.
 CREATE TABLE IF NOT EXISTS project_ci_job (
   project_id text NOT NULL,
-  repo       text NOT NULL,
   workflow   text NOT NULL,
   job        text NOT NULL,
   platform   text NOT NULL CHECK (platform <> ''),
@@ -1714,17 +1718,21 @@ CREATE TABLE IF NOT EXISTS project_ci_job (
 -- записывался бы заново на каждом заходе, раз в пять минут. Память — в базе,
 -- а не в воркере: перезапуск и второй экземпляр иначе взяли бы то же дважды.
 --
+-- В ключе и попытка: перезапуск прогона GitHub носит тот же номер, и после
+-- попытки, умершей на раннере, повтор иначе не брался бы никогда.
+--
 -- Пустая платформа запрещена и здесь, а не только у объявления: отметка
 -- пишется одной транзакцией со строками партии, и партия CI без платформы
 -- легла бы своими строками в `test_run_trunk` — ровно та подмена ствола,
 -- от которой он заведён.
 CREATE TABLE IF NOT EXISTS ci_run_taken (
-  project_id text   NOT NULL,
-  run_id     bigint NOT NULL,
-  actor      text   NOT NULL,
-  platform   text   NOT NULL CHECK (platform <> ''),
-  at         bigint NOT NULL,
-  PRIMARY KEY (project_id, run_id, actor));
+  project_id  text   NOT NULL,
+  run_id      bigint NOT NULL,
+  run_attempt bigint NOT NULL,
+  actor       text   NOT NULL,
+  platform    text   NOT NULL CHECK (platform <> ''),
+  at          bigint NOT NULL,
+  PRIMARY KEY (project_id, run_id, run_attempt, actor));
 
 CREATE TABLE IF NOT EXISTS chat_message (
   id           bigserial PRIMARY KEY,
@@ -9549,7 +9557,6 @@ pub(crate) async fn declare_sensor_spec(pool: &Pool, project: &str, fields: Sens
 
 /// Поля объявления задания CI, как их принимает дверь `ci-job-add`.
 pub(crate) struct CiJob<'a> {
-    pub repo: &'a str,
     pub workflow: &'a str,
     pub job: &'a str,
     pub platform: &'a str,
@@ -9560,9 +9567,10 @@ pub(crate) struct CiJob<'a> {
 ///
 /// Дверь принимает АДРЕС журнала, а не вердикт: что упало, харнес вынет сам
 /// тем же разбором, что и у своего прогона. Принимай она «упала» со слов,
-/// `red-observed-failing` снова судил бы прозу коммита.
+/// `red-observed-failing` снова судил бы прозу коммита. Репозиторий она не
+/// принимает вовсе — см. `project_ci_job`.
 pub(crate) async fn declare_ci_job(pool: &Pool, project: &str, fields: CiJob<'_>, drop_it: bool) -> Result<Value, crate::db::Fail> {
-    let CiJob { repo, workflow, job, platform, note } = fields;
+    let CiJob { workflow, job, platform, note } = fields;
     if workflow.trim().is_empty() || job.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "задание CI называется файлом работы и именем задания" }));
     }
@@ -9572,23 +9580,19 @@ pub(crate) async fn declare_ci_job(pool: &Pool, project: &str, fields: CiJob<'_>
                                   &[&project, &workflow, &job]).await?;
         return Ok(json!({ "status": if gone > 0 { "dropped" } else { "not_found" }, "workflow": workflow, "job": job }));
     }
-    // Адрес читает `gh api repos/<repo>/…`: без косой черты он уйдёт в пустоту,
-    // и отказ всплыл бы лишь в журнале воркера, раз в пять минут.
-    if repo.split('/').filter(|s| !s.trim().is_empty()).count() != 2 {
-        return Ok(json!({ "status": "bad_repo", "repo": repo, "why": "репозиторий пишется как владелец/имя" }));
-    }
     // Пустая платформа значит «машина харнеса», и партия из журнала стала бы
     // последним прогоном ствола — см. `test_run_trunk`.
     if platform.trim().is_empty() {
         return Ok(json!({ "status": "no_platform", "why": "платформа обязательна: пустая означает прогон самого харнеса" }));
     }
     client.execute(
-        "INSERT INTO project_ci_job (project_id, repo, workflow, job, platform, note)
-         VALUES ($1,$2,$3,$4,$5,$6)
-         ON CONFLICT (project_id, workflow, job) DO UPDATE SET repo = EXCLUDED.repo,
+        "INSERT INTO project_ci_job (project_id, workflow, job, platform, note)
+         VALUES ($1,$2,$3,$4,$5)
+         ON CONFLICT (project_id, workflow, job) DO UPDATE SET
            platform = EXCLUDED.platform, note = EXCLUDED.note",
-        &[&project, &repo, &workflow, &job, &platform, &note]).await?;
-    Ok(json!({ "status": "declared", "repo": repo, "workflow": workflow, "job": job, "platform": platform }))
+        &[&project, &workflow, &job, &platform, &note]).await?;
+    Ok(json!({ "status": "declared", "workflow": workflow, "job": job, "platform": platform,
+               "repo": "из `origin` дерева набора, по которому воркер сверяет ствол" }))
 }
 
 /// Объявлено дверью и не написано документом.
@@ -10774,37 +10778,76 @@ const TEST_RUN_PRUNE: &str = "DELETE FROM test_run t
                                         AND NOT f.dirty AND f.verdict = 'failed'
                                         AND (f.at, f.id) > (t.at, t.id)))";
 
+/// Прогон GitHub, из журнала которого взята партия CI.
+pub(crate) struct CiRun<'a> {
+    pub platform: &'a str,
+    pub run: i64,
+    pub attempt: i64,
+    /// Начало прогона, как его пишет GitHub: `2026-09-29T22:54:40Z`.
+    pub started: &'a str,
+}
+
+/// Измерена ли вершина прогоном харнеса позже `since` — тогда наблюдатель её
+/// не перемеряет.
+///
+/// Спрашивает `test_run_trunk`, и это не выбор вкуса: партия CI на той же
+/// вершине гоняла горстку проверок, и прогон харнеса, пропущенный из-за неё,
+/// оставил бы ствол без измерения на шесть часов.
+pub(crate) async fn head_measured_since(
+    client: &impl deadpool_postgres::GenericClient, project: &str, head: &str, since: i64,
+) -> Result<bool, tokio_postgres::Error> {
+    Ok(client
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM test_run_trunk
+                             WHERE project_id = $1 AND commit_sha = $2 AND NOT dirty AND at > $3)",
+            &[&project, &head, &since],
+        )
+        .await?
+        .get(0))
+}
+
 /// Прогоны тестов, снятые харнесом: по строке на проверку. История обрезается
 /// по двадцати последним на проверку, кроме самого свежего чистого падения —
 /// «наблюдалась красной до кода» требует прошлого, и зелёные прогоны его не
 /// вытесняют (`TEST_RUN_PRUNE`).
 ///
-/// `ci` пуст у прогона харнеса; у партии из журнала CI это платформа её
-/// задания и номер прогона GitHub (см. `test_run_trunk`).
+/// `ci` пуст у прогона харнеса; у партии из журнала CI это её прогон GitHub
+/// (см. `test_run_trunk`).
 pub(crate) async fn record_test_runs(
     pool: &Pool, project: &str, commit: &str, rows: &[(String, String, String)], actor: &str,
-    dirty: bool, ci: Option<(&str, i64)>,
+    dirty: bool, ci: Option<CiRun<'_>>,
 ) -> Result<Value, crate::db::Fail> {
-    let platform = ci.map_or("", |(p, _)| p);
+    let platform = ci.as_ref().map_or("", |c| c.platform);
     let mut client = crate::db::conn(pool).await?;
     let tx = client.transaction().await?;
     // Одно время на ПАРТИЮ: иначе пятьсот вставок растянутся на миллисекунды,
     // и «последний прогон» по max(at) увидит лишь хвост партии.
-    let at = now_ms();
+    //
+    // У партии CI время — начало её прогона, а не миг, когда журнал скачали:
+    // журнал берут через пять минут или через сутки, и время взятия говорило
+    // бы о воркере, а не о том, когда проверка падала.
+    let at = match &ci {
+        None => now_ms(),
+        Some(c) => tx
+            .query_one("SELECT (extract(epoch from $1::text::timestamptz) * 1000)::bigint", &[&c.started])
+            .await?
+            .get(0),
+    };
     // ВЗЯТЫЙ ПРОГОН CI ОТМЕЧАЕТСЯ В ТОЙ ЖЕ ТРАНЗАКЦИИ, ЧТО И ЕГО СТРОКИ. Порознь
     // отказ между ними давал бы либо партию без отметки — её взяли бы снова, —
     // либо отметку без партии, и падение пропало бы навсегда. Второй воркер
     // (сине-зелёная смена) упирается в тот же ключ и ничего не пишет.
-    if let Some((_, run)) = ci {
+    if let Some(c) = &ci {
         let fresh = tx
             .execute(
-                "INSERT INTO ci_run_taken (project_id, run_id, actor, platform, at) VALUES ($1,$2,$3,$4,$5)
-                 ON CONFLICT (project_id, run_id, actor) DO NOTHING",
-                &[&project, &run, &actor, &platform, &at],
+                "INSERT INTO ci_run_taken (project_id, run_id, run_attempt, actor, platform, at)
+                 VALUES ($1,$2,$3,$4,$5,$6)
+                 ON CONFLICT (project_id, run_id, run_attempt, actor) DO NOTHING",
+                &[&project, &c.run, &c.attempt, &actor, &platform, &now_ms()],
             )
             .await?;
         if fresh == 0 {
-            return Ok(json!({ "kind": "test-run", "recorded": 0, "already": run }));
+            return Ok(json!({ "kind": "test-run", "recorded": 0, "already": c.run }));
         }
     }
     for (check, verdict, binary) in rows {
@@ -16551,15 +16594,37 @@ mod ci_batch {
         // Партия CI: одна проверка, упавшая, в бинаре БЕЗ `mirror_` — просочись
         // она в «последний прогон», пункт про ствол назвал бы её поломкой.
         let rows = vec![("окно_отзыв".to_owned(), "failed".to_owned(), "windows_only.rs".to_owned())];
-        super::record_test_runs(&pool, "Ц", "c", &rows, "ci:probe.yml/win", false, Some(("windows", 7)))
+        let ci = |platform: &'static str, run: i64, attempt: i64| {
+            Some(super::CiRun { platform, run, attempt, started: "2026-09-29T22:54:37Z" })
+        };
+        super::record_test_runs(&pool, "Ц", "c", &rows, "ci:probe.yml/win", false, ci("windows", 7, 1))
             .await
             .expect("партия CI пишется");
-        let again = super::record_test_runs(&pool, "Ц", "c", &rows, "ci:probe.yml/win", false, Some(("windows", 7)))
+        let again = super::record_test_runs(&pool, "Ц", "c", &rows, "ci:probe.yml/win", false, ci("windows", 7, 1))
             .await
             .expect("повтор отвечает, а не падает");
         assert_eq!(again["recorded"], 0, "взятый прогон не пишется дважды: {again}");
-        let empty = super::record_test_runs(&pool, "Ц", "c", &rows, "ci:probe.yml/win", false, Some(("", 8))).await;
+        let retry = super::record_test_runs(&pool, "Ц", "c", &rows, "ci:probe.yml/win", false, ci("windows", 7, 2))
+            .await
+            .expect("перезапуск прогона пишется");
+        assert_eq!(retry["recorded"], 1, "вторая попытка того же прогона — новый прогон: {retry}");
+        let empty = super::record_test_runs(&pool, "Ц", "c", &rows, "ci:probe.yml/win", false, ci("", 8, 1)).await;
         assert!(empty.is_err(), "партия CI без платформы легла бы в ствол — база обязана отказать");
+        let at: Vec<i64> = client
+            .query("SELECT DISTINCT at FROM test_run WHERE project_id = 'Ц' AND platform = 'windows'", &[])
+            .await
+            .expect("строки CI читаются")
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        assert_eq!(at, vec![1_790_722_477_000], "время партии CI — начало её прогона, а не миг взятия");
+
+        // Вершина, измеренная лишь партией CI, для наблюдателя не измерена: иначе
+        // свой прогон на ней пропускался бы шесть часов.
+        assert!(!super::head_measured_since(&client, "Ц", "c", 0).await.expect("запрос исполняется"),
+                "партия CI не делает вершину измеренной");
+        assert!(super::head_measured_since(&client, "Ц", "a", 0).await.expect("запрос исполняется"),
+                "своя партия делает");
 
         let after = run(red).await;
         assert_eq!((after.state, &after.detail), ("passed", &vec![]),
