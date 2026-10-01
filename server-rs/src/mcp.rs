@@ -923,6 +923,25 @@ impl Mcp {
         "gate-selftest",
     ];
 
+    /// Строка вызова, которой достаётся документ вида `kind` с именем `name`.
+    ///
+    /// ОДНА НА ВСЕ ОТВЕТЫ, ЧТО ПЕЧАТАЮТ ПУТЬ К ДОКУМЕНТУ. Их было три, и каждая
+    /// собирала строку сама: `documents` знала про занятые дверью имена,
+    /// `tree` — нет и печатала `mh call goals id=`, что отдаёт разбор двери, а
+    /// у одиночки (`srs`, `glossary`) — `id=` с пустым именем, который сверка
+    /// доводов отвергает. Вид, чьё имя занято дверью, достаётся только через
+    /// `kind=`; пустое имя не печатается вовсе.
+    pub fn entity_call(kind: &str, name: &str) -> String {
+        let mut call = format!("mh call {kind}");
+        if Self::RESERVED.contains(&kind) {
+            call += &format!(" kind={kind}");
+        }
+        if !name.is_empty() {
+            call += &format!(" id={name}");
+        }
+        call
+    }
+
     // Двери, чьё имя старше одноимённого вида: вид достаётся им только
     // доводом `kind=<имя>`.
     const RESERVED: &[&str] = &[
@@ -1249,17 +1268,7 @@ impl Mcp {
                         "count": rows.len(),
                         "documents": rows.iter().map(|r| {
                             let (kind, name): (String, String) = (r.get(0), r.get(1));
-                            // Вид, чьё имя занято дверью, достаётся только
-                            // через `kind=`: без него строка вызова отдала бы
-                            // разбор двери вместо документа.
-                            let mut call = format!("mh call {kind}");
-                            if Self::RESERVED.contains(&kind.as_str()) {
-                                call += &format!(" kind={kind}");
-                            }
-                            if !name.is_empty() {
-                                call += &format!(" id={name}");
-                            }
-                            json!({ "kind": kind, "name": name, "bytes": r.get::<_, i32>(2), "достаётся": call })
+                            json!({ "kind": kind, "name": name, "bytes": r.get::<_, i32>(2), "достаётся": Self::entity_call(&kind, &name) })
                         }).collect::<Vec<_>>(),
                     })),
                     Err(e) => refusal(crate::db::Fail::Db(e).into()),
@@ -3588,6 +3597,15 @@ mod tests {
     ///
     /// Освобождённые для всех дверей, они пропадали молча: `mh call ready
     /// id=M5-T175 kind=task` отдал пункты всех задач — 2137 вместо 15.
+    #[test]
+    fn a_printed_call_reaches_its_document() {
+        // Строку вызова агент копирует как есть: она обязана пройти сверку
+        // доводов и прийти к документу, а не к одноимённой двери.
+        assert_eq!(Mcp::entity_call("srs", ""), "mh call srs");
+        assert_eq!(Mcp::entity_call("goals", ""), "mh call goals kind=goals");
+        assert_eq!(Mcp::entity_call("task", "M5-T1"), "mh call task id=M5-T1");
+    }
+
     #[test]
     fn id_and_kind_reach_only_doors_that_read_them() {
         let kind = || serde_json::from_value::<crate::kinds::Kind>(json!({})).expect("вид из умолчаний");

@@ -9916,7 +9916,7 @@ pub(crate) async fn tree(
         node.insert("depth".into(), json!(d));
         node.insert("via".into(), json!(how_many));
         node.insert("names".into(), json!(examples));
-        node.insert("by".into(), json!(format!("mh call {k} id={n}")));
+        node.insert("by".into(), json!(crate::mcp::Mcp::entity_call(&k, &n)));
         if !own.is_empty() {
             node.insert("children".into(), json!(own));
         }

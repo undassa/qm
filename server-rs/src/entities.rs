@@ -478,7 +478,7 @@ async fn said_at(
 ) -> Result<Value, crate::db::Fail> {
     let rows = client
         .query(
-            "SELECT n.entity_kind, n.entity_name, s.ord, s.title, n.caveated, n.role
+            "SELECT n.entity_kind, n.entity_name, s.ord, s.title, n.caveated, n.role, s.anchor
                FROM named_id_role n
                LEFT JOIN project_document_sections s
                  ON s.project_id = n.project_id AND s.entity_kind = n.entity_kind
@@ -515,8 +515,12 @@ async fn said_at(
                 "title": title.unwrap_or_default(),
                 "caveated": r.get::<_, bool>(4),
                 "role": r.get::<_, String>(5),
-                "by": format!("mh call section kind={} id={} ord={}", kind, name,
-                              ord.map(|o| o.to_string()).unwrap_or_default()),
+                // Дверь `section` ищет раздел по якорю, а не по номеру: строка
+                // с `ord=` отвергалась как неизвестный довод на первом же вызове.
+                "by": match r.get::<_, Option<String>>(6) {
+                    Some(anchor) => format!("mh call section kind={kind} id={name} anchor={anchor}"),
+                    None => crate::mcp::Mcp::entity_call(&kind, &name),
+                },
             })
         })
         .collect();
