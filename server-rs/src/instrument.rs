@@ -1004,3 +1004,51 @@ mod dependency_order {
         client.batch_execute("DROP SCHEMA IF EXISTS deporder CASCADE").await.expect("схема снимается");
     }
 }
+
+/// `corpus · decided-not-named` держателем решения принимает задачу либо
+/// документ `process`. Решение о процессе исполняет обряд, а не задача
+/// (undassa/mh#169): пункт краснел на нём, и закрыть находку честно было нечем.
+///
+/// Подсаживает сама проба пункта: перестанет она сажать вопрос, названный
+/// только в process, — здесь пропадёт зелёная сторона, и тест покраснеет.
+#[cfg(test)]
+mod decided_holder {
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn a_decision_held_by_a_task_or_by_process_passes_and_an_unheld_one_does_not() {
+        let url = std::env::var("MH_TEST_DB_URL").expect("MH_TEST_DB_URL: адрес пустой базы");
+        let apart = format!("{}{}", if url.contains('?') { '&' } else { '?' },
+                            "options=-c%20search_path%3Ddecholder");
+        let pool = crate::db::pool(&format!("{url}{apart}"), 1).expect("пул тестовой базы");
+        pool.get().await.expect("соединение")
+            .batch_execute("DROP SCHEMA IF EXISTS decholder CASCADE; CREATE SCHEMA decholder;")
+            .await
+            .expect("своя схема заводится");
+        crate::projector::ensure(&pool).await.expect("схема встаёт");
+        let client = pool.get().await.expect("соединение");
+        client
+            .batch_execute(
+                "INSERT INTO project_questions (project_id, id, number, title, state, origin)
+                      VALUES ('p', 'Q-1', 1, '', 'decided', 'declared'),
+                             ('p', 'Q-2', 2, '', 'decided', 'declared');
+                 INSERT INTO project_documents (project_id, entity_kind, entity_name, content, content_hash,
+                                                bytes, revision, updated_at, updated_by)
+                      VALUES ('p', 'task', 'M1-T1', 'Решения: Q-1', 'h', 0, 1, 1, 't'),
+                             ('p', 'question', 'Q-2', 'Q-2 сам себя не держит', 'h', 0, 1, 1, 't');",
+            )
+            .await
+            .expect("набор заводится");
+        client
+            .execute(include_str!("../../instrument/gate/corpus/decided-not-named.probe.sql"), &[&"p"])
+            .await
+            .expect("проба сажает");
+        let rule = include_str!("../../instrument/gate/corpus/decided-not-named.sql");
+        let found: Vec<String> = client.query(rule, &[&"p"]).await.expect("пункт исполняется")
+            .iter().map(|r| r.get::<_, String>(0)).collect();
+        let named: Vec<&str> = found.iter().map(|d| d.split(' ').next().unwrap_or("")).collect();
+        assert_eq!(named, ["Q-2", "Q-9999"], "держат задача (Q-1) и process (Q-9998): {found:?}");
+        assert!(found[0].contains("в задаче") && found[0].contains("в документе process"),
+                "находка не называет обоих путей закрытия: {}", found[0]);
+        client.batch_execute("DROP SCHEMA IF EXISTS decholder CASCADE").await.expect("схема снимается");
+    }
+}
