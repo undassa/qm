@@ -199,7 +199,7 @@ export function Corpus({
 
   useEffect(() => {
     if (!projectId || !pick) { setEnt(null); return; }
-    void tool<Ent>(projectId, kind, { id: pick }).then(setEnt).catch(() => setEnt(null));
+    void tool<Ent>(projectId, kind, { kind, id: pick }).then(setEnt).catch(() => setEnt(null));
   }, [projectId, kind, pick]);
 
   /**

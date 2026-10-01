@@ -378,7 +378,7 @@ impl Mcp {
         tools.push(json!({ "name": "readiness-gaps", "description": "пункты готовности без способа проверки — разбивкой по виду владельца и чем это закрывается",
             "inputSchema": { "type": "object", "properties": {} } }));
         tools.push(json!({ "name": "coverage", "description": "что не покрыто: какие документы не достаются ни одним видом и какие достаются двумя",
-            "inputSchema": { "type": "object", "properties": {} } }));
+            "inputSchema": { "type": "object", "properties": { "id": s("имя документа вида coverage: с ним отдаётся документ, а не разбор") } } }));
         tools.push(json!({ "name": "phases", "description": "цепочка фаз с полной картиной: документы, гейт и задачи каждой фазы порознь",
             "inputSchema": { "type": "object", "properties": {} } }));
         tools.push(json!({ "name": "waves", "description": "волны: что можно вести одновременно, с барьером красной фазы",
@@ -846,12 +846,12 @@ impl Mcp {
                 "required": ["kind", "id"] } }));
         tools.push(json!({ "name": "tree", "description": "дерево связанного: от одного документа всё, с чем он связан, по записям связей",
             "inputSchema": { "type": "object", "properties": { "kind": s("вид документа, например srs"),
-                "name": s("имя документа; у одиночного вида пусто"),
+                "name": s("имя документа; у одиночного вида пусто"), "id": s("то же, что name, когда name не подан"),
                 "depth": json!({"type":"integer","description":"глубина обхода, 1..4; по умолчанию 2"}) },
                 "required": ["kind"] } }));
         tools.push(json!({ "name": "document-coverage", "description": "что документа уже живёт в таблицах, а что держит только текст — по разделам",
             "inputSchema": { "type": "object", "properties": { "kind": s("вид документа"),
-                "name": s("имя документа; у одиночного вида пусто") }, "required": ["kind"] } }));
+                "name": s("имя документа; у одиночного вида пусто"), "id": s("то же, что name, когда name не подан") }, "required": ["kind"] } }));
         tools.push(json!({ "name": "holders", "description": "объявленные держатели инварианта: требование и путь",
             "inputSchema": { "type": "object", "properties": {} } }));
         tools.push(json!({ "name": "derived-copy-set", "description": "вот источник, вот копия, вот чем сверять: одна дверь для чисел и для тел",
@@ -921,6 +921,19 @@ impl Mcp {
     // шесть — заказывал полный пересчёт всем проектам ни за чем.
     const SHARED_WRITES: [&'static str; 1] = [
         "gate-selftest",
+    ];
+
+    // Двери, чьё имя старше одноимённого вида: вид достаётся им только
+    // доводом `kind=<имя>`.
+    const RESERVED: &[&str] = &[
+        "documents",
+        "method-set", "question-holders", "preflight-push", "worktree-push",
+        "sensor-specs", "scheme-terms", "scheme-roles", "frozen-trees", "addresses-declared", "tree-declared", "donors", "skills-push", "skills", "agents", "code-facts-push", "code-facts", "summary", "links-of", "retired-terms", "term-retire", "entity-confirm", "request-add", "approval-ask", "question-ask", "asks", "ask-decide", "ask-inbox", "chat-start", "chat-say", "chat-inbox", "chat", "run-start", "run-state", "run-event", "run-automaton", "run-say", "run-inbox", "runs", "ready", "test-run", "order", "gate-measure", "gate-selftest", "links-rewrite", "links-retarget", "reparse", "screen-area-set", "skill-set", "skills-paths", "version-freeze", "version-delta", "generated-check", "principal-allow", "principals", "author-set", "authors", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "version-close", "gate-selftest", "next-step", "process-state", "statuses", "task-status", "status-anomaly", "pipeline", "board", "waves", "phases", "coverage", "blocks", "history", "at-revision", "process-history", "progress",
+        "kinds", "kinds-due", "readiness-gaps", "declared-unwritten", "blame-set", "doors", "derived-copy-set", "holders", "counts-sync", "tree", "document-coverage", "sections", "section", "backlinks", "search", "put",
+        "put-section", "rm", "document-add", "reproject", "sweep", "gate", "next-task", "what-if", "blockers", "events", "task-plan-push",
+        "norm-versions", "measurements", "plan", "readiness", "requirements-of",
+        "tasks-of", "preflight-queue", "claims",
+        "task-state-push", "state-disagreements",
     ];
 
     const TRY_ON: &[&str] = &[
@@ -1010,7 +1023,7 @@ impl Mcp {
     }
 
     fn args_refusal(&self, name: &str, args: &Value) -> Option<Value> {
-        // ДОВОДЫ СОБИРАЮТСЯ СО ВСЕХ ЗАПИСЕЙ ЭТОГО ИМЕНИ, А НЕ С ПЕРВОЙ.
+        // ДОВОДЫ СВЕРЯЮТСЯ СО СХЕМОЙ ТОЙ ЗАПИСИ, КУДА ПОЙДЁТ ВЫЗОВ.
         //
         // Имя инструмента не единственно: виды сущностей кладутся в перечень
         // первыми и дают запись с именем вида, а дверь с тем же именем — позже.
@@ -1018,24 +1031,42 @@ impl Mcp {
         // читалась записью вида: схема вида знает один `id`, и всякий другой
         // довод двери отвергался как неизвестный. Довод `sql`, заведённый
         // 2026-09-25, так и не сработал ни разу — отказ приходил до разбора.
+        // Обратная ошибка тоже тиха: `id` из схемы вида пропускался к двери
+        // `goals`, которая его не читает. Поэтому запись выбирается так же,
+        // как имя разбирает `run`: вид — по `kind=<имя>` или у имени, не
+        // занятого дверью, иначе дверь.
         //
-        // Объединение никогда не отвергает лишнего: довод, известный хоть одной
-        // записи имени, известен. Исполняет вызов не эта функция, а разбор
-        // имени ниже, и он про столкновение имён знает.
+        // `id` И `kind` НЕ ОСВОБОЖДЕНЫ ОТ СВЕРКИ НИГДЕ, КРОМЕ ДОРОГИ К СУЩНОСТИ.
+        // Раньше их пропускала любая дверь, и `mh call ready id=M5-T175
+        // kind=task` молча забыл имя и отдал пункты готовности всех задач —
+        // 2137 вместо 15; звавший принял ответ о другом за ответ о своём.
+        // Дверь, которая их читает, объявляет их в схеме; остальным они
+        // отказ. `brief` — флаг выдачи, его понимают все.
         let tools = self.tools();
+        let is_kind = self.kinds.get(name).is_some();
+        let by_kind_arg = is_kind && args.get("kind").and_then(|v| v.as_str()) == Some(name);
+        let mut entries: Vec<&Value> = tools.iter().filter(|t| t["name"] == name).collect();
+        if is_kind && !entries.is_empty() {
+            if by_kind_arg || !Self::RESERVED.contains(&name) {
+                entries.truncate(1);
+            } else {
+                entries.remove(0);
+            }
+        }
+        if entries.is_empty() {
+            return None;
+        }
         let mut known = serde_json::Map::new();
-        for tool in tools.iter().filter(|t| t["name"] == name) {
+        for tool in entries {
             if let Some(props) = tool["inputSchema"]["properties"].as_object() {
                 known.extend(props.clone());
             }
         }
-        if known.is_empty() && !tools.iter().any(|t| t["name"] == name) {
-            return None;
-        }
         let (given, known) = (args.as_object()?, &known);
         let unknown: Vec<String> = given
             .keys()
-            .filter(|k| !known.contains_key(*k) && !matches!(k.as_str(), "id" | "kind" | "brief"))
+            .filter(|k| !known.contains_key(*k))
+            .filter(|k| !(k.as_str() == "brief" || by_kind_arg && matches!(k.as_str(), "id" | "kind")))
             .map(|k| format!("«{k}»"))
             .collect();
         if unknown.is_empty() {
@@ -1075,17 +1106,7 @@ impl Mcp {
         // неотличима от опечатки.
         const TAKEN_AWAY: &[&str] = Mcp::TAKEN_AWAY_NAMES;
 
-        const RESERVED: &[&str] = &[
-            "documents",
-            "method-set", "question-holders", "preflight-push", "worktree-push",
-            "sensor-specs", "scheme-terms", "scheme-roles", "frozen-trees", "addresses-declared", "tree-declared", "donors", "skills-push", "skills", "agents", "code-facts-push", "code-facts", "summary", "links-of", "retired-terms", "term-retire", "entity-confirm", "request-add", "approval-ask", "question-ask", "asks", "ask-decide", "ask-inbox", "chat-start", "chat-say", "chat-inbox", "chat", "run-start", "run-state", "run-event", "run-automaton", "run-say", "run-inbox", "runs", "ready", "test-run", "order", "gate-measure", "gate-selftest", "links-rewrite", "links-retarget", "reparse", "screen-area-set", "skill-set", "skills-paths", "version-freeze", "version-delta", "generated-check", "principal-allow", "principals", "author-set", "authors", "sensor-declare", "sensors", "requirement-retire", "requirement-scope-set", "requirement-source-add", "article-gate-add", "protocol-op-add", "crate-add", "stand-row-add", "algorithm-add", "reference-source-add", "token-add", "postmortem-add", "freeze-row-add", "release-artifact-add", "task-dep-add", "article-add", "requirement-add", "term-add", "decision-add", "story-add", "screen-add", "version-add", "milestone-add", "task-add", "alternative-add", "task-requirement-add", "screen-reference-add", "question-add", "risk-add", "goal-add", "goals", "acceptance-add", "feature-link-add", "story-requirement-add", "feature-story-add", "story-detail-add", "screen-detail-add", "milestone-detail-add", "process-row-add", "frame-rule-add", "decision-link-add", "run-record-add", "version-close", "gate-selftest", "next-step", "process-state", "statuses", "task-status", "status-anomaly", "pipeline", "board", "waves", "phases", "coverage", "blocks", "history", "at-revision", "process-history", "progress",
-            "kinds", "kinds-due", "readiness-gaps", "declared-unwritten", "blame-set", "doors", "derived-copy-set", "holders", "counts-sync", "tree", "document-coverage", "sections", "section", "backlinks", "search", "put",
-            "put-section", "rm", "document-add", "reproject", "sweep", "gate", "next-task", "what-if", "blockers", "events", "task-plan-push",
-            "norm-versions", "measurements", "plan", "readiness", "requirements-of",
-            "tasks-of", "preflight-queue", "claims",
-            "task-state-push", "state-disagreements",
-        ];
-        let reserved = RESERVED.contains(&name);
+        let reserved = Self::RESERVED.contains(&name);
 
         // Инструмент вида: имя инструмента и есть вид.
         if let Some(kind) = name.strip_suffix("-list") {
@@ -1228,11 +1249,16 @@ impl Mcp {
                         "count": rows.len(),
                         "documents": rows.iter().map(|r| {
                             let (kind, name): (String, String) = (r.get(0), r.get(1));
-                            let call = if name.is_empty() {
-                                format!("mh call {kind}")
-                            } else {
-                                format!("mh call {kind} id={name}")
-                            };
+                            // Вид, чьё имя занято дверью, достаётся только
+                            // через `kind=`: без него строка вызова отдала бы
+                            // разбор двери вместо документа.
+                            let mut call = format!("mh call {kind}");
+                            if Self::RESERVED.contains(&kind.as_str()) {
+                                call += &format!(" kind={kind}");
+                            }
+                            if !name.is_empty() {
+                                call += &format!(" id={name}");
+                            }
                             json!({ "kind": kind, "name": name, "bytes": r.get::<_, i32>(2), "достаётся": call })
                         }).collect::<Vec<_>>(),
                     })),
@@ -3556,5 +3582,43 @@ mod tests {
             mcp.args_refusal("gate", &json!({ "такого-довода-нет": 1 })).is_some(),
             "неизвестный довод обязан отвергаться, иначе объединение сняло бы сверку целиком"
         );
+    }
+
+    /// `id` и `kind` сверяются, как всякий довод, кроме дороги к сущности.
+    ///
+    /// Освобождённые для всех дверей, они пропадали молча: `mh call ready
+    /// id=M5-T175 kind=task` отдал пункты всех задач — 2137 вместо 15.
+    #[test]
+    fn id_and_kind_reach_only_doors_that_read_them() {
+        let kind = || serde_json::from_value::<crate::kinds::Kind>(json!({})).expect("вид из умолчаний");
+        let kinds = crate::kinds::Kinds(
+            [("task".to_owned(), kind()), ("goals".to_owned(), kind())].into_iter().collect(),
+        );
+        let mcp = Mcp {
+            pool: crate::db::pool("postgres://нет/нет", 1).expect("пул без соединения"),
+            kinds: Arc::new(kinds),
+            project: "набор".to_owned(),
+            author: "проверка".to_owned(),
+        };
+        let says = |name: &str, args: Value| {
+            mcp.args_refusal(name, &args).map(|v| v["content"][0]["text"].as_str().unwrap_or("").to_owned())
+        };
+
+        let ready = says("ready", json!({ "id": "M5-T175", "kind": "task" }));
+        assert!(
+            ready.as_deref().is_some_and(|t| t.contains("«id»") && t.contains("«kind»")),
+            "ready не читает id: ответ обо всём наборе пришёл бы за ответ о задаче, а пришло {ready:?}"
+        );
+        assert_eq!(says("readiness", json!({ "kind": "task", "id": "M5-T175" })), None, "readiness их читает");
+        assert_eq!(says("task", json!({ "kind": "task", "id": "M5-T175" })), None, "сущность через имя вида и kind");
+        assert_eq!(says("task", json!({ "id": "M5-T175", "brief": true })), None, "сущность через имя вида");
+        assert!(says("task", json!({ "id": "M5-T175", "kind": "goals" })).is_some(), "чужой kind у вида пропал бы");
+        assert!(says("task-list", json!({ "id": "M5-T175" })).is_some(), "перечень имён id не читает");
+        assert!(
+            says("goals", json!({ "id": "цель" })).is_some(),
+            "дверь goals id не читает; схема одноимённого вида его не разрешает"
+        );
+        assert_eq!(says("goals", json!({ "kind": "goals", "id": "цель" })), None, "документ goals по kind");
+        assert_eq!(says("coverage", json!({ "id": "покрытие" })), None, "coverage с id отдаёт документ");
     }
 }
