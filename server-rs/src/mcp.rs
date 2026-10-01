@@ -350,7 +350,7 @@ impl Mcp {
             "inputSchema": { "type": "object", "properties": { "deferProjection": json!({"type":"boolean","description":"не пересобирать проекции сейчас; позвать `reproject` после серии правок"}), "kind": s("вид"), "id": s("имя"), "anchor": s("якорь"), "body": s("новое тело раздела"), "expectedRevision": json!({"type":"integer"}) }, "required": ["kind", "anchor", "body"] } }));
         tools.push(json!({ "name": "rm", "description": "удалить сущность",
             "inputSchema": { "type": "object", "properties": { "deferProjection": json!({"type":"boolean","description":"не пересобирать проекции сейчас; позвать `reproject` после серии правок"}), "kind": s("вид"), "id": s("имя") }, "required": ["kind"] } }));
-        tools.push(json!({ "name": "task-state-push", "description": "принять состояния задач, выведенные харнесом из закрывающих трейлеров; подача полная. `at` — время коммита в мс: без него харнес знает лишь «когда увидел», а этим порядок не судится",
+        tools.push(json!({ "name": "task-state-push", "description": "принять ПОЛНУЮ подачу состояний задач, выведенных `mh sense` из закрывающих трейлеров. Не для ручного закрытия одной задачи: задача, которой нет в подаче, теряет состояние, а ручную подачу следующий `mh sense` перепишет — закрывает задачу трейлер в стволе. `at` — время коммита в мс: без него харнес знает лишь «когда увидел», а этим порядок не судится",
             "inputSchema": { "type": "object", "properties": {
                 "commit": s("коммит дерева, с которого сняты состояния: без него подача читается как «неизвестно»"),
                 "dirty": json!({"type":"boolean","description":"дерево было грязным: состояния выведены не из ствола"}),
