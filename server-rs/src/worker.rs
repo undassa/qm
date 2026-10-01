@@ -944,7 +944,7 @@ impl Worker {
     /// Отказ — словом, и тогда прогона не будет: **мерить не то хуже, чем не
     /// мерить**. Своего в дереве не остаётся между заходами: `reset --hard` и
     /// `clean -fd` снимают всё, кроме игнорируемого, — каталог сборки переживает
-    /// и не собирается заново каждый час.
+    /// и не собирается заново каждый час, пока не перерос порог `trim_target`.
     fn prepare_runner_tree(repo: &str) -> Result<String, String> {
         let tree = Self::runner_tree(repo);
         // ОТКАЗ `fetch` НЕ ОТМЕНЯЕТ ЗАМЕР, а отказ `reset` — отменяет.
@@ -992,12 +992,21 @@ impl Worker {
     fn trim_target(tree: &str) {
         const LIMIT_KB: u64 = 18 * 1024 * 1024;
         let target = format!("{tree}/target");
+        if !std::path::Path::new(&target).is_dir() {
+            return;
+        }
         let kb = std::process::Command::new("du")
             .args(["-sk", &target])
             .output()
             .ok()
             .and_then(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().next().and_then(|n| n.parse::<u64>().ok()));
-        if let Some(kb) = kb.filter(|kb| *kb > LIMIT_KB) {
+        // Размер не прочёлся — предел молча снят и диск снова кончится; это
+        // говорится вслух, иначе отказ `du` неотличим от «меньше порога».
+        let Some(kb) = kb else {
+            println!("размер сборки дерева прогона не прочёлся — предел 18 ГБ не проверен");
+            return;
+        };
+        if kb > LIMIT_KB {
             match std::fs::remove_dir_all(&target) {
                 Ok(()) => println!("сборка дерева прогона снесена: {} ГБ при пороге 18", kb / 1024 / 1024),
                 Err(e) => println!("сборка дерева прогона не снесена ({} ГБ): {e}", kb / 1024 / 1024),
