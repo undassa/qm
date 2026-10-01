@@ -96,20 +96,16 @@ WITH прогон AS (
 -- закрывать им пункт значило бы повторить ровно то, что три ветки ниже и
 -- осуждают: «написанная и никогда не запущенная проверка закрывала пункт так
 -- же, как зелёная». Оно остаётся в честной куче «судить нечем».
--- ЯКОРЬ ЗДЕСЬ НУЖНЕЕ, ЧЕМ ГДЕ-ЛИБО: это единственное место, где заявление
--- СНИМАЕТ находку. Съехавшее на соседа заявление без якоря погасило бы
--- «судить нечем» у пункта, которого никто не мерил, — и погасило бы молча,
--- а этот файл двумя ветками выше сам называет молчание худшим исходом.
+-- ЗАЯВЛЕНИЕ ВЯЖЕТСЯ К ПУНКТУ ЧЕРЕЗ `readiness_bound` — по тексту пункта, а
+-- `ord` берётся нынешний. Здесь это нужнее, чем где-либо: это единственное
+-- место, где заявление СНИМАЕТ находку, и заявление на чужом пункте погасило
+-- бы «судить нечем» у того, кого никто не мерил, — молча, а этот файл двумя
+-- ветками выше сам называет молчание худшим исходом.
 заявление AS (
-  SELECT m.owner_id AS task_id, m.ord
-    FROM readiness_method m
-   WHERE m.project_id = $1 AND m.owner_kind = 'task'
-     AND m.method_kind = 'checks-green' AND m.verdict = 'passed'
-     AND (m.item_text = '' OR EXISTS (
-           SELECT 1 FROM readiness_item i
-            WHERE i.project_id = m.project_id AND i.owner_kind = m.owner_kind
-              AND i.owner_id = m.owner_id AND i.ord = m.ord
-              AND i.text = m.item_text))),
+  SELECT b.owner_id AS task_id, b.ord
+    FROM readiness_bound b
+   WHERE b.project_id = $1 AND b.owner_kind = 'task'
+     AND b.method_kind = 'checks-green' AND b.verdict = 'passed'),
 ответ AS (
   SELECT r.check_name, bool_or(r.verdict = 'passed') AS зелена
     FROM test_run_trunk r, прогон п
@@ -221,24 +217,16 @@ SELECT t.id || ' — заявлений «проверки зелены» не �
        || ' — `mh call readiness kind=task id=' || t.id || '`'
   FROM project_plan_tasks t
   JOIN task_ready_item r ON r.project_id = t.project_id AND r.task_id = t.id
-  JOIN readiness_method m
-    ON m.project_id = t.project_id AND m.owner_kind = 'task'
-   AND m.owner_id = r.task_id AND m.ord = r.ord
-   -- Якорь — то же условие, что у круга замера. Вердикт ложится на заявление,
-   -- а заявление относится к пункту, чей текст оно запомнило; без якоря
-   -- правка выше чек-листа принесла бы сюда вердикт, снятый с соседнего
-   -- пункта.
-   --
-   -- Сравнивается с `readiness_item`, а НЕ с `r.text`: `task_ready_item`
-   -- держит строку с меткой `- [ ]` и склеенными продолжениями, а якорь
-   -- пишется из `readiness_item`, где метки нет. Первая редакция этой правки
-   -- сравнивала с `r.text` и была ложна всегда — 0 совпадений из 198.
-   AND (m.item_text = '' OR EXISTS (
-         SELECT 1 FROM readiness_item i
-          WHERE i.project_id = m.project_id AND i.owner_kind = m.owner_kind
-            AND i.owner_id = m.owner_id AND i.ord = m.ord
-            AND i.text = m.item_text))
-   AND m.method_kind = 'checks-green' AND m.verdict = 'failed'
+  -- То же соединение, что у круга замера: вердикт ложится на заявление, а
+  -- заявление — на пункт с его текстом. Сводить по `r.text` нельзя:
+  -- `task_ready_item` держит строку с меткой `- [ ]` и склеенными
+  -- продолжениями, а ключ выведен из `readiness_item`, где метки нет. Первая
+  -- редакция якоря сравнивала с `r.text` и была ложна всегда — 0 совпадений из
+  -- 198. Номер строки у обеих таблиц один, по нему и сводится.
+  JOIN readiness_bound b
+    ON b.project_id = t.project_id AND b.owner_kind = 'task'
+   AND b.owner_id = r.task_id AND b.ord = r.ord
+   AND b.method_kind = 'checks-green' AND b.verdict = 'failed'
  WHERE t.project_id = $1 AND fact_fresh($1, 'test-name')
    AND t.kind = 'dev' AND t.state = 'closed' AND NOT r.done AND r.check_id = ''
  GROUP BY t.project_id, t.id

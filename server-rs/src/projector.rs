@@ -195,6 +195,17 @@ CREATE OR REPLACE VIEW readiness_state AS
   SELECT i.project_id, i.owner_kind, i.owner_id, i.ord, i.text, i.declared, i.method_kind,
          CASE WHEN i.method_kind = 'unknown' THEN 'unknown' ELSE 'computable' END AS state
     FROM readiness_item i;
+-- Пункт и его объявленный способ — ОДНИМ соединением для всех читателей,
+-- включая правила гейта. Условие соединения прежде было переписано в пяти
+-- местах, и каждая правка якоря обязана была найти все пять; `ord` здесь —
+-- номер пункта сейчас, а не тот, на котором способ объявили.
+CREATE OR REPLACE VIEW readiness_bound AS
+  SELECT i.project_id, i.owner_kind, i.owner_id, i.ord, m.item_text,
+         m.method_kind, m.method, m.verdict
+    FROM readiness_item i
+    JOIN readiness_method m
+      ON m.project_id = i.project_id AND m.owner_kind = i.owner_kind
+     AND m.owner_id = i.owner_id AND m.item_text = ready_item_key(i.text);
 "#;
 
 
@@ -905,8 +916,13 @@ CREATE TABLE IF NOT EXISTS readiness_method (
   -- Набор подтвердил живьём: правка внутри признака готовности сдвинула
   -- `118 → 121 → 124 → 127`, а способы выше правки уцелели.
   --
-  -- Пустой текст значит «объявлено до якоря»: такой способ работает как
-  -- прежде и доверия не получает. Заново объявленный — получает.
+  -- ЯКОРЬ — КЛЮЧ, А `ord` — ЛИШЬ ПОДСКАЗКА. Пока ключом был номер, а текст
+  -- только сверялся, сдвиг уже не уводил способ на чужой пункт, но и свой
+  -- пункт способ терять переставал не раньше, чем его переобъявят: на
+  -- `M5-T175` «`just gate` зелёный целиком» уехал с 225 на 232 от правки
+  -- соседнего пункта, и за вечер привязки одной задачи слетали трижды. Поэтому
+  -- способ ищется по тексту пункта (`ready_item_key`), и только правка САМОГО
+  -- пункта — смена предмета — его отцепляет. `ord` — номер на миг объявления.
   --
   -- ПОТОЛОК НАЗВАН: здесь лежит ПЕРВАЯ ФИЗИЧЕСКАЯ СТРОКА пункта, а не весь
   -- пункт. Автор вправе перенести длинный пункт, и 490 пунктов из 2151 так и
@@ -924,7 +940,7 @@ CREATE TABLE IF NOT EXISTS readiness_method (
   -- Галочка якорь НЕ рвёт: разбор снимает `- [ ]` и `- [x]` одинаково, и
   -- самая частая правка чек-листа безопасна.
   item_text text NOT NULL DEFAULT '',
-  PRIMARY KEY (project_id, owner_kind, owner_id, ord));
+  PRIMARY KEY (project_id, owner_kind, owner_id, item_text));
 
 -- Связи, вынутые из фактов и полей документов. Каждая — своя таблица, потому
 -- что соединять их иначе значит искать подстроку в чужом тексте: такая связь
@@ -3088,6 +3104,61 @@ ALTER TABLE readiness_method ADD COLUMN IF NOT EXISTS verdict_at bigint NOT NULL
 ALTER TABLE readiness_method DROP CONSTRAINT IF EXISTS readiness_method_method_kind_check;
 ALTER TABLE readiness_method ADD CONSTRAINT readiness_method_method_kind_check
   CHECK (method_kind IN ('query','command','checks-green','unknown'));
+
+-- ПРЕДМЕТ ПУНКТА, ПО КОТОРОМУ ИЩЕТСЯ ЕГО СПОСОБ. Одна функция на запись и на
+-- все чтения: стоит одному читателю сравнить сырой текст, а другому
+-- нормализованный, — и привязка видна в одной двери и пропадает в другой.
+-- Метку снимает и здесь, хотя `readiness_item` пишется уже без неё: дверь
+-- `method-set` принимает текст пункта от человека, а он скопирует строку
+-- целиком. Пробелы сводятся, потому что лишний пробел предмета не меняет.
+CREATE OR REPLACE FUNCTION ready_item_key(t text) RETURNS text AS $к$
+  SELECT btrim(regexp_replace(regexp_replace(t, '^\s*[-*]\s+\[[ xX]\]\s*', ''), '\s+', ' ', 'g'))
+$к$ LANGUAGE sql IMMUTABLE;
+
+-- ПЕРЕНОС КЛЮЧА С НОМЕРА НА ТЕКСТ. Довод — у объявления таблицы.
+--
+-- Запомненный текст у способа и есть текст пункта на миг объявления — он
+-- переходит в ключ как есть. У объявленных до якоря (`item_text = ''`) миг
+-- объявления не записан вовсе, и ревизию документа, на которой их ставили,
+-- найти нечем: такие берут текст пункта, стоящего на их номере СЕЙЧАС, — то
+-- есть ровно тот пункт, который они и судили до переноса. Нет пункта на номере
+-- — не судили ничего, и строка снимается: ключа у неё нет.
+--
+-- Два способа одного пункта (объявленный заново на новом номере и забытый на
+-- старом) сходятся в один ключ; остаётся тот, что стоит на пункте сейчас, затем
+-- последний посчитанный.
+--
+-- ДВА ЭКЗЕМПЛЯРА, СТАРТУЮЩИЕ РАЗОМ, не переносят дважды: схема идёт одной
+-- неявной транзакцией, и `ALTER TABLE readiness_method` выше берёт замок на
+-- таблицу до этого блока — второй ждёт первого и видит уже перенесённое.
+-- Замерено двумя параллельными копиями: без предшествующего ALTER одна из них
+-- падала на `CREATE OR REPLACE FUNCTION` с дублем в `pg_proc`. Убрать или
+-- переставить этот ALTER — значит снять защиту, о которой больше ничто не скажет.
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_constraint c
+               JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey)
+              WHERE c.conname = 'readiness_method_pkey' AND a.attname = 'ord') THEN
+    UPDATE readiness_method m SET item_text = i.text
+      FROM readiness_item i
+     WHERE m.item_text = '' AND i.project_id = m.project_id AND i.owner_kind = m.owner_kind
+       AND i.owner_id = m.owner_id AND i.ord = m.ord;
+    DELETE FROM readiness_method WHERE item_text = '';
+    UPDATE readiness_method SET item_text = ready_item_key(item_text);
+    DELETE FROM readiness_method WHERE ctid IN (
+      SELECT ctid FROM (
+        SELECT m.ctid, row_number() OVER (
+                 PARTITION BY m.project_id, m.owner_kind, m.owner_id, m.item_text
+                 ORDER BY EXISTS (SELECT 1 FROM readiness_item i
+                                   WHERE i.project_id = m.project_id AND i.owner_kind = m.owner_kind
+                                     AND i.owner_id = m.owner_id AND i.ord = m.ord
+                                     AND ready_item_key(i.text) = m.item_text) DESC,
+                          m.verdict_at DESC, m.ord DESC) AS n
+          FROM readiness_method m) д
+       WHERE д.n > 1);
+    ALTER TABLE readiness_method DROP CONSTRAINT readiness_method_pkey;
+    ALTER TABLE readiness_method ADD PRIMARY KEY (project_id, owner_kind, owner_id, item_text);
+  END IF;
+END $$;
 ALTER TABLE readiness_item DROP CONSTRAINT IF EXISTS readiness_item_method_kind_check;
 ALTER TABLE readiness_item ADD CONSTRAINT readiness_item_method_kind_check
   CHECK (method_kind IN ('query','command','checks-green','unknown'));
@@ -4777,24 +4848,13 @@ pub async fn rebuild(pool: &Pool, project: &str, _: &crate::watch::Lease) -> Res
     // Объявленные способы возвращаются на пересобранные пункты.
     let methods = tx
         .execute(
-            // ЯКОРЬ СИЛЬНЕЕ НОМЕРА. Способ с запомненным текстом возвращается
-            // только на пункт с ТЕМ ЖЕ текстом; уехал номер — способ не
-            // встаёт никуда, и пункт честно остаётся без способа. Прежде он
-            // вставал на чужой пункт и судил не то.
-            //
-            // Объявленные до якоря (`item_text = ''`) ходят по номеру, как
-            // ходили: менять им поведение молча нельзя. Доверия им это не
-            // добавляет, и УВИДЕТЬ их сейчас негде — `readiness_method` не
-            // читает ни одна дверь. Пока такой двери нет, единственный честный
-            // путь снять подозрение — переобъявить способ, и тогда он получит
-            // якорь. Переобъявление ставит НОВУЮ строку, если номер изменился:
-            // старую надо снять `drop=true` по старому номеру, иначе она
-            // останется клеить свой способ на чужой пункт.
-            "UPDATE readiness_item i SET method_kind = m.method_kind, method = m.method
-               FROM readiness_method m
-              WHERE m.project_id = i.project_id AND m.owner_kind = i.owner_kind
-                AND m.owner_id = i.owner_id AND m.ord = i.ord AND i.project_id = $1
-                AND (m.item_text = '' OR m.item_text = i.text)",
+            // СПОСОБ ВОЗВРАЩАЕТСЯ НА ПУНКТ С ТЕМ ЖЕ ТЕКСТОМ, ГДЕ БЫ ТОТ НИ СТОЯЛ.
+            // Сдвиг номеров способа не отцепляет; правка текста самого пункта
+            // отцепляет, и пункт честно остаётся без способа: предмет сменился.
+            "UPDATE readiness_item i SET method_kind = b.method_kind, method = b.method
+               FROM readiness_bound b
+              WHERE b.project_id = i.project_id AND b.owner_kind = i.owner_kind
+                AND b.owner_id = i.owner_id AND b.ord = i.ord AND i.project_id = $1",
             &[&project],
         )
         .await?;
@@ -5287,32 +5347,25 @@ pub(crate) async fn measure_gates(pool: &Pool, project: &str, since: i64) -> Res
     // котором их сличили. Поэтому исполнитель один, а посчитанное кладётся
     // рядом с объявлением.
     //
-    // ЯКОРЬ ПРОВЕРЯЕТСЯ И ЗДЕСЬ. `ord` есть номер строки в документе, и
-    // заявление переживает пересборку: правка выше чек-листа уводит его на
-    // чужой пункт. Возврат заявлений на пункты это уже стережёт текстом;
-    // вердикт без той же проверки обошёл бы стража — прошедшее заявление
-    // сняло бы находку с пункта, которого никто не мерил. Замер: из 166
-    // способов 94 стояли на соседнем пункте.
+    // ВЕРДИКТ — ТОЛЬКО ЗАЯВЛЕНИЮ, ЧЕЙ ПУНКТ СЕЙЧАС ЕСТЬ. Прошедшее заявление
+    // снимает находку с пункта; посчитанное для пункта, которого больше нет,
+    // сняло бы её с того, чего никто не мерил.
     //
     // Точка возврата на каждое: круг идёт одной транзакцией, а Postgres после
     // ошибки прерывает её целиком, и одно неудачное заявление унесло бы весь
     // замер гейта — молча, потому что дверь отдаёт сохранённый круг.
     for r in client
         .query(
-            "SELECT m.owner_kind, m.owner_id, m.ord, m.method_kind, m.method
-               FROM readiness_method m
-               JOIN readiness_item i
-                 ON i.project_id = m.project_id AND i.owner_kind = m.owner_kind
-                AND i.owner_id = m.owner_id AND i.ord = m.ord
-                AND (m.item_text = '' OR m.item_text = i.text)
-              WHERE m.project_id = $1 AND m.method_kind = 'checks-green'
-                AND coalesce(btrim(m.method), '') <> ''
-              ORDER BY m.owner_kind, m.owner_id, m.ord",
+            "SELECT DISTINCT b.owner_kind, b.owner_id, b.item_text, b.method_kind, b.method
+               FROM readiness_bound b
+              WHERE b.project_id = $1 AND b.method_kind = 'checks-green'
+                AND coalesce(btrim(b.method), '') <> ''
+              ORDER BY b.owner_kind, b.owner_id, b.item_text",
             &[&project],
         )
         .await?
     {
-        let (ok, oi, ord, mk, m): (String, String, i32, String, String) =
+        let (ok, oi, key, mk, m): (String, String, String, String, String) =
             (r.get(0), r.get(1), r.get(2), r.get(3), r.get(4));
         client.batch_execute("SAVEPOINT заявление").await?;
         let v = execute_method(&client, project, &mk, &m).await;
@@ -5324,8 +5377,8 @@ pub(crate) async fn measure_gates(pool: &Pool, project: &str, since: i64) -> Res
         client
             .execute(
                 "UPDATE readiness_method SET verdict = $5, verdict_at = $6
-                  WHERE project_id = $1 AND owner_kind = $2 AND owner_id = $3 AND ord = $4",
-                &[&project, &ok, &oi, &ord, &v.state, &now_ms()],
+                  WHERE project_id = $1 AND owner_kind = $2 AND owner_id = $3 AND item_text = $4",
+                &[&project, &ok, &oi, &key, &v.state, &now_ms()],
             )
             .await?;
     }
@@ -6204,6 +6257,9 @@ pub(crate) struct Method<'a> {
     pub kind: &'a str,
     pub id: &'a str,
     pub ord: i32,
+    /// Текст пункта вместо номера. Номер называет пункт лишь до ближайшей
+    /// правки выше него; текст — пока не сменился сам пункт.
+    pub text: &'a str,
     pub method_kind: &'a str,
     pub method: &'a str,
     pub declared_by: &'a str,
@@ -6223,14 +6279,20 @@ pub(crate) struct Method<'a> {
 /// сервер является. Команду выполняет харнес и подаёт итог — тем же путём, что
 /// состояния задач.
 pub(crate) async fn set_method(pool: &Pool, project: &str, fields: Method<'_>) -> Result<Value, crate::db::Fail> {
-    let Method { kind, id, ord, method_kind, method, declared_by, drop } = fields;
+    let Method { kind, id, ord, text, method_kind, method, declared_by, drop } = fields;
     let client = crate::db::conn(pool).await?;
     if drop {
+        // Снять по тексту можно и тогда, когда пункта уже нет: иначе способ,
+        // чей пункт переписали, остался бы в таблице навсегда.
         let n = client
             .execute(
                 "DELETE FROM readiness_method
-                  WHERE project_id = $1 AND owner_kind = $2 AND owner_id = $3 AND ord = $4",
-                &[&project, &kind, &id, &ord],
+                  WHERE project_id = $1 AND owner_kind = $2 AND owner_id = $3
+                    AND item_text = CASE WHEN btrim($5) <> '' THEN ready_item_key($5)
+                                         ELSE (SELECT ready_item_key(i.text) FROM readiness_item i
+                                                WHERE i.project_id = $1 AND i.owner_kind = $2
+                                                  AND i.owner_id = $3 AND i.ord = $4) END",
+                &[&project, &kind, &id, &ord, &text],
             )
             .await?;
         return Ok(json!({ "status": if n > 0 { "dropped" } else { "not_found" }, "ord": ord }));
@@ -6238,9 +6300,9 @@ pub(crate) async fn set_method(pool: &Pool, project: &str, fields: Method<'_>) -
     // Способ объявляется ЧЬЕМУ-ТО пункту. Вызов без вида и без номера писал
     // строку с пустым владельцем и `ord = -1` — объявление, которое ничему не
     // принадлежит и никогда не сработает.
-    if kind.trim().is_empty() || ord < 0 {
+    if kind.trim().is_empty() || (ord < 0 && text.trim().is_empty()) {
         return Ok(json!({ "status": "no_owner",
-                          "why": "способ объявляется пункту: нужен вид владельца и номер пункта" }));
+                          "why": "способ объявляется пункту: нужен вид владельца и номер либо текст пункта" }));
     }
     // Кто объявил — записывается. Это не украшение: способ живёт дольше
     // пересборки, и без имени объявившего его нельзя ни спросить, ни убрать
@@ -6254,32 +6316,35 @@ pub(crate) async fn set_method(pool: &Pool, project: &str, fields: Method<'_>) -
     // который никогда ничего не судит и о котором никто не узнает. Таких
     // мёртвых строк намерено 501 из 1724.
     //
-    // Текст пункта — якорь против сдвига номеров (довод у таблицы).
+    // Текст пункта — ключ способа (довод у таблицы).
     //
     // ЧИТАТЬ И ПИСАТЬ ПОРОЗНЬ НЕЛЬЗЯ. Пересборка `readiness_item` идёт после
     // КАЖДОЙ правки документа любой сессией и занимает десятки секунд: между
-    // отдельным `SELECT` и отдельным `INSERT` пункт успевает переехать, и
-    // якорь лёг бы от старого пункта к новому номеру — строка, мёртвая с
-    // рождения. Поэтому текст берётся подзапросом в том же операторе, и ноль
-    // вставленных строк САМ значит «пункта нет».
-    let written = client
-        .execute(
+    // отдельным `SELECT` и отдельным `INSERT` пункт успевает переехать, и ключ
+    // лёг бы от соседнего пункта. Поэтому текст берётся подзапросом в том же
+    // операторе, и пустой ответ САМ значит «пункта нет».
+    let key: Option<String> = client
+        .query_opt(
             "INSERT INTO readiness_method (project_id, owner_kind, owner_id, ord, method_kind, method, declared_by, item_text)
-             SELECT $1, $2, $3, $4, $5, $6, $7, i.text
+             SELECT $1, $2, $3, i.ord, $5, $6, $7, ready_item_key(i.text)
                FROM readiness_item i
-              WHERE i.project_id = $1 AND i.owner_kind = $2 AND i.owner_id = $3 AND i.ord = $4
-             ON CONFLICT (project_id, owner_kind, owner_id, ord)
-               DO UPDATE SET method_kind = EXCLUDED.method_kind, method = EXCLUDED.method,
-                             declared_by = EXCLUDED.declared_by, item_text = EXCLUDED.item_text,
+              WHERE i.project_id = $1 AND i.owner_kind = $2 AND i.owner_id = $3
+                AND CASE WHEN btrim($8) <> '' THEN ready_item_key(i.text) = ready_item_key($8) ELSE i.ord = $4 END
+              ORDER BY i.ord LIMIT 1
+             ON CONFLICT (project_id, owner_kind, owner_id, item_text)
+               DO UPDATE SET ord = EXCLUDED.ord, method_kind = EXCLUDED.method_kind, method = EXCLUDED.method,
+                             declared_by = EXCLUDED.declared_by,
                              -- ВЕРДИКТ ОБНУЛЯЕТСЯ ПРИ ПЕРЕОБЪЯВЛЕНИИ. Иначе между
                              -- новым объявлением и ближайшим кругом правило читало
-                             -- бы вердикт, посчитанный для ДРУГОГО текста, и
+                             -- бы вердикт, посчитанный для ДРУГОГО способа, и
                              -- отличить это было бы нечем.
-                             verdict = '', verdict_at = 0",
-            &[&project, &kind, &id, &ord, &method_kind, &method, &declared_by],
+                             verdict = '', verdict_at = 0
+             RETURNING item_text",
+            &[&project, &kind, &id, &ord, &method_kind, &method, &declared_by, &text],
         )
-        .await?;
-    if written == 0 {
+        .await?
+        .map(|r| r.get(0));
+    let Some(key) = key else {
         // ОТКАЗ ОТДАЁТСЯ ОТКАЗОМ. Успех с полем `status` оболочка отдаёт с
         // кодом 0, и цикл на `set -e`, объявляющий полтораста способов,
         // отрапортовал бы полтораста успехов. Соседняя дверь `readiness`
@@ -6290,21 +6355,21 @@ pub(crate) async fn set_method(pool: &Pool, project: &str, fields: Method<'_>) -
         // 1223 стоят на пунктах, которых `ready` не показывает вовсе — у
         // красных задач, у вложенных и звёздочных пунктов. `readiness` читает
         // ту самую таблицу, по которой судит эта дверь.
+        let item = if text.trim().is_empty() { ord.to_string() } else { format!("«{}»", text.trim()) };
         return Ok(json!({ "status": "no_item",
-            "why": format!("пункта {ord} у {kind} {id} нет: способ объявлять нечему \
-                            — номера называет `mh call readiness kind={kind} id={id}`") }));
-    }
+            "why": format!("пункта {item} у {kind} {id} нет: способ объявлять нечему \
+                            — пункты называет `mh call readiness kind={kind} id={id}`") }));
+    };
     let n = client
         .execute(
             "UPDATE readiness_item SET method_kind = $5, method = $6
-              WHERE project_id = $1 AND owner_kind = $2 AND owner_id = $3 AND ord = $4",
-            &[&project, &kind, &id, &ord, &method_kind, &method],
+              WHERE project_id = $1 AND owner_kind = $2 AND owner_id = $3 AND ready_item_key(text) = $4",
+            &[&project, &kind, &id, &key, &method_kind, &method],
         )
         .await?;
-    // ПЕРЕЖИВЁТ ПЕРЕСБОРКУ — ТЕПЕРЬ УСЛОВНО, И УСЛОВИЕ НАЗВАНО. Безусловное
-    // «true» стало ложью в тот миг, когда способ начал держаться за текст:
-    // переживёт, ПОКА текст пункта тот же.
-    Ok(json!({ "updated": n, "methodKind": method_kind, "declaredBy": declared_by,
+    // ПЕРЕЖИВЁТ ПЕРЕСБОРКУ, ПОКА ТЕКСТ ПУНКТА ТОТ ЖЕ: сдвиг номеров способ не
+    // отцепляет, правка самого пункта — отцепляет.
+    Ok(json!({ "updated": n, "item": key, "methodKind": method_kind, "declaredBy": declared_by,
                "survivesRebuild": "пока текст пункта тот же" }))
 }
 
@@ -11096,43 +11161,28 @@ pub(crate) async fn ready_items(pool: &Pool, project: &str, task: &str) -> Resul
     // `query`, и ни одно из 503 вердикта не получит никогда. Написать им «вердикт
     // появится после круга» значило бы завести поле, которое врёт большинству
     // спрашивающих, — хуже, чем прежнее молчание.
-    // ЯКОРЬ ПРОВЕРЯЕТСЯ И ЗДЕСЬ, И СРАВНИВАЕТСЯ С `readiness_item`, А НЕ С
-    // ТЕКСТОМ ПУНКТА ОТСЮДА.
+    // СПОСОБ БЕРЁТСЯ ЧЕРЕЗ `readiness_bound`, ТЕМ ЖЕ СОЕДИНЕНИЕМ, ЧТО У КРУГА.
     //
-    // Заявление относится к пункту, чей текст оно запомнило; `ord` — номер
-    // строки, и правка выше чек-листа уводит заявление на соседа. Круг замера
-    // это уже стерёг, а показ — нет: `readiness` способа не показывал,
-    // `ready` показывал. Замер на `M5-T25`: расходились шесть пунктов из
-    // тринадцати.
+    // Показ и круг расходились уже однажды: `ready` показывал способ на
+    // соседнем пункте, которого круг не судил, — на `M5-T25` шесть пунктов из
+    // тринадцати. Пять ревьюеров и контролирующая сессия прочли это и записали
+    // набору ложную находку «пункт судится чужой проверкой».
     //
     // ДВА ТЕКСТА ОДНОГО ПУНКТА РАЗНЫЕ, И ЭТО НЕ ОЧЕВИДНО. `readiness_item`
     // держит текст БЕЗ `- [ ]` и без склейки переносов; `task_ready_item` —
     // строку целиком, с меткой и склеенными продолжениями, обрезанную до 400.
-    // Якорь пишет дверь `method-set` из `readiness_item`, поэтому сравнивать
-    // его с `r.text` нельзя: первая же редакция этой правки так и сделала, и
-    // условие оказалось ложным ВСЕГДА — 0 совпадений из 198 на живой базе.
-    // Дверь скрыла бы все 198 якорных заявлений (192 привязаны верно) и
-    // оставила только 413 безъякорных, то есть ровно те, которым сама не
-    // доверяет. Ревью поймало это замером до выкатки.
-    //
-    // Цена расхождения не в неудобстве. Пять ревьюеров и контролирующая сессия
-    // прочли `ready`, увидели способ на чужом пункте и записали набору находку
-    // «пункт судится чужой проверкой» — тогда как круг его не судил вовсе.
-    // Дверь, показавшая несуществующую связь, родила ложную находку, а не
-    // скрыла настоящую.
+    // Ключ способа выведен из первого, поэтому `r.text` в сравнение не идёт:
+    // первая редакция якоря сравнила с ним, и условие оказалось ложным ВСЕГДА
+    // — 0 совпадений из 198 на живой базе. Пункт сводится по номеру строки,
+    // который у обеих таблиц один.
     let rows = client
         .query(
             "SELECT r.task_id, r.ord, r.check_id, r.text, r.done,
-                    coalesce(m.method_kind, ''), coalesce(m.method, ''), coalesce(m.verdict, '')
+                    coalesce(b.method_kind, ''), coalesce(b.method, ''), coalesce(b.verdict, '')
                FROM task_ready_item r
-               LEFT JOIN readiness_method m
-                 ON m.project_id = r.project_id AND m.owner_kind = 'task'
-                AND m.owner_id = r.task_id AND m.ord = r.ord
-                AND (m.item_text = '' OR EXISTS (
-                      SELECT 1 FROM readiness_item i
-                       WHERE i.project_id = m.project_id AND i.owner_kind = m.owner_kind
-                         AND i.owner_id = m.owner_id AND i.ord = m.ord
-                         AND i.text = m.item_text))
+               LEFT JOIN readiness_bound b
+                 ON b.project_id = r.project_id AND b.owner_kind = 'task'
+                AND b.owner_id = r.task_id AND b.ord = r.ord
               WHERE r.project_id = $1 AND ($2 = '' OR r.task_id = $2)
               ORDER BY r.task_id, r.ord",
             &[&project, &task],
@@ -15794,6 +15844,166 @@ mod work_run_token {
     }
 }
 
+/// Способ пункта готовности держится за текст пункта, а не за номер строки.
+///
+/// Заведено по замеру на `M5-T175`: правка соседнего пункта выше сдвинула
+/// номера, и привязки одной задачи слетали трижды за вечер.
+#[cfg(test)]
+mod readiness_binding {
+    use super::{set_method, Method};
+
+    /// Пул на своей схеме: тесты этого модуля не делят таблицы ни друг с
+    /// другом, ни с соседями.
+    async fn own_schema(name: &str, before_ensure: &str) -> deadpool_postgres::Pool {
+        let url = std::env::var("MH_TEST_DB_URL").expect("MH_TEST_DB_URL: адрес пустой базы");
+        let apart = format!("{}options=-c%20search_path%3D{name}", if url.contains('?') { '&' } else { '?' });
+        let pool = crate::db::pool(&format!("{url}{apart}"), 2).expect("пул тестовой базы");
+        let client = pool.get().await.expect("соединение с тестовой базой");
+        client
+            .batch_execute(&format!("DROP SCHEMA IF EXISTS {name} CASCADE; CREATE SCHEMA {name}; {before_ensure}"))
+            .await
+            .expect("своя схема заводится");
+        drop(client);
+        super::ensure(&pool).await.expect("схема встаёт");
+        pool
+    }
+
+    /// Пересборка пунктов так, как её делает проекция: всё стёрто и написано
+    /// заново, номер — строка документа.
+    async fn project_items(pool: &deadpool_postgres::Pool, lines: &[&str]) {
+        let client = pool.get().await.expect("соединение");
+        client.execute("DELETE FROM readiness_item WHERE project_id = 'П'", &[]).await.expect("пункты стираются");
+        for (n, line) in lines.iter().enumerate() {
+            client
+                .execute(
+                    "INSERT INTO readiness_item (project_id, owner_kind, owner_id, ord, text, declared, method_kind)
+                     VALUES ('П', 'task', 'T-1', $1, $2, false, 'unknown')",
+                    &[&(n as i32 + 1), line],
+                )
+                .await
+                .expect("пункт пишется");
+        }
+    }
+
+    async fn bound_at(pool: &deadpool_postgres::Pool) -> Vec<i32> {
+        let client = pool.get().await.expect("соединение");
+        client
+            .query("SELECT ord FROM readiness_bound WHERE project_id = 'П' ORDER BY ord", &[])
+            .await
+            .expect("привязки читаются")
+            .iter()
+            .map(|r| r.get(0))
+            .collect()
+    }
+
+    fn method<'a>(ord: i32, text: &'a str) -> Method<'a> {
+        Method { kind: "task", id: "T-1", ord, text, method_kind: "checks-green",
+                 method: "a_test", declared_by: "тест", drop: false }
+    }
+
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn the_key_ignores_the_checkbox_and_extra_spaces() {
+        let pool = own_schema("readiness_key", "").await;
+        let client = pool.get().await.expect("соединение");
+        for (raw, key) in [("  - [x]  just   gate\tзелёный ", "just gate зелёный"),
+                           ("* [ ] пункт", "пункт"),
+                           ("пункт без метки", "пункт без метки"),
+                           ("[x] не метка списка", "[x] не метка списка")] {
+            let got: String = client.query_one("SELECT ready_item_key($1)", &[&raw]).await.unwrap().get(0);
+            assert_eq!(got, key, "ключ для {raw:?}");
+        }
+        client.batch_execute("DROP SCHEMA IF EXISTS readiness_key CASCADE").await.expect("схема снимается");
+    }
+
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn a_shift_keeps_the_binding_and_a_new_subject_drops_it() {
+        let pool = own_schema("readiness_shift", "").await;
+        project_items(&pool, &["первый", "`just gate` зелёный целиком"]).await;
+        let set = set_method(&pool, "П", method(2, "")).await.expect("способ объявляется");
+        assert_eq!(set["item"], "`just gate` зелёный целиком", "ключ — текст пункта на названном номере");
+        assert_eq!(bound_at(&pool).await, vec![2]);
+
+        // Правка ВЫШЕ пункта: номер уехал, предмет тот же.
+        project_items(&pool, &["первый", "вставлен выше", "ещё один", "`just gate` зелёный целиком"]).await;
+        assert_eq!(bound_at(&pool).await, vec![4], "сдвиг номеров привязку не отцепляет");
+
+        // Галочка и пробелы предмета не меняют.
+        project_items(&pool, &["первый", "`just gate`  зелёный целиком"]).await;
+        assert_eq!(bound_at(&pool).await, vec![2], "лишний пробел предмета не меняет");
+
+        // Правка САМОГО пункта: предмет сменился.
+        project_items(&pool, &["первый", "`just gate` зелёный, кроме G5"]).await;
+        assert!(bound_at(&pool).await.is_empty(), "смена текста пункта отцепляет способ");
+
+        // Текст вместо номера: метку человек скопирует вместе со строкой.
+        let set = set_method(&pool, "П", method(-1, "- [ ] `just gate` зелёный, кроме G5")).await.unwrap();
+        assert_eq!(set["item"], "`just gate` зелёный, кроме G5");
+        assert_eq!(bound_at(&pool).await, vec![2]);
+        let missing = set_method(&pool, "П", method(-1, "такого пункта нет")).await.unwrap();
+        assert_eq!(missing["status"], "no_item", "текст, которого нет, — отказ, а не мёртвая строка");
+
+        // Снятие по тексту — и по пункту, которого уже нет.
+        let dropped = set_method(&pool, "П", Method { drop: true, ..method(-1, "`just gate` зелёный целиком") })
+            .await.unwrap();
+        assert_eq!(dropped["status"], "dropped", "способ отцепившегося пункта снимается по его тексту");
+
+        let client = pool.get().await.expect("соединение");
+        client.batch_execute("DROP SCHEMA IF EXISTS readiness_shift CASCADE").await.expect("схема снимается");
+    }
+
+    /// Перенос базы, где ключом был номер. Таблицы заведены в той форме, в
+    /// какой они стояли до переноса, и `ensure` переводит их тем же текстом
+    /// схемы, которым переведёт живую базу.
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn the_migration_moves_bindings_from_the_line_to_the_text() {
+        let pool = own_schema("readiness_move", "
+            CREATE TABLE readiness_item (
+              project_id text NOT NULL, owner_kind text NOT NULL, owner_id text NOT NULL, ord integer NOT NULL,
+              text text NOT NULL, declared boolean,
+              method_kind text NOT NULL DEFAULT 'unknown', method text NOT NULL DEFAULT '',
+              PRIMARY KEY (project_id, owner_kind, owner_id, ord));
+            CREATE TABLE readiness_method (
+              project_id text NOT NULL, owner_kind text NOT NULL, owner_id text NOT NULL, ord integer NOT NULL,
+              method_kind text NOT NULL, method text NOT NULL DEFAULT '', declared_by text NOT NULL DEFAULT '',
+              verdict text NOT NULL DEFAULT '', verdict_at bigint NOT NULL DEFAULT 0,
+              item_text text NOT NULL DEFAULT '',
+              PRIMARY KEY (project_id, owner_kind, owner_id, ord));
+            INSERT INTO readiness_item (project_id, owner_kind, owner_id, ord, text) VALUES
+              ('П', 'task', 'T-1', 2, 'уехавший  пункт'),
+              ('П', 'task', 'T-1', 3, 'пункт без якоря');
+            INSERT INTO readiness_method (project_id, owner_kind, owner_id, ord, method_kind, method, item_text) VALUES
+              -- якорь есть, номер устарел: правка выше сдвинула пункт с 1 на 2
+              ('П', 'task', 'T-1', 1, 'checks-green', 'старый', 'уехавший пункт'),
+              -- тот же пункт, переобъявленный на новом номере
+              ('П', 'task', 'T-1', 2, 'checks-green', 'новый', 'уехавший  пункт'),
+              -- объявлен до якоря: берёт текст пункта на своём номере
+              ('П', 'task', 'T-1', 3, 'command', 'без якоря', ''),
+              -- объявлен до якоря на номере, где пункта нет: судить было нечего
+              ('П', 'task', 'T-1', 9, 'command', 'мёртвый', '');
+        ").await;
+        let client = pool.get().await.expect("соединение");
+        let rows: Vec<(String, String)> = client
+            .query("SELECT item_text, method FROM readiness_method ORDER BY item_text", &[])
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| (r.get(0), r.get(1)))
+            .collect();
+        assert_eq!(rows, vec![
+            ("пункт без якоря".to_owned(), "без якоря".to_owned()),
+            ("уехавший пункт".to_owned(), "новый".to_owned()),
+        ], "два способа одного пункта сходятся в тот, что стоит на нём сейчас; мёртвый снят");
+        assert_eq!(bound_at(&pool).await, vec![2, 3], "после переноса оба пункта находят свой способ");
+        drop(client);
+        super::ensure(&pool).await.expect("перенос повторно не ломает схему");
+        let client = pool.get().await.expect("соединение");
+        client.batch_execute("DROP SCHEMA IF EXISTS readiness_move CASCADE").await.expect("схема снимается");
+    }
+}
+
 /// Очередь пульта против круга «отдали → ответили → отдали снова».
 ///
 /// Проверка заведена по находке ревью: сторож очереди смотрел, есть ли у вопроса
@@ -15926,7 +16136,10 @@ mod plan_task_kinds {
     /// Тот самый `DO`-блок схемы, что чинит список видов задачи.
     fn repair_ddl() -> &'static str {
         let from = super::DDL
-            .find("DO $$ BEGIN\n  IF EXISTS (SELECT 1 FROM pg_constraint")
+            // По предмету блока, а не по первому похожему началу: `DO`-блоков с
+            // тем же началом в схеме несколько, и новый, вставший выше, молча
+            // подменил бы проверяемую починку.
+            .find("DO $$ BEGIN\n  IF EXISTS (SELECT 1 FROM pg_constraint\n              WHERE conrelid = 'project_plan_tasks'::regclass")
             .expect("починка объявлена в схеме");
         let to = from + super::DDL[from..].find("END $$;").expect("конец блока") + 7;
         &super::DDL[from..to]

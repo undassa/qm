@@ -398,8 +398,10 @@ impl Mcp {
         tools.push(json!({ "name": "method-set", "description": "объявить, чем судится пункт готовности. `checks-green`: в `method` — имена проверок через пробел, и пункт закрывается, когда все они зелены на последнем чистом прогоне ствола. Имя, которого в прогоне нет, даёт красное наравне с упавшим; измерившего прогона (где что-то кроме упавшей сборки) не было вовсе — `unknown`, а не красное",
             "inputSchema": { "type": "object", "properties": { "drop": json!({"type":"boolean","description":"снять объявленное этой же дверью"}),
                 "kind": s("вид владельца"), "id": s("имя владельца; у одиночки пусто"),
-                "ord": json!({"type":"integer"}), "methodKind": s("checks-green — список имён проверок, зелёных на последнем чистом прогоне ствола; command — выполняет харнес; query — только пунктам гейта, пунктам приёмки отозван"),
-                "method": s("запрос либо команда") }, "required": ["kind", "ord", "methodKind"] } }));
+                "ord": json!({"type":"integer","description":"номер пункта, как его называет `readiness`; способ держится не за номер, а за текст пункта на этом номере"}),
+                "text": s("текст пункта вместо номера; метка `- [ ]` и лишние пробелы не важны"),
+                "methodKind": s("checks-green — список имён проверок, зелёных на последнем чистом прогоне ствола; command — выполняет харнес; query — только пунктам гейта, пунктам приёмки отозван"),
+                "method": s("запрос либо команда") }, "required": ["kind", "methodKind"] } }));
         tools.push(json!({ "name": "links-of", "description": "чем доказано и с чем связано: связи сущности по видам: проверки, истории, задачи, решения — то, что показывает панель раздела",
             "inputSchema": { "type": "object", "properties": { "kind": s("requirement · story · decision"), "id": s("имя") }, "required": ["kind", "id"] } }));
         tools.push(json!({ "name": "entity-confirm", "description": "перечитал переоткрытую запись — закрытие в силе: с доводом и автором; правка опоры снова её переоткроет",
@@ -2833,8 +2835,9 @@ impl Mcp {
                 let ord = num(args, "ord").unwrap_or(-1) as i32;
                 let mk = args.get("methodKind").and_then(|v| v.as_str()).unwrap_or("unknown");
                 let method = args.get("method").and_then(|v| v.as_str()).unwrap_or("");
+                let text = args.get("text").and_then(|v| v.as_str()).unwrap_or("");
                 let drop = flag(args, "drop");
-                match crate::projector::set_method(&self.pool, p, crate::projector::Method { kind: kind_arg, id: id.unwrap_or(""), ord, method_kind: mk, method, declared_by: &self.author, drop }).await {
+                match crate::projector::set_method(&self.pool, p, crate::projector::Method { kind: kind_arg, id: id.unwrap_or(""), ord, text, method_kind: mk, method, declared_by: &self.author, drop }).await {
                     // ОТКАЗ ОСТАЁТСЯ ОТКАЗОМ И В ОБОЛОЧКЕ. Успех с полем
                     // `status` уходит с кодом 0, и цикл на `set -e`,
                     // объявляющий полтораста способов несуществующим номерам,
