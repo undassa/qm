@@ -515,12 +515,7 @@ async fn said_at(
                 "title": title.unwrap_or_default(),
                 "caveated": r.get::<_, bool>(4),
                 "role": r.get::<_, String>(5),
-                // Дверь `section` ищет раздел по якорю, а не по номеру: строка
-                // с `ord=` отвергалась как неизвестный довод на первом же вызове.
-                "by": match r.get::<_, Option<String>>(6) {
-                    Some(anchor) => format!("mh call section kind={kind} id={name} anchor={anchor}"),
-                    None => crate::mcp::Mcp::entity_call(&kind, &name),
-                },
+                "by": crate::mcp::Mcp::section_call(&kind, &name, r.get::<_, Option<String>>(6).as_deref()),
             })
         })
         .collect();

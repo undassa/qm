@@ -942,6 +942,16 @@ impl Mcp {
         call
     }
 
+    /// Строка вызова раздела документа. Без якоря — путь к самому документу:
+    /// `section` ищет раздел по якорю, и строка с номером раздела (`ord=`)
+    /// отвергалась сверкой доводов на первом же вызове.
+    pub fn section_call(kind: &str, name: &str, anchor: Option<&str>) -> String {
+        match anchor {
+            Some(anchor) => format!("mh call section kind={kind} id={name} anchor={anchor}"),
+            None => Self::entity_call(kind, name),
+        }
+    }
+
     // Двери, чьё имя старше одноимённого вида: вид достаётся им только
     // доводом `kind=<имя>`.
     const RESERVED: &[&str] = &[
@@ -3598,15 +3608,6 @@ mod tests {
     /// Освобождённые для всех дверей, они пропадали молча: `mh call ready
     /// id=M5-T175 kind=task` отдал пункты всех задач — 2137 вместо 15.
     #[test]
-    fn a_printed_call_reaches_its_document() {
-        // Строку вызова агент копирует как есть: она обязана пройти сверку
-        // доводов и прийти к документу, а не к одноимённой двери.
-        assert_eq!(Mcp::entity_call("srs", ""), "mh call srs");
-        assert_eq!(Mcp::entity_call("goals", ""), "mh call goals kind=goals");
-        assert_eq!(Mcp::entity_call("task", "M5-T1"), "mh call task id=M5-T1");
-    }
-
-    #[test]
     fn id_and_kind_reach_only_doors_that_read_them() {
         let kind = || serde_json::from_value::<crate::kinds::Kind>(json!({})).expect("вид из умолчаний");
         let kinds = crate::kinds::Kinds(
@@ -3638,5 +3639,20 @@ mod tests {
         );
         assert_eq!(says("goals", json!({ "kind": "goals", "id": "цель" })), None, "документ goals по kind");
         assert_eq!(says("coverage", json!({ "id": "покрытие" })), None, "coverage с id отдаёт документ");
+
+        // Строку вызова, которую печатают ответы, агент копирует как есть:
+        // она обязана пройти эту же сверку, иначе подсказка ведёт в отказ.
+        for line in [
+            Mcp::entity_call("srs", ""),
+            Mcp::entity_call("goals", ""),
+            Mcp::entity_call("goals", "цель"),
+            Mcp::entity_call("task", "M5-T1"),
+            Mcp::section_call("task", "M5-T1", Some("что-делать")),
+            Mcp::section_call("task", "M5-T1", None),
+        ] {
+            let words: Vec<String> = line.split(' ').map(str::to_owned).collect();
+            let args = crate::client::args_of(&words[3..]).expect("доводы строки разбираются");
+            assert_eq!(says(&words[2], args), None, "напечатанная строка «{line}» отвергнута сверкой");
+        }
     }
 }
