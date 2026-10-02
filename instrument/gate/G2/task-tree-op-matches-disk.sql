@@ -35,11 +35,14 @@ WITH свежий AS (
      -- выход из петли — закрыться при закрытой фазе, что пишет долг `task_redo`.
      -- Так набор и получил 81 строку долга.
      --
-     -- «В работе» берётся у открытого рабочего дерева — факта, а не намерения.
-     -- Задача в покое судится как прежде: «+» на существующий файл — настоящая
-     -- находка, кто-то уже построил обещанное.
-     AND NOT EXISTS (SELECT 1 FROM task_worktree w
-                      WHERE w.project_id = l.project_id AND w.task_id = l.task_id)),
+     -- «В работе» берётся у `task_held` — открытого рабочего дерева или живого
+     -- прогона, фактов, а не намерений: дерево датчик видит только на своей
+     -- машине, и работа на другом сервере иначе читалась бы покоем. Задача в
+     -- покое судится как прежде: «+» на существующий файл — настоящая находка,
+     -- кто-то уже построил обещанное.
+     AND NOT EXISTS (SELECT 1 FROM task_held h
+                      WHERE h.project_id = l.project_id AND h.task_id = l.task_id
+                        AND (h.worktree IS NOT NULL OR h.run IS NOT NULL))),
 предок AS (
   WITH RECURSIVE до(task_id, dep) AS (
     SELECT d.task_id, d.depends_on FROM project_plan_task_deps d WHERE d.project_id = $1

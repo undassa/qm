@@ -95,6 +95,7 @@ const СЛОВАРЬ: Record<string, [string, string]> = {
   "wk.waves": ["Волны", "Waves"],
   "wk.wave": ["Волна", "Wave"],
   "wk.onBranch": ["ведётся на ветке", "in flight on branch"],
+  "wk.inRun": ["держит живой прогон", "held by a live run"],
   "wk.waveNote": ["доля свежих вердиктов в волне; щелчок оставляет только её",
                   "share of fresh verdicts per wave; click to keep only it"],
   "wk.honest": ["У задачи датирован только предполёт: закрытие помечено коммитом, а не датой — путь задачи лента показать не может.",

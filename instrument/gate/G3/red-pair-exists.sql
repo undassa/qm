@@ -61,8 +61,9 @@ WITH судимые AS (
     FROM project_plan_tasks t
     LEFT JOIN task_state ts ON ts.project_id = t.project_id AND ts.task_id = t.id
    WHERE t.project_id = $1 AND t.kind = 'dev'
-     AND (EXISTS (SELECT 1 FROM task_worktree w
-                   WHERE w.project_id = t.project_id AND w.task_id = t.id)
+     AND (EXISTS (SELECT 1 FROM task_held h
+                   WHERE h.project_id = t.project_id AND h.task_id = t.id
+                     AND (h.worktree IS NOT NULL OR h.run IS NOT NULL))
           OR (t.state = 'closed' AND nullif(ts.closed_at, 0) >= $2))
      AND NOT EXISTS (SELECT 1 FROM project_plan_tasks r
                       WHERE r.project_id = t.project_id AND r.kind = 'red'

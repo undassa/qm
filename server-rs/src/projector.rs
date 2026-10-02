@@ -88,16 +88,18 @@ CREATE OR REPLACE VIEW task_held AS
   SELECT t.project_id, t.id AS task_id,
          -- Занятую не отдаём второму: открытое рабочее дерево значит, что
          -- задачу уже ведут. Пропуск, а не отказ — вернётся, как снимут.
-         -- Живой прогон держит так же: датчик видит деревья только своей
-         -- машины, и `tot-ade` выдал M5-T104 второй сессии, пока первая
-         -- вела её на другом сервере с открытым прогоном, — а `run-start`
-         -- второй сессии уже отвечал `already_running`.
-         coalesce((SELECT w.branch FROM task_worktree w
-                    WHERE w.project_id = t.project_id AND w.task_id = t.id),
-                  (SELECT 'прогон ' || r.id || ' · ' || r.agent_id FROM project_task_runs r
-                    WHERE r.project_id = t.project_id AND r.task_id = t.id
-                      AND r.state <> ALL (ARRAY['done', 'failed', 'cancelled'])
-                    ORDER BY r.created_at LIMIT 1)) AS worktree,
+         (SELECT w.branch FROM task_worktree w
+           WHERE w.project_id = t.project_id AND w.task_id = t.id) AS worktree,
+         -- Живой прогон держит тоже, и ОТДЕЛЬНЫМ столбцом: датчик видит деревья
+         -- только своей машины, и `tot-ade` выдал M5-T104 второй сессии, пока
+         -- первая вела её на другом сервере с открытым прогоном, — а `run-start`
+         -- второй уже отвечал `already_running`. Дерево снимается само, когда
+         -- датчик перестаёт его видеть; прогон — только `run-state`, и двери
+         -- обязаны называть этот путь, а не обещать «вернётся, как снимут».
+         (SELECT r.id FROM project_task_runs r
+           WHERE r.project_id = t.project_id AND r.task_id = t.id
+             AND r.state <> ALL (ARRAY['done', 'failed', 'cancelled'])
+           ORDER BY r.created_at LIMIT 1) AS run,
          -- Зеркало вперёд тела (`ADR-0080`): пока красная пара не закрыта, её
          -- файла в стволе нет, и начать работу нечем.
          (SELECT r.id FROM red_task r
@@ -5058,7 +5060,8 @@ pub(crate) async fn next_task(pool: &Pool, project: &str) -> Result<Value, crate
                 -- тринадцати занятых отвечал «ничто не держит».
                 AND NOT EXISTS (SELECT 1 FROM task_held h
                                  WHERE h.project_id = $1 AND h.task_id = o.id
-                                   AND (h.worktree IS NOT NULL OR h.mirror IS NOT NULL))
+                                   AND (h.worktree IS NOT NULL OR h.mirror IS NOT NULL
+                                        OR h.run IS NOT NULL))
               ORDER BY (tp.open IS NOT TRUE), o.milestone_id, o.ord
               LIMIT 1",
             &[&project],
@@ -5271,15 +5274,19 @@ pub(crate) async fn task_blockers(pool: &Pool, project: &str, task: &str) -> Res
     // его тем же: держание рождается в одном месте и читается обеими дверями.
     let held = client
         .query_opt(
-            "SELECT worktree, mirror FROM task_held
-              WHERE project_id = $1 AND task_id = $2",
+            "SELECT h.worktree, h.mirror, h.run,
+                    (SELECT r.agent_id || ' · ' || r.state FROM project_task_runs r WHERE r.id = h.run)
+               FROM task_held h
+              WHERE h.project_id = $1 AND h.task_id = $2",
             &[&project, &task],
         )
         .await?;
     let worktree: Option<String> = held.as_ref().and_then(|r| r.get(0));
     let mirror: Option<String> = held.as_ref().and_then(|r| r.get(1));
+    let run: Option<String> = held.as_ref().and_then(|r| r.get(2));
+    let run_by: Option<String> = held.as_ref().and_then(|r| r.get(3));
     let free = tasks.is_empty() && milestones.is_empty() && phase_open == Some(true)
-        && worktree.is_none() && mirror.is_none();
+        && worktree.is_none() && mirror.is_none() && run.is_none();
     Ok(json!({
         "task": task,
         "phase": match &phase {
@@ -5305,6 +5312,7 @@ pub(crate) async fn task_blockers(pool: &Pool, project: &str, task: &str) -> Res
         })).collect::<Vec<_>>(),
         "waitsForMirror": mirror,
         "inWorktree": worktree,
+        "inRun": run,
         // Пустота СКАЗАНА СЛОВОМ: два пустых списка и «ничто не держит» — разное
         // только для того, кто знает, что задача существует и была спрошена.
         "why": if free {
@@ -5315,6 +5323,11 @@ pub(crate) async fn task_blockers(pool: &Pool, project: &str, task: &str) -> Res
         } else if let Some(b) = &worktree {
             format!("задачу уже ведут в рабочем дереве `{b}`: второму её не отдают, и это пропуск, \
                      а не отказ — вернётся, как дерево снимут")
+        } else if let Some(id) = &run {
+            format!("у задачи живой прогон `{id}` ({}): второму её не отдают. Сам он не \
+                     истекает; если его никто не ведёт, закрыть: \
+                     `mh call run-state runId={id} state=cancelled note=<почему>`",
+                    run_by.clone().unwrap_or_default())
         } else {
             String::new()
         },
@@ -14931,7 +14944,8 @@ pub(crate) async fn waves(pool: &Pool, project: &str) -> Result<Value, crate::db
                     -- звали на работу, которой дверь не даёт. Один и тот же
                     -- дефект второй раз, поэтому держание теперь читается из
                     -- `task_held` и тут, и в `next-task`, и в `blockers`.
-                    h.mirror AS held_by_mirror
+                    h.mirror AS held_by_mirror,
+                    h.run AS held_by_run
                FROM project_plan_tasks t
                LEFT JOIN task_held h ON h.project_id = t.project_id AND h.task_id = t.id
                LEFT JOIN red_task r ON r.project_id = t.project_id AND r.id = t.id
@@ -15004,6 +15018,7 @@ pub(crate) async fn waves(pool: &Pool, project: &str) -> Result<Value, crate::db
             "wave": r.get::<_, Option<i32>>("wave"),
             "inFlight": r.get::<_, Option<String>>("in_flight"),
             "heldByMirror": r.get::<_, Option<String>>("held_by_mirror"),
+            "heldByRun": r.get::<_, Option<String>>("held_by_run"),
             "waits": depends[i].iter().filter(|&&j| tasks[j].get::<_, String>("state") != "closed").count(),
         }));
     }
@@ -15028,6 +15043,10 @@ pub(crate) async fn waves(pool: &Pool, project: &str) -> Result<Value, crate::db
         .iter()
         .filter(|c| c["state"] != "closed" && !c["inFlight"].is_null())
         .count();
+    let held_run = cards
+        .iter()
+        .filter(|c| c["state"] != "closed" && !c["heldByRun"].is_null())
+        .count();
     Ok(json!({
         "cards": cards,
         "total": cards.len(),
@@ -15036,6 +15055,7 @@ pub(crate) async fn waves(pool: &Pool, project: &str) -> Result<Value, crate::db
         "heldByPhase": held,
         "heldByMirror": held_mirror,
         "heldByWorktree": held_flight,
+        "heldByRun": held_run,
         "why": match (held > 0, held_mirror > 0) {
             (true, true) => "карточки с `phaseOpen` не `true` в очередь не идут: их фаза не открыта либо вид задачи не отображён ни на одну фазу.                              Карточки с непустым `heldByMirror` — тоже: их красная пара не закрыта, и `next-task` их не выдаст".to_owned(),
             (true, false) => "карточки с `phaseOpen` не `true` в очередь не идут: их фаза не открыта либо вид задачи не отображён ни на одну фазу".to_owned(),
@@ -15043,6 +15063,9 @@ pub(crate) async fn waves(pool: &Pool, project: &str) -> Result<Value, crate::db
             (false, false) => String::new(),
         } + if held_flight > 0 {
             ". Карточки с непустым `inFlight` тоже: задачу уже ведут в рабочем дереве, и второму её не отдают"
+        } else { "" } + if held_run > 0 {
+            ". Карточки с непустым `heldByRun` тоже: у задачи живой прогон. Сам он не истекает; \
+             брошенный закрывают `mh call run-state runId=… state=cancelled note=…`"
         } else { "" },
     }))
 }
@@ -17237,16 +17260,24 @@ mod run_holds_task {
             .expect("задача подсаживается");
         let held = || async {
             pool.get().await.expect("соединение")
-                .query_one("SELECT worktree FROM task_held WHERE project_id = 'П' AND task_id = 'T1'", &[])
+                .query_one("SELECT run FROM task_held WHERE project_id = 'П' AND task_id = 'T1'", &[])
                 .await.expect("держание читается")
                 .get::<_, Option<String>>(0)
         };
 
         assert_eq!(held().await, None, "без дерева и прогона задачу ничто не держит");
+        let next = super::next_task(&pool, "П").await.expect("дверь next-task");
+        assert!(next["task"]["id"] == "T1" || next["candidate"] == "T1",
+                "свободную задачу дверь видит — иначе проверка ниже ничего не мерит: {next}");
         let run = super::start_run(&pool, "П", "T1", "sg-00", "начал").await.expect("прогон заводится");
         let id = run["runId"].as_str().expect("номер прогона").to_owned();
-        let by = held().await.expect("живой прогон держит задачу");
-        assert!(by.contains(&id) && by.contains("sg-00"), "держание называет прогон и сессию: {by}");
+        assert_eq!(held().await.as_deref(), Some(id.as_str()), "живой прогон держит задачу и назван");
+        let next = super::next_task(&pool, "П").await.expect("дверь next-task");
+        assert!(next["task"]["id"] != "T1" && next["candidate"] != "T1",
+                "задачу с живым прогоном не выдают и не называют кандидатом: {next}");
+        let why = super::task_blockers(&pool, "П", "T1").await.expect("дверь blockers");
+        assert!(why["why"].as_str().unwrap_or("").contains("state=cancelled"),
+                "отказ называет, как снять брошенный прогон: {why}");
         super::set_run_state(&pool, "П", &id, "done", "слито", "", "sg-00").await.expect("прогон закрывается");
         assert_eq!(held().await, None, "закрытый прогон задачу отпускает");
 

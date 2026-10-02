@@ -62,6 +62,7 @@ interface WaveCard {
   state: string;
   wave: number | null;
   inFlight: string | null;
+  heldByRun: string | null;
 }
 interface Waves {
   cards: WaveCard[];
@@ -472,12 +473,13 @@ export function Work({ projectId, lang }: { projectId: string; lang: Lang }): Re
                     {список.map((c) => (
                       <li
                         key={c.id}
-                        className={c.inFlight ? "in" : c.state === "closed" ? "done" : ""}
+                        className={c.inFlight || c.heldByRun ? "in" : c.state === "closed" ? "done" : ""}
                       >
                         <button
                           type="button"
                           onClick={() => setOpen(c.id)}
-                          title={c.inFlight ? `${say(lang, "wk.onBranch")} ${c.inFlight}` : bare(c.title)}
+                          title={c.inFlight ? `${say(lang, "wk.onBranch")} ${c.inFlight}`
+                            : c.heldByRun ? `${say(lang, "wk.inRun")} ${c.heldByRun}` : bare(c.title)}
                         >
                           <span className="wk-id">{c.id}</span>
                           <span className="wk-bt">{bare(c.title)}</span>
