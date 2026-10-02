@@ -15052,6 +15052,17 @@ pub(crate) async fn waves(pool: &Pool, project: &str) -> Result<Value, crate::db
         .iter()
         .filter(|c| c["state"] != "closed" && !c["heldByRun"].is_null())
         .count();
+    let why = [
+        (held > 0).then_some("карточки с `phaseOpen` не `true` в очередь не идут: их фаза не открыта \
+                              либо вид задачи не отображён ни на одну фазу"),
+        (held_mirror > 0).then_some("карточки с непустым `heldByMirror` в очередь не идут: их красная \
+                                     пара не закрыта, и `next-task` их не выдаст"),
+        (held_flight > 0).then_some("карточки с непустым `inFlight` в очередь не идут: задачу уже ведут \
+                                     в рабочем дереве, и второму её не отдают"),
+        (held_run > 0).then_some("карточки с непустым `heldByRun` в очередь не идут: у задачи живой \
+                                  прогон. Сам он не истекает; брошенный закрывают \
+                                  `mh call run-state runId=… state=cancelled note=…`"),
+    ].into_iter().flatten().collect::<Vec<_>>().join(". ");
     Ok(json!({
         "cards": cards,
         "total": cards.len(),
@@ -15061,17 +15072,7 @@ pub(crate) async fn waves(pool: &Pool, project: &str) -> Result<Value, crate::db
         "heldByMirror": held_mirror,
         "heldByWorktree": held_flight,
         "heldByRun": held_run,
-        "why": [
-            (held > 0).then_some("карточки с `phaseOpen` не `true` в очередь не идут: их фаза не открыта \
-                                  либо вид задачи не отображён ни на одну фазу"),
-            (held_mirror > 0).then_some("карточки с непустым `heldByMirror` в очередь не идут: их красная \
-                                         пара не закрыта, и `next-task` их не выдаст"),
-            (held_flight > 0).then_some("карточки с непустым `inFlight` в очередь не идут: задачу уже ведут \
-                                         в рабочем дереве, и второму её не отдают"),
-            (held_run > 0).then_some("карточки с непустым `heldByRun` в очередь не идут: у задачи живой \
-                                      прогон. Сам он не истекает; брошенный закрывают \
-                                      `mh call run-state runId=… state=cancelled note=…`"),
-        ].into_iter().flatten().collect::<Vec<_>>().join(". "),
+        "why": why,
     }))
 }
 
