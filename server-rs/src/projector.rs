@@ -88,8 +88,16 @@ CREATE OR REPLACE VIEW task_held AS
   SELECT t.project_id, t.id AS task_id,
          -- Занятую не отдаём второму: открытое рабочее дерево значит, что
          -- задачу уже ведут. Пропуск, а не отказ — вернётся, как снимут.
-         (SELECT w.branch FROM task_worktree w
-           WHERE w.project_id = t.project_id AND w.task_id = t.id) AS worktree,
+         -- Живой прогон держит так же: датчик видит деревья только своей
+         -- машины, и `tot-ade` выдал M5-T104 второй сессии, пока первая
+         -- вела её на другом сервере с открытым прогоном, — а `run-start`
+         -- второй сессии уже отвечал `already_running`.
+         coalesce((SELECT w.branch FROM task_worktree w
+                    WHERE w.project_id = t.project_id AND w.task_id = t.id),
+                  (SELECT 'прогон ' || r.id || ' · ' || r.agent_id FROM project_task_runs r
+                    WHERE r.project_id = t.project_id AND r.task_id = t.id
+                      AND r.state <> ALL (ARRAY['done', 'failed', 'cancelled'])
+                    ORDER BY r.created_at LIMIT 1)) AS worktree,
          -- Зеркало вперёд тела (`ADR-0080`): пока красная пара не закрыта, её
          -- файла в стволе нет, и начать работу нечем.
          (SELECT r.id FROM red_task r
@@ -17188,6 +17196,62 @@ mod subject_why_only_when_empty {
 
         pool.get().await.expect("соединение")
             .batch_execute("DROP SCHEMA IF EXISTS subject_why_only_when_empty CASCADE")
+            .await.expect("схема снимается");
+    }
+}
+
+/// Живой прогон держит задачу так же, как рабочее дерево.
+///
+/// Порча, которую ловит проверка: держание знает только деревья, которые видит
+/// датчик своей машины, и `next-task` отдаёт задачу второй сессии, пока первая
+/// ведёт её на другом сервере, — хотя `run-start` второй уже говорит
+/// `already_running`.
+#[cfg(test)]
+mod run_holds_task {
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn a_live_run_holds_its_task_and_a_finished_one_releases_it() {
+        let url = std::env::var("MH_TEST_DB_URL").expect("MH_TEST_DB_URL: адрес пустой базы");
+        let apart = format!("{}{}", if url.contains('?') { '&' } else { '?' },
+                            "options=-c%20search_path%3Drun_holds_task");
+        let pool = crate::db::pool(&format!("{url}{apart}"), 2).expect("пул тестовой базы");
+        {
+            let client = pool.get().await.expect("соединение с тестовой базой");
+            client
+                .batch_execute("DROP SCHEMA IF EXISTS run_holds_task CASCADE; CREATE SCHEMA run_holds_task;")
+                .await
+                .expect("своя схема заводится");
+        }
+        super::ensure(&pool).await.expect("схема встаёт на пустой базе");
+        let client = pool.get().await.expect("соединение");
+        client
+            .batch_execute(
+                "INSERT INTO project_plan_versions (project_id, id) VALUES ('П', 'v1');
+                 INSERT INTO project_plan_milestones (project_id, id, version_id, ord, title)
+                 VALUES ('П', 'M1', 'v1', 1, 'веха');
+                 INSERT INTO project_plan_tasks (project_id, id, milestone_id, ord, title, size, state, kind,
+                                                 entity_kind, entity_name)
+                 VALUES ('П', 'T1', 'M1', 1, 'задача', '', 'not_started', 'dev', 'task', 'T1');",
+            )
+            .await
+            .expect("задача подсаживается");
+        let held = || async {
+            pool.get().await.expect("соединение")
+                .query_one("SELECT worktree FROM task_held WHERE project_id = 'П' AND task_id = 'T1'", &[])
+                .await.expect("держание читается")
+                .get::<_, Option<String>>(0)
+        };
+
+        assert_eq!(held().await, None, "без дерева и прогона задачу ничто не держит");
+        let run = super::start_run(&pool, "П", "T1", "sg-00", "начал").await.expect("прогон заводится");
+        let id = run["runId"].as_str().expect("номер прогона").to_owned();
+        let by = held().await.expect("живой прогон держит задачу");
+        assert!(by.contains(&id) && by.contains("sg-00"), "держание называет прогон и сессию: {by}");
+        super::set_run_state(&pool, "П", &id, "done", "слито", "", "sg-00").await.expect("прогон закрывается");
+        assert_eq!(held().await, None, "закрытый прогон задачу отпускает");
+
+        pool.get().await.expect("соединение")
+            .batch_execute("DROP SCHEMA IF EXISTS run_holds_task CASCADE")
             .await.expect("схема снимается");
     }
 }
