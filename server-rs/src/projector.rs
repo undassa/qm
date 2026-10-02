@@ -90,6 +90,15 @@ CREATE OR REPLACE VIEW task_held AS
          -- задачу уже ведут. Пропуск, а не отказ — вернётся, как снимут.
          (SELECT w.branch FROM task_worktree w
            WHERE w.project_id = t.project_id AND w.task_id = t.id) AS worktree,
+         -- Зеркало вперёд тела (`ADR-0080`): пока красная пара не закрыта, её
+         -- файла в стволе нет, и начать работу нечем.
+         (SELECT r.id FROM red_task r
+            JOIN project_plan_tasks z ON z.project_id = r.project_id AND z.id = r.id
+           WHERE r.project_id = t.project_id AND lower(r.parent_task) = lower(t.id)
+             AND z.state <> 'closed'
+           ORDER BY r.id LIMIT 1) AS mirror,
+         -- Столбец в КОНЦЕ: `CREATE OR REPLACE VIEW` не переставляет
+         -- существующие, и вставка в середину роняла бы `ensure` при старте.
          -- Живой прогон держит тоже, и ОТДЕЛЬНЫМ столбцом: датчик видит деревья
          -- только своей машины, и `tot-ade` выдал M5-T104 второй сессии, пока
          -- первая вела её на другом сервере с открытым прогоном, — а `run-start`
@@ -99,14 +108,7 @@ CREATE OR REPLACE VIEW task_held AS
          (SELECT r.id FROM project_task_runs r
            WHERE r.project_id = t.project_id AND r.task_id = t.id
              AND r.state <> ALL (ARRAY['done', 'failed', 'cancelled'])
-           ORDER BY r.created_at LIMIT 1) AS run,
-         -- Зеркало вперёд тела (`ADR-0080`): пока красная пара не закрыта, её
-         -- файла в стволе нет, и начать работу нечем.
-         (SELECT r.id FROM red_task r
-            JOIN project_plan_tasks z ON z.project_id = r.project_id AND z.id = r.id
-           WHERE r.project_id = t.project_id AND lower(r.parent_task) = lower(t.id)
-             AND z.state <> 'closed'
-           ORDER BY r.id LIMIT 1) AS mirror
+           ORDER BY r.created_at LIMIT 1) AS run
     FROM project_plan_tasks t;
 
 -- Чем требование доказано — ОДИН ответ на всех, а не по ответу на дверь.
