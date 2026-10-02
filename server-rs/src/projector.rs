@@ -5322,16 +5322,19 @@ pub(crate) async fn task_blockers(pool: &Pool, project: &str, task: &str) -> Res
         } else if let Some(m) = &mirror {
             format!("красная пара `{m}` не закрыта: проверка обязана приземлиться раньше тела (`ADR-0080`), \
                      и до тех пор задача не выдаётся")
-        } else if let Some(b) = &worktree {
-            format!("задачу уже ведут в рабочем дереве `{b}`: второму её не отдают, и это пропуск, \
-                     а не отказ — вернётся, как дерево снимут")
-        } else if let Some(id) = &run {
-            format!("у задачи живой прогон `{id}` ({}): второму её не отдают. Сам он не \
-                     истекает; если его никто не ведёт, закрыть: \
-                     `mh call run-state runId={id} state=cancelled note=<почему>`",
-                    run_by.clone().unwrap_or_default())
         } else {
-            String::new()
+            // Дерево и прогон держат порознь и снимаются порознь, поэтому при
+            // обоих называются оба: одно «вернётся, как дерево снимут» обещало
+            // возврат, которого брошенный прогон не даст.
+            [worktree.as_ref().map(|b| format!(
+                 "задачу уже ведут в рабочем дереве `{b}`: второму её не отдают, и это пропуск, \
+                  а не отказ — дерево снимается само, когда датчик перестаёт его видеть")),
+             run.as_ref().map(|id| format!(
+                 "у задачи живой прогон `{id}` ({}): второму её не отдают. Сам он не \
+                  истекает; если его никто не ведёт, закрыть: \
+                  `mh call run-state runId={id} state=cancelled note=<почему>`",
+                 run_by.clone().unwrap_or_default()))]
+            .into_iter().flatten().collect::<Vec<_>>().join(". ")
         },
     }))
 }
@@ -15058,17 +15061,17 @@ pub(crate) async fn waves(pool: &Pool, project: &str) -> Result<Value, crate::db
         "heldByMirror": held_mirror,
         "heldByWorktree": held_flight,
         "heldByRun": held_run,
-        "why": match (held > 0, held_mirror > 0) {
-            (true, true) => "карточки с `phaseOpen` не `true` в очередь не идут: их фаза не открыта либо вид задачи не отображён ни на одну фазу.                              Карточки с непустым `heldByMirror` — тоже: их красная пара не закрыта, и `next-task` их не выдаст".to_owned(),
-            (true, false) => "карточки с `phaseOpen` не `true` в очередь не идут: их фаза не открыта либо вид задачи не отображён ни на одну фазу".to_owned(),
-            (false, true) => "карточки с непустым `heldByMirror` в очередь не идут: их красная пара не закрыта, и `next-task` их не выдаст".to_owned(),
-            (false, false) => String::new(),
-        } + if held_flight > 0 {
-            ". Карточки с непустым `inFlight` тоже: задачу уже ведут в рабочем дереве, и второму её не отдают"
-        } else { "" } + if held_run > 0 {
-            ". Карточки с непустым `heldByRun` тоже: у задачи живой прогон. Сам он не истекает; \
-             брошенный закрывают `mh call run-state runId=… state=cancelled note=…`"
-        } else { "" },
+        "why": [
+            (held > 0).then_some("карточки с `phaseOpen` не `true` в очередь не идут: их фаза не открыта \
+                                  либо вид задачи не отображён ни на одну фазу"),
+            (held_mirror > 0).then_some("карточки с непустым `heldByMirror` в очередь не идут: их красная \
+                                         пара не закрыта, и `next-task` их не выдаст"),
+            (held_flight > 0).then_some("карточки с непустым `inFlight` в очередь не идут: задачу уже ведут \
+                                         в рабочем дереве, и второму её не отдают"),
+            (held_run > 0).then_some("карточки с непустым `heldByRun` в очередь не идут: у задачи живой \
+                                      прогон. Сам он не истекает; брошенный закрывают \
+                                      `mh call run-state runId=… state=cancelled note=…`"),
+        ].into_iter().flatten().collect::<Vec<_>>().join(". "),
     }))
 }
 
@@ -17274,12 +17277,18 @@ mod run_holds_task {
         let run = super::start_run(&pool, "П", "T1", "sg-00", "начал").await.expect("прогон заводится");
         let id = run["runId"].as_str().expect("номер прогона").to_owned();
         assert_eq!(held().await.as_deref(), Some(id.as_str()), "живой прогон держит задачу и назван");
+        pool.get().await.expect("соединение")
+            .batch_execute("INSERT INTO task_worktree (project_id, task_id, branch, since) VALUES ('П', 'T1', 'ветка', 1)")
+            .await.expect("дерево подсаживается");
         let next = super::next_task(&pool, "П").await.expect("дверь next-task");
         assert!(next["task"]["id"] != "T1" && next["candidate"] != "T1",
                 "задачу с живым прогоном не выдают и не называют кандидатом: {next}");
         let why = super::task_blockers(&pool, "П", "T1").await.expect("дверь blockers");
         assert!(why["why"].as_str().unwrap_or("").contains("state=cancelled"),
-                "отказ называет, как снять брошенный прогон: {why}");
+                "отказ называет, как снять брошенный прогон, и при открытом дереве тоже: {why}");
+        pool.get().await.expect("соединение")
+            .batch_execute("DELETE FROM task_worktree WHERE project_id = 'П'")
+            .await.expect("дерево снимается");
         super::set_run_state(&pool, "П", &id, "done", "слито", "", "sg-00").await.expect("прогон закрывается");
         assert_eq!(held().await, None, "закрытый прогон задачу отпускает");
 
