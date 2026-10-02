@@ -5319,14 +5319,14 @@ pub(crate) async fn task_blockers(pool: &Pool, project: &str, task: &str) -> Res
         // только для того, кто знает, что задача существует и была спрошена.
         "why": if free {
             "ничто не держит: все зависимости закрыты и фаза задачи открыта".to_owned()
-        } else if let Some(m) = &mirror {
-            format!("красная пара `{m}` не закрыта: проверка обязана приземлиться раньше тела (`ADR-0080`), \
-                     и до тех пор задача не выдаётся")
         } else {
-            // Дерево и прогон держат порознь и снимаются порознь, поэтому при
-            // обоих называются оба: одно «вернётся, как дерево снимут» обещало
-            // возврат, которого брошенный прогон не даст.
-            [worktree.as_ref().map(|b| format!(
+            // Зеркало, дерево и прогон держат порознь и снимаются порознь,
+            // поэтому называются все, что есть: одно «вернётся, как дерево
+            // снимут» обещало возврат, которого брошенный прогон не даст.
+            [mirror.as_ref().map(|m| format!(
+                 "красная пара `{m}` не закрыта: проверка обязана приземлиться раньше тела (`ADR-0080`), \
+                  и до тех пор задача не выдаётся")),
+             worktree.as_ref().map(|b| format!(
                  "задачу уже ведут в рабочем дереве `{b}`: второму её не отдают, и это пропуск, \
                   а не отказ — дерево снимается само, когда датчик перестаёт его видеть")),
              run.as_ref().map(|id| format!(
@@ -17278,12 +17278,13 @@ mod run_holds_task {
         let run = super::start_run(&pool, "П", "T1", "sg-00", "начал").await.expect("прогон заводится");
         let id = run["runId"].as_str().expect("номер прогона").to_owned();
         assert_eq!(held().await.as_deref(), Some(id.as_str()), "живой прогон держит задачу и назван");
-        pool.get().await.expect("соединение")
-            .batch_execute("INSERT INTO task_worktree (project_id, task_id, branch, since) VALUES ('П', 'T1', 'ветка', 1)")
-            .await.expect("дерево подсаживается");
+        // Дерева ещё нет: держит один прогон, иначе пропуск мерил бы дерево.
         let next = super::next_task(&pool, "П").await.expect("дверь next-task");
         assert!(next["task"]["id"] != "T1" && next["candidate"] != "T1",
                 "задачу с живым прогоном не выдают и не называют кандидатом: {next}");
+        pool.get().await.expect("соединение")
+            .batch_execute("INSERT INTO task_worktree (project_id, task_id, branch, since) VALUES ('П', 'T1', 'ветка', 1)")
+            .await.expect("дерево подсаживается");
         let why = super::task_blockers(&pool, "П", "T1").await.expect("дверь blockers");
         assert!(why["why"].as_str().unwrap_or("").contains("state=cancelled"),
                 "отказ называет, как снять брошенный прогон, и при открытом дереве тоже: {why}");
