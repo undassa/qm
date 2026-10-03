@@ -17313,6 +17313,28 @@ mod run_holds_task {
         super::set_run_state(&pool, "П", &id, "done", "слито", "", "sg-00").await.expect("прогон закрывается");
         assert_eq!(held().await, None, "закрытый прогон задачу отпускает");
 
+        // Снятие задачи из документа называет дверь, а не «нет такой».
+        client
+            .batch_execute(
+                "INSERT INTO project_documents (project_id, entity_kind, entity_name, content, content_hash,
+                                                bytes, revision, updated_at, updated_by)
+                 VALUES ('П', 'red-task', 'V1-T1', '# V1-T1', '', 0, 1, 0, 't')")
+            .await
+            .expect("документ заводится");
+        let drop = |id: &'static str| {
+            let pool = pool.clone();
+            async move {
+                super::declare_task(&pool, "П", super::Task { id, milestone: "", ord: 0, title: "",
+                                                              kind: "", state: "", size: "" }, true)
+                    .await.expect("дверь task-add")
+            }
+        };
+        let said = drop("V1-T1").await;
+        assert_eq!(said["status"], "projected", "задача из документа не «нет такой»: {said}");
+        assert!(said["why"].as_str().unwrap_or("").contains("rm kind=red-task id=V1-T1"),
+                "отказ называет дверь и род документа: {said}");
+        assert_eq!(drop("V1-T9").await["status"], "not_found", "нет ни строки, ни документа — «нет такой»");
+
         pool.get().await.expect("соединение")
             .batch_execute("DROP SCHEMA IF EXISTS run_holds_task CASCADE")
             .await.expect("схема снимается");
