@@ -9125,7 +9125,26 @@ pub(crate) async fn declare_task(pool: &Pool, project: &str, fields: Task<'_>, d
                 &[&project, &id],
             )
             .await?;
-        return Ok(json!({ "status": if gone > 0 { "dropped" } else { "not_found" }, "id": id }));
+        if gone > 0 {
+            return Ok(json!({ "status": "dropped", "id": id }));
+        }
+        // «Нет такой» о задаче, которая стоит в плане, отправляла искать
+        // дверь наугад (tot-ade, M5-T237): задача из документа уходит с ним.
+        let kind: Option<String> = client
+            .query_opt(
+                "SELECT entity_kind FROM project_documents
+                  WHERE project_id = $1 AND entity_kind IN ('task', 'red-task') AND lower(entity_name) = lower($2)
+                  LIMIT 1",
+                &[&project, &id],
+            )
+            .await?
+            .map(|r| r.get(0));
+        return Ok(match kind {
+            Some(kind) => json!({ "status": "projected", "id": id,
+                "why": format!("задача заведена документом, а не объявлением, и уходит вместе с ним: \
+                                `mh call rm kind={kind} id={id}`") }),
+            None => json!({ "status": "not_found", "id": id }),
+        });
     }
 
     if id.trim().is_empty() {
