@@ -169,6 +169,34 @@ fn fld<'a>(v: &'a Value, key: &str, who: &str) -> &'a Value {
     &v[key]
 }
 
+/// Партия прогона с учётом кода выхода, а не одних разобранных строк.
+///
+/// Пусто и красно — не собралось: ни одной проверки не увидели, и факт об
+/// этом тоже факт, иначе красное сборки неотличимо от «не гоняли».
+///
+/// Строки есть, ни одна не упала, а рецепт красен — красным его сделал шаг
+/// после тестов. tot-ade M5-T257 (2026-10-03) ставит в `just test` сторожа
+/// следов в дереве, и без строки `(exit)` его вердикт терялся: партия ложилась
+/// одними `passed`, и ствол числился зелёным. Так же ловятся TIMEOUT и SIGKILL
+/// nextest, которых разбор не узнаёт.
+///
+/// ПОТОЛОК НАЗВАН: если упала хоть одна проверка, `(exit)` не добавляется, и
+/// отказ шага после тестов прячется за ней. Когда гейт её прощает (её ещё
+/// пишет открытая задача), ствол выходит зелёным при красном стороже.
+/// Добавлять `(exit)` всегда нельзя: каждая красная фаза в обычном бинаре
+/// краснила бы ствол. Что именно упало, харнес не хранит (mh#175).
+pub fn batch_of_run(mut rows: Vec<(String, String, String)>, ok: bool) -> Vec<(String, String, String)> {
+    if ok {
+        return rows;
+    }
+    if rows.is_empty() {
+        rows.push(("(build)".to_owned(), "build-failed".to_owned(), String::new()));
+    } else if !rows.iter().any(|(_, verdict, _)| verdict == "failed") {
+        rows.push(("(exit)".to_owned(), "failed".to_owned(), String::new()));
+    }
+    rows
+}
+
 /// Строки прогона — из текста, который напечатал `cargo test` либо nextest.
 ///
 /// ОДНА ФУНКЦИЯ НА ВСЕ ИСТОЧНИКИ, И ЭТО НЕ ЭКОНОМИЯ. Прогон харнеса и журнал
@@ -1246,12 +1274,8 @@ impl Worker {
         self.sense_tree(bundle, &root).await;
         println!("{} · тесты: прогон на {head}", bundle.name);
         let started = std::time::SystemTime::now();
-        let (mut rows, ok) = Self::profile(&cwd, &spec.cmd).await?;
-        if rows.is_empty() && !ok {
-            // Не собралось: ни одной проверки не увидели — факт об этом тоже
-            // факт, иначе красное сборки неотличимо от «не гоняли».
-            rows.push(("(build)".to_owned(), "build-failed".to_owned(), String::new()));
-        }
+        let (rows, ok) = Self::profile(&cwd, &spec.cmd).await?;
+        let mut rows = batch_of_run(rows, ok);
         // Красный профиль идёт ТОЙ ЖЕ ПАРТИЕЙ: у записи одно время, и «последний
         // прогон» по max(at) видит оба. Пункт про ствол зеркала отсеивает сам —
         // по имени бинаря, а не по принадлежности партии.
@@ -2385,6 +2409,16 @@ mod tests {
 
     fn row(name: &str, verdict: &str, binary: &str) -> (String, String, String) {
         (name.to_owned(), verdict.to_owned(), binary.to_owned())
+    }
+
+    #[test]
+    fn a_red_exit_is_recorded_even_when_every_check_passed() {
+        let row = |n: &str, v: &str| (n.to_owned(), v.to_owned(), String::new());
+        let names = |rows: Vec<(String, String, String)>| rows.into_iter().map(|(n, v, _)| format!("{n}:{v}")).collect::<Vec<_>>();
+        assert_eq!(names(super::batch_of_run(vec![row("a", "passed")], false)), ["a:passed", "(exit):failed"]);
+        assert_eq!(names(super::batch_of_run(vec![row("a", "failed")], false)), ["a:failed"]);
+        assert_eq!(names(super::batch_of_run(vec![], false)), ["(build):build-failed"]);
+        assert_eq!(names(super::batch_of_run(vec![row("a", "passed")], true)), ["a:passed"]);
     }
 
     /// Nextest: вердикт, бинарь и имя — одной строкой, `крейт::` снимается.
