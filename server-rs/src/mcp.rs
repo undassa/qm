@@ -350,7 +350,7 @@ impl Mcp {
             "inputSchema": { "type": "object", "properties": { "deferProjection": json!({"type":"boolean","description":"не пересобирать проекции сейчас; позвать `reproject` после серии правок"}), "kind": s("вид"), "id": s("имя"), "anchor": s("якорь"), "body": s("новое тело раздела"), "expectedRevision": json!({"type":"integer"}) }, "required": ["kind", "anchor", "body"] } }));
         tools.push(json!({ "name": "rm", "description": "удалить сущность",
             "inputSchema": { "type": "object", "properties": { "deferProjection": json!({"type":"boolean","description":"не пересобирать проекции сейчас; позвать `reproject` после серии правок"}), "kind": s("вид"), "id": s("имя") }, "required": ["kind"] } }));
-        tools.push(json!({ "name": "task-state-push", "description": "принять ПОЛНУЮ подачу состояний задач, выведенных `mh sense` из закрывающих трейлеров. Не для ручного закрытия одной задачи: задача, которой нет в подаче, теряет состояние, а ручную подачу следующий `mh sense` перепишет — закрывает задачу трейлер в стволе. `at` — время коммита в мс: без него харнес знает лишь «когда увидел», а этим порядок не судится",
+        tools.push(json!({ "name": "task-state-push", "description": "принять ПОЛНУЮ подачу состояний задач, выведенных харнесом из закрывающих трейлеров ствола; подаёт только харнес. Не для ручного закрытия одной задачи: задача, которой нет в подаче, теряет состояние, а ручную подачу следующий `mh sense` перепишет — закрывает задачу трейлер в стволе. `at` — время коммита в мс: без него харнес знает лишь «когда увидел», а этим порядок не судится",
             "inputSchema": { "type": "object", "properties": {
                 "commit": s("коммит дерева, с которого сняты состояния: без него подача читается как «неизвестно»"),
                 "dirty": json!({"type":"boolean","description":"дерево было грязным: состояния выведены не из ствола"}),
@@ -1842,14 +1842,13 @@ impl Mcp {
                         "text": "подача без перечня: пустой перечень — это «ничего не нашёл», а отсутствие перечня — «не подали»" }],
                         "isError": true });
                 }
-                // РОД С ОБРАЗЦОМ СЪЁМА ПОДАЁТ ТОЛЬКО ХАРНЕС (заявка 18). Это
-                // факт о репозитории: харнес снимает его сам с чистого ствола, и
-                // подача рукой — из рабочего каталога сессии — подменила бы
-                // ствол тем, что лежит у неё. Род без образца — наблюдение
-                // (`onboarding-run`), снять его харнесу нечем, и подаёт его
-                // сессия, как прежде.
+                // РОД О РЕПОЗИТОРИИ ПОДАЁТ ТОЛЬКО ХАРНЕС (заявка 18). Харнес
+                // снимает его сам с чистого ствола, и подача рукой — из рабочего
+                // каталога сессии — подменила бы ствол тем, что лежит у неё.
+                // Наблюдение (`onboarding-run`) харнесу снять нечем, и подаёт
+                // его сессия, как прежде. Что есть что — `repo_kind`.
                 if self.author != crate::projector::HARNESS {
-                    match crate::projector::has_sensor_spec(&self.pool, p, &fact_kind).await {
+                    match crate::projector::is_repo_kind(&self.pool, p, &fact_kind).await {
                         Ok(false) => {}
                         Ok(true) => {
                             return json!({ "content": [{ "type": "text",
@@ -2467,6 +2466,21 @@ impl Mcp {
                 let about = args.get("about").and_then(|v| v.as_str()).unwrap_or("");
                 let stale = num(args, "staleAfterMs");
                 let drop = flag(args, "drop");
+                // Снятие стирает поданные факты рода. Факты о репозитории
+                // вернуть может только харнес, и только на следующей вершине:
+                // стёртые рукой, они держали бы гейт на «мерить нечем» до
+                // слияния (ревью undassa/mh#178).
+                if drop && self.author != crate::projector::HARNESS {
+                    match crate::projector::is_repo_kind(&self.pool, p, fact).await {
+                        Ok(false) => {}
+                        Ok(true) => {
+                            return json!({ "content": [{ "type": "text",
+                                "text": format!("«{fact}» — факт о репозитории: его подачи и факты держит харнес, и снять их рукой нельзя") }],
+                                "isError": true });
+                        }
+                        Err(e) => return refusal(e.into()),
+                    }
+                }
                 match crate::projector::declare_sensor(&self.pool, p, fact, about, stale, &self.author, drop).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),
@@ -2742,6 +2756,12 @@ impl Mcp {
                 let note = args.get("note").and_then(|v| v.as_str());
                 let drop = flag(args, "drop");
                 if who.is_empty() { return refusal(Miss::Refused("человек не назван".into())); }
+                // Имя харнеса выдаёт только его ключ. Допусти его в перечень — и
+                // всякий, у кого общий секрет края, назвался бы харнесом
+                // заголовком (ревью undassa/mh#178).
+                if who == crate::projector::HARNESS {
+                    return refusal(Miss::Refused("имя харнеса выдаёт только его ключ: в перечень допуска оно не вносится".into()));
+                }
                 match crate::projector::allow_principal(&self.pool, who, note, drop, &self.author).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),

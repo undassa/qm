@@ -808,8 +808,10 @@ impl Worker {
     /// а прогон — только объявившему `test`.
     pub async fn test_watch(self: std::sync::Arc<Self>, bundle: Bundle) {
         let spec = bundle.test.clone();
+        // Вершина, чей съём сорвался в прошлый заход: второй срыв её продвигает.
+        let mut failed: Option<String> = None;
         loop {
-            match self.run_tests_once(&bundle, spec.as_ref()).await {
+            match self.run_tests_once(&bundle, spec.as_ref(), &mut failed).await {
                 Ok(Some(v)) => println!(
                     "{} · тесты: {} проверок, упало {} · {}",
                     bundle.name,
@@ -1217,7 +1219,12 @@ impl Worker {
 
     /// Заход по стволу набора: состояния задач, съём фактов с новой вершины и,
     /// если набор объявил `test`, прогон. Без `test` заход кончается съёмом.
-    async fn run_tests_once(&self, bundle: &Bundle, spec: Option<&TestSpec>) -> Result<Option<Value>, String> {
+    async fn run_tests_once(
+        &self,
+        bundle: &Bundle,
+        spec: Option<&TestSpec>,
+        failed: &mut Option<String>,
+    ) -> Result<Option<Value>, String> {
         let root = Self::prepare_runner_tree(&bundle.repo)?;
         let cwd = match spec {
             Some(s) if !s.dir.is_empty() => format!("{root}/{}", s.dir),
@@ -1272,12 +1279,30 @@ impl Worker {
         // не переснималась шесть часов. Новая вершина — это сравнение с
         // `trunk_head`, а не с прогоном: прогон к фактам отношения не имеет.
         //
-        // Вершина пишется только после состоявшегося съёма: несостоявшийся
-        // повторится на следующем заходе, а не погасит факты молча.
+        // ПУБЛИКАЦИЯ В ДВА ШАГА (ревью undassa/mh#178). Перед съёмом вершина
+        // объявляется снимаемой — пока съём идёт, свежи и прежняя, и новая, и
+        // гейты не мигают. После съёма она становится вершиной ствола.
+        //
+        // Сорвавшийся съём (отказ хоть одного рода или обрыв посреди) вершину
+        // в первый раз НЕ продвигает: снимаемая остаётся, свежими остаются оба
+        // коммита, и следующий заход снимает снова. Сорвавшийся второй раз на
+        // той же вершине продвигает её всё равно: иначе один упорно отказанный
+        // род держал бы остальные на прежнем коммите вечно, а сам числился бы
+        // свежим. Род, не поданный и во втором съёме, гаснет — так и видно, что
+        // датчик умолк.
         let sensed = crate::projector::trunk_head(&self.pool, &bundle.project).await.unwrap_or_default();
-        if sensed != head && self.sense_tree(bundle, &root).await {
-            if let Err(e) = crate::projector::set_trunk_head(&self.pool, &bundle.project, &head).await {
-                println!("{} · вершина ствола не записана: {e:?}", bundle.name);
+        if sensed != head {
+            let again = failed.as_deref() == Some(head.as_str());
+            if let Err(e) = crate::projector::begin_trunk_sense(&self.pool, &bundle.project, &head).await {
+                println!("{} · снимаемая вершина не записана: {e:?}", bundle.name);
+            }
+            if self.sense_tree(bundle, &root).await || again {
+                match crate::projector::set_trunk_head(&self.pool, &bundle.project, &head).await {
+                    Ok(()) => *failed = None,
+                    Err(e) => println!("{} · вершина ствола не записана: {e:?}", bundle.name),
+                }
+            } else {
+                *failed = Some(head.clone());
             }
         }
         let Some(spec) = spec else { return Ok(None) };

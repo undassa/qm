@@ -774,6 +774,13 @@ CREATE TABLE IF NOT EXISTS trunk_head (
   project_id text PRIMARY KEY,
   commit_sha text NOT NULL,
   at bigint NOT NULL);
+-- ВЕРШИНА, КОТОРУЮ ХАРНЕС СНИМАЕТ СЕЙЧАС. Роды подаются по одному, и съём у
+-- `tot-ade` идёт около двух минут (замер ревью undassa/mh#178: 114 с). Без неё
+-- каждый переснятый род до конца съёма смотрел бы на новый коммит при прежней
+-- вершине и гас, сборщик перемерял бы гейты каждые две секунды, и G1–G2 мигали
+-- бы «не пройден» после каждого слияния, придерживая выдачу задач. Пока съём
+-- идёт, свежи оба коммита: прежний и снимаемый.
+ALTER TABLE trunk_head ADD COLUMN IF NOT EXISTS sensing_sha text NOT NULL DEFAULT '';
 -- Первый запуск после выкладки не должен гасить факты, которые воркер уже снял
 -- со ствола: вершиной становится коммит его последнего чистого съёма. Набор,
 -- который воркер не снимал ни разу, вершины не получает и честно ждёт съёма.
@@ -783,6 +790,15 @@ SELECT DISTINCT ON (project_id) project_id, commit_sha, at
  WHERE actor = 'mh-runner' AND NOT dirty AND commit_sha <> ''
  ORDER BY project_id, at DESC
 ON CONFLICT (project_id) DO NOTHING;
+-- Подачу состояний задач дверь подписывала строкой «харнес», кто бы её ни
+-- подал. Теперь её подписывает имя воркера, и только от него она принимается.
+-- Прежняя запись переподписывается, лишь если её коммит совпадает с подачей
+-- воркера: значит, сделана тем же его съёмом, а не сессией из своего дерева.
+UPDATE fact_push fp SET actor = 'mh-runner'
+ WHERE fp.fact = 'task-state' AND fp.actor = 'харнес' AND fp.commit_sha <> ''
+   AND EXISTS (SELECT 1 FROM fact_push w
+                WHERE w.project_id = fp.project_id AND w.actor = 'mh-runner'
+                  AND w.commit_sha = fp.commit_sha);
 
 -- Снятый термин — строка, а не regexp внутри правила.
 --
@@ -3083,6 +3099,18 @@ ALTER TABLE project_gates ADD COLUMN IF NOT EXISTS result jsonb;
 -- строк, и принёс доказательство, что датчики отвечают. Отвечали они правда, и
 -- отметка подачи стояла четырьмя часами ранее при сроке в неделю — а несвежими
 -- они были оттого, что сняты с ГРЯЗНОГО дерева. Слово было одно, состояния три.
+-- РОД О РЕПОЗИТОРИИ: у него есть образец съёма ИЛИ последнюю подачу сделал
+-- харнес (заявка 18). Второе условие — не украшение. Образец набор снимает
+-- дверью без пропуска, и по одному образцу «снять образец, подать рукой, вернуть
+-- образец» делало подделку свежей (ревью undassa/mh#178). Род, однажды снятый
+-- харнесом, остаётся родом о репозитории и без образца.
+--
+-- Имя харнеса здесь строкой: оно же `projector::HARNESS` в коде сервера.
+CREATE OR REPLACE FUNCTION repo_kind(p text, f text) RETURNS boolean AS $р$
+  SELECT EXISTS (SELECT 1 FROM project_sensor_spec WHERE project_id = p AND fact = f)
+      OR EXISTS (SELECT 1 FROM fact_push WHERE project_id = p AND fact = f AND actor = 'mh-runner')
+$р$ LANGUAGE sql STABLE;
+
 CREATE OR REPLACE FUNCTION fact_gap(p text, f text) RETURNS text AS $г$
   SELECT CASE
     WHEN NOT EXISTS (SELECT 1 FROM fact_push WHERE project_id = p AND fact = f)
@@ -3093,8 +3121,11 @@ CREATE OR REPLACE FUNCTION fact_gap(p text, f text) RETURNS text AS $г$
     WHEN (SELECT fp.commit_sha = '' FROM fact_push fp
            WHERE fp.project_id = p AND fp.fact = f ORDER BY fp.at DESC LIMIT 1)
          THEN 'снят БЕЗ КОММИТА: с какого дерева — неизвестно'
-    WHEN EXISTS (SELECT 1 FROM project_sensor_spec ss WHERE ss.project_id = p AND ss.fact = f)
+    WHEN repo_kind(p, f)
          THEN CASE
+           WHEN (SELECT fp.actor <> 'mh-runner' FROM fact_push fp
+                  WHERE fp.project_id = p AND fp.fact = f ORDER BY fp.at DESC LIMIT 1)
+                THEN 'подан рукой, а факт о репозитории снимает харнес со ствола: дождитесь съёма после слияния'
            WHEN NOT EXISTS (SELECT 1 FROM trunk_head th WHERE th.project_id = p)
                 THEN 'ствол ещё не снят харнесом: свежесть мерить не с чем — съём идёт сам после слияния'
            ELSE 'снят не с вершины ствола: факт о коммите '
@@ -3122,9 +3153,10 @@ $г$ LANGUAGE sql STABLE;
 -- работа набора) и подача со ствола чистого дерева.
 --
 -- ФАКТ О РЕПОЗИТОРИИ СВЕЖ КОММИТОМ, А НЕ СРОКОМ (заявка 18, решение владельца
--- 2026-09-17). Фактом о репозитории считается род с образцом съёма
--- (`project_sensor_spec`): его снимает харнес со ствола, и свеж он ровно тогда,
--- когда снят с той вершины, с которой харнес снимал последним (`trunk_head`).
+-- 2026-09-17). Фактом о репозитории считается `repo_kind`: его снимает харнес со
+-- ствола, и свеж он ровно тогда, когда последнюю подачу сделал харнес и с той
+-- вершины, с которой снимал последним (`trunk_head`). Подача от другого имени
+-- свежей не бывает, какой бы коммит она ни назвала.
 -- Датчик, умолкший в последнем съёме, остаётся на прежнем коммите и гаснет
 -- сразу, а не через неделю срока.
 --
@@ -3139,10 +3171,13 @@ CREATE OR REPLACE FUNCTION fact_fresh(p text, f text) RETURNS boolean AS $ф$
             FROM fact_push fp
            WHERE fp.project_id = p AND fp.fact = f
            ORDER BY fp.at DESC LIMIT 1) THEN false
-    WHEN EXISTS (SELECT 1 FROM project_sensor_spec ss WHERE ss.project_id = p AND ss.fact = f)
-         THEN coalesce((SELECT fp.commit_sha FROM fact_push fp
-                         WHERE fp.project_id = p AND fp.fact = f ORDER BY fp.at DESC LIMIT 1)
-                       = (SELECT th.commit_sha FROM trunk_head th WHERE th.project_id = p), false)
+    WHEN repo_kind(p, f)
+         THEN coalesce((SELECT fp.actor = 'mh-runner'
+                               AND (fp.commit_sha = th.commit_sha
+                                    OR (th.sensing_sha <> '' AND fp.commit_sha = th.sensing_sha))
+                          FROM fact_push fp, trunk_head th
+                         WHERE fp.project_id = p AND fp.fact = f AND th.project_id = p
+                         ORDER BY fp.at DESC LIMIT 1), false)
     WHEN (SELECT s.stale_after_ms FROM sensor s WHERE s.project_id = p AND s.fact = f) IS NULL THEN false
     ELSE (SELECT max(fp.at) FROM fact_push fp WHERE fp.project_id = p AND fp.fact = f)
          > (extract(epoch from now()) * 1000)::bigint
@@ -5186,8 +5221,9 @@ pub(crate) async fn next_task(pool: &Pool, project: &str) -> Result<Value, crate
         // без оговорки отправляет искать находку, которой нет.
         let stale: Vec<String> = client
             .query(
-                "SELECT s.fact FROM sensor s
-                  WHERE s.project_id = $1 AND NOT fact_fresh($1, s.fact) ORDER BY s.fact",
+                "SELECT k.fact FROM (SELECT fact FROM sensor WHERE project_id = $1
+                                      UNION SELECT fact FROM project_sensor_spec WHERE project_id = $1) k
+                  WHERE NOT fact_fresh($1, k.fact) ORDER BY k.fact",
                 &[&project],
             )
             .await?
@@ -5727,8 +5763,9 @@ pub(crate) async fn gate(
     // сказать, чем оно лечится, обязан тот, кто его показывает.
     let stale_sensors: Vec<String> = client
         .query(
-            "SELECT s.fact FROM sensor s
-              WHERE s.project_id = $1 AND NOT fact_fresh($1, s.fact) ORDER BY s.fact",
+            "SELECT k.fact FROM (SELECT fact FROM sensor WHERE project_id = $1
+                                  UNION SELECT fact FROM project_sensor_spec WHERE project_id = $1) k
+              WHERE NOT fact_fresh($1, k.fact) ORDER BY k.fact",
             &[&project],
         )
         .await?
@@ -6265,7 +6302,7 @@ pub(crate) async fn push_task_state(
          ON CONFLICT (project_id, fact) DO UPDATE SET at = EXCLUDED.at,
            actor = EXCLUDED.actor, rows = EXCLUDED.rows,
            commit_sha = EXCLUDED.commit_sha, dirty = EXCLUDED.dirty, reads = EXCLUDED.reads",
-        &[&project, &"task-state", &seen_at, &"харнес", &(states.len() as i32),
+        &[&project, &"task-state", &seen_at, &HARNESS, &(states.len() as i32),
           &commit.to_owned(), &dirty],
     )
     .await?;
@@ -9067,9 +9104,32 @@ mod trunk_freshness {
         super::set_trunk_head(&pool, "П", "bbb").await.expect("вершина");
         assert!(!fresh("migration-file").await, "свеж, хотя последний съём его не подал");
 
+        // Пока съём «ccc» идёт, свежи и прежняя вершина, и снимаемая: гейт не мигает.
+        super::set_trunk_head(&pool, "П", "aaa").await.expect("вершина");
+        super::begin_trunk_sense(&pool, "П", "ccc").await.expect("снимаемая");
+        assert!(fresh("migration-file").await, "род на прежней вершине погас посреди съёма");
+        let taken = as_who(super::HARNESS).call("code-facts-push", &push("migration-file", "ccc")).await;
+        assert_ne!(taken["isError"], json!(true), "харнесу отказано: {taken}");
+        assert!(fresh("migration-file").await, "переснятый род погас посреди съёма");
+        super::set_trunk_head(&pool, "П", "ccc").await.expect("вершина");
+        assert!(fresh("migration-file").await, "не свеж на своей вершине после съёма");
+
+        // Снять образец, подать рукой, вернуть образец (ревью undassa/mh#178):
+        // род, снятый харнесом, остаётся родом о репозитории и без образца.
+        pool.get().await.expect("соединение")
+            .batch_execute("DELETE FROM project_sensor_spec WHERE project_id = 'П' AND fact = 'migration-file'")
+            .await.expect("образец снят");
+        let forged = as_who("проба").call("code-facts-push", &push("migration-file", "ccc")).await;
+        assert_eq!(forged["isError"], json!(true), "рукой подан род без образца, снятый харнесом: {forged}");
+        assert!(fresh("migration-file").await, "отказанная подача тронула факт харнеса");
+        let wiped = as_who("проба").call("sensor-declare", &json!({ "fact": "migration-file", "drop": true })).await;
+        assert_eq!(wiped["isError"], json!(true), "сессия стёрла факты харнеса: {wiped}");
+        let named = as_who("проба").call("principal-allow", &json!({ "principal": super::HARNESS })).await;
+        assert_eq!(named["isError"], json!(true), "имя харнеса внесено в перечень допуска: {named}");
+
         let observed = as_who("проба").call("code-facts-push", &push("onboarding-run", "ccc")).await;
         assert_ne!(observed["isError"], json!(true), "наблюдение отказано сессии: {observed}");
-        assert!(fresh("onboarding-run").await, "наблюдение судится вершиной, а не сроком");
+        assert!(fresh("onboarding-run").await, "наблюдение не свежо по объявленному сроку");
 
         pool.get().await.expect("соединение")
             .batch_execute("DROP SCHEMA IF EXISTS trunk_freshness CASCADE").await.expect("схема снимается");
@@ -11307,30 +11367,47 @@ async fn known_head(client: &impl deadpool_postgres::GenericClient, project: &st
 /// (`key_admits`), назвать себя им заголовком нельзя.
 pub const HARNESS: &str = "mh-runner";
 
-/// Записать вершину ствола, с которой харнес снял факты. Зовёт воркер ПОСЛЕ
-/// съёма — довод у `trunk_head`.
-pub(crate) async fn set_trunk_head(pool: &Pool, project: &str, commit: &str) -> Result<(), crate::db::Fail> {
-    let client = crate::db::conn(pool).await?;
-    client
-        .execute(
-            "INSERT INTO trunk_head (project_id, commit_sha, at) VALUES ($1, $2, $3)
-             ON CONFLICT (project_id) DO UPDATE SET commit_sha = EXCLUDED.commit_sha, at = EXCLUDED.at",
-            &[&project, &commit, &now_ms()],
-        )
-        .await?;
-    Ok(())
+/// Съём вершины начался: пока он идёт, свежи и прежняя вершина, и снимаемая
+/// (довод у `trunk_head.sensing_sha`).
+pub(crate) async fn begin_trunk_sense(pool: &Pool, project: &str, commit: &str) -> Result<(), crate::db::Fail> {
+    {
+        let client = crate::db::conn(pool).await?;
+        client
+            .execute(
+                "INSERT INTO trunk_head (project_id, commit_sha, at, sensing_sha) VALUES ($1, '', $3, $2)
+                 ON CONFLICT (project_id) DO UPDATE SET sensing_sha = EXCLUDED.sensing_sha",
+                &[&project, &commit, &now_ms()],
+            )
+            .await?;
+    }
+    crate::watch::touch(pool, project, "съём ствола начат").await
 }
 
-/// Есть ли у рода образец съёма — то есть факт ли это о репозитории, который
-/// снимает харнес, а не наблюдение руками (довод у `fact_fresh`).
-pub(crate) async fn has_sensor_spec(pool: &Pool, project: &str, fact: &str) -> Result<bool, crate::db::Fail> {
+/// Съём вершины кончился: она становится вершиной ствола, снимаемой больше нет.
+/// Род, не поданный в этом съёме, остаётся на прежнем коммите и гаснет — так и
+/// видно, что датчик умолк. Пометка «перемерить» ставится здесь же: иначе круг
+/// сборщика, прочитавший до записи, оставил бы гейт посчитанным по прежней
+/// вершине до следующей посторонней правки (ревью undassa/mh#178).
+pub(crate) async fn set_trunk_head(pool: &Pool, project: &str, commit: &str) -> Result<(), crate::db::Fail> {
+    {
+        let client = crate::db::conn(pool).await?;
+        client
+            .execute(
+                "INSERT INTO trunk_head (project_id, commit_sha, at) VALUES ($1, $2, $3)
+                 ON CONFLICT (project_id) DO UPDATE SET commit_sha = EXCLUDED.commit_sha,
+                   at = EXCLUDED.at, sensing_sha = ''",
+                &[&project, &commit, &now_ms()],
+            )
+            .await?;
+    }
+    crate::watch::touch(pool, project, "вершина ствола").await
+}
+
+/// Факт ли это о репозитории, который снимает харнес, а не наблюдение руками.
+/// Определение одно — SQL `repo_kind`, довод у неё.
+pub(crate) async fn is_repo_kind(pool: &Pool, project: &str, fact: &str) -> Result<bool, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
-    let row = client
-        .query_one(
-            "SELECT EXISTS (SELECT 1 FROM project_sensor_spec WHERE project_id = $1 AND fact = $2)",
-            &[&project, &fact],
-        )
-        .await?;
+    let row = client.query_one("SELECT repo_kind($1, $2)", &[&project, &fact]).await?;
     Ok(row.get(0))
 }
 
@@ -12766,7 +12843,8 @@ pub(crate) async fn step_selftest(
         // Свежесть внутри пробы — настоящая, как в gate_selftest: ступень,
         // чей род факта ждёт sense, иначе на подсадке не роняется.
         tx.execute(
-            "UPDATE fact_push SET at = $2, commit_sha = 'probe', dirty = false WHERE project_id = $1",
+            "UPDATE fact_push SET at = $2, commit_sha = 'probe', dirty = false, actor = 'mh-runner'
+              WHERE project_id = $1",
             &[&project, &now_ms()],
         )
         .await?;
@@ -12960,7 +13038,8 @@ pub(crate) async fn gate_selftest(pool: &Pool, project: &str, under: &str) -> Re
         // Правка заявки 18 сделала необъявленный срок честным («неизвестно»),
         // и без этой строчки половина G3-G4 перестала бы роняться пробой.
         tx.execute(
-            "UPDATE fact_push SET at = $2, commit_sha = 'probe', dirty = false WHERE project_id = $1",
+            "UPDATE fact_push SET at = $2, commit_sha = 'probe', dirty = false, actor = 'mh-runner'
+              WHERE project_id = $1",
             &[&project, &now_ms()],
         )
         .await?;

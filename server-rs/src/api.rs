@@ -238,6 +238,12 @@ async fn require_identity(State(app): State<App>, request: Request, next: Next) 
             // ОБЩИЙ СЕКРЕТ КРАЯ ПОКА ОСТАЁТСЯ, и это временно: он отвечает «это
             // край», но не «этому человеку можно». Уйдёт вместе с переездом
             // сессий в контейнеры, где секрет у каждой свой.
+            // ИМЯ ХАРНЕСА ОБЩИМ СЕКРЕТОМ НЕ БЕРЁТСЯ, даже при пустом перечне
+            // допуска (`edge_admits` тогда пускает любого): оно выдаётся только
+            // ключом воркера, и только харнес подаёт факты о репозитории.
+            if principal == crate::projector::HARNESS {
+                return Failure::Unauthorized.into_response();
+            }
             if !shown.is_empty() && shown == edge.secret && !principal.is_empty() {
                 match crate::projector::edge_admits(&app.pool, &principal).await {
                     Ok(true) => {

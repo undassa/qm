@@ -22,7 +22,7 @@ SELECT 'датчик заморозки ' || fact_gap($1, 'frozen-tree') || ': �
    AND NOT fact_fresh($1, 'frozen-tree')
 UNION ALL
 SELECT t.path || ' — заморозка объявлена, а датчик о ней не сказал НИЧЕГО: подача свежа, '
-       || 'но этого дерева в ней нет. Снять заново: `mh sense`' AS detail
+       || 'но этого дерева в ней нет. Харнес переснимет его со ствола после слияния' AS detail
   FROM project_frozen_tree t
  WHERE t.project_id = $1
    AND NOT EXISTS (SELECT 1 FROM code_fact f
