@@ -18,6 +18,9 @@ pub struct Door {
     pub project: String,
     pub secret: String,
     pub principal: String,
+    /// Съём без подачи: `mh sense` у сессии только показывает, что снялось бы
+    /// с её дерева. Факты о репозитории подаёт харнес со ствола (заявка 18).
+    pub dry: bool,
 }
 
 impl Door {
@@ -77,7 +80,7 @@ impl Door {
                 Err(e) => Self::ask_whose(&url, &secret, &principal).ok_or(e)?,
             },
         };
-        Ok(Door { url, project, secret, principal })
+        Ok(Door { url, project, secret, principal, dry: false })
     }
 
     /// Спросить сервер, какому проекту принадлежит текущее дерево.
@@ -469,6 +472,10 @@ fn push_facts(
     dirty: bool,
     read: usize,
 ) -> Result<(), String> {
+    if door.dry {
+        sensed.take(fact, &Value::Null, false, json!({ "fact": fact, "files": read, "found": facts.len() }));
+        return Ok(());
+    }
     let (out, refused) = door.call(
         "code-facts-push",
         &json!({ "kind": fact, "facts": facts, "commit": head, "dirty": dirty, "read": read }),
@@ -668,6 +675,10 @@ pub fn sense(door: &Door, only: Option<&str>, root: &str) -> Result<Value, Strin
 
         if how == "task-trailers" {
             let states = task_states_from_repo(&root, re).map_err(|why| format!("{fact}: {why}"))?;
+            if door.dry {
+                sensed.take(fact, &Value::Null, false, json!({ "fact": fact, "files": 0, "found": states.len() }));
+                continue;
+            }
             // ЧЕМ СНЯТ ФАКТ — коммитом и чистотой дерева, как у всякой другой
             // подачи. Без них `fact_fresh` отвечает «снят БЕЗ КОММИТА», и
             // `G4 · task-state-matches-history` держит находку, которую набору
@@ -1889,7 +1900,7 @@ mod refused_push {
         git(&["init", "-q", "-b", "main"]);
         git(&["add", "a.txt"]);
         git(&["commit", "-q", "--allow-empty", "-m", "работа\n\nTask: M1-T1 closed"]);
-        let door = super::Door { url, project: "p".into(), secret: "s".into(), principal: "t".into() };
+        let door = super::Door { url, project: "p".into(), secret: "s".into(), principal: "t".into(), dry: false };
 
         let said = super::sense(&door, None, root.to_str().expect("путь"));
         let _ = std::fs::remove_dir_all(&root);

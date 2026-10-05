@@ -75,6 +75,9 @@ fn main() {
                     std::process::exit(2);
                 }
             };
+            // ТОЛЬКО ПОКАЗАТЬ (заявка 18): факты о репозитории подаёт харнес со
+            // ствола после слияния, и сервер отказал бы этой подаче.
+            let door = client::Door { dry: true, ..door };
             match client::sense(&door, only.as_deref(), &root) {
                 Ok(v) => say(&v),
                 Err(why) => {

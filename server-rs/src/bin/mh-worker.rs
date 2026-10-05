@@ -62,11 +62,10 @@ async fn main() {
         std::process::exit(3);
     }
     let worker = std::sync::Arc::new(mh_server::worker::Worker::new(pool, kinds, claude));
-    // Наблюдатели прогонов — по набору с объявленной командой тестов (заявка 20).
+    // Наблюдатель ствола — у каждого набора: съём фактов нужен всем (заявка 18),
+    // прогон тестов он делает лишь там, где объявлена команда (заявка 20).
     for bundle in &config.projects {
-        if bundle.test.is_some() {
-            tokio::spawn(worker.clone().test_watch(bundle.clone()));
-        }
+        tokio::spawn(worker.clone().test_watch(bundle.clone()));
         // Взятие журналов CI — у КАЖДОГО набора: раздел `test` ему не нужен.
         tokio::spawn(worker.clone().ci_watch(bundle.clone()));
     }
