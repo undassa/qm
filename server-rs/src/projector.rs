@@ -3117,7 +3117,7 @@ CREATE OR REPLACE FUNCTION fact_gap(p text, f text) RETURNS text AS $г$
          THEN 'ни разу не подавал'
     WHEN (SELECT fp.dirty FROM fact_push fp
            WHERE fp.project_id = p AND fp.fact = f ORDER BY fp.at DESC LIMIT 1)
-         THEN 'снят с ГРЯЗНОГО дерева: рассказывает не про ствол — переснять из чистого'
+         THEN 'снят с ГРЯЗНОГО дерева: рассказывает не про ствол — наблюдение подать заново из чистого, факт о репозитории харнес переснимет сам'
     WHEN (SELECT fp.commit_sha = '' FROM fact_push fp
            WHERE fp.project_id = p AND fp.fact = f ORDER BY fp.at DESC LIMIT 1)
          THEN 'снят БЕЗ КОММИТА: с какого дерева — неизвестно'
@@ -3126,7 +3126,7 @@ CREATE OR REPLACE FUNCTION fact_gap(p text, f text) RETURNS text AS $г$
            WHEN (SELECT fp.actor <> 'mh-runner' FROM fact_push fp
                   WHERE fp.project_id = p AND fp.fact = f ORDER BY fp.at DESC LIMIT 1)
                 THEN 'подан рукой, а факт о репозитории снимает харнес со ствола: дождитесь съёма после слияния'
-           WHEN NOT EXISTS (SELECT 1 FROM trunk_head th WHERE th.project_id = p)
+           WHEN NOT EXISTS (SELECT 1 FROM trunk_head th WHERE th.project_id = p AND th.commit_sha <> '')
                 THEN 'ствол ещё не снят харнесом: свежесть мерить не с чем — съём идёт сам после слияния'
            ELSE 'снят не с вершины ствола: факт о коммите '
                 || (SELECT left(fp.commit_sha, 10) FROM fact_push fp
@@ -9114,6 +9114,20 @@ mod trunk_freshness {
         super::set_trunk_head(&pool, "П", "ccc").await.expect("вершина");
         assert!(fresh("migration-file").await, "не свеж на своей вершине после съёма");
 
+        // Съём «eee» сорвался: «stuck» отказан и остался на «ccc». Ствол ушёл
+        // на «fff», и новый съём сперва продвигает «eee»: поданное свежо,
+        // отказанный гаснет, а не держит остальных (ревью undassa/mh#178).
+        pool.get().await.expect("соединение")
+            .batch_execute("INSERT INTO project_sensor_spec (project_id, fact) VALUES ('П', 'stuck')")
+            .await.expect("второй образец");
+        let stuck = as_who(super::HARNESS).call("code-facts-push", &push("stuck", "ccc")).await;
+        assert_ne!(stuck["isError"], json!(true), "харнесу отказано: {stuck}");
+        super::begin_trunk_sense(&pool, "П", "eee").await.expect("снимаемая");
+        as_who(super::HARNESS).call("code-facts-push", &push("migration-file", "eee")).await;
+        super::begin_trunk_sense(&pool, "П", "fff").await.expect("снимаемая");
+        assert!(fresh("migration-file").await, "поданное сорвавшимся съёмом погасло");
+        assert!(!fresh("stuck").await, "отказанный род свеж после продвижения");
+
         // Снять образец, подать рукой, вернуть образец (ревью undassa/mh#178):
         // род, снятый харнесом, остаётся родом о репозитории и без образца.
         pool.get().await.expect("соединение")
@@ -11350,7 +11364,7 @@ async fn known_head(client: &impl deadpool_postgres::GenericClient, project: &st
     client
         .query_one(
             "SELECT coalesce(
-               (SELECT commit_sha FROM trunk_head WHERE project_id = $1),
+               (SELECT nullif(commit_sha, '') FROM trunk_head WHERE project_id = $1),
                (SELECT max(commit_sha) FROM test_run_trunk
                  WHERE project_id = $1 AND NOT dirty
                    AND at = (SELECT max(at) FROM test_run_trunk WHERE project_id = $1 AND NOT dirty)),
@@ -11369,13 +11383,23 @@ pub const HARNESS: &str = "mh-runner";
 
 /// Съём вершины начался: пока он идёт, свежи и прежняя вершина, и снимаемая
 /// (довод у `trunk_head.sensing_sha`).
+///
+/// ОСТАВШАЯСЯ СНИМАЕМАЯ ВЕРШИНА СНАЧАЛА ПРОДВИГАЕТСЯ. Она остаётся от съёма,
+/// который сорвался (отказ рода, обрыв, перезапуск воркера). У `tot-ade` ствол
+/// почти всегда сдвигается между заходами, и, затри её новый съём, роды,
+/// поданные сорвавшимся, гасли бы до конца нового, а упорно отказанный род
+/// числился бы свежим вечно — замер ревью undassa/mh#178: свежим оставался 1
+/// род из 48, и это был отказанный. Продвинутая, она гасит только не поданное.
 pub(crate) async fn begin_trunk_sense(pool: &Pool, project: &str, commit: &str) -> Result<(), crate::db::Fail> {
     {
         let client = crate::db::conn(pool).await?;
         client
             .execute(
                 "INSERT INTO trunk_head (project_id, commit_sha, at, sensing_sha) VALUES ($1, '', $3, $2)
-                 ON CONFLICT (project_id) DO UPDATE SET sensing_sha = EXCLUDED.sensing_sha",
+                 ON CONFLICT (project_id) DO UPDATE SET
+                   commit_sha = CASE WHEN trunk_head.sensing_sha <> '' THEN trunk_head.sensing_sha
+                                     ELSE trunk_head.commit_sha END,
+                   sensing_sha = EXCLUDED.sensing_sha",
                 &[&project, &commit, &now_ms()],
             )
             .await?;

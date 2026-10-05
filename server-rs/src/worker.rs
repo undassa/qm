@@ -762,6 +762,11 @@ impl Worker {
             cmd.arg("--resume").arg(session);
         }
         cmd.current_dir(&bundle.repo).env("MH_PROJECT", &bundle.project);
+        // КЛЮЧ ВОРКЕРА СЕССИИ НЕ ДОСТАЁТСЯ. Унаследовав окружение, сессия ходила
+        // бы в сервер как `mh-runner` — то самое имя, которому одному доверена
+        // подача фактов о репозитории (ревью undassa/mh#178). Без него она
+        // входит так же, как сессия, заведённая человеком.
+        cmd.env_remove("MH_EDGE_SECRET").env_remove("MH_PRINCIPAL");
         // Через `output_within`: потолок обязан погасить claude вместе с его
         // командами — иначе осиротевший claude или его cargo продолжили бы
         // править дерево и держать замок сборки, а воркер завёл бы вторую
@@ -808,10 +813,8 @@ impl Worker {
     /// а прогон — только объявившему `test`.
     pub async fn test_watch(self: std::sync::Arc<Self>, bundle: Bundle) {
         let spec = bundle.test.clone();
-        // Вершина, чей съём сорвался в прошлый заход: второй срыв её продвигает.
-        let mut failed: Option<String> = None;
         loop {
-            match self.run_tests_once(&bundle, spec.as_ref(), &mut failed).await {
+            match self.run_tests_once(&bundle, spec.as_ref()).await {
                 Ok(Some(v)) => println!(
                     "{} · тесты: {} проверок, упало {} · {}",
                     bundle.name,
@@ -1219,12 +1222,7 @@ impl Worker {
 
     /// Заход по стволу набора: состояния задач, съём фактов с новой вершины и,
     /// если набор объявил `test`, прогон. Без `test` заход кончается съёмом.
-    async fn run_tests_once(
-        &self,
-        bundle: &Bundle,
-        spec: Option<&TestSpec>,
-        failed: &mut Option<String>,
-    ) -> Result<Option<Value>, String> {
+    async fn run_tests_once(&self, bundle: &Bundle, spec: Option<&TestSpec>) -> Result<Option<Value>, String> {
         let root = Self::prepare_runner_tree(&bundle.repo)?;
         let cwd = match spec {
             Some(s) if !s.dir.is_empty() => format!("{root}/{}", s.dir),
@@ -1281,28 +1279,22 @@ impl Worker {
         //
         // ПУБЛИКАЦИЯ В ДВА ШАГА (ревью undassa/mh#178). Перед съёмом вершина
         // объявляется снимаемой — пока съём идёт, свежи и прежняя, и новая, и
-        // гейты не мигают. После съёма она становится вершиной ствола.
+        // гейты не мигают. После удачного съёма она становится вершиной ствола.
         //
-        // Сорвавшийся съём (отказ хоть одного рода или обрыв посреди) вершину
-        // в первый раз НЕ продвигает: снимаемая остаётся, свежими остаются оба
-        // коммита, и следующий заход снимает снова. Сорвавшийся второй раз на
-        // той же вершине продвигает её всё равно: иначе один упорно отказанный
-        // род держал бы остальные на прежнем коммите вечно, а сам числился бы
-        // свежим. Род, не поданный и во втором съёме, гаснет — так и видно, что
-        // датчик умолк.
+        // Сорвавшийся съём (отказ хоть одного рода или обрыв посреди) оставляет
+        // её снимаемой, и следующий заход снимает снова. Начиная его,
+        // `begin_trunk_sense` сперва продвигает оставшуюся: род, не поданный
+        // сорвавшимся съёмом, гаснет, а остальные не ждут его вечно. Состояния
+        // в памяти воркера для этого нет — переживает и перезапуск.
         let sensed = crate::projector::trunk_head(&self.pool, &bundle.project).await.unwrap_or_default();
         if sensed != head {
-            let again = failed.as_deref() == Some(head.as_str());
             if let Err(e) = crate::projector::begin_trunk_sense(&self.pool, &bundle.project, &head).await {
                 println!("{} · снимаемая вершина не записана: {e:?}", bundle.name);
             }
-            if self.sense_tree(bundle, &root).await || again {
-                match crate::projector::set_trunk_head(&self.pool, &bundle.project, &head).await {
-                    Ok(()) => *failed = None,
-                    Err(e) => println!("{} · вершина ствола не записана: {e:?}", bundle.name),
+            if self.sense_tree(bundle, &root).await {
+                if let Err(e) = crate::projector::set_trunk_head(&self.pool, &bundle.project, &head).await {
+                    println!("{} · вершина ствола не записана: {e:?}", bundle.name);
                 }
-            } else {
-                *failed = Some(head.clone());
             }
         }
         let Some(spec) = spec else { return Ok(None) };
