@@ -822,7 +822,8 @@ impl Mcp {
         tools.push(json!({ "name": "run-inbox", "description": "что человек сказал прогону и он ещё не прочёл; прочитанное помечается",
             "inputSchema": { "type": "object", "properties": { "runId": s("прогон") }, "required": ["runId"] } }));
         tools.push(json!({ "name": "runs", "description": "прогоны набора с последними шагами и сказанным",
-            "inputSchema": { "type": "object", "properties": { "limit": json!({"type":"integer","description":"сколько прогонов, по умолчанию 10"}) } } }));
+            "inputSchema": { "type": "object", "properties": { "limit": json!({"type":"integer","description":"сколько прогонов, по умолчанию 10, не больше 60"}),
+                "state": json!({"type":"string","description":"только прогоны в этом состоянии, например running; `total` считает их же"}) } } }));
         tools.push(json!({ "name": "ready", "description": "пункты приёмки задачи из «Признак готовности»: что открыто, что проверено; без задачи — по всему набору",
             "inputSchema": { "type": "object", "properties": { "task": s("задача; пусто — весь набор") } } }));
         tools.push(json!({ "name": "test-run", "description": "прогоны тестов, снятые харнесом: когда последний раз, каким коммитом и чем гоняли, что упало на чистом дереве. `names` — имена через пробел: о каждом отвечает поимённо, и «в прогоне нет» отличается от «упала»",
@@ -1600,7 +1601,8 @@ impl Mcp {
             }
             "runs" => {
                 let limit = num(args, "limit").unwrap_or(10).clamp(1, 60);
-                match crate::projector::list_runs(&self.pool, p, limit).await {
+                let state = args.get("state").and_then(|v| v.as_str()).unwrap_or("");
+                match crate::projector::list_runs(&self.pool, p, limit, state).await {
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),
                 }

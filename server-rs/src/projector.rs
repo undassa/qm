@@ -11838,7 +11838,7 @@ pub(crate) async fn read_chat(
 }
 
 /// Прогоны с последними шагами: пульту нужен не список состояний, а рассказ.
-pub(crate) async fn list_runs(pool: &Pool, project: &str, limit: i64) -> Result<Value, crate::db::Fail> {
+pub(crate) async fn list_runs(pool: &Pool, project: &str, limit: i64, state: &str) -> Result<Value, crate::db::Fail> {
     let client = crate::db::conn(pool).await?;
     let runs = client
         .query(
@@ -11846,9 +11846,9 @@ pub(crate) async fn list_runs(pool: &Pool, project: &str, limit: i64) -> Result<
                     r.created_at, coalesce(r.updated_at, r.created_at), coalesce(r.session_id, '')
                FROM project_task_runs r
                LEFT JOIN project_plan_tasks t ON t.project_id = r.project_id AND t.id = r.task_id
-              WHERE r.project_id = $1
+              WHERE r.project_id = $1 AND ($3 = '' OR r.state = $3)
               ORDER BY coalesce(r.updated_at, r.created_at) DESC LIMIT $2",
-            &[&project, &limit],
+            &[&project, &limit, &state],
         )
         .await?;
     let mut out = Vec::new();
@@ -11882,7 +11882,8 @@ pub(crate) async fn list_runs(pool: &Pool, project: &str, limit: i64) -> Result<
     // пределу не виден: держатель прочёл первые десять прогонов как все и не
     // нашёл двух открытых, лежавших дальше.
     let total: i64 = client
-        .query_one("SELECT count(*) FROM project_task_runs WHERE project_id = $1", &[&project])
+        .query_one("SELECT count(*) FROM project_task_runs WHERE project_id = $1 AND ($2 = '' OR state = $2)",
+                   &[&project, &state])
         .await?
         .get(0);
     Ok(json!({ "count": out.len(), "total": total, "runs": out }))
