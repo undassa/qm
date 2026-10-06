@@ -1608,6 +1608,27 @@ impl Mcp {
             "ready" => {
                 let task = args.get("task").and_then(|v| v.as_str()).unwrap_or("");
                 match crate::projector::ready_items(&self.pool, p, task).await {
+                    // Ноль о задаче, чьих пунктов дверь не выводит, — отказ.
+                    // Пункты выводятся только из документов вида `task`; о
+                    // красной паре дверь отвечала `count: 0`, и «пунктов нет»
+                    // читалось там, где они были (V5-T335 слита с четырьмя открытыми).
+                    Ok(v) if !task.is_empty() && v["count"] == 0 => {
+                        let kind = match crate::db::conn(&self.pool).await {
+                            Ok(c) => crate::projector::task_document_kind(&c, p, task).await
+                                .map_err(Miss::from),
+                            Err(e) => Err(e.into()),
+                        };
+                        // Задача, объявленная без документа, законно без пунктов:
+                        // отказ только виду, чьих пунктов дверь не выводит.
+                        match kind {
+                            Ok(Some(k)) if k != "task" => refusal(Miss::Refused(format!(
+                                "`{task}` — документ вида `{k}`: его «Признак готовности» эта дверь \
+                                 не выводит, и ноль здесь значил бы «не знаю», а не «пунктов нет»; \
+                                 читайте `mh call {k} id={task}`"))),
+                            Ok(_) => ok(v),
+                            Err(m) => refusal(m),
+                        }
+                    }
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),
                 }
@@ -3522,6 +3543,56 @@ mod refused_facts {
 
         pool.get().await.expect("соединение")
             .batch_execute("DROP SCHEMA IF EXISTS refused_facts CASCADE").await.expect("схема снимается");
+    }
+}
+
+/// `ready` о красной паре — отказ с дверью, а не `count: 0`: пункты
+/// выводятся только из документов вида `task`, и ноль о паре держатель прочёл
+/// «пунктов нет» и слил V5-T335 с четырьмя открытыми.
+#[cfg(test)]
+mod ready_of_a_red_pair {
+    use serde_json::json;
+
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn a_red_pair_is_refused_naming_its_door_and_a_task_answers() {
+        let url = std::env::var("MH_TEST_DB_URL").expect("MH_TEST_DB_URL: адрес пустой базы");
+        let apart = format!("{}{}", if url.contains('?') { '&' } else { '?' },
+                            "options=-c%20search_path%3Dready_red");
+        let pool = crate::db::pool(&format!("{url}{apart}"), 2).expect("пул тестовой базы");
+        pool.get().await.expect("соединение")
+            .batch_execute("DROP SCHEMA IF EXISTS ready_red CASCADE; CREATE SCHEMA ready_red;")
+            .await.expect("своя схема заводится");
+        crate::projector::ensure(&pool).await.expect("схема встаёт на пустой базе");
+        pool.get().await.expect("соединение")
+            .batch_execute(
+                "INSERT INTO project_documents (project_id, entity_kind, entity_name, content, content_hash,
+                                                bytes, revision, updated_at, updated_by)
+                      VALUES ('p', 'red-task', 'V1-T1', '- [ ] красный пункт', 'h', 0, 1, 1, 't'),
+                             ('p', 'task', 'M1-T1', 'без чек-листа', 'h', 0, 1, 1, 't');",
+            )
+            .await.expect("набор заводится");
+        let door = super::Mcp {
+            pool: pool.clone(),
+            kinds: std::sync::Arc::new(crate::kinds::Kinds::from_db(&pool).await.expect("виды")),
+            project: "p".to_owned(),
+            author: "проба".to_owned(),
+        };
+        let text = |v: &serde_json::Value| v["content"][0]["text"].as_str().unwrap_or("").to_owned();
+
+        let red = door.call("ready", &json!({ "task": "V1-T1" })).await;
+        assert_eq!(red["isError"], json!(true), "о красной паре пришёл ответ, а не отказ: {red}");
+        assert!(text(&red).contains("red-task id=V1-T1"), "отказ не называет дверь пары: {red}");
+
+        let task = door.call("ready", &json!({ "task": "M1-T1" })).await;
+        assert_ne!(task["isError"], json!(true), "задача без пунктов отказана: {task}");
+
+        let declared = door.call("ready", &json!({ "task": "M9-T9" })).await;
+        assert_ne!(declared["isError"], json!(true),
+                   "задача без документа (объявленная) отказана, а пунктов у неё и не бывает: {declared}");
+
+        pool.get().await.expect("соединение")
+            .batch_execute("DROP SCHEMA IF EXISTS ready_red CASCADE").await.expect("схема снимается");
     }
 }
 

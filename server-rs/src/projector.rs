@@ -9314,15 +9314,7 @@ pub(crate) async fn declare_task(pool: &Pool, project: &str, fields: Task<'_>, d
         }
         // «Нет такой» о задаче, которая стоит в плане, отправляла искать
         // дверь наугад (tot-ade, M5-T237): задача из документа уходит с ним.
-        let kind: Option<String> = client
-            .query_opt(
-                "SELECT entity_kind FROM project_documents
-                  WHERE project_id = $1 AND entity_kind IN ('task', 'red-task') AND lower(entity_name) = lower($2)
-                  LIMIT 1",
-                &[&project, &id],
-            )
-            .await?
-            .map(|r| r.get(0));
+        let kind = task_document_kind(&client, project, id).await?;
         return Ok(match kind {
             Some(kind) => json!({ "status": "projected", "id": id,
                 "why": format!("задача заведена документом, а не объявлением, и уходит вместе с ним: \
@@ -9346,16 +9338,7 @@ pub(crate) async fn declare_task(pool: &Pool, project: &str, fields: Task<'_>, d
     // Объявление поверх документа роняло пересборку всего набора: строка
     // красной задачи ложилась в план второй раз. Документ полнее объявления, и
     // пересборка всё равно перепишет строку по нему.
-    if let Some(row) = client
-        .query_opt(
-            "SELECT entity_kind FROM project_documents
-              WHERE project_id = $1 AND entity_kind IN ('task', 'red-task') AND lower(entity_name) = lower($2)
-              LIMIT 1",
-            &[&project, &id],
-        )
-        .await?
-    {
-        let kind: String = row.get(0);
+    if let Some(kind) = task_document_kind(&client, project, id).await? {
         return Ok(json!({ "status": "has_document", "id": id,
             "why": format!("у задачи есть документ вида {kind}: документ полнее объявления, и план строится по нему — объявлять не нужно") }));
     }
@@ -11442,6 +11425,23 @@ pub(crate) async fn trunk_head(pool: &Pool, project: &str) -> Result<String, cra
         .query_opt("SELECT commit_sha FROM trunk_head WHERE project_id = $1", &[&project])
         .await?;
     Ok(row.map(|r| r.get(0)).unwrap_or_default())
+}
+
+/// Вид документа задачи — `task` или `red-task`; `None`, когда задачи нет.
+pub(crate) async fn task_document_kind(
+    client: &tokio_postgres::Client,
+    project: &str,
+    id: &str,
+) -> Result<Option<String>, tokio_postgres::Error> {
+    Ok(client
+        .query_opt(
+            "SELECT entity_kind FROM project_documents
+              WHERE project_id = $1 AND entity_kind IN ('task', 'red-task') AND lower(entity_name) = lower($2)
+              LIMIT 1",
+            &[&project, &id],
+        )
+        .await?
+        .map(|r| r.get(0)))
 }
 
 /// Пункты приёмки задачи — чек-лист из документа, выведенный строками.
