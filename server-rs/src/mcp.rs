@@ -2351,14 +2351,14 @@ impl Mcp {
                 let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
                 match crate::projector::declare_task_dep(&self.pool, p, &g("task"), &g("dependsOn"),
                                                          flag(args, "drop")).await {
-                    // НЕ ЗАПИСАННОЕ РЕБРО — ОТКАЗ, А НЕ ОТВЕТ. «red_task» шёл
+                    // НЕ ИСПОЛНЕННАЯ ПРОСЬБА — ОТКАЗ, А НЕ ОТВЕТ. «red_task» шёл
                     // успехом со словами внутри, и набор принял его за
                     // объявление: `V5-T348` ждала `M5-T350` только в голове
                     // объявившего, `waves` давала ей `waits: 0`, и шесть новых
                     // сессий раздали бы заблокированную задачу.
                     Ok(v) if !matches!(v["status"].as_str(), Some("declared" | "dropped")) => {
                         refusal(Miss::Refused(v["why"].as_str().map_or_else(
-                            || format!("зависимость не записана: {}", v["status"]),
+                            || format!("зависимость не тронута: {}", v["status"].as_str().unwrap_or("")),
                             str::to_owned)))
                     }
                     Ok(v) => ok(v),
