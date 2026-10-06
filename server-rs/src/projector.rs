@@ -6296,6 +6296,14 @@ pub(crate) async fn push_task_state(
                SELECT id, state FROM project_task_runs
                 WHERE project_id = $1 AND task_id = ANY($2)
                   AND state <> ALL (ARRAY['done', 'failed', 'cancelled'])
+                  -- Только прогон, начатый ДО того, как задача стала закрытой:
+                  -- доработка закрытой задачи (последующий запрос с бареым
+                  -- трейлером) состояния не меняет, и без этой черты её живой
+                  -- прогон закрывался бы под исполнителем на каждой подаче.
+                  -- `seen_at` двигается лишь при смене состояния и идёт по тем
+                  -- же серверным часам, что `created_at`.
+                  AND created_at < (SELECT ts.seen_at FROM task_state ts
+                                     WHERE ts.project_id = $1 AND ts.task_id = project_task_runs.task_id)
                 FOR UPDATE)
              UPDATE project_task_runs r
                 SET state = 'done', updated_at = $3, finished_at = $3,

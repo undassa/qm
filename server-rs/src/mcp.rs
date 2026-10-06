@@ -3627,7 +3627,7 @@ mod runs_of_a_closed_task {
             ("M1-T1".to_owned(), "closed".to_owned(), "c1".to_owned(), 1_i64),
             ("M1-T2".to_owned(), "claimed".to_owned(), "c2".to_owned(), 1_i64),
         ];
-        let pushed = crate::projector::push_task_state(&pool, "p", &states, 2, "c1", false)
+        let pushed = crate::projector::push_task_state(&pool, "p", &states, crate::projector::now_ms(), "c1", false)
             .await.expect("подача принята");
         assert_eq!(pushed["runsClosed"], 1, "закрыт не один прогон: {pushed}");
         let client = pool.get().await.expect("соединение");
@@ -3645,6 +3645,14 @@ mod runs_of_a_closed_task {
                        &[&closed_run])
             .await.expect("переход записан").get(0);
         assert_eq!(by, "harness", "закрытие не названо харнесом");
+
+        // Доработка закрытой задачи: прогон, начатый ПОСЛЕ закрытия, живёт, и
+        // следующая подача того же состояния его не трогает.
+        let rework = started("M1-T1").await;
+        let again = crate::projector::push_task_state(&pool, "p", &states, crate::projector::now_ms(), "c1", false)
+            .await.expect("подача принята");
+        assert_eq!(again["runsClosed"], 0, "подача закрыла прогон доработки: {again}");
+        assert_eq!(state(rework).await, "running", "прогон, начатый после закрытия, закрыт под исполнителем");
         client.batch_execute("DROP SCHEMA IF EXISTS runs_closed CASCADE").await.expect("схема снимается");
     }
 }
