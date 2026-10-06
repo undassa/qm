@@ -539,6 +539,9 @@ pub(crate) struct Column {
     pub primary_key: bool,
     pub references: Option<String>,
     pub source: Option<String>,
+    /// Колонку пишет триггер миграции (`NEW.колонка := …`). Писатель есть, и
+    /// пометка ему не нужна — решение владельца по заявке #21.
+    pub by_trigger: bool,
 }
 
 pub(crate) struct Table {
@@ -583,13 +586,15 @@ fn column_def(c: &regex::Captures) -> Column {
         name: c[1].to_owned(),
         ty: c[2].to_lowercase(),
         not_null: rest.contains("NOT NULL"),
-        has_default: rest.contains("DEFAULT"),
+        // `GENERATED … AS` — значение кладёт сама база, как и умолчанием.
+        has_default: rest.contains("DEFAULT") || rest.contains("GENERATED"),
         primary_key: rest.contains("PRIMARY KEY"),
         references: regex::Regex::new(r"(?i)\bREFERENCES\s+(?:[a-z][a-z0-9_]*\.)?([a-z][a-z0-9_]*)")
             .expect("образец ссылки")
             .captures(&c[3])
             .map(|r| r[1].to_owned()),
         source: None,
+        by_trigger: false,
     }
 }
 
@@ -772,7 +777,151 @@ pub(crate) fn schema_of(texts: &[String]) -> Vec<Table> {
             },
         }
     }
+    for (table, name) in trigger_writes(texts) {
+        if let Some(c) = column_mut(&mut out, &table, &name) {
+            c.by_trigger = true;
+        }
+    }
     out
+}
+
+/// Колонки, которые пишет триггер: `CREATE TRIGGER … ON таблица … EXECUTE
+/// FUNCTION ф()` и в теле `ф` присваивание `NEW.колонка :=` (или `=`).
+/// Функция и триггер живут в разных миграциях, поэтому читаются все тексты.
+/// ponytail: снятие триггера (`DROP TRIGGER`) не учтено — триггер считается
+/// живым, пока о нём не заявит находка.
+fn trigger_writes(texts: &[String]) -> Vec<(String, String)> {
+    let func = regex::Regex::new(
+        r"(?is)CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:[a-z][a-z0-9_]*\.)?([a-z][a-z0-9_]*)\s*\(.*?(\$[a-z0-9_]*\$)(.*?)\$",
+    )
+    .expect("образец функции");
+    let new = regex::Regex::new(r"(?i)\bNEW\.([a-z][a-z0-9_]*)\s*:?=").expect("образец присваивания NEW");
+    let trigger = regex::Regex::new(
+        r"(?is)CREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\s+\S+\s+[^;]*?\bON\s+(?:[a-z][a-z0-9_]*\.)?([a-z][a-z0-9_]*)[^;]*?EXECUTE\s+(?:FUNCTION|PROCEDURE)\s+(?:[a-z][a-z0-9_]*\.)?([a-z][a-z0-9_]*)",
+    )
+    .expect("образец триггера");
+    let clean: Vec<String> = texts.iter().map(|t| uncommented(t)).collect();
+    let mut sets: Vec<(String, Vec<String>)> = Vec::new();
+    for t in &clean {
+        for f in func.captures_iter(t) {
+            let cols = new.captures_iter(&f[3]).map(|c| c[1].to_lowercase()).collect();
+            sets.push((f[1].to_lowercase(), cols));
+        }
+    }
+    let mut out = Vec::new();
+    for t in &clean {
+        for tr in trigger.captures_iter(t) {
+            let f = tr[2].to_lowercase();
+            for (_, cols) in sets.iter().filter(|(name, _)| *name == f) {
+                out.extend(cols.iter().map(|c| (tr[1].to_lowercase(), c.clone())));
+            }
+        }
+    }
+    out
+}
+
+/// Где код пишет колонку: `INSERT INTO т (к, …)`, `UPDATE т SET к = …` и
+/// `ON CONFLICT … DO UPDATE SET к = …`. Имя — `таблица.колонка`, пояснение —
+/// место первой записи.
+///
+/// Это вторая половина проверки пометки `x-source`: задача, названная
+/// писателем, закрыта — значит, запись колонки в коде есть. Запись, которой
+/// датчик не видит (ORM, SQL, собранный по кускам), — повод научить датчик, а не
+/// пометка (решение владельца по заявке #21).
+pub(crate) fn column_writes(text: &str, file: &str) -> Vec<Pair> {
+    static INSERT: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+        regex::Regex::new(r"(?is)\bINSERT\s+INTO\s+(?:[a-z_][a-z0-9_]*\.)?([a-z_][a-z0-9_]*)\s*\(([^)]*)\)")
+            .expect("образец вставки")
+    });
+    static UPDATE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+        regex::Regex::new(r#"(?is)\bUPDATE\s+(?:ONLY\s+)?(?:[a-z_][a-z0-9_]*\.)?([a-z_][a-z0-9_]*)(?:\s+(?:AS\s+)?[a-z_][a-z0-9_]*)?\s+SET\s+(.*?)(?:\bWHERE\b|\bFROM\b|\bRETURNING\b|;|[^\\]"|$)"#)
+            .expect("образец правки")
+    });
+    static UPSERT: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+        regex::Regex::new(r#"(?is)\bINSERT\s+INTO\s+(?:[a-z_][a-z0-9_]*\.)?([a-z_][a-z0-9_]*)[^;]*?\bON\s+CONFLICT\b[^;]*?\bDO\s+UPDATE\s+SET\s+(.*?)(?:\bWHERE\b|\bRETURNING\b|;|[^\\]"|$)"#)
+            .expect("образец вставки с правкой")
+    });
+    static LHS: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+        regex::Regex::new(r#"(?s)^\s*(?:\(([^)]*)\)|(?:[a-z_][a-z0-9_]*\.)?\\?"?([a-z_][a-z0-9_]*)\\?"?)\s*="#).expect("образец присваивания")
+    });
+    let ident = |w: &str| {
+        // Имя в кавычках внутри строки Rust приходит как `\"имя\"`.
+        let w = w.trim().trim_matches(|c| c == '"' || c == '\\').to_lowercase();
+        (!w.is_empty() && w.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')).then_some(w)
+    };
+    // Присваивания режутся запятой ВЕРХНЕГО уровня: `coalesce(a, b)` — одно.
+    let assigned = |list: &str| -> Vec<String> {
+        let mut parts = vec![String::new()];
+        let mut d = 0i32;
+        for ch in list.chars() {
+            match ch {
+                '(' => d += 1,
+                ')' => d -= 1,
+                ',' if d == 0 => {
+                    parts.push(String::new());
+                    continue;
+                }
+                _ => {}
+            }
+            parts.last_mut().expect("есть кусок").push(ch);
+        }
+        parts
+            .iter()
+            .filter_map(|p| LHS.captures(p))
+            .flat_map(|c| match (c.get(1), c.get(2)) {
+                (Some(many), _) => many.as_str().split(',').filter_map(ident).collect(),
+                (_, Some(one)) => ident(one.as_str()).into_iter().collect(),
+                _ => Vec::new(),
+            })
+            .collect()
+    };
+    let line = |at: usize| text[..at].matches('\n').count() + 1;
+    let mut out: Vec<Pair> = Vec::new();
+    let mut put = |table: &str, cols: Vec<String>, at: usize| {
+        let Some(table) = ident(table) else { return };
+        for c in cols {
+            let name = format!("{table}.{c}");
+            if !out.iter().any(|p| p.name == name) {
+                out.push(Pair { name, detail: format!("пишется: {file}:{}", line(at)) });
+            }
+        }
+    };
+    for m in INSERT.captures_iter(text) {
+        put(&m[1], m[2].split(',').filter_map(ident).collect(), m.get(0).expect("целиком").start());
+    }
+    for m in UPDATE.captures_iter(text) {
+        put(&m[1], assigned(&m[2]), m.get(0).expect("целиком").start());
+    }
+    for m in UPSERT.captures_iter(text) {
+        put(&m[1], assigned(&m[2]), m.get(0).expect("целиком").start());
+    }
+    out
+}
+
+/// Задача, названная пометкой `x-source`: `task:M3-T14 — пояснение`.
+///
+/// Пометка снимала находку любой непустой строкой, и ничто не проверяло, правда
+/// ли она: одно слово гасило семьдесят семь находок `G3` (заявка #21). Теперь
+/// засчитывается только пометка, называющая задачу, которая запись реализует:
+/// её существование судит `G3`, а когда она закрыта, `G4` ищет запись колонки в
+/// коде. Ссылка на решение или раздел модели исполнителя не называет.
+pub(crate) fn x_source_task(said: &str) -> Option<&str> {
+    let rest = said.trim().strip_prefix("task:")?.trim_start();
+    let id = rest.split(|c: char| c.is_whitespace() || c == '—').next()?;
+    let ok = id.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c));
+    ok.then_some(id)
+}
+
+/// Что датчик говорит о колонке или таблице с пометкой `x-source`: пометка,
+/// называющая задачу, — «помечено»; любая иная — та же находка, что без неё,
+/// с объяснением, почему пометка не засчитана.
+fn said_by_source(source: Option<&str>, finding: String) -> String {
+    match source {
+        Some(s) if x_source_task(s).is_some() => format!("помечено x-source: {s}"),
+        Some(s) => format!("{finding}. Пометка «x-source: {s}» задачу-писателя не называет и находку не снимает"),
+        None => finding,
+    }
 }
 
 fn column_mut<'a>(tables: &'a mut [Table], table: &str, name: &str) -> Option<&'a mut Column> {
@@ -1149,7 +1298,8 @@ pub(crate) fn contract_vs_schema(
     // Способ сказать «колонку пишет не контракт» был, а находка о нём молчала:
     // набор искал его в дверях и в спецификации датчика и подал заявку.
     const X_SOURCE: &str = ". Если колонку пишет не контракт, а сервер или воркер, — \
-                            источник называется в миграции: COMMENT ON COLUMN таблица.колонка IS 'x-source: чем'";
+                            писатель называется в миграции задачей, которая запись реализует: \
+                            COMMENT ON COLUMN таблица.колонка IS 'x-source: task:<id> — пояснение'";
     let schemas: Vec<String> = doc
         .get("components")
         .and_then(|c| c.get("schemas"))
@@ -1306,7 +1456,8 @@ pub(crate) fn contract_vs_schema(
         let Some(t) = tables.iter().find(|t| &t.name == table) else { continue };
         let known = family(table);
         for c in &t.cols {
-            if SYSTEM.contains(&c.name.as_str()) || known.contains(&c.name) {
+            // Умолчание, `GENERATED` и триггер — писатель в самой схеме.
+            if SYSTEM.contains(&c.name.as_str()) || known.contains(&c.name) || c.has_default || c.by_trigger {
                 continue;
             }
             if params_of.iter().any(|(t2, n)| t2 == &t.name && n == &c.name) {
@@ -1315,14 +1466,12 @@ pub(crate) fn contract_vs_schema(
             let elsewhere = names.contains(&c.name);
             out.push(Pair {
                 name: format!("{}.{}", t.name, c.name),
-                detail: if let Some(s) = &c.source {
-                    format!("помечено x-source: {s}")
-                } else if elsewhere {
+                detail: said_by_source(c.source.as_deref(), if elsewhere {
                     format!("колонка без входа: имя есть в контракте, но в ЧУЖОЙ схеме — \
                              положить в {} нечем{X_SOURCE}", t.name)
                 } else {
                     format!("колонка без входа: ни свойства, ни параметра с именем {}{X_SOURCE}", c.name)
-                },
+                }),
             });
         }
     }
@@ -1377,10 +1526,8 @@ pub(crate) fn contract_vs_schema(
             if !cols.is_empty() {
                 out.push(Pair {
                     name: format!("{} · без записи", t.name),
-                    detail: match &t.source {
-                        Some(s) => format!("помечено x-source: {s}"),
-                        None => format!("таблица есть, а контракт в неё ничем не пишет: {} колонок", cols.len()),
-                    },
+                    detail: said_by_source(t.source.as_deref(),
+                        format!("таблица есть, а контракт в неё ничем не пишет: {} колонок", cols.len())),
                 });
             }
             continue;
@@ -1429,11 +1576,8 @@ pub(crate) fn contract_vs_schema(
             // починкой.
             out.push(Pair {
                 name: format!("{}.{} · обязательна", t.name, c.name),
-                detail: match &c.source {
-                    Some(s) => format!("помечено x-source: {s}"),
-                    None => format!("колонка обязательна, а обязательного входа нет: NOT NULL без умолчания, \
-                             и ни одна схема семьи её не требует{X_SOURCE}"),
-                },
+                detail: said_by_source(c.source.as_deref(), format!("колонка обязательна, а обязательного входа нет: NOT NULL без умолчания, \
+                             и ни одна схема семьи её не требует{X_SOURCE}")),
             });
         }
     }
@@ -2107,10 +2251,10 @@ CREATE TABLE handovers (
 "#;
 
     const MARKS: &str = "
-COMMENT ON COLUMN absences.synced_at IS 'x-source: синхронизация календаря';
+COMMENT ON COLUMN absences.synced_at IS 'x-source: task:M2-T7 — синхронизация календаря';
 COMMENT ON COLUMN absences.source IS 'x-source: POST /absences пишет ''manual''';
 COMMENT ON COLUMN absences.starts_at IS 'x-source: ';
-COMMENT ON TABLE tenants IS 'x-source: импорт конфигурации';
+COMMENT ON TABLE tenants IS 'x-source: task:M4-T1 — импорт конфигурации';
 ";
 
     fn contract() -> Value {
@@ -2159,7 +2303,7 @@ COMMENT ON TABLE tenants IS 'x-source: импорт конфигурации';
         assert_eq!(col("absences", "source").source.as_deref(), Some("POST /absences пишет 'manual'"));
         assert!(col("absences", "starts_at").source.is_none(), "пустая метка меткой не считается");
         assert_eq!(t.iter().find(|x| x.name == "tenants").and_then(|x| x.source.as_deref()),
-                   Some("импорт конфигурации"));
+                   Some("task:M4-T1 — импорт конфигурации"));
         assert_eq!(col("handovers", "from_shift_id").references.as_deref(), Some("shifts"));
         assert_eq!(col("handovers", "to_shift_id").references.as_deref(), Some("shifts"));
         assert_eq!(col("handovers", "account_id").references.as_deref(), Some("accounts"));
@@ -2213,11 +2357,68 @@ COMMENT ON TABLE tenants IS 'x-source: импорт конфигурации';
     #[test]
     fn x_source_marks_both_a_column_and_a_table() {
         let p = compare(SQL);
-        assert_eq!(note(&p, "absences.synced_at"), Some("помечено x-source: синхронизация календаря"));
-        assert_eq!(note(&p, "absences.source · обязательна"),
-                   Some("помечено x-source: POST /absences пишет 'manual'"));
-        assert_eq!(note(&p, "tenants · без записи"), Some("помечено x-source: импорт конфигурации"));
+        assert_eq!(note(&p, "absences.synced_at"), Some("помечено x-source: task:M2-T7 — синхронизация календаря"));
+        assert_eq!(note(&p, "tenants · без записи"), Some("помечено x-source: task:M4-T1 — импорт конфигурации"));
         assert!(note(&p, "monitors · без записи").is_some_and(|d| d.starts_with("таблица есть")));
+    }
+
+    /// Заявка #21: пометка, не называющая задачу, находку не снимает — та же
+    /// находка, что без пометки, и её ловит тот же пункт гейта.
+    #[test]
+    fn an_x_source_without_a_task_stays_a_finding() {
+        let p = compare(SQL);
+        let said = note(&p, "absences.source · обязательна").expect("находка");
+        assert!(said.starts_with("колонка обязательна") && said.contains("задачу-писателя не называет"), "{said}");
+        assert_eq!(super::x_source_task("task:M3-T14 — пишет воркер"), Some("M3-T14"));
+        assert_eq!(super::x_source_task("task:M3-T14"), Some("M3-T14"));
+        for no in ["ADR-0042", "task:", "task: — воркер", "сервер, task:M1-T1", "task:М1-Т1"] {
+            assert_eq!(super::x_source_task(no), None, "{no}");
+        }
+    }
+
+    #[test]
+    fn default_generated_and_a_trigger_write_the_column() {
+        let sql = "
+CREATE OR REPLACE FUNCTION stamp() RETURNS trigger AS $$
+BEGIN
+  NEW.touched_at := now();
+  RETURN NEW;
+END $$ LANGUAGE plpgsql;
+CREATE TABLE monitors (id text PRIMARY KEY, name text NOT NULL, state text NOT NULL DEFAULT 'up',
+  slug text GENERATED ALWAYS AS (lower(name)) STORED, touched_at timestamptz, note text);
+CREATE TRIGGER trg_monitors_touch BEFORE UPDATE ON monitors FOR EACH ROW EXECUTE FUNCTION stamp();
+";
+        let doc = json!({
+            "paths": { "/monitors": { "post": { "requestBody": link("MonitorInput"), "responses": { "201": link("Monitor") } } } },
+            "components": { "schemas": {
+                "MonitorInput": { "type": "object", "required": ["name"], "properties": { "name": { "type": "string" } } },
+                "Monitor": { "type": "object", "properties": { "id": { "type": "string" }, "name": { "type": "string" } } }
+            } }
+        });
+        let p = contract_vs_schema(&doc, &schema_of(&[sql.into()]), &[]);
+        for written in ["monitors.state", "monitors.slug", "monitors.touched_at"] {
+            assert!(note(&p, written).is_none(), "{written}: писатель в схеме");
+        }
+        assert!(note(&p, "monitors.note").is_some_and(|d| d.starts_with("колонка без входа")));
+    }
+
+    #[test]
+    fn code_writes_are_insert_update_and_upsert() {
+        let rs = r#"
+sqlx::query!("INSERT INTO monitors (id, account_id, name) VALUES ($1, $2, $3)
+              ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, \"state\" = 'up' RETURNING id", a, b, c);
+sqlx::query("UPDATE monitors m SET (paused_at, paused_by) = ($1, $2), note = coalesce($3, note) WHERE id = $4");
+sqlx::query("update public.absences set synced_at = now()");
+"#;
+        let w = super::column_writes(rs, "src/m.rs");
+        let names: Vec<&str> = w.iter().map(|p| p.name.as_str()).collect();
+        for want in ["monitors.id", "monitors.account_id", "monitors.name", "monitors.state",
+                     "monitors.paused_at", "monitors.paused_by", "monitors.note", "absences.synced_at"] {
+            assert!(names.contains(&want), "{want} не найдено в {names:?}");
+        }
+        assert!(!names.iter().any(|n| n.ends_with(".id") && n.starts_with("absences")));
+        assert_eq!(w.iter().find(|p| p.name == "absences.synced_at").map(|p| p.detail.as_str()),
+                   Some("пишется: src/m.rs:5"));
     }
 
     #[test]

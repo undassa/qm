@@ -7058,10 +7058,15 @@ pub(crate) async fn push_worktrees(
             )
             .await?;
     }
+    // Вершиной, как у предполёта: `fact_fresh` требует коммита у любого факта,
+    // и подача без него числилась «снятой без коммита» навсегда — ступень 7
+    // лестницы держала выдачу задач.
+    let head = known_head(&tx, project).await;
     tx.execute(
-        "INSERT INTO fact_push (project_id, fact, at, actor, rows) VALUES ($1, 'worktree', $2, $3, $4)
-         ON CONFLICT (project_id, fact) DO UPDATE SET at = EXCLUDED.at, actor = EXCLUDED.actor, rows = EXCLUDED.rows",
-        &[&project, &now_ms(), &actor, &(written as i32)],
+        "INSERT INTO fact_push (project_id, fact, at, actor, rows, commit_sha, dirty) VALUES ($1, 'worktree', $2, $3, $4, $5, false)
+         ON CONFLICT (project_id, fact) DO UPDATE SET at = EXCLUDED.at, actor = EXCLUDED.actor, rows = EXCLUDED.rows,
+           commit_sha = EXCLUDED.commit_sha, dirty = EXCLUDED.dirty",
+        &[&project, &now_ms(), &actor, &(written as i32), &head],
     )
     .await?;
     tx.commit().await?;
@@ -10114,7 +10119,7 @@ pub(crate) async fn declare_sensor_spec(pool: &Pool, project: &str, fields: Sens
     }
     // Незнакомый род прежде молча становился `extract`: датчик объявляли одним,
     // он снимал другое и говорил «снято». Отказ называет допустимые роды.
-    const KINDS: [&str; 17] = ["extract", "files", "secret-fields", "declared-paths", "lines", "retired-terms",
+    const KINDS: [&str; 18] = ["extract", "files", "secret-fields", "declared-paths", "lines", "retired-terms", "column-writes",
                               "domain-vs-check", "contract-vs-schema", "contract-ops", "contract-body", "declared-lines", "contract-marks", "contract-head", "frozen-tree",
                               "task-trailers", "holder-stub", "file-matches"];
     let how = if how.trim().is_empty() { "extract" } else { how };

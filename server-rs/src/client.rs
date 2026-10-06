@@ -1082,6 +1082,14 @@ pub fn sense(door: &Door, only: Option<&str>, root: &str) -> Result<Value, Strin
                 }
                 continue;
             }
+            if how == "column-writes" {
+                for w in crate::repo_corpus::column_writes(&text, &short) {
+                    if seen.insert(w.name.clone()) {
+                        names.push((w.name, w.detail, String::new()));
+                    }
+                }
+                continue;
+            }
             if how == "secret-fields" {
                 for (decl, field, ty) in secret_fields(&text, re, &declared, &own) {
                     // Ключ несёт путь: `Target.url` встречается в двух файлах
