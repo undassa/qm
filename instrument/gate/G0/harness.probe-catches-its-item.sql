@@ -24,4 +24,7 @@ SELECT 'пункт ' || g.phase || ' · ' || g.id
        || 'Зелёный такого пункта ничего не доказывает — `mh call gate-selftest`' AS detail
   FROM project_gates g
  WHERE g.project_id = $1 AND g.probe_ok IS FALSE
+   -- Неприменимый к проекту пункт не обязан роняться пробой: подсаживать некуда
+   -- (довод у `item_applicable`). Его приговор пробе не судится здесь вовсе.
+   AND g.applicable IS NOT FALSE
  ORDER BY 1

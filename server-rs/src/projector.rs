@@ -3554,6 +3554,91 @@ ALTER TABLE gate_item ADD COLUMN IF NOT EXISTS subject_query text NOT NULL DEFAU
 ALTER TABLE gate_item ADD COLUMN IF NOT EXISTS subject_why text NOT NULL DEFAULT '';
 ALTER TABLE project_gates ADD COLUMN IF NOT EXISTS probe_ok boolean;
 ALTER TABLE project_gates ADD COLUMN IF NOT EXISTS id text NOT NULL DEFAULT '';
+
+-- ПРИМЕНИМОСТЬ ПУНКТА — ОТ ТОГО, ЧТО ЕСТЬ В ПРОЕКТЕ, А НЕ ОТ ПУСТОТЫ ПРЕДМЕТА.
+--
+-- Харнес один на все проекты, а правила пишутся под устройство одного из них:
+-- «блок вне закрытой библиотеки невозможен» есть у `tot-ade` с его поверхностью,
+-- и нет у `myack`, где поверхности на Rust нет вовсе. Пустой предмет отвечал
+-- «пройден», и это смешивало два разных ответа: «технология есть, сущностей
+-- пока нет» и «технологии в проекте нет». Самотест их не различал и требовал
+-- ловить нарушение там, где подсаживать не во что: G0 у `myack` стоял красным
+-- на трёх таких пунктах (решение владельца 2026-10-06).
+--
+-- Пункт объявляет, что ему нужно (`gate_item.requires`), проект — что у него
+-- есть, и объявляет он это не отдельным профилем, а своим стеком: таблицей
+-- «Слой | Выбор» (или «Слой | Технология») в любом документе набора. Профиль
+-- руками разошёлся бы со стеком; выведенный — нет.
+ALTER TABLE gate_item ADD COLUMN IF NOT EXISTS requires text[] NOT NULL DEFAULT '{}';
+-- Неприменимый пункт пишется пройденным в `state` — гейт на него не реагирует, —
+-- а различимым здесь: самотест и `harness:probe-catches-its-item` его обходят.
+ALTER TABLE project_gates ADD COLUMN IF NOT EXISTS applicable boolean;
+-- Словарь возможностей — общий, из `instrument/capabilities.json`: какая технология
+-- стека даёт какую возможность. Синоним сравнивается целым словом без учёта
+-- регистра: «React 19 + TypeScript» даёт и `react`, и `typescript`.
+CREATE TABLE IF NOT EXISTS capability (id text PRIMARY KEY, about text NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS capability_alias (
+  capability text NOT NULL, alias text NOT NULL, PRIMARY KEY (capability, alias));
+
+CREATE OR REPLACE VIEW project_stack AS
+SELECT c.project_id, c.entity_kind, c.entity_name, c.block_ord, c.row_ord,
+       l.value AS layer, c.value AS technology
+  FROM project_document_cells c
+  JOIN project_document_cells h0
+    ON (h0.project_id, h0.entity_kind, h0.entity_name, h0.block_ord)
+       = (c.project_id, c.entity_kind, c.entity_name, c.block_ord)
+   AND h0.row_ord = 0 AND h0.col = 0 AND h0.value = 'Слой'
+  JOIN project_document_cells h1
+    ON (h1.project_id, h1.entity_kind, h1.entity_name, h1.block_ord)
+       = (c.project_id, c.entity_kind, c.entity_name, c.block_ord)
+   AND h1.row_ord = 0 AND h1.col = 1 AND h1.value IN ('Выбор', 'Технология')
+  JOIN project_document_cells l
+    ON (l.project_id, l.entity_kind, l.entity_name, l.block_ord, l.row_ord)
+       = (c.project_id, c.entity_kind, c.entity_name, c.block_ord, c.row_ord)
+   AND l.col = 0
+ WHERE c.col = 1 AND c.row_ord > 0;
+
+-- Есть ли возможность у проекта. NULL — проект стека не описал: судить нечем, и
+-- пункт мерится, как мерился. Иначе каждый проект без таблицы стека потерял бы
+-- все правила с требованиями разом, ничего о себе не сказав.
+CREATE OR REPLACE FUNCTION project_has_capability(p text, cap text) RETURNS boolean AS $в$
+  SELECT CASE
+    WHEN NOT EXISTS (SELECT 1 FROM project_stack WHERE project_id = p) THEN NULL
+    ELSE EXISTS (
+      SELECT 1 FROM project_stack s JOIN capability_alias a ON a.capability = cap
+       WHERE s.project_id = p
+         AND s.technology ~* ('(^|[^[:alnum:]])'
+                              || regexp_replace(a.alias, '([.^$*+?()\[\]{}|\\])', '\\\1', 'g')
+                              || '($|[^[:alnum:]])'))
+  END
+$в$ LANGUAGE sql STABLE;
+
+-- Почему пункт к проекту не применим; пусто — применим. Требование `article` —
+-- конституция проекта связывает с пунктом статью строкой `ART-nn  <пункт> …`:
+-- правило архитектуры одного проекта не судит проект, этой статьи не принявший.
+-- Одно место ответа: его спрашивают замер, самотест и пункт G0.
+CREATE OR REPLACE FUNCTION item_applicable(p text, ph text, i text) RETURNS text AS $п$
+  SELECT coalesce(string_agg(why, '; ' ORDER BY ord), '') FROM (
+    SELECT r.ord, CASE
+      WHEN r.req = 'article' THEN
+        CASE WHEN EXISTS (
+               SELECT 1 FROM project_documents d
+                WHERE d.project_id = p AND d.entity_kind = 'constitution'
+                  AND d.content ~ ('(?n)^\s*ART-\d+\s+'
+                                   || regexp_replace(i, '([.^$*+?()\[\]{}|\\])', '\\\1', 'g')
+                                   || '(\s|$)'))
+             THEN NULL
+             ELSE 'конституция проекта не связывает с этим пунктом ни одной статьи' END
+      ELSE
+        CASE WHEN project_has_capability(p, r.req) IS FALSE
+             THEN 'в стеке проекта нет «' || r.req || '»'
+                  || coalesce(' — ' || nullif((SELECT c.about FROM capability c WHERE c.id = r.req), ''), '')
+        END
+    END AS why
+      FROM gate_item g, unnest(g.requires) WITH ORDINALITY AS r(req, ord)
+     WHERE g.phase = ph AND g.id = i) w
+   WHERE why IS NOT NULL
+$п$ LANGUAGE sql STABLE;
 CREATE UNIQUE INDEX IF NOT EXISTS project_task_workspaces_one_per_run
   ON project_task_workspaces (task_run_id);
 CREATE UNIQUE INDEX IF NOT EXISTS project_gates_by_id ON project_gates (project_id, phase, id);
@@ -5536,7 +5621,18 @@ pub(crate) async fn measure_gates(pool: &Pool, project: &str, since: i64) -> Res
         // непустым, пока отсутствие не установлено: датчик не свеж, сборка не
         // прогонялась. Есть сущности — пункт мерится, и красное только чинится.
         let subject: String = r.get(5);
-        let subject_rows = if subject.trim().is_empty() {
+        // НЕПРИМЕНИМЫЙ ПУНКТ НЕ ИСПОЛНЯЕТСЯ ВОВСЕ — ни предмет, ни запрос. Его
+        // требования (`requires`) проект не выполняет: технологии нет в стеке
+        // или статья не принята конституцией. Мерить такой пункт значило бы
+        // судить проект за то, чего у него не бывает.
+        let unmet: String = match client
+            .query_one("SELECT item_applicable($1, $2, $3)", &[&project, &phase, &id])
+            .await
+        {
+            Ok(row) => row.get(0),
+            Err(e) => format!("\u{0}{}", e.says()),
+        };
+        let subject_rows = if !unmet.is_empty() || subject.trim().is_empty() {
             Ok(None)
         } else {
             client.query(subject.as_str(), &[&project]).await.map(|rows| Some(rows.len()))
@@ -5546,6 +5642,12 @@ pub(crate) async fn measure_gates(pool: &Pool, project: &str, since: i64) -> Res
         // печатала довод пустоты рядом с обоими: семь пунктов G4 в tot-ade,
         // померенных по коду, прочитаны разработчиком как «зелено ни о чём».
         let entry = match subject_rows {
+            // Отказ самого вопроса о применимости — «неизвестно», а не «неприменим»:
+            // транзакция прервана до точки возврата, и судить нечем.
+            _ if unmet.starts_with('\u{0}') => json!({ "computed": "unknown",
+                "why": format!("применимость не вычислилась: {}", &unmet[1..]) }),
+            _ if !unmet.is_empty() => json!({ "computed": "inapplicable", "violations": 0,
+                "detail": [], "why": format!("неприменим: {unmet}") }),
             Ok(Some(0)) => {
                 let w: String = r.get(6);
                 json!({ "computed": "passed", "violations": 0, "detail": [], "subjectRows": 0,
@@ -5574,7 +5676,7 @@ pub(crate) async fn measure_gates(pool: &Pool, project: &str, since: i64) -> Res
         // таблицы. Полное слово («не подписан», «подпись устарела») лежит в
         // `result`: сузить его до `unknown` в колонке можно, потерять — нельзя.
         let flat = match computed {
-            "passed" => "passed",
+            "passed" | "inapplicable" => "passed",
             "failed" => "failed",
             _ => "unknown",
         };
@@ -5602,13 +5704,14 @@ pub(crate) async fn measure_gates(pool: &Pool, project: &str, since: i64) -> Res
         let written = client
             .execute(
                 "INSERT INTO project_gates (project_id, phase, state, violations, detail,
-                                            result, checked_at, id)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+                                            result, checked_at, id, applicable)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
                  ON CONFLICT (project_id, phase, id) DO UPDATE SET
                    state = EXCLUDED.state, violations = EXCLUDED.violations,
                    detail = EXCLUDED.detail, result = EXCLUDED.result,
-                   checked_at = EXCLUDED.checked_at",
-                &[&project, &phase, &flat, &violations, &detail, &entry, &now, &id],
+                   checked_at = EXCLUDED.checked_at, applicable = EXCLUDED.applicable",
+                &[&project, &phase, &flat, &violations, &detail, &entry, &now, &id,
+                  &(computed != "inapplicable")],
             )
             .await;
         match written {
@@ -9192,6 +9295,74 @@ mod trunk_freshness {
     }
 }
 
+/// Применимость пункта — от стека и конституции проекта (решение владельца
+/// 2026-10-06): технологии нет — пункт неприменим, а не «пройден по пустоте».
+#[cfg(test)]
+mod applicability {
+    use serde_json::json;
+
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn an_item_applies_only_where_the_stack_or_the_constitution_has_its_subject() {
+        let url = std::env::var("MH_TEST_DB_URL").expect("MH_TEST_DB_URL: адрес пустой базы");
+        let apart = format!("{}{}", if url.contains('?') { '&' } else { '?' },
+                            "options=-c%20search_path%3Dapplicability");
+        let pool = crate::db::pool(&format!("{url}{apart}"), 2).expect("пул тестовой базы");
+        pool.get().await.expect("соединение")
+            .batch_execute("DROP SCHEMA IF EXISTS applicability CASCADE; CREATE SCHEMA applicability;")
+            .await.expect("своя схема заводится");
+        crate::projector::ensure(&pool).await.expect("схема встаёт на пустой базе");
+        crate::instrument::apply(&pool).await.expect("прибор раскладывается");
+        let door = crate::mcp::Mcp {
+            pool: pool.clone(),
+            kinds: std::sync::Arc::new(crate::kinds::Kinds::from_db(&pool).await.expect("виды")),
+            project: "П".to_owned(),
+            author: "проба".to_owned(),
+        };
+        let ask = |sql: &'static str| {
+            let pool = pool.clone();
+            async move {
+                pool.get().await.expect("соединение")
+                    .query_one(sql, &[]).await.expect("запрос").get::<_, Option<String>>(0)
+            }
+        };
+        let has = |cap: &'static str| {
+            let pool = pool.clone();
+            async move {
+                pool.get().await.expect("соединение")
+                    .query_one("SELECT project_has_capability('П', $1)", &[&cap]).await.expect("запрос")
+                    .get::<_, Option<bool>>(0)
+            }
+        };
+        let article = "SELECT item_applicable('П', 'G4', 'render:blocks-from-library')";
+
+        // Без конституции статья не принята: правило архитектуры чужого проекта не судит этот.
+        assert_ne!(ask(article).await.as_deref(), Some(""), "пункт статьи применим без статьи");
+        // Стека нет — судить возможность нечем: NULL, и пункт мерится, как мерился.
+        assert_eq!(has("react").await, None, "возможность выведена без стека");
+
+        // Таблица, где «Слой» — слой архитектуры, стеком не считается.
+        let arch = door.call("document-add", &json!({ "kind": "design-view", "id": "layers",
+            "content": "# Слои\n\n| Слой | Что держит |\n|---|---|\n| ядро | React нигде |\n" })).await;
+        assert_ne!(arch["isError"], json!(true), "документ не заведён: {arch}");
+        assert_eq!(has("react").await, None, "таблица слоёв архитектуры прочитана как стек");
+
+        let stack = door.call("document-add", &json!({ "kind": "design-view", "id": "sdd",
+            "content": "# Стек\n\n| Слой | Выбор | Почему |\n|---|---|---|\n| Основа | React 19 + TypeScript + Vite | так |\n" })).await;
+        assert_ne!(stack["isError"], json!(true), "документ стека не заведён: {stack}");
+        assert_eq!(has("react").await, Some(true), "React из стека не дал возможности");
+        assert_eq!(has("tauri").await, Some(false), "возможность без технологии в стеке");
+
+        let constitution = door.call("document-add", &json!({ "kind": "constitution",
+            "content": "# Конституция\n\n```\nART-22  render:blocks-from-library  библиотека закрыта\n```\n" })).await;
+        assert_ne!(constitution["isError"], json!(true), "конституция не заведена: {constitution}");
+        assert_eq!(ask(article).await.as_deref(), Some(""), "пункт статьи неприменим при принятой статье");
+
+        pool.get().await.expect("соединение")
+            .batch_execute("DROP SCHEMA IF EXISTS applicability CASCADE").await.expect("схема снимается");
+    }
+}
+
 pub(crate) async fn declare_task_requirement(
     pool: &Pool, project: &str, task: &str, requirement: &str, drop_it: bool,
 ) -> Result<Value, crate::db::Fail> {
@@ -11401,6 +11572,57 @@ async fn known_head(client: &impl deadpool_postgres::GenericClient, project: &st
         .unwrap_or_default()
 }
 
+/// Профиль проекта — вывод, а не запись: стек из таблиц «Слой | Выбор» набора,
+/// возможности словаря, которые он даёт, и пункты, к проекту неприменимые.
+/// Хранить его отдельно значило бы завести вторую правду о стеке.
+pub(crate) async fn profile(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
+    let stack: Vec<Value> = client
+        .query(
+            "SELECT entity_kind, entity_name, layer, technology FROM project_stack
+              WHERE project_id = $1 ORDER BY entity_kind, entity_name, block_ord, row_ord",
+            &[&project],
+        )
+        .await?
+        .iter()
+        .map(|r| json!({ "from": format!("{}:{}", r.get::<_, String>(0), r.get::<_, String>(1)),
+                         "layer": r.get::<_, String>(2), "technology": r.get::<_, String>(3) }))
+        .collect();
+    let capabilities: Vec<Value> = client
+        .query(
+            "SELECT id, about, project_has_capability($1, id) FROM capability ORDER BY id",
+            &[&project],
+        )
+        .await?
+        .iter()
+        .map(|r| json!({ "id": r.get::<_, String>(0), "about": r.get::<_, String>(1),
+                         "has": r.get::<_, Option<bool>>(2) }))
+        .collect();
+    let inapplicable: Vec<Value> = client
+        .query(
+            "SELECT phase, id, item_applicable($1, phase, id) FROM gate_item
+              WHERE cardinality(requires) > 0 AND item_applicable($1, phase, id) <> ''
+              ORDER BY phase, id",
+            &[&project],
+        )
+        .await?
+        .iter()
+        .map(|r| json!({ "phase": r.get::<_, String>(0), "item": r.get::<_, String>(1),
+                         "why": r.get::<_, String>(2) }))
+        .collect();
+    Ok(json!({
+        "stack": stack,
+        "capabilities": capabilities,
+        "inapplicable": inapplicable,
+        "means": if stack.is_empty() {
+            "таблицы стека («Слой | Выбор» или «Слой | Технология») в наборе нет: возможности не судятся, \
+             и пункты с требованием возможности мерятся, как прежде"
+        } else {
+            "has: true — технология есть в стеке; false — нет, и пункты, требующие её, неприменимы"
+        },
+    }))
+}
+
 /// Принципал воркера харнеса — единственный, кто подаёт факты о репозитории
 /// (заявка 18, решение владельца: «только харнес»). Имя выдаёт его ключ сессии
 /// (`key_admits`), назвать себя им заголовком нельзя.
@@ -13080,6 +13302,10 @@ pub(crate) async fn gate_selftest(pool: &Pool, project: &str, under: &str) -> Re
         .await?;
 
     let (mut alive, mut broken, mut undeclared) = (Vec::new(), Vec::new(), Vec::new());
+    // Неприменимый к проекту пункт пробой не роняется и не обязан: подсаживать
+    // нарушение некуда, и требовать этого значит красить G0 за то, чего в
+    // проекте нет (довод у `item_applicable`).
+    let mut inapplicable: Vec<Value> = Vec::new();
     // Третья корзина: правило, чей род факта не свеж, судить отказывается, и
     // уронить его подсадкой нельзя — реагировать нечему.
     let mut stale: Vec<Value> = Vec::new();
@@ -13096,6 +13322,15 @@ pub(crate) async fn gate_selftest(pool: &Pool, project: &str, under: &str) -> Re
         let since: i64 = r.try_get("since").unwrap_or(0);
         let subject: String = r.get(5);
         let sql = query.unwrap_or_default();
+        let unmet: String = client
+            .query_one("SELECT item_applicable($1, $2, $3)", &[&project, &phase, &item])
+            .await?
+            .get(0);
+        if !unmet.is_empty() {
+            verdict.push((phase.clone(), item.clone(), None));
+            inapplicable.push(json!({ "phase": phase, "item": item, "why": unmet }));
+            continue;
+        }
         if probe.trim().is_empty() {
             verdict.push((phase.clone(), item.clone(), None));
             undeclared.push(json!({ "phase": phase, "item": item,
@@ -13264,6 +13499,7 @@ pub(crate) async fn gate_selftest(pool: &Pool, project: &str, under: &str) -> Re
         "broken": broken.len(), "brokenItems": broken,
         "stale": stale.len(), "staleItems": stale,
         "undeclared": undeclared.len(), "undeclaredItems": undeclared,
+        "inapplicable": inapplicable.len(), "inapplicableItems": inapplicable,
         "why": "пункт без пробы не «прошёл самотест», а «самотест не объявлен» — это разные ответы",
     }))
 }

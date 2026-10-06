@@ -54,6 +54,49 @@ struct Item {
     subject_why: String,
     #[serde(default)]
     since: i64,
+    /// Что пункту нужно в проекте: `article` — статья конституции, связанная с
+    /// пунктом, либо возможность из `capabilities.json`. Не выполнено — пункт
+    /// к проекту неприменим и не исполняется (`item_applicable`).
+    #[serde(default)]
+    requires: Vec<String>,
+}
+
+/// Возможность проекта и технологии стека, которые её дают.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Capability {
+    id: String,
+    about: String,
+    aliases: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Capabilities {
+    capabilities: Vec<Capability>,
+}
+
+/// Словарь возможностей. Требование, которого в словаре нет, роняет раскладку:
+/// опечатка в `requires` иначе сделала бы пункт неприменимым ко всем проектам
+/// со стеком — молча, по ошибке в одном слове.
+fn capabilities(rules: &[Rule]) -> Result<Vec<Capability>, String> {
+    let raw = text("capabilities.json").ok_or("словаря возможностей нет: instrument/capabilities.json")?;
+    let declared: Capabilities = serde_json::from_str(raw)
+        .map_err(|e| format!("instrument/capabilities.json не разбирается: {e}"))?;
+    for c in &declared.capabilities {
+        if c.aliases.iter().all(|a| a.trim().is_empty()) {
+            return Err(format!("возможность {} без единой технологии: её не даст ни один стек", c.id));
+        }
+    }
+    for r in rules {
+        for req in &r.item.requires {
+            if req != "article" && !declared.capabilities.iter().any(|c| &c.id == req) {
+                return Err(format!(
+                    "пункт {} требует «{req}», а в словаре возможностей её нет", r.item.id));
+            }
+        }
+    }
+    Ok(declared.capabilities)
 }
 
 /// Фаза работы: порядок, гейт, уровень плана и вид задач, который она пускает.
@@ -159,6 +202,7 @@ struct Rungs {
 
 /// Прибор целиком, как его объявляет репозиторий.
 struct Instrument {
+    capabilities: Vec<Capability>,
     kinds: std::collections::BTreeMap<String, Value>,
     gates: Vec<Gate>,
     rules: Vec<Rule>,
@@ -173,6 +217,8 @@ struct Instrument {
 fn declared() -> Result<Instrument, String> {
     let Gates { gates, rules, mut used } = read()?;
     checked(&gates, &rules)?;
+    let capabilities = capabilities(&rules)?;
+    used.push("capabilities.json".to_owned());
     let phases = phases()?;
     let Rungs { set, process, title, rungs, used: ladder_files } = ladder()?;
     used.extend(ladder_files);
@@ -196,7 +242,7 @@ fn declared() -> Result<Instrument, String> {
             return Err(format!("фаза {} стоит на гейте {}, которого нет в объявлении", p.id, p.gate));
         }
     }
-    Ok(Instrument { kinds: layout.kinds, gates, rules, phases, set, process, title, rungs })
+    Ok(Instrument { capabilities, kinds: layout.kinds, gates, rules, phases, set, process, title, rungs })
 }
 
 fn read() -> Result<Gates, String> {
@@ -389,7 +435,8 @@ fn checked(gates: &[Gate], rules: &[Rule]) -> Result<(), String> {
 /// Всё одной транзакцией под общим замком: раскладывают двое — сервер и всякая
 /// подкоманда, — и половина прибора хуже прежнего целиком.
 pub async fn apply(pool: &Pool) -> Result<Value, String> {
-    let Instrument { kinds, gates, rules, phases: steps, set, process, title, rungs } = declared()?;
+    let Instrument { capabilities, kinds, gates, rules, phases: steps, set, process, title, rungs } =
+        declared()?;
     let mut client = crate::db::conn(pool).await.map_err(|e| crate::db::Says::says(&e))?;
     let tx = client.transaction().await.map_err(|e| e.to_string())?;
     tx.execute("SELECT pg_advisory_xact_lock(hashtext('instrument'))", &[])
@@ -449,10 +496,44 @@ pub async fn apply(pool: &Pool) -> Result<Value, String> {
         return Err(format!("объявленного не исполнить ({}):\n{}", broken.len(), broken.join("\n")));
     }
 
+    // СЛОВАРЬ ВОЗМОЖНОСТЕЙ ПЕРЕПИСЫВАЕТСЯ ЦЕЛИКОМ: он мал, и сверять построчно
+    // дороже, чем записать. Изменился — перемер всем: от него зависит, какие
+    // пункты к какому проекту применимы.
+    let vocabulary_was: Vec<(String, String, String)> = tx
+        .query("SELECT c.id, c.about, coalesce(a.alias, '') FROM capability c
+                  LEFT JOIN capability_alias a ON a.capability = c.id ORDER BY 1, 3", &[])
+        .await
+        .map_err(|e| e.to_string())?
+        .iter()
+        .map(|r| (r.get(0), r.get(1), r.get(2)))
+        .collect();
+    let mut vocabulary_now: Vec<(String, String, String)> = capabilities
+        .iter()
+        .flat_map(|c| c.aliases.iter().map(move |a| (c.id.clone(), c.about.clone(), a.clone())))
+        .collect();
+    vocabulary_now.sort();
+    let vocabulary_changed = vocabulary_was != vocabulary_now;
+    if vocabulary_changed {
+        tx.batch_execute("DELETE FROM capability_alias; DELETE FROM capability")
+            .await
+            .map_err(|e| e.to_string())?;
+        for c in &capabilities {
+            tx.execute("INSERT INTO capability (id, about) VALUES ($1, $2)", &[&c.id, &c.about])
+                .await
+                .map_err(|e| format!("возможность {} не записана: {e}", c.id))?;
+            for a in &c.aliases {
+                tx.execute("INSERT INTO capability_alias (capability, alias) VALUES ($1, $2)
+                            ON CONFLICT DO NOTHING", &[&c.id, a])
+                    .await
+                    .map_err(|e| format!("технология {a} возможности {} не записана: {e}", c.id))?;
+            }
+        }
+    }
+
     let was = tx
         .query(
             "SELECT phase, id, item, kind, coalesce(query, ''), probe, coalesce(owner, ''), why,
-                    subject_query, subject_why, since
+                    subject_query, subject_why, since, requires
                FROM gate_item",
             &[],
         )
@@ -478,6 +559,7 @@ pub async fn apply(pool: &Pool) -> Result<Value, String> {
                 && db(8) == r.subject
                 && db(9) == r.item.subject_why
                 && w.get::<_, i64>(10) == r.item.since
+                && w.get::<_, Vec<String>>(11) == r.item.requires
         });
         if same {
             continue;
@@ -524,15 +606,15 @@ pub async fn apply(pool: &Pool) -> Result<Value, String> {
         let owner = (!r.item.owner.is_empty()).then(|| r.item.owner.clone());
         tx.execute(
             "INSERT INTO gate_item (phase, id, item, kind, query, owner, probe, why,
-                                    subject_query, subject_why, since)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                                    subject_query, subject_why, since, requires)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
              ON CONFLICT (phase, id) DO UPDATE SET
                item = EXCLUDED.item, kind = EXCLUDED.kind, query = EXCLUDED.query,
                owner = EXCLUDED.owner, probe = EXCLUDED.probe, why = EXCLUDED.why,
                subject_query = EXCLUDED.subject_query, subject_why = EXCLUDED.subject_why,
-               since = EXCLUDED.since",
+               since = EXCLUDED.since, requires = EXCLUDED.requires",
             &[&r.item.phase, &r.item.id, &r.item.title, &r.item.kind, &query, &owner, &r.probe,
-              &r.item.why, &r.subject, &r.item.subject_why, &r.item.since],
+              &r.item.why, &r.subject, &r.item.subject_why, &r.item.since, &r.item.requires],
         )
         .await
         .map_err(|e| format!("пункт {} не записан: {}", r.item.id, crate::db::Says::says(&e)))?;
@@ -743,7 +825,7 @@ pub async fn apply(pool: &Pool) -> Result<Value, String> {
     let touched = !changed.is_empty() || gone > 0 || measures > 0
         || phases_gone > 0 || !phases_changed.is_empty()
         || !ladder_changed.is_empty() || rungs_gone > 0
-        || !kinds_changed.is_empty() || kinds_gone > 0;
+        || !kinds_changed.is_empty() || kinds_gone > 0 || vocabulary_changed;
     if touched {
         crate::watch::touch_all(pool, "правка прибора").await.map_err(|e| crate::db::Says::says(&e))?;
     }
@@ -753,6 +835,7 @@ pub async fn apply(pool: &Pool) -> Result<Value, String> {
                "снято пунктов": gone, "снято замеров": measures, "снято фаз": phases_gone,
                "фазы": phases_changed, "ступеней": rungs.len(),
                "ступени": ladder_changed, "снято ступеней": rungs_gone,
+               "словарь возможностей": if vocabulary_changed { "изменён" } else { "прежний" },
                "перемерить": touched }))
 }
 

@@ -630,6 +630,8 @@ impl Mcp {
                 "required": ["fact"] } }));
         tools.push(json!({ "name": "sensors", "description": "объявленные датчики и когда каждый подавал; отдельно — подающие, которых никто не объявлял",
             "inputSchema": { "type": "object", "properties": {} } }));
+        tools.push(json!({ "name": "profile", "description": "профиль проекта, выведенный из его стека: строки таблиц «Слой | Выбор» набора, возможности, которые из них вышли, и пункты гейтов, к проекту неприменимые, с причиной",
+            "inputSchema": { "type": "object", "properties": {} } }));
         tools.push(json!({ "name": "version-close", "description": "объявить выпуск закрытым или снова открытым; от закрытого считают, что изменилось после него",
             "inputSchema": { "type": "object", "properties": { "drop": json!({"type":"boolean","description":"снять объявленное этой же дверью"}), "version": s("имя выпуска"),
                 "state": s("closed · open, по умолчанию closed") }, "required": ["version"] } }));
@@ -2514,6 +2516,10 @@ impl Mcp {
                 Err(e) => refusal(e.into()),
             },
             "donors" => match crate::projector::donors_and_guards(&self.pool, p).await {
+                Ok(v) => ok(v),
+                Err(e) => refusal(e.into()),
+            },
+            "profile" => match crate::projector::profile(&self.pool, p).await {
                 Ok(v) => ok(v),
                 Err(e) => refusal(e.into()),
             },

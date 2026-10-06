@@ -1,0 +1,15 @@
+{
+  "capabilities": [
+    { "id": "rust", "about": "код на Rust", "aliases": ["Rust"] },
+    { "id": "typescript", "about": "код на TypeScript", "aliases": ["TypeScript"] },
+    { "id": "react", "about": "интерфейс на React", "aliases": ["React"] },
+    { "id": "tauri", "about": "оконное приложение на Tauri", "aliases": ["Tauri"] },
+    { "id": "axum", "about": "HTTP-сервер на axum", "aliases": ["axum"] },
+    { "id": "sqlx", "about": "доступ к базе через sqlx", "aliases": ["sqlx"] },
+    { "id": "postgres", "about": "хранилище PostgreSQL", "aliases": ["PostgreSQL", "Postgres"] },
+    { "id": "timescaledb", "about": "временные ряды в TimescaleDB", "aliases": ["TimescaleDB"] },
+    { "id": "vite", "about": "сборка фронтенда Vite", "aliases": ["Vite"] },
+    { "id": "tailwind", "about": "стили Tailwind", "aliases": ["Tailwind"] },
+    { "id": "playwright", "about": "сквозные проверки Playwright", "aliases": ["Playwright"] }
+  ]
+}
