@@ -2351,6 +2351,16 @@ impl Mcp {
                 let g = |n: &str| args.get(n).and_then(|v| v.as_str()).unwrap_or("").to_owned();
                 match crate::projector::declare_task_dep(&self.pool, p, &g("task"), &g("dependsOn"),
                                                          flag(args, "drop")).await {
+                    // НЕ ЗАПИСАННОЕ РЕБРО — ОТКАЗ, А НЕ ОТВЕТ. «red_task» шёл
+                    // успехом со словами внутри, и набор принял его за
+                    // объявление: `V5-T348` ждала `M5-T350` только в голове
+                    // объявившего, `waves` давала ей `waits: 0`, и шесть новых
+                    // сессий раздали бы заблокированную задачу.
+                    Ok(v) if !matches!(v["status"].as_str(), Some("declared" | "dropped")) => {
+                        refusal(Miss::Refused(v["why"].as_str().map_or_else(
+                            || format!("зависимость не записана: {}", v["status"]),
+                            str::to_owned)))
+                    }
                     Ok(v) => ok(v),
                     Err(e) => refusal(e.into()),
                 }
@@ -3601,6 +3611,58 @@ mod ready_of_a_red_pair {
 
         pool.get().await.expect("соединение")
             .batch_execute("DROP SCHEMA IF EXISTS ready_red CASCADE").await.expect("схема снимается");
+    }
+}
+
+/// Ребро, которое дверь не записала, приходит отказом: `V5-T348` ждала
+/// `M5-T350` только в голове объявившего, потому что «red_task» шёл успехом.
+#[cfg(test)]
+mod a_dependency_not_written {
+    use serde_json::json;
+
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn an_edge_the_door_did_not_write_is_a_refusal() {
+        let url = std::env::var("MH_TEST_DB_URL").expect("MH_TEST_DB_URL: адрес пустой базы");
+        let apart = format!("{}{}", if url.contains('?') { '&' } else { '?' },
+                            "options=-c%20search_path%3Ddep_refused");
+        let pool = crate::db::pool(&format!("{url}{apart}"), 2).expect("пул тестовой базы");
+        pool.get().await.expect("соединение")
+            .batch_execute("DROP SCHEMA IF EXISTS dep_refused CASCADE; CREATE SCHEMA dep_refused;")
+            .await.expect("своя схема заводится");
+        crate::projector::ensure(&pool).await.expect("схема встаёт на пустой базе");
+        pool.get().await.expect("соединение")
+            .batch_execute(
+                "INSERT INTO project_plan_versions (project_id, id) VALUES ('p', 'v1');
+                 INSERT INTO project_plan_milestones (project_id, id, version_id, ord, title)
+                      VALUES ('p', 'M1', 'v1', 1, '');
+                 INSERT INTO project_plan_tasks (project_id, id, milestone_id, ord, title, size, state,
+                                                 entity_kind, entity_name)
+                      VALUES ('p', 'V1-T1', 'M1', 1, '', 'S', 'not_started', 'red-task', 'V1-T1'),
+                             ('p', 'M1-T1', 'M1', 2, '', 'S', 'not_started', 'task', 'M1-T1'),
+                             ('p', 'M1-T2', 'M1', 3, '', 'S', 'not_started', 'task', 'M1-T2');",
+            )
+            .await.expect("набор заводится");
+        let door = super::Mcp {
+            pool: pool.clone(),
+            kinds: std::sync::Arc::new(crate::kinds::Kinds::from_db(&pool).await.expect("виды")),
+            project: "p".to_owned(),
+            author: "проба".to_owned(),
+        };
+        let text = |v: &serde_json::Value| v["content"][0]["text"].as_str().unwrap_or("").to_owned();
+
+        let red = door.call("task-dep-add", &json!({ "task": "V1-T1", "dependsOn": "M1-T1" })).await;
+        assert_eq!(red["isError"], json!(true), "ребро красной задачи не записано, а пришёл успех: {red}");
+        assert!(text(&red).contains("Зависит от"), "отказ не говорит, куда писать зависимость: {red}");
+
+        let unknown = door.call("task-dep-add", &json!({ "task": "M1-T1", "dependsOn": "M9-T9" })).await;
+        assert_eq!(unknown["isError"], json!(true), "ребро в несуществующую задачу пришло успехом: {unknown}");
+
+        let real = door.call("task-dep-add", &json!({ "task": "M1-T2", "dependsOn": "M1-T1" })).await;
+        assert_ne!(real["isError"], json!(true), "записанное ребро отказано: {real}");
+
+        pool.get().await.expect("соединение")
+            .batch_execute("DROP SCHEMA IF EXISTS dep_refused CASCADE").await.expect("схема снимается");
     }
 }
 
