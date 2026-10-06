@@ -1028,6 +1028,7 @@ pub fn sense(door: &Door, only: Option<&str>, root: &str) -> Result<Value, Strin
         } else {
             Vec::new()
         };
+        let own: Vec<String> = if how == "secret-fields" { own_crates(&root, &tracked) } else { Vec::new() };
         for f in &files {
             let short = f.strip_prefix(&format!("{root}/")).unwrap_or(f).to_owned();
             if how == "files" {
@@ -1082,7 +1083,7 @@ pub fn sense(door: &Door, only: Option<&str>, root: &str) -> Result<Value, Strin
                 continue;
             }
             if how == "secret-fields" {
-                for (decl, field, ty) in secret_fields(&text, re, &declared) {
+                for (decl, field, ty) in secret_fields(&text, re, &declared, &own) {
                     // Ключ несёт путь: `Target.url` встречается в двух файлах
                     // разными типами, и одно исключение сняло бы оба разом.
                     let key = format!("{short}#{decl}.{field}");
@@ -1135,7 +1136,7 @@ fn bare_type(ty: &str) -> String {
     ty.split("//").next().unwrap_or("").trim().trim_end_matches(',').trim().to_owned()
 }
 
-fn answered(ty: &str, declared: &[String], imported: &[String]) -> bool {
+fn answered(ty: &str, declared: &[String], imported: &[String], own: &[String]) -> bool {
     let mut t = ty.trim();
     while let Some(inner) = ["Option<", "Box<", "Vec<"]
         .iter()
@@ -1150,6 +1151,9 @@ fn answered(ty: &str, declared: &[String], imported: &[String]) -> bool {
     let local = match t.split_once("::") {
         None => Some(t).filter(|name| !imported.iter().any(|i| i == name)),
         Some(("crate" | "self" | "super", _)) => t.rsplit("::").next(),
+        // Свой крейт рабочего пространства — тот же корпус, что `crate::`:
+        // `myack_kernel::PublicUrl` объявлен проектом, а не пришёл извне.
+        Some((root, _)) if own.iter().any(|o| o == root) => t.rsplit("::").next(),
         Some(_) => None,
     };
     ty.contains("Secret<") || local.is_some_and(|name| declared.iter().any(|d| d == name))
@@ -1163,11 +1167,32 @@ fn declared_types(text: &str) -> Vec<String> {
         .collect()
 }
 
-fn imported_types(text: &str) -> Vec<String> {
+/// Имена крейтов рабочего пространства проекта — как их пишут в путях Rust
+/// (`myack-kernel` → `myack_kernel`). Тип, ввезённый из своего крейта, объявлен
+/// корпусом: без этого `use myack_kernel::PublicUrl` читался чужим, и тип,
+/// заведённый ради ответа датчику, ответом не считался.
+fn own_crates(root: &str, tracked: &[String]) -> Vec<String> {
+    let name = regex::Regex::new(r#"(?m)^\s*name\s*=\s*"([^"]+)""#).expect("образец имени");
+    tracked
+        .iter()
+        .filter(|p| p.ends_with("Cargo.toml"))
+        .filter_map(|p| std::fs::read_to_string(std::path::Path::new(root).join(p)).ok())
+        .filter_map(|t| {
+            let package = t.split("[package]").nth(1)?;
+            let package = package.split("\n[").next().unwrap_or(package);
+            name.captures(package).map(|c| c[1].replace('-', "_"))
+        })
+        .collect()
+}
+
+fn imported_types(text: &str, own: &[String]) -> Vec<String> {
     regex::Regex::new(r"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?use\s+([^;]+);")
         .expect("образец use")
         .captures_iter(text)
-        .filter(|c| !matches!(c[1].trim().trim_start_matches("::").split("::").next(), Some("crate" | "self" | "super")))
+        .filter(|c| {
+            let root = c[1].trim().trim_start_matches("::").split("::").next().unwrap_or("");
+            !matches!(root, "crate" | "self" | "super") && !own.iter().any(|o| o == root)
+        })
         .flat_map(|c| {
             c[1].replace(['{', '}'], ",")
                 .split(',')
@@ -1212,7 +1237,7 @@ fn facts_of(pairs: &[crate::repo_corpus::Pair]) -> Vec<Value> {
         .collect()
 }
 
-fn secret_fields(text: &str, field_re: &str, declared: &[String]) -> Vec<(String, String, String)> {
+fn secret_fields(text: &str, field_re: &str, declared: &[String], own: &[String]) -> Vec<(String, String, String)> {
     let Ok(suspect) = regex::Regex::new(if field_re.trim().is_empty() {
         r"(?i)\b(token|secret|password|passwd|api_?key|credential|private_?key)\b"
     } else {
@@ -1226,7 +1251,7 @@ fn secret_fields(text: &str, field_re: &str, declared: &[String]) -> Vec<(String
     let field = regex::Regex::new(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(\w+)\s*:\s*(.+?),?\s*$")
         .expect("образец поля");
     let variant = regex::Regex::new(r"^\s*\w+\s*\{(.+)\}\s*,?\s*$").expect("образец ветки");
-    let imported = imported_types(text);
+    let imported = imported_types(text, own);
     let lines: Vec<&str> = text.split('\n').collect();
     let mut out = Vec::new();
     let mut i = 0;
@@ -1264,14 +1289,14 @@ fn secret_fields(text: &str, field_re: &str, declared: &[String]) -> Vec<(String
                 for part in v[1].split(',') {
                     if let Some(f) = field.captures(part) {
                         let (fname, ftype) = (f[1].to_owned(), bare_type(&f[2]));
-                        if suspect.is_match(&fname) && !answered(&ftype, declared, &imported) {
+                        if suspect.is_match(&fname) && !answered(&ftype, declared, &imported, own) {
                             out.push((owner.clone(), fname, ftype));
                         }
                     }
                 }
             } else if let Some(f) = field.captures(lines[k]) {
                 let (fname, ftype) = (f[1].to_owned(), bare_type(&f[2]));
-                if suspect.is_match(&fname) && !answered(&ftype, declared, &imported) {
+                if suspect.is_match(&fname) && !answered(&ftype, declared, &imported, own) {
                     out.push((owner.clone(), fname, ftype));
                 }
             }
@@ -2042,8 +2067,22 @@ pub struct Keys {
     const NAMES: &str = r"(?i)(^|_)(password|token|secret|url|credential)($|_)|(^|_)(api|private|secret|signing)_key($|_)";
 
     #[test]
+    fn a_type_from_an_own_workspace_crate_answers_like_a_local_one() {
+        // `PublicUrl` объявлен в своём крейте и ввезён `use`: это корпус, а не
+        // чужой тип. `reqwest::Url` — чужой, и подозрение он не снимает.
+        let rs = "use myack_kernel::PublicUrl;\nuse reqwest::Url;\n#[derive(Debug)]\npub struct S {\n    pub logo_url: PublicUrl,\n    pub hook_url: Url,\n    pub page_url: myack_kernel::PublicUrl,\n}\n";
+        let kernel = "pub struct PublicUrl(String);\n";
+        let declared = super::declared_types(kernel);
+        let own = vec!["myack_kernel".to_owned()];
+        let found: Vec<String> = super::secret_fields(rs, NAMES, &declared, &own).into_iter().map(|(_, f, _)| f).collect();
+        assert_eq!(found, vec!["hook_url".to_owned()], "свой тип не снял подозрение или чужой снял");
+        let without: Vec<String> = super::secret_fields(rs, NAMES, &declared, &[]).into_iter().map(|(_, f, _)| f).collect();
+        assert_eq!(without.len(), 3, "без своих крейтов все три поля подозрительны");
+    }
+
+    #[test]
     fn suspicious_everything_except_secret_and_type_corpus() {
-        let found: Vec<String> = secret_fields(RS, NAMES, &declared_types(RS))
+        let found: Vec<String> = secret_fields(RS, NAMES, &declared_types(RS), &[])
             .into_iter()
             .map(|(decl, field, ty)| format!("{decl}.{field}: {ty}"))
             .collect();
@@ -2063,19 +2102,19 @@ pub struct Keys {
     #[test]
     fn type_corpus_recognised_bare_name_or_path_crate() {
         let rs = "#[derive(Debug)]\npub struct Url(pub String);\n\n#[derive(Debug)]\npub struct Hook {\n    pub webhook_url: reqwest::Url,\n    pub callback_url: Option<Url>,\n    pub public_url: crate::Url,\n}\n";
-        let found: Vec<String> = secret_fields(rs, NAMES, &declared_types(rs)).into_iter().map(|(_, f, _)| f).collect();
+        let found: Vec<String> = secret_fields(rs, NAMES, &declared_types(rs), &[]).into_iter().map(|(_, f, _)| f).collect();
         assert_eq!(found, vec!["webhook_url"]);
         let declared = vec!["Url".to_owned(), "Link".to_owned(), "PublicUrl".to_owned()];
         for rs in ["use reqwest::Url;\n\n#[derive(Debug)]\npub struct Hook {\n    pub webhook_url: Url,\n    pub public_url: PublicUrl,\n}\n",
                    "use reqwest::{Client, Url as Link};\n\n#[derive(Debug)]\npub struct Hook {\n    pub webhook_url: Link,\n    pub public_url: crate::PublicUrl,\n}\n"] {
-            let found: Vec<String> = secret_fields(rs, NAMES, &declared).into_iter().map(|(_, f, _)| f).collect();
+            let found: Vec<String> = secret_fields(rs, NAMES, &declared, &[]).into_iter().map(|(_, f, _)| f).collect();
             assert_eq!(found, vec!["webhook_url"], "{rs}");
         }
     }
 
     #[test]
     fn type_not_from_corpus_suspicion_not_clears() {
-        let found = secret_fields(RS, NAMES, &[]);
+        let found = secret_fields(RS, NAMES, &[], &[]);
         assert!(found.iter().any(|(d, f, _)| d == "Issued" && f == "token"), "{found:?}");
         assert!(found.iter().any(|(d, f, _)| d == "Target" && f == "public_url"), "{found:?}");
     }
@@ -2083,7 +2122,7 @@ pub struct Keys {
     #[test]
     fn field_bool_secret_not_carries() {
         let rs = "#[derive(Debug)]\npub enum Platform {\n    Windows { restricted_token: bool },\n}\n\n#[derive(Debug)]\npub struct Keys {\n    pub token_ttl: u64,\n    pub token: String,\n}\n";
-        let found: Vec<String> = secret_fields(rs, NAMES, &[]).into_iter().map(|(_, f, _)| f).collect();
+        let found: Vec<String> = secret_fields(rs, NAMES, &[], &[]).into_iter().map(|(_, f, _)| f).collect();
         assert_eq!(found, vec!["token_ttl", "token"]);
     }
 
