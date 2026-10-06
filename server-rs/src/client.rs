@@ -1176,6 +1176,9 @@ fn own_crates(root: &str, tracked: &[String]) -> Vec<String> {
     tracked
         .iter()
         .filter(|p| p.ends_with("Cargo.toml"))
+        // Вендоренный крейт лежит в дереве, но проектом не объявлен: его тип
+        // (`rsipstack::Credential` у `myack`) иначе снимал бы подозрение как свой.
+        .filter(|p| !p.split('/').any(|part| part == "vendor"))
         .filter_map(|p| std::fs::read_to_string(std::path::Path::new(root).join(p)).ok())
         .filter_map(|t| {
             let package = t.split("[package]").nth(1)?;
