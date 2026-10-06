@@ -86,9 +86,12 @@ const TONE: Record<string, string> = {
   passed: "ok",
   failed: "bad",
   unknown: "dim",
+  inapplicable: "dim",
 };
 
-const held = (computed: string) => computed === "passed";
+// Неприменимый к проекту пункт гейт считает пройденным — и полоска тоже: иначе
+// он висел бы в «прочих» и в перечне непройденного, споря с состоянием фазы.
+const held = (computed: string) => computed === "passed" || computed === "inapplicable";
 
 /** Считает пункты гейта по состояниям — это и есть содержимое полоски фазы. */
 function tally(g?: Gate): { passed: number; failed: number; other: number; total: number; violations: number } {

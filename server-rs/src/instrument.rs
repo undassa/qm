@@ -67,7 +67,14 @@ struct Item {
 struct Capability {
     id: String,
     about: String,
+    #[serde(default)]
     aliases: Vec<String>,
+    /// Роды фактов о репозитории, само наличие которых даёт возможность: код
+    /// решает точнее стека. `rust` ← `crate`: у проекта есть крейты — Rust есть,
+    /// как бы ни был описан стек (ревью undassa/mh#181: стек `myack` описывал
+    /// один фронтенд, и профиль утверждал, что Rust у него нет).
+    #[serde(default)]
+    facts: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -84,11 +91,20 @@ fn capabilities(rules: &[Rule]) -> Result<Vec<Capability>, String> {
     let declared: Capabilities = serde_json::from_str(raw)
         .map_err(|e| format!("instrument/capabilities.json не разбирается: {e}"))?;
     for c in &declared.capabilities {
-        if c.aliases.iter().all(|a| a.trim().is_empty()) {
-            return Err(format!("возможность {} без единой технологии: её не даст ни один стек", c.id));
+        if c.aliases.is_empty() && c.facts.is_empty() {
+            return Err(format!("возможность {} без технологии и без факта: её не даст ни один проект", c.id));
+        }
+        // Пустой синоним совпадает с любым стеком: возможность давалась бы всем.
+        if c.aliases.iter().chain(&c.facts).any(|a| a.trim().is_empty()) {
+            return Err(format!("у возможности {} пустой синоним или род факта", c.id));
         }
     }
     for r in rules {
+        // САМОПРОВЕРКИ НЕ ВЫКЛЮЧАЮТСЯ: требование у G0 или у `harness:*` дало бы
+        // проекту способ ослепить сам прибор (ревью undassa/mh#181).
+        if !r.item.requires.is_empty() && (r.item.phase == "G0" || r.item.id.starts_with("harness:")) {
+            return Err(format!("пункт {} — самопроверка прибора, и требований у него быть не может", r.item.id));
+        }
         for req in &r.item.requires {
             if req != "article" && !declared.capabilities.iter().any(|c| &c.id == req) {
                 return Err(format!(
@@ -499,22 +515,36 @@ pub async fn apply(pool: &Pool) -> Result<Value, String> {
     // СЛОВАРЬ ВОЗМОЖНОСТЕЙ ПЕРЕПИСЫВАЕТСЯ ЦЕЛИКОМ: он мал, и сверять построчно
     // дороже, чем записать. Изменился — перемер всем: от него зависит, какие
     // пункты к какому проекту применимы.
-    let vocabulary_was: Vec<(String, String, String)> = tx
-        .query("SELECT c.id, c.about, coalesce(a.alias, '') FROM capability c
-                  LEFT JOIN capability_alias a ON a.capability = c.id ORDER BY 1, 3", &[])
+    // Порядок — побайтовый с обеих сторон: сортировка базы по локали ставила
+    // «PostgreSQL» и «Postgres» не так, как Rust, и словарь считался изменённым
+    // на каждом старте, перемеряя всех (ревью undassa/mh#181).
+    let mut vocabulary_was: Vec<(String, String, String, String)> = tx
+        .query("SELECT c.id, c.about, 'alias', a.alias FROM capability c
+                  JOIN capability_alias a ON a.capability = c.id
+                UNION ALL
+                SELECT c.id, c.about, 'fact', f.fact FROM capability c
+                  JOIN capability_fact f ON f.capability = c.id
+                UNION ALL
+                SELECT c.id, c.about, '', '' FROM capability c", &[])
         .await
         .map_err(|e| e.to_string())?
         .iter()
-        .map(|r| (r.get(0), r.get(1), r.get(2)))
+        .map(|r| (r.get(0), r.get(1), r.get(2), r.get(3)))
         .collect();
-    let mut vocabulary_now: Vec<(String, String, String)> = capabilities
+    vocabulary_was.sort();
+    let mut vocabulary_now: Vec<(String, String, String, String)> = capabilities
         .iter()
-        .flat_map(|c| c.aliases.iter().map(move |a| (c.id.clone(), c.about.clone(), a.clone())))
+        .flat_map(|c| {
+            std::iter::once((c.id.clone(), c.about.clone(), String::new(), String::new()))
+                .chain(c.aliases.iter().map(move |a| (c.id.clone(), c.about.clone(), "alias".to_owned(), a.clone())))
+                .chain(c.facts.iter().map(move |f| (c.id.clone(), c.about.clone(), "fact".to_owned(), f.clone())))
+        })
         .collect();
     vocabulary_now.sort();
+    vocabulary_now.dedup();
     let vocabulary_changed = vocabulary_was != vocabulary_now;
     if vocabulary_changed {
-        tx.batch_execute("DELETE FROM capability_alias; DELETE FROM capability")
+        tx.batch_execute("DELETE FROM capability_alias; DELETE FROM capability_fact; DELETE FROM capability")
             .await
             .map_err(|e| e.to_string())?;
         for c in &capabilities {
@@ -526,6 +556,12 @@ pub async fn apply(pool: &Pool) -> Result<Value, String> {
                             ON CONFLICT DO NOTHING", &[&c.id, a])
                     .await
                     .map_err(|e| format!("технология {a} возможности {} не записана: {e}", c.id))?;
+            }
+            for f in &c.facts {
+                tx.execute("INSERT INTO capability_fact (capability, fact) VALUES ($1, $2)
+                            ON CONFLICT DO NOTHING", &[&c.id, f])
+                    .await
+                    .map_err(|e| format!("род факта {f} возможности {} не записан: {e}", c.id))?;
             }
         }
     }

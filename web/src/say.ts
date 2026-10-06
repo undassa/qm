@@ -150,6 +150,7 @@ const СЛОВАРЬ: Record<string, [string, string]> = {
   "gate.passed": ["пройден", "passed"],
   "gate.failed": ["провален", "failed"],
   "gate.unknown": ["мерить нечем", "nothing to measure by"],
+  "gate.inapplicable": ["неприменим к проекту", "not applicable to the project"],
   // ── Готовность ──────────────────────────────────────────────────────────
   "rd.reading": ["Считаю готовность…", "Measuring readiness…"],
   "rd.head": ["Готовность", "Readiness"],

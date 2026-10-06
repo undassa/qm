@@ -3579,6 +3579,8 @@ ALTER TABLE project_gates ADD COLUMN IF NOT EXISTS applicable boolean;
 CREATE TABLE IF NOT EXISTS capability (id text PRIMARY KEY, about text NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS capability_alias (
   capability text NOT NULL, alias text NOT NULL, PRIMARY KEY (capability, alias));
+CREATE TABLE IF NOT EXISTS capability_fact (
+  capability text NOT NULL, fact text NOT NULL, PRIMARY KEY (capability, fact));
 
 CREATE OR REPLACE VIEW project_stack AS
 SELECT c.project_id, c.entity_kind, c.entity_name, c.block_ord, c.row_ord,
@@ -3596,13 +3598,22 @@ SELECT c.project_id, c.entity_kind, c.entity_name, c.block_ord, c.row_ord,
     ON (l.project_id, l.entity_kind, l.entity_name, l.block_ord, l.row_ord)
        = (c.project_id, c.entity_kind, c.entity_name, c.block_ord, c.row_ord)
    AND l.col = 0
- WHERE c.col = 1 AND c.row_ord > 0;
+ -- Стек — только из проектных документов. Таблица с тем же заголовком в вопросе
+ -- или прогоне, которые сессия пишет свободно, иначе делала бы стек непустым и
+ -- выключала разом все требования возможностей (ревью undassa/mh#181).
+ WHERE c.col = 1 AND c.row_ord > 0 AND c.entity_kind = 'design-view';
 
--- Есть ли возможность у проекта. NULL — проект стека не описал: судить нечем, и
+-- Есть ли возможность у проекта. Первым судит КОД: снятый харнесом факт рода,
+-- объявленного словарём (`rust` ← `crate`), даёт возможность, как бы ни был
+-- описан стек. Затем стек. NULL — ни кода, ни таблицы стека: судить нечем, и
 -- пункт мерится, как мерился. Иначе каждый проект без таблицы стека потерял бы
--- все правила с требованиями разом, ничего о себе не сказав.
+-- все правила с требованиями разом, ничего о себе не сказав. «Нет» значит «нет
+-- ни в коде, ни в описанном стеке», а не «не упомянуто в найденной таблице».
 CREATE OR REPLACE FUNCTION project_has_capability(p text, cap text) RETURNS boolean AS $в$
   SELECT CASE
+    WHEN EXISTS (SELECT 1 FROM capability_fact cf JOIN code_fact f
+                   ON f.project_id = p AND f.kind = cf.fact
+                  WHERE cf.capability = cap) THEN true
     WHEN NOT EXISTS (SELECT 1 FROM project_stack WHERE project_id = p) THEN NULL
     ELSE EXISTS (
       SELECT 1 FROM project_stack s JOIN capability_alias a ON a.capability = cap
@@ -3614,19 +3625,20 @@ CREATE OR REPLACE FUNCTION project_has_capability(p text, cap text) RETURNS bool
 $в$ LANGUAGE sql STABLE;
 
 -- Почему пункт к проекту не применим; пусто — применим. Требование `article` —
--- конституция проекта связывает с пунктом статью строкой `ART-nn  <пункт> …`:
--- правило архитектуры одного проекта не судит проект, этой статьи не принявший.
+-- проект объявил пару «статья ⇄ пункт» (`project_article_gates`) для статьи,
+-- которая у него есть: правило архитектуры одного проекта не судит проект, этой
+-- статьи не принявший. Пара читается из того же объявления, что сверяет
+-- `harness:articles-have-gates`, а не вторым разбором текста конституции.
 -- Одно место ответа: его спрашивают замер, самотест и пункт G0.
 CREATE OR REPLACE FUNCTION item_applicable(p text, ph text, i text) RETURNS text AS $п$
   SELECT coalesce(string_agg(why, '; ' ORDER BY ord), '') FROM (
     SELECT r.ord, CASE
       WHEN r.req = 'article' THEN
         CASE WHEN EXISTS (
-               SELECT 1 FROM project_documents d
-                WHERE d.project_id = p AND d.entity_kind = 'constitution'
-                  AND d.content ~ ('(?n)^\s*ART-\d+\s+'
-                                   || regexp_replace(i, '([.^$*+?()\[\]{}|\\])', '\\\1', 'g')
-                                   || '(\s|$)'))
+               SELECT 1 FROM project_article_gates ag
+                 JOIN project_articles pa ON pa.project_id = ag.project_id AND pa.number = ag.article
+                WHERE ag.project_id = p AND ag.gate = i
+                  AND ag.state IN ('enforced', 'advisory', 'planned'))
              THEN NULL
              ELSE 'конституция проекта не связывает с этим пунктом ни одной статьи' END
       ELSE
@@ -6004,13 +6016,16 @@ pub(crate) async fn gate(
             // причину словами; правило «незнание называется словом» исполнялось
             // ВНУТРИ пункта и терялось на выходе.
             //
-            // Три значения и никаких больше: сложить «неизвестно» с зелёным
-            // теперь можно только нарочно.
+            // Четыре значения и никаких больше: сложить «неизвестно» с зелёным
+            // теперь можно только нарочно. «Неприменим» — своё слово, а не
+            // «неизвестно»: гейт его считает пройденным, и дверь, называвшая его
+            // неизвестным, спорила с состоянием фазы (ревью undassa/mh#181).
             m.insert(
                 "verdict".into(),
                 json!(match m.get("computed").and_then(|v| v.as_str()).unwrap_or("") {
                     "passed" => "green",
                     "failed" => "red",
+                    "inapplicable" => "inapplicable",
                     _ => "unknown",
                 }),
             );
@@ -9353,9 +9368,21 @@ mod applicability {
         assert_eq!(has("react").await, Some(true), "React из стека не дал возможности");
         assert_eq!(has("tauri").await, Some(false), "возможность без технологии в стеке");
 
-        let constitution = door.call("document-add", &json!({ "kind": "constitution",
-            "content": "# Конституция\n\n```\nART-22  render:blocks-from-library  библиотека закрыта\n```\n" })).await;
-        assert_ne!(constitution["isError"], json!(true), "конституция не заведена: {constitution}");
+        // Стек описывает один фронтенд, а крейты в коде есть: Rust у проекта есть.
+        assert_eq!(has("rust").await, Some(false), "Rust без крейтов и без упоминания в стеке");
+        pool.get().await.expect("соединение")
+            .batch_execute("INSERT INTO code_fact (project_id, kind, name, detail, place)
+                            VALUES ('П', 'crate', 'ядро', '', 'crates/core/Cargo.toml')")
+            .await.expect("факт о крейте");
+        assert_eq!(has("rust").await, Some(true), "крейты в коде не дали Rust");
+
+        // Статья принята — пара «статья ⇄ пункт» объявлена для статьи, которая есть.
+        pool.get().await.expect("соединение")
+            .batch_execute("INSERT INTO project_articles (project_id, number, title, anchor, body)
+                            VALUES ('П', 22, 'Библиотека блоков', '', '');
+                            INSERT INTO project_article_gates (project_id, article, gate, state)
+                            VALUES ('П', 22, 'render:blocks-from-library', 'enforced')")
+            .await.expect("статья и пара");
         assert_eq!(ask(article).await.as_deref(), Some(""), "пункт статьи неприменим при принятой статье");
 
         pool.get().await.expect("соединение")
