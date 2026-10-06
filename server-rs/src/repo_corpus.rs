@@ -216,6 +216,14 @@ pub(crate) fn enums_of(text: &str, file: &str) -> Vec<Enum> {
 
 /// Множества `CHECK` из текста одной миграции. Комментарии снимаются: `--` и
 /// `/* */` вне строки в кавычках съели бы половину определения.
+#[cfg(test)]
+#[test]
+fn a_zero_one_flag_is_not_a_set() {
+    let sql = "CREATE TABLE m (up smallint NOT NULL CHECK (up IN (0, 1)), p smallint CHECK (p IN (1, 2, 3)), s text CHECK (s IN ('0', '1')));";
+    let at: Vec<String> = checks_of(sql, "m.sql").into_iter().map(|c| c.at).collect();
+    assert_eq!(at, vec!["m.p", "m.s"]);
+}
+
 pub(crate) fn checks_of(text: &str, file: &str) -> Vec<CheckSet> {
     let no_comments = uncommented(text);
     let table = regex::Regex::new(r"(?i)CREATE TABLE (?:IF NOT EXISTS )?([a-z][a-z0-9_]*)\s*\(")
@@ -246,7 +254,11 @@ pub(crate) fn checks_of(text: &str, file: &str) -> Vec<CheckSet> {
                 .captures_iter(&c[2])
                 .filter_map(|v| v.get(1).or_else(|| v.get(2)).map(|x| x.as_str().to_owned()))
                 .collect();
-            if values.is_empty() {
+            // `IN (0, 1)` без кавычек — флаг, а не перечисление: ему нечем быть в
+            // домене, кроме `bool`, и находка «множество без перечисления» о нём
+            // ложна (`metric_points.up` у myack: `sum(up)/count(*)`).
+            let numeric = !c[2].contains('\'');
+            if values.is_empty() || (numeric && { let mut v = values.clone(); v.sort(); v == ["0", "1"] }) {
                 continue;
             }
             out.push(CheckSet {
