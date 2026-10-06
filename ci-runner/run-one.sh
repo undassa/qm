@@ -117,10 +117,16 @@ token=$(gh api -X POST "repos/${REPO}/actions/runners/registration-token" --jq .
 # по восемь просили бы пятьдесят шесть из шестидесяти двух, и сборка хозяина
 # рядом клала бы машину — так уже было, oom-killer снял рабочую сессию. Расход
 # памяти идёт за числом потоков, а их теперь два, а не три.
+# ПРОФИЛЬ SECCOMP — ДОКЕРОВСКИЙ ПЛЮС КОЛЬЦО. Профиль по умолчанию отвечает на
+# `io_uring_setup` EPERM, и проверка, меряющая наш фильтр сокетов против кольца
+# (`m5_t344`, `V5-T360`), читает «этот хозяин не меряет» и краснеет на каждом
+# прогоне здесь. `seccomp.json` рядом — профиль moby (github.com/moby/profiles)
+# плюс три вызова io_uring; владелец одобрил 2026-10-06.
 exec docker run --rm \
   --name "ci-runner-${slug}" \
   --hostname "ci-${slug}" \
   --cpus 2 --memory 6g \
+  --security-opt "seccomp=$(dirname "$(readlink -f "$0")")/seccomp.json" \
   -e REPO="${REPO}" \
   -e RUNNER_TOKEN="${token}" \
   -e RUNNER_NAME="ci-${slug}" \
