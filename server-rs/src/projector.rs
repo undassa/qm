@@ -6280,6 +6280,40 @@ pub(crate) async fn push_task_state(
             )
             .await?;
     }
+    // Прогон закрытой задачи закрывается вместе с ней. Закрывает задачу трейлер
+    // в стволе, а прогон — запись о попытке, и открытым он оставался, пока
+    // исполнитель не вспомнит: в tot-ade к 2026-10-06 из 41 открытого прогона 27
+    // принадлежали задачам, закрытым днями раньше, и найти их хозяев было
+    // нечем (session_id пуст). Закрывает харнес, своим словом в переходе.
+    let closed: Vec<String> = states.iter()
+        .filter(|(_, state, _, _)| state == "closed")
+        .map(|(t, _, _, _)| t.clone())
+        .collect();
+    let at = now_ms();
+    let swept = tx
+        .query(
+            "WITH open AS (
+               SELECT id, state FROM project_task_runs
+                WHERE project_id = $1 AND task_id = ANY($2)
+                  AND state <> ALL (ARRAY['done', 'failed', 'cancelled'])
+                FOR UPDATE)
+             UPDATE project_task_runs r
+                SET state = 'done', updated_at = $3, finished_at = $3,
+                    note = CASE WHEN r.note = '' THEN $4 ELSE r.note || ' · ' || $4 END
+               FROM open
+              WHERE r.id = open.id
+          RETURNING r.id, open.state",
+            &[&project, &closed, &at, &"задача закрыта трейлером в стволе; прогон закрыт харнесом"],
+        )
+        .await?;
+    for r in &swept {
+        tx.execute(
+            "INSERT INTO project_task_run_events (task_run_id, from_state, to_state, reason, actor, at)
+             VALUES ($1, $2, 'done', 'задача закрыта трейлером в стволе', 'harness', $3)",
+            &[&r.get::<_, String>(0), &r.get::<_, String>(1), &at],
+        )
+        .await?;
+    }
     // След ПОДАЧИ, а не только её содержимого.
     //
     // `task_state` держала 99 строк и ни слова о том, кто и когда их подал:
@@ -6307,7 +6341,7 @@ pub(crate) async fn push_task_state(
     )
     .await?;
     tx.commit().await?;
-    Ok(json!({ "accepted": written, "pushedAt": seen_at }))
+    Ok(json!({ "accepted": written, "pushedAt": seen_at, "runsClosed": swept.len() }))
 }
 
 /// Где документ и история расходятся о состоянии задачи.

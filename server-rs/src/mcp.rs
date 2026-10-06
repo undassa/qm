@@ -3598,6 +3598,57 @@ mod ready_of_a_red_pair {
     }
 }
 
+/// Прогон закрытой задачи закрывается подачей её состояния: прогон — запись
+/// о попытке, и открытым он висел, пока исполнитель не вспомнит (в tot-ade 27
+/// из 41 открытого принадлежали задачам, закрытым днями раньше).
+#[cfg(test)]
+mod runs_of_a_closed_task {
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn a_closed_tasks_open_run_closes_and_a_claimed_ones_stays() {
+        let url = std::env::var("MH_TEST_DB_URL").expect("MH_TEST_DB_URL: адрес пустой базы");
+        let apart = format!("{}{}", if url.contains('?') { '&' } else { '?' },
+                            "options=-c%20search_path%3Druns_closed");
+        let pool = crate::db::pool(&format!("{url}{apart}"), 2).expect("пул тестовой базы");
+        pool.get().await.expect("соединение")
+            .batch_execute("DROP SCHEMA IF EXISTS runs_closed CASCADE; CREATE SCHEMA runs_closed;")
+            .await.expect("своя схема заводится");
+        crate::projector::ensure(&pool).await.expect("схема встаёт на пустой базе");
+        let started = |task: &'static str| {
+            let pool = pool.clone();
+            async move {
+                let v = crate::projector::start_run(&pool, "p", task, "", "").await.expect("прогон заводится");
+                v["runId"].as_str().expect("номер прогона").to_owned()
+            }
+        };
+        let closed_run = started("M1-T1").await;
+        let claimed_run = started("M1-T2").await;
+        let states = vec![
+            ("M1-T1".to_owned(), "closed".to_owned(), "c1".to_owned(), 1_i64),
+            ("M1-T2".to_owned(), "claimed".to_owned(), "c2".to_owned(), 1_i64),
+        ];
+        let pushed = crate::projector::push_task_state(&pool, "p", &states, 2, "c1", false)
+            .await.expect("подача принята");
+        assert_eq!(pushed["runsClosed"], 1, "закрыт не один прогон: {pushed}");
+        let client = pool.get().await.expect("соединение");
+        let state = |run: String| {
+            let client = &client;
+            async move {
+                client.query_one("SELECT state FROM project_task_runs WHERE id = $1", &[&run])
+                    .await.expect("прогон есть").get::<_, String>(0)
+            }
+        };
+        assert_eq!(state(closed_run.clone()).await, "done", "прогон закрытой задачи остался открытым");
+        assert_eq!(state(claimed_run).await, "running", "прогон взятой, но не закрытой задачи закрыт");
+        let by: String = client
+            .query_one("SELECT actor FROM project_task_run_events WHERE task_run_id = $1 AND to_state = 'done'",
+                       &[&closed_run])
+            .await.expect("переход записан").get(0);
+        assert_eq!(by, "harness", "закрытие не названо харнесом");
+        client.batch_execute("DROP SCHEMA IF EXISTS runs_closed CASCADE").await.expect("схема снимается");
+    }
+}
+
 #[cfg(test)]
 mod refusal_tests {
     use super::refusal;
