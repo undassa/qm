@@ -9288,6 +9288,19 @@ mod trunk_freshness {
         assert!(fresh("migration-file").await, "поданное сорвавшимся съёмом погасло");
         assert!(!fresh("stuck").await, "отказанный род свеж после продвижения");
 
+        // Съём «fff» сорвался, повтор той же вершины не гасит роды на время
+        // повтора; сорвавшийся и повтор продвигает вершину, и неподанный гаснет.
+        super::set_trunk_head(&pool, "П", "fff").await.expect("вершина");
+        as_who(super::HARNESS).call("code-facts-push", &push("migration-file", "fff")).await;
+        as_who(super::HARNESS).call("code-facts-push", &push("stuck", "fff")).await;
+        super::begin_trunk_sense(&pool, "П", "ggg").await.expect("снимаемая");
+        super::begin_trunk_sense(&pool, "П", "ggg").await.expect("повтор той же");
+        assert!(fresh("migration-file").await, "повтор той же вершины погасил роды");
+        as_who(super::HARNESS).call("code-facts-push", &push("migration-file", "ggg")).await;
+        super::settle_repeated_failure(&pool, "П", "ggg").await.expect("повтор сорвался");
+        assert!(fresh("migration-file").await, "поданное повтором погасло");
+        assert!(!fresh("stuck").await, "не поданный и в повторе род свеж");
+
         // Снять образец, подать рукой, вернуть образец (ревью undassa/mh#178):
         // род, снятый харнесом, остаётся родом о репозитории и без образца.
         pool.get().await.expect("соединение")
@@ -11658,8 +11671,10 @@ pub const HARNESS: &str = "mh-runner";
 /// Съём вершины начался: пока он идёт, свежи и прежняя вершина, и снимаемая
 /// (довод у `trunk_head.sensing_sha`).
 ///
-/// ОСТАВШАЯСЯ СНИМАЕМАЯ ВЕРШИНА СНАЧАЛА ПРОДВИГАЕТСЯ. Она остаётся от съёма,
-/// который сорвался (отказ рода, обрыв, перезапуск воркера). У `tot-ade` ствол
+/// ОСТАВШАЯСЯ СНИМАЕМАЯ ВЕРШИНА СНАЧАЛА ПРОДВИГАЕТСЯ — если ствол ушёл дальше
+/// неё. Повтор той же вершины её не продвигает: иначе на время повтора гасли бы
+/// все роды; повтор, сорвавшийся снова, продвигает `settle_repeated_failure`.
+/// Она остаётся от съёма, который сорвался (отказ рода, обрыв, перезапуск воркера). У `tot-ade` ствол
 /// почти всегда сдвигается между заходами, и, затри её новый съём, роды,
 /// поданные сорвавшимся, гасли бы до конца нового, а упорно отказанный род
 /// числился бы свежим вечно — замер ревью undassa/mh#178: свежим оставался 1
@@ -11671,14 +11686,42 @@ pub(crate) async fn begin_trunk_sense(pool: &Pool, project: &str, commit: &str) 
             .execute(
                 "INSERT INTO trunk_head (project_id, commit_sha, at, sensing_sha) VALUES ($1, '', $3, $2)
                  ON CONFLICT (project_id) DO UPDATE SET
-                   commit_sha = CASE WHEN trunk_head.sensing_sha <> '' THEN trunk_head.sensing_sha
-                                     ELSE trunk_head.commit_sha END,
+                   commit_sha = CASE WHEN trunk_head.sensing_sha NOT IN ('', EXCLUDED.sensing_sha)
+                                     THEN trunk_head.sensing_sha ELSE trunk_head.commit_sha END,
                    sensing_sha = EXCLUDED.sensing_sha",
                 &[&project, &commit, &now_ms()],
             )
             .await?;
     }
     crate::watch::touch(pool, project, "съём ствола начат").await
+}
+
+/// Повторный съём той же вершины сорвался снова: она продвигается, и род, не
+/// поданный и во второй раз, гаснет. Продвигать ДО повтора нельзя: так все роды
+/// гасли на время повторного съёма (замер 2026-10-06: после съёма, оборванного
+/// перезапуском сервера, гейт круга, попавшего в окно, назвал 48 родов
+/// «снятыми не с вершины» и встал на выдаче).
+pub(crate) async fn settle_repeated_failure(pool: &Pool, project: &str, commit: &str) -> Result<(), crate::db::Fail> {
+    {
+        let client = crate::db::conn(pool).await?;
+        client
+            .execute(
+                "UPDATE trunk_head SET commit_sha = sensing_sha, sensing_sha = ''
+                  WHERE project_id = $1 AND sensing_sha = $2",
+                &[&project, &commit],
+            )
+            .await?;
+    }
+    crate::watch::touch(pool, project, "повторный съём сорвался").await
+}
+
+/// Вершина, которую съём начал и не кончил; пусто — такой нет.
+pub(crate) async fn sensing_head(pool: &Pool, project: &str) -> Result<String, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
+    let row = client
+        .query_opt("SELECT sensing_sha FROM trunk_head WHERE project_id = $1", &[&project])
+        .await?;
+    Ok(row.map(|r| r.get(0)).unwrap_or_default())
 }
 
 /// Съём вершины кончился: она становится вершиной ствола, снимаемой больше нет.

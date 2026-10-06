@@ -1282,18 +1282,26 @@ impl Worker {
         // гейты не мигают. После удачного съёма она становится вершиной ствола.
         //
         // Сорвавшийся съём (отказ хоть одного рода или обрыв посреди) оставляет
-        // её снимаемой, и следующий заход снимает снова. Начиная его,
-        // `begin_trunk_sense` сперва продвигает оставшуюся: род, не поданный
-        // сорвавшимся съёмом, гаснет, а остальные не ждут его вечно. Состояния
-        // в памяти воркера для этого нет — переживает и перезапуск.
+        // её снимаемой, и следующий заход снимает снова. Если ствол ушёл
+        // дальше, `begin_trunk_sense` сперва продвигает оставшуюся; повтор той
+        // же вершины её не продвигает (иначе на время повтора гасли бы все
+        // роды), а сорвавшийся и он продвигает её после: род, не поданный
+        // дважды, гаснет, остальные не ждут его вечно. Состояния в памяти
+        // воркера для этого нет — переживает и перезапуск.
         let sensed = crate::projector::trunk_head(&self.pool, &bundle.project).await.unwrap_or_default();
         if sensed != head {
+            let retry = crate::projector::sensing_head(&self.pool, &bundle.project).await
+                .is_ok_and(|pending| pending == head);
             if let Err(e) = crate::projector::begin_trunk_sense(&self.pool, &bundle.project, &head).await {
                 println!("{} · снимаемая вершина не записана: {e:?}", bundle.name);
             }
             if self.sense_tree(bundle, &root).await {
                 if let Err(e) = crate::projector::set_trunk_head(&self.pool, &bundle.project, &head).await {
                     println!("{} · вершина ствола не записана: {e:?}", bundle.name);
+                }
+            } else if retry {
+                if let Err(e) = crate::projector::settle_repeated_failure(&self.pool, &bundle.project, &head).await {
+                    println!("{} · повторно сорвавшаяся вершина не продвинута: {e:?}", bundle.name);
                 }
             }
         }
