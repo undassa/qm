@@ -1290,11 +1290,13 @@ impl Worker {
         // воркера для этого нет — переживает и перезапуск.
         let sensed = crate::projector::trunk_head(&self.pool, &bundle.project).await.unwrap_or_default();
         if sensed != head {
-            let retry = crate::projector::sensing_head(&self.pool, &bundle.project).await
-                .is_ok_and(|pending| pending == head);
-            if let Err(e) = crate::projector::begin_trunk_sense(&self.pool, &bundle.project, &head).await {
-                println!("{} · снимаемая вершина не записана: {e:?}", bundle.name);
-            }
+            let retry = match crate::projector::begin_trunk_sense(&self.pool, &bundle.project, &head).await {
+                Ok(retry) => retry,
+                Err(e) => {
+                    println!("{} · снимаемая вершина не записана: {e:?}", bundle.name);
+                    false
+                }
+            };
             if self.sense_tree(bundle, &root).await {
                 if let Err(e) = crate::projector::set_trunk_head(&self.pool, &bundle.project, &head).await {
                     println!("{} · вершина ствола не записана: {e:?}", bundle.name);
