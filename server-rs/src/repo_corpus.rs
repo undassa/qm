@@ -587,7 +587,7 @@ fn column_def(c: &regex::Captures) -> Column {
         ty: c[2].to_lowercase(),
         not_null: rest.contains("NOT NULL"),
         // `GENERATED … AS` — значение кладёт сама база, как и умолчанием.
-        has_default: rest.contains("DEFAULT") || rest.contains("GENERATED"),
+        has_default: rest.contains("DEFAULT") || rest.contains("GENERATED ALWAYS AS"),
         primary_key: rest.contains("PRIMARY KEY"),
         references: regex::Regex::new(r"(?i)\bREFERENCES\s+(?:[a-z][a-z0-9_]*\.)?([a-z][a-z0-9_]*)")
             .expect("образец ссылки")
@@ -777,9 +777,11 @@ pub(crate) fn schema_of(texts: &[String]) -> Vec<Table> {
             },
         }
     }
-    for (table, name) in trigger_writes(texts) {
+    for (table, name, on_insert) in trigger_writes(texts) {
         if let Some(c) = column_mut(&mut out, &table, &name) {
             c.by_trigger = true;
+            // Триггер на вставку заполняет обязательную колонку, как умолчание.
+            c.has_default |= on_insert;
         }
     }
     out
@@ -790,14 +792,18 @@ pub(crate) fn schema_of(texts: &[String]) -> Vec<Table> {
 /// Функция и триггер живут в разных миграциях, поэтому читаются все тексты.
 /// ponytail: снятие триггера (`DROP TRIGGER`) не учтено — триггер считается
 /// живым, пока о нём не заявит находка.
-fn trigger_writes(texts: &[String]) -> Vec<(String, String)> {
+/// Третье в ответе — триггер срабатывает на вставку: тогда колонку он заполняет
+/// и при заведении строки, как умолчание.
+fn trigger_writes(texts: &[String]) -> Vec<(String, String, bool)> {
     let func = regex::Regex::new(
-        r"(?is)CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:[a-z][a-z0-9_]*\.)?([a-z][a-z0-9_]*)\s*\(.*?(\$[a-z0-9_]*\$)(.*?)\$",
+        r"(?is)CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:[a-z][a-z0-9_]*\.)?([a-z][a-z0-9_]*)\s*\([^;]*?(\$[a-z0-9_]*\$)(.*?)\$",
     )
     .expect("образец функции");
-    let new = regex::Regex::new(r"(?i)\bNEW\.([a-z][a-z0-9_]*)\s*:?=").expect("образец присваивания NEW");
+    // Присваивание — начало оператора; `IF NEW.a = …` и `WHEN NEW.a = OLD.a` — чтение.
+    let new = regex::Regex::new(r"(?im)(?:^|;|\bBEGIN|\bTHEN|\bELSE|\bLOOP)\s*NEW\.([a-z][a-z0-9_]*)\s*:?=")
+        .expect("образец присваивания NEW");
     let trigger = regex::Regex::new(
-        r"(?is)CREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\s+\S+\s+[^;]*?\bON\s+(?:[a-z][a-z0-9_]*\.)?([a-z][a-z0-9_]*)[^;]*?EXECUTE\s+(?:FUNCTION|PROCEDURE)\s+(?:[a-z][a-z0-9_]*\.)?([a-z][a-z0-9_]*)",
+        r"(?is)CREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\s+\S+\s+([^;]*?)\bON\s+(?:[a-z][a-z0-9_]*\.)?([a-z][a-z0-9_]*)[^;]*?EXECUTE\s+(?:FUNCTION|PROCEDURE)\s+(?:[a-z][a-z0-9_]*\.)?([a-z][a-z0-9_]*)",
     )
     .expect("образец триггера");
     let clean: Vec<String> = texts.iter().map(|t| uncommented(t)).collect();
@@ -811,9 +817,9 @@ fn trigger_writes(texts: &[String]) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for t in &clean {
         for tr in trigger.captures_iter(t) {
-            let f = tr[2].to_lowercase();
+            let (on_insert, table, f) = (tr[1].to_uppercase().contains("INSERT"), tr[2].to_lowercase(), tr[3].to_lowercase());
             for (_, cols) in sets.iter().filter(|(name, _)| *name == f) {
-                out.extend(cols.iter().map(|c| (tr[1].to_lowercase(), c.clone())));
+                out.extend(cols.iter().map(|c| (table.clone(), c.clone(), on_insert)));
             }
         }
     }
@@ -875,6 +881,9 @@ pub(crate) fn column_writes(text: &str, file: &str) -> Vec<Pair> {
             })
             .collect()
     };
+    // Комментарий — не запись: `// UPDATE t SET c` закрыл бы G4 одной строкой.
+    let stripped = rust_uncommented(text);
+    let text = stripped.as_str();
     let line = |at: usize| text[..at].matches('\n').count() + 1;
     let mut out: Vec<Pair> = Vec::new();
     let mut put = |table: &str, cols: Vec<String>, at: usize| {
@@ -894,6 +903,59 @@ pub(crate) fn column_writes(text: &str, file: &str) -> Vec<Pair> {
     }
     for m in UPSERT.captures_iter(text) {
         put(&m[1], assigned(&m[2]), m.get(0).expect("целиком").start());
+    }
+    out
+}
+
+/// Текст Rust без комментариев, с теми же строками: `//` до конца строки и
+/// `/* … */` заменяются пробелами. Кавычки уважаются, поэтому `"http://…"` в
+/// строке комментарием не считается.
+fn rust_uncommented(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let (mut quoted, mut escaped, mut line, mut block) = (false, false, false, 0usize);
+    while let Some(c) = chars.next() {
+        if c == '\n' {
+            line = false;
+            out.push(c);
+            continue;
+        }
+        if line || block > 0 {
+            if block > 0 && c == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                block -= 1;
+                out.push(' ');
+            }
+            out.push(' ');
+            continue;
+        }
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                quoted = false;
+            }
+            out.push(c);
+            continue;
+        }
+        match (c, chars.peek()) {
+            ('"', _) => quoted = true,
+            ('/', Some('/')) => {
+                line = true;
+                out.push(' ');
+                continue;
+            }
+            ('/', Some('*')) => {
+                chars.next();
+                block += 1;
+                out.push_str("  ");
+                continue;
+            }
+            _ => {}
+        }
+        out.push(c);
     }
     out
 }
@@ -2400,6 +2462,39 @@ CREATE TRIGGER trg_monitors_touch BEFORE UPDATE ON monitors FOR EACH ROW EXECUTE
             assert!(note(&p, written).is_none(), "{written}: писатель в схеме");
         }
         assert!(note(&p, "monitors.note").is_some_and(|d| d.starts_with("колонка без входа")));
+    }
+
+    #[test]
+    fn a_comment_a_comparison_and_a_literal_are_not_writers() {
+        let w = super::column_writes("// UPDATE monitors SET state = 1\n/// we INSERT INTO monitors (note) later\n/* UPDATE monitors SET a = 1 */\nlet u = \"http://x\"; sqlx::query(\"UPDATE monitors SET b = 1\");", "m.rs");
+        let names: Vec<&str> = w.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["monitors.b"]);
+        assert_eq!(w[0].detail, "пишется: m.rs:4");
+        let sql = "
+CREATE FUNCTION plain() RETURNS int LANGUAGE sql AS 'select 1';
+CREATE FUNCTION guard() RETURNS trigger AS $$
+BEGIN
+  IF NEW.state = 'closed' THEN NEW.closed_at := now(); END IF;
+  RETURN NEW;
+END $$ LANGUAGE plpgsql;
+CREATE FUNCTION mkslug() RETURNS trigger AS $$ BEGIN NEW.slug := lower(NEW.name); RETURN NEW; END $$ LANGUAGE plpgsql;
+CREATE TABLE monitors (id text PRIMARY KEY, name text NOT NULL, state text, closed_at timestamptz,
+  slug text NOT NULL, origin text NOT NULL CHECK (origin IN ('manual','generated')));
+CREATE TRIGGER g BEFORE UPDATE ON monitors FOR EACH ROW EXECUTE FUNCTION guard();
+CREATE TRIGGER s BEFORE INSERT ON monitors FOR EACH ROW EXECUTE FUNCTION mkslug();
+";
+        let doc = json!({
+            "paths": { "/monitors": { "post": { "requestBody": link("MonitorInput"), "responses": { "201": link("Monitor") } } } },
+            "components": { "schemas": {
+                "MonitorInput": { "type": "object", "required": ["name"], "properties": { "name": { "type": "string" } } },
+                "Monitor": { "type": "object", "properties": { "id": { "type": "string" } } }
+            } }
+        });
+        let p = contract_vs_schema(&doc, &schema_of(&[sql.into()]), &[]);
+        assert!(note(&p, "monitors.state").is_some(), "сравнение в триггере — чтение, а не запись");
+        assert!(note(&p, "monitors.closed_at").is_none(), "присваивание в триггере — запись");
+        assert!(note(&p, "monitors.slug · обязательна").is_none(), "триггер на вставку заполняет обязательную");
+        assert!(note(&p, "monitors.origin · обязательна").is_some(), "слово generated в CHECK — не GENERATED");
     }
 
     #[test]

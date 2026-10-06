@@ -16,5 +16,5 @@ SELECT f.name || '  —  пометка x-source называет задачу '
  CROSS JOIN LATERAL (SELECT substring(f.detail FROM '^помечено x-source: task:\s*([A-Za-z0-9][A-Za-z0-9._-]*)') AS task) m
  WHERE f.project_id = $1 AND f.kind = 'contract-schema' AND f.detail LIKE 'помечено x-source: task:%'
    AND NOT EXISTS (SELECT 1 FROM project_plan_tasks t
-                    WHERE t.project_id = $1 AND t.id = m.task AND t.kind <> 'red')
+                    WHERE t.project_id = $1 AND t.id = m.task AND t.kind = 'dev')
  ORDER BY 1

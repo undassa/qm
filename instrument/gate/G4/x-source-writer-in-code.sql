@@ -16,7 +16,7 @@ WITH помеченные AS (
    WHERE f.project_id = $1 AND f.kind = 'contract-schema' AND f.detail LIKE 'помечено x-source: task:%'),
 судимые AS (
   SELECT п.at, п.task FROM помеченные п
-    JOIN project_plan_tasks t ON t.project_id = $1 AND t.id = п.task AND t.kind <> 'red' AND t.state = 'closed')
+    JOIN project_plan_tasks t ON t.project_id = $1 AND t.id = п.task AND t.kind = 'dev' AND t.state = 'closed')
 SELECT 'датчик записи колонок «column-write» ' || fact_gap($1, 'column-write')
        || ': пишет ли код колонки закрытых задач — неизвестно' AS detail
  WHERE EXISTS (SELECT 1 FROM судимые) AND NOT fact_fresh($1, 'column-write')
