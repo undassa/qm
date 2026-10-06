@@ -11878,7 +11878,14 @@ pub(crate) async fn list_runs(pool: &Pool, project: &str, limit: i64) -> Result<
                 "at": m.get::<_, i64>(0), "side": m.get::<_, String>(1), "text": m.get::<_, String>(2) })).collect::<Vec<_>>(),
         }));
     }
-    Ok(json!({ "count": out.len(), "runs": out }))
+    // `count` — сколько отдано, `total` — сколько есть. Без второго обрыв по
+    // пределу не виден: держатель прочёл первые десять прогонов как все и не
+    // нашёл двух открытых, лежавших дальше.
+    let total: i64 = client
+        .query_one("SELECT count(*) FROM project_task_runs WHERE project_id = $1", &[&project])
+        .await?
+        .get(0);
+    Ok(json!({ "count": out.len(), "total": total, "runs": out }))
 }
 
 pub(crate) async fn holders(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
