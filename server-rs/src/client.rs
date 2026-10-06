@@ -2414,12 +2414,9 @@ fn trailer_states(
         .map(&split)
         .filter(|(commit, _, _)| in_product.contains(commit))
         .flat_map(|(_, _, body)| {
-            rex.captures_iter(&body)
-                .filter_map(|c| {
-                    let id = c.get(1).map(|m| m.as_str().trim().to_owned())?;
-                    let state = c.get(2).map(|m| m.as_str().trim()).unwrap_or("closed");
-                    (state == "closed" && !id.is_empty()).then_some(id)
-                })
+            trailers(&body, rex)
+                .into_iter()
+                .filter_map(|(id, state)| (state == "closed").then_some(id))
                 .collect::<Vec<_>>()
         })
         .collect();
@@ -2429,11 +2426,8 @@ fn trailer_states(
     let mut states: Vec<Value> = Vec::new();
     for e in log.split('\u{1}') {
         let (commit, at, body) = split(e);
-        for c in rex.captures_iter(&body) {
-            let id = c.get(1).map(|m| m.as_str().trim().to_owned()).unwrap_or_default();
-            let state = c.get(2).map(|m| m.as_str().trim().to_owned())
-                .unwrap_or_else(|| "closed".to_owned());
-            if id.is_empty() || !seen.insert(id.clone()) {
+        for (id, state) in trailers(&body, rex) {
+            if !seen.insert(id.clone()) {
                 continue;
             }
             let state = if state == "closed" && !closed_in_product.contains(&id) {
@@ -2445,6 +2439,28 @@ fn trailer_states(
         }
     }
     states
+}
+
+/// Трейлеры сообщения: только те, что начинают свою строку.
+///
+/// Объявленный набором образец ищется где угодно в теле, а тела выжимок
+/// цитируют трейлер прозой («…ждём `Task: M5-T333 closed` следующей
+/// выжимкой»). Такая цитата закрывала бы чужую задачу из тела другого
+/// запроса — в tot-ade 18bc7224 проза «`Task: <id> closed`» легла в ствол, и
+/// уцелели только потому, что `<id>` не прошло образцом имени. Трейлер — это
+/// строка целиком, поэтому совпадение засчитывается, лишь когда перед ним на
+/// строке нет ничего, кроме пробелов.
+fn trailers(body: &str, rex: &regex::Regex) -> Vec<(String, String)> {
+    body.lines()
+        .map(str::trim_start)
+        .flat_map(|line| rex.captures_iter(line).filter(|c| c.get(0).is_some_and(|m| m.start() == 0))
+            .filter_map(|c| {
+                let id = c.get(1).map(|m| m.as_str().trim().to_owned())?;
+                let state = c.get(2).map_or("closed", |m| m.as_str().trim()).to_owned();
+                (!id.is_empty()).then_some((id, state))
+            })
+            .collect::<Vec<_>>())
+        .collect()
 }
 
 #[cfg(test)]
@@ -2505,6 +2521,26 @@ mod trailers {
         ]);
         let product = ["82ec5f6".to_owned(), "cafe777".to_owned()].into_iter().collect();
         assert_eq!(state_of(&trailer_states(&l, &product, &rex()), "M1-T5"), "reopened");
+    }
+
+    /// Проза, цитирующая трейлер, — не трейлер. Тело выжимки одной задачи
+    /// говорит «ждём `Task: M5-T333 closed` следующей выжимкой»; закрыть
+    /// `M5-T333` из чужого тела значило бы соврать вверх. Свой трейлер строкой
+    /// того же тела при этом засчитывается, и с отступом — тоже.
+    #[test]
+    fn a_trailer_quoted_in_prose_closes_nothing() {
+        let l = log(&[(
+            "18bc722",
+            1789833840,
+            "landed: greps for the anchored `Task: M5-T333 closed` line, \
+             and Task: M5-T334 closed mid-sentence too\n\nTask: M5-T342 closed\n  Task: M5-T341 closed",
+        )]);
+        let product = ["18bc722".to_owned()].into_iter().collect();
+        let states = trailer_states(&l, &product, &rex());
+        assert_eq!(state_of(&states, "M5-T333"), "нет", "цитата в обратных кавычках закрыла задачу: {states:?}");
+        assert_eq!(state_of(&states, "M5-T334"), "нет", "трейлер посреди фразы закрыл задачу: {states:?}");
+        assert_eq!(state_of(&states, "M5-T342"), "closed", "свой трейлер строкой не засчитан: {states:?}");
+        assert_eq!(state_of(&states, "M5-T341"), "closed", "трейлер с отступом не засчитан: {states:?}");
     }
 }
 
