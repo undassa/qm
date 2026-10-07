@@ -9758,9 +9758,10 @@ pub(crate) async fn declare_version(
         }
     // Объявление поверх документа перекрашивало строку в «объявленную», и
     // следом `drop=true` снимал её с каскадом — обход отказа выше.
-    if let Some((kind, _)) = plan_row_document(&client, "project_plan_versions", project, id).await? {
+    if let Some((kind, name)) = plan_row_document(&client, "project_plan_versions", project, id).await? {
         return Ok(json!({ "status": "has_document", "id": id,
-            "why": format!("у выпуска есть документ вида {kind}: план строится по нему — объявлять не нужно") }));
+            "why": format!("у выпуска есть документ, и план строится по нему: правят его \
+                            `mh call put kind={kind} id={name}`, снимают `mh call rm kind={kind} id={name}`") }));
     }
     client.execute(
         "INSERT INTO project_plan_versions (project_id, id, entity_kind, entity_name, origin)
@@ -9799,9 +9800,10 @@ pub(crate) async fn declare_milestone(
         }
     // Объявление поверх документа перекрашивало строку в «объявленную», и
     // следом `drop=true` снимал её с каскадом — обход отказа выше.
-    if let Some((kind, _)) = plan_row_document(&client, "project_plan_milestones", project, id).await? {
+    if let Some((kind, name)) = plan_row_document(&client, "project_plan_milestones", project, id).await? {
         return Ok(json!({ "status": "has_document", "id": id,
-            "why": format!("у вехи есть документ вида {kind}: план строится по нему — объявлять не нужно") }));
+            "why": format!("у вехи есть документ, и план строится по нему: правят его \
+                            `mh call put kind={kind} id={name}`, снимают `mh call rm kind={kind} id={name}`") }));
     }
     client.execute(
         "INSERT INTO project_plan_milestones (project_id, id, version_id, ord, title,

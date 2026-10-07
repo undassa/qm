@@ -3947,7 +3947,6 @@ mod a_projected_version {
         };
         let plan = "| Этап | Что |\n|---|---|\n| M1 | ядро |\n| MA | десятый |\n| V5 | пятый |\n";
         add("version", "v1", plan).await;
-        add("version", "v2", plan).await;
         add("milestone", "M1", "# M1 ядро\n").await;
         add("milestone", "MA", "# MA десятый\n").await;
         add("milestone", "V5", "# V5 пятый\n").await;
@@ -3985,7 +3984,7 @@ mod a_projected_version {
         assert!(text(&refused).contains("projected") && text(&refused).contains("rm kind=version id=v1"), "{refused}");
         assert_eq!(count(below).await, held, "отказ ничего ниже выпуска не тронул");
         let over = door.call("version-add", &json!({ "id": "v1" })).await;
-        assert!(text(&over).contains("has_document"), "объявление поверх документа: {over}");
+        assert!(text(&over).contains("has_document") && text(&over).contains("put kind=version id=v1"), "объявление поверх документа: {over}");
         let still = door.call("version-add", &json!({ "id": "v1", "drop": true })).await;
         assert!(text(&still).contains("projected"), "после объявления поверх: {still}");
         let milestone = door.call("milestone-add", &json!({ "id": "M1", "version": "v1", "drop": true })).await;
@@ -3999,11 +3998,35 @@ mod a_projected_version {
         assert!(text(&in_plan).contains("in_plan") && text(&in_plan).contains("rm kind=version id=v1")
                 && !text(&in_plan).contains("version-add"), "{in_plan}");
 
-        // Документ уходит — пересборка снимает строку плана, и закрытие снимается.
+        // Под этап v1 повешены дверями задача и ребро: их пересборка не вернёт.
+        let task = door.call("task-add", &json!({ "id": "M1-T9", "milestone": "M1", "title": "объявлена", "kind": "dev" })).await;
+        assert!(text(&task).contains("declared"), "{task}");
+        let dep = door.call("task-dep-add", &json!({ "task": "M1-T9", "dependsOn": "M1-T1" })).await;
+        assert_ne!(dep["isError"], json!(true), "{dep}");
+        let declared_below = "SELECT (SELECT count(*) FROM project_plan_tasks WHERE project_id = 'p' AND id = 'M1-T9')
+                                   + (SELECT count(*) FROM project_plan_task_deps WHERE project_id = 'p' AND task_id = 'M1-T9')";
+        assert_eq!(count(declared_below).await, 2);
+
+        // Переименование: v2 перечисляет те же этапы, v1 уходит, и пересборка
+        // одна — этапы переезжают и выпуск снимается в одной транзакции.
+        add("version", "v2", plan).await;
         let rm = crate::store::remove(&pool, "p", "version", "v1").await.expect("документ снимается");
         assert_eq!(rm["status"], "deleted", "{rm}");
         rebuild().await;
         assert_eq!(count("SELECT count(*) FROM project_plan_versions WHERE project_id = 'p' AND id = 'v1'").await, 0);
+        assert_eq!(count("SELECT count(*) FROM project_plan_milestones WHERE project_id = 'p' AND version_id = 'v2'").await, 3);
+        assert_eq!(count(declared_below).await, 2, "объявленная задача и ребро под переехавшим этапом пережили снятие v1");
+
+        // Этап, названный двумя выпусками, достаётся заведённому позже, а не
+        // порядку строк: v0 заведён после v2, хотя по имени раньше.
+        add("version", "v0", "| Этап | Что |\n|---|---|\n| M1 | ядро |\n").await;
+        pool.get().await.expect("соединение")
+            .batch_execute("UPDATE project_document_revisions SET written_at = written_at + 100000
+                             WHERE project_id = 'p' AND entity_kind = 'version' AND entity_name = 'v0'")
+            .await.expect("v0 позже");
+        rebuild().await;
+        assert_eq!(count("SELECT count(*) FROM project_plan_milestones WHERE project_id = 'p' AND id = 'M1' AND version_id = 'v0'").await, 1,
+                   "этап у выпуска, заведённого позже");
         let dropped = door.call("version-close", &json!({ "version": "v1", "drop": true })).await;
         assert!(text(&dropped).contains("dropped"), "{dropped}");
 
