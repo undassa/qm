@@ -58,6 +58,14 @@ fn main() {
     }
     let door = match client::Door::from_env() {
         Ok(d) => d,
+        // A hook with no harness to ask answers «free», as `guard` already does
+        // when the server is unreachable. Exit 2 here blocked every edit made by
+        // an agent whose launch carries no secret: tot-ade's own Claude Code over
+        // ACP could not write a line of its draft (tot-tester, 2026-10-07).
+        Err(why) if what == "guard" => {
+            eprintln!("mh guard: правила не проверены — {why}");
+            std::process::exit(0);
+        }
         Err(why) => {
             eprintln!("mh {what}: {why}");
             std::process::exit(2);
