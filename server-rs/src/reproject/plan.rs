@@ -17,6 +17,12 @@ use std::collections::HashMap;
 /// то же самое, что имя задачи, — только окольно.
 static TASK_MILESTONE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)^([MV]\d+)-T").expect("образец этапа в имени задачи"));
+/// Имя этапа внутри поля «Веха». Поле пишут прозой — «**M9** — выпуск 0.1.2,
+/// редактор», — и целиком оно этапом не было никогда: десять задач tot-ade
+/// назвали так веху, и пересборка всего плана стояла, пока их не нашли
+/// (2026-10-07). Буквенная форма (`MA`) — та же, что у имени этапа.
+static FIELD_MILESTONE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\b([MV](?:\d+|[A-Z]))\b").expect("образец этапа в поле"));
 /// Имя задачи в поле «Зависит от» — с кавычками кода и без них.
 ///
 /// Требование кавычек стоило 57 зависимостей из 338: половина набора пишет
@@ -234,12 +240,17 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize,
         // (`m1-t1`) при вехе `M1`: образец не совпадал, веха выходила пустой и
         // вся пересборка падала о внешний ключ. Имя остаётся запасным ответом —
         // но регистр в нём больше не решает.
-        let milestone = match got("Веха").trim() {
-            "" => TASK_MILESTONE
+        // Поле без имени этапа, но не пустое, остаётся как написано и падает
+        // проверкой неизвестной вехи ниже: запасной ответ по имени задачи
+        // молча увёл бы её в другой этап, чем назвал автор.
+        let field = got("Веха");
+        let milestone = match FIELD_MILESTONE.captures(field) {
+            Some(m) => m[1].to_owned(),
+            None if field.trim_matches(|c: char| c.is_whitespace() || "*—-".contains(c)).is_empty() => TASK_MILESTONE
                 .captures(&id)
                 .map(|m| m[1].to_uppercase())
                 .unwrap_or_default(),
-            declared => declared.to_owned(),
+            None => field.trim().to_owned(),
         };
         tasks.push((
             id.clone(),
@@ -290,9 +301,19 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize,
     // можно назвать одной строкой. Виновником оказался документ подсадки
     // самотеста, утёкший из транзакции: веха выводилась из имени `M9-T9990`,
     // такой вехи нет.
+    // Этап, объявленный ручкой (`milestone-add`), документа не имеет и в
+    // перечне выше не стоит, но в плане он есть: задача из документа с такой
+    // вехой роняла пересборку, хотя внешний ключ её принял бы (tot-ade, M9).
+    let declared_milestones: Vec<String> = tx
+        .query("SELECT id FROM project_plan_milestones WHERE project_id = $1 AND origin = 'declared'",
+               &[&project])
+        .await?
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
     let unknown: Vec<String> = tasks
         .iter()
-        .filter(|t| !milestone_ids.contains(&t.1))
+        .filter(|t| !milestone_ids.contains(&t.1) && !declared_milestones.contains(&t.1))
         .map(|t| format!("{} → веха «{}»", t.0, t.1))
         .collect();
     if !unknown.is_empty() {
@@ -668,5 +689,70 @@ mod waves_depth {
     fn a_self_edge_and_an_unknown_name_are_ignored() {
         let t = ids(&["A", "B"]);
         assert_eq!(depth(&t, &edges(&[("A", "A"), ("B", "нет-такой")])), vec![Some(1), Some(1)]);
+    }
+}
+
+/// Задача из документа под этапом, объявленным ручкой, с вехой, написанной
+/// прозой, — как карточки M9 у tot-ade, на которых пересборка плана стояла.
+#[cfg(test)]
+mod milestone_field {
+    const P: &str = "p";
+    const SCHEMA: &str = "plan_milestone_field";
+
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn a_prose_milestone_under_a_declared_milestone_projects() {
+        let url = std::env::var("MH_TEST_DB_URL").expect("MH_TEST_DB_URL: адрес пустой базы");
+        let apart = format!("{}options=-c%20search_path%3D{SCHEMA}", if url.contains('?') { '&' } else { '?' });
+        let pool = crate::db::pool(&format!("{url}{apart}"), 4).expect("пул тестовой базы");
+        pool.get().await.expect("соединение")
+            .batch_execute(&format!("DROP SCHEMA IF EXISTS {SCHEMA} CASCADE; CREATE SCHEMA {SCHEMA};"))
+            .await.expect("своя схема заводится");
+        crate::projector::ensure(&pool).await.expect("схема встаёт на пустой базе");
+        crate::projector::declare_version(&pool, P, "0.1.2", false).await.expect("выпуск");
+        crate::projector::declare_milestone(&pool, P, "M9", "0.1.2", 1, "каркас", false).await.expect("этап");
+        // Имя задачи этапа не называет: иначе запасной ответ по имени скрыл бы
+        // непрочитанное поле.
+        // Документ и его поле кладутся строками: разбор документа в поля — не
+        // предмет этой проверки, а `value_raw` хранит веху так, как её
+        // написали, со звёздочками.
+        let client = pool.get().await.expect("соединение");
+        client.execute(
+            "INSERT INTO project_documents (project_id, entity_kind, entity_name, content, content_hash,
+                                            bytes, revision, updated_at, updated_by)
+             VALUES ($1, 'task', 'window-1', '# window-1 · Окно', '', 0, 1, 0, 't')", &[&P])
+            .await.expect("документ задачи");
+        client.execute(
+            "INSERT INTO project_document_fields (project_id, entity_kind, entity_name, section_ord, ord,
+                                                  name, shape, value_raw, value)
+             VALUES ($1, 'task', 'window-1', 0, 0, 'Веха', 'row', $2, $3)",
+            &[&P, &"**M9** — выпуск **0.1.2**, редактор", &"M9 — выпуск 0.1.2, редактор"])
+            .await.expect("поле вехи");
+        drop(client);
+        super::project(&pool, P).await.map_err(|e| crate::db::Says::says(&e)).expect("пересборка плана проходит");
+        let milestone: String = pool.get().await.expect("соединение")
+            .query_one("SELECT milestone_id FROM project_plan_tasks WHERE project_id = $1 AND id = 'window-1'", &[&P])
+            .await.expect("задача в плане").get(0);
+        assert_eq!(milestone, "M9");
+        // Веха прозой без имени этапа — отказ с её словами, а не этап по имени.
+        let client = pool.get().await.expect("соединение");
+        client.execute(
+            "INSERT INTO project_documents (project_id, entity_kind, entity_name, content, content_hash,
+                                            bytes, revision, updated_at, updated_by)
+             VALUES ($1, 'task', 'M9-T2', '# M9-T2 · Окно', '', 0, 1, 0, 't')", &[&P])
+            .await.expect("документ задачи");
+        client.execute(
+            "INSERT INTO project_document_fields (project_id, entity_kind, entity_name, section_ord, ord,
+                                                  name, shape, value_raw, value)
+             VALUES ($1, 'task', 'M9-T2', 0, 0, 'Веха', 'row', $2, $2)",
+            &[&P, &"выпуск 0.1.2"])
+            .await.expect("поле вехи");
+        drop(client);
+        let refused = super::project(&pool, P).await.map(|_| ()).map_err(|e| crate::db::Says::says(&e));
+        let why = refused.expect_err("веха без имени этапа не уходит в этап по имени задачи");
+        assert!(why.contains("M9-T2 → веха «выпуск 0.1.2»"), "отказ называет задачу и её слова: {why}");
+        pool.get().await.expect("соединение")
+            .batch_execute(&format!("DROP SCHEMA IF EXISTS {SCHEMA} CASCADE"))
+            .await.expect("схема снимается");
     }
 }
