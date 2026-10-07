@@ -1805,6 +1805,11 @@ CREATE TABLE IF NOT EXISTS project_ci_job (
   platform   text NOT NULL CHECK (platform <> ''),
   note       text NOT NULL DEFAULT '',
   PRIMARY KEY (project_id, workflow, job));
+-- БРАТЬ ЛИ ПАДЕНИЯ ИЗ СВОИХ ЗАПРОСОВ НА СЛИЯНИЕ: пара в одном запросе при
+-- слиянии сжатием теряет красный коммит, и на стволе его не увидит никто.
+-- Граница доверия и потолок — у `worker::job_run`; строки такого прогона
+-- несут платформу задания и в `test_run_trunk` не входят, как любая партия CI.
+ALTER TABLE project_ci_job ADD COLUMN IF NOT EXISTS pr_red boolean NOT NULL DEFAULT false;
 
 -- Прогоны CI, уже взятые: без памяти о них журнал каждого прогона качался и
 -- записывался бы заново на каждом заходе, раз в пять минут. Память — в базе,
@@ -10143,6 +10148,7 @@ pub(crate) struct CiJob<'a> {
     pub job: &'a str,
     pub platform: &'a str,
     pub note: &'a str,
+    pub pr_red: bool,
 }
 
 /// Объявить задание CI, чей журнал несёт прогон проверок другой платформы.
@@ -10152,7 +10158,7 @@ pub(crate) struct CiJob<'a> {
 /// `red-observed-failing` снова судил бы прозу коммита. Репозиторий она не
 /// принимает вовсе — см. `project_ci_job`.
 pub(crate) async fn declare_ci_job(pool: &Pool, project: &str, fields: CiJob<'_>, drop_it: bool) -> Result<Value, crate::db::Fail> {
-    let CiJob { workflow, job, platform, note } = fields;
+    let CiJob { workflow, job, platform, note, pr_red } = fields;
     if workflow.trim().is_empty() || job.trim().is_empty() {
         return Ok(json!({ "status": "nameless", "why": "задание CI называется файлом работы и именем задания" }));
     }
@@ -10168,12 +10174,12 @@ pub(crate) async fn declare_ci_job(pool: &Pool, project: &str, fields: CiJob<'_>
         return Ok(json!({ "status": "no_platform", "why": "платформа обязательна: пустая означает прогон самого харнеса" }));
     }
     client.execute(
-        "INSERT INTO project_ci_job (project_id, workflow, job, platform, note)
-         VALUES ($1,$2,$3,$4,$5)
+        "INSERT INTO project_ci_job (project_id, workflow, job, platform, note, pr_red)
+         VALUES ($1,$2,$3,$4,$5,$6)
          ON CONFLICT (project_id, workflow, job) DO UPDATE SET
-           platform = EXCLUDED.platform, note = EXCLUDED.note",
-        &[&project, &workflow, &job, &platform, &note]).await?;
-    Ok(json!({ "status": "declared", "workflow": workflow, "job": job, "platform": platform,
+           platform = EXCLUDED.platform, note = EXCLUDED.note, pr_red = EXCLUDED.pr_red",
+        &[&project, &workflow, &job, &platform, &note, &pr_red]).await?;
+    Ok(json!({ "status": "declared", "workflow": workflow, "job": job, "platform": platform, "prRed": pr_red,
                "repo": "из `origin` дерева набора, по которому воркер сверяет ствол" }))
 }
 

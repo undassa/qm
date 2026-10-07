@@ -677,13 +677,15 @@ fn sweep_runner_target(
     );
 }
 
-/// Прогон работы, годный в факт о стволе набора.
+/// Прогон работы, годный в запись: со ствола набора либо, у задания с
+/// `pr_red`, из запроса на слияние в том же репозитории (`from_pr`).
 #[derive(Debug, PartialEq)]
-pub struct TrunkRun {
+pub struct JobRun {
     pub id: i64,
     pub attempt: i64,
     pub sha: String,
     pub started: String,
+    pub from_pr: bool,
 }
 
 /// Прогон ствола — ветка по умолчанию, коммит из САМОГО репозитория набора и
@@ -693,19 +695,42 @@ pub struct TrunkRun {
 /// его прогон приходит в тот же список с `head_branch = main`. Прогон
 /// `pull_request_target` исполняется в контексте ствола, но по чужому коду.
 /// Любой из них закрыл бы красную фазу падением, которого в наборе не было.
-pub fn trunk_run(run: &Value, repo: &str, trunk: &str) -> Option<TrunkRun> {
-    if run["head_branch"].as_str() != Some(trunk)
-        || matches!(run["event"].as_str(), None | Some("pull_request" | "pull_request_target"))
-        || !run["head_repository"]["full_name"].as_str()?.eq_ignore_ascii_case(repo)
+///
+/// ЗАПРОС НА СЛИЯНИЕ БЕРЁТСЯ ЛИШЬ У ЗАДАНИЯ С `pr_red`, и только свой.
+/// Набор, сливающий сжатием (`tot-ade`), теряет красный коммит пары: на
+/// стволе его нет никогда, и пара в одном запросе требовала отдельной посадки
+/// зеркала ради одного прохода. Задание `red-pair` гоняет проверку пары на
+/// красном коммите внутри запроса, ожидая падения, — его журнал и есть
+/// наблюдение. Граница доверия: голова запроса — из репозитория набора (форк
+/// и `pull_request_target` не берутся никогда), а пишутся из такого прогона
+/// ТОЛЬКО падения (`recordable`): голова запроса не ствол, и её зелёное о
+/// стволе не говорит. Потолок тот же, что у правила: падение доказано по
+/// имени и к коммиту ствола не привязано.
+pub fn job_run(run: &Value, repo: &str, trunk: &str, pr_red: bool) -> Option<JobRun> {
+    let from_pr = match run["event"].as_str()? {
+        "pull_request_target" => return None,
+        "pull_request" => true,
+        _ => false,
+    };
+    if !run["head_repository"]["full_name"].as_str()?.eq_ignore_ascii_case(repo)
+        || (from_pr && !pr_red)
+        || (!from_pr && run["head_branch"].as_str() != Some(trunk))
     {
         return None;
     }
-    Some(TrunkRun {
+    Some(JobRun {
         id: run["id"].as_i64()?,
         attempt: run["run_attempt"].as_i64()?,
         sha: run["head_sha"].as_str()?.to_owned(),
         started: run["run_started_at"].as_str()?.to_owned(),
+        from_pr,
     })
+}
+
+/// Строки прогона, годные в запись. Из запроса на слияние — только падения:
+/// прошедшая там проверка ствола не видела (см. `job_run`).
+pub fn recordable(rows: Vec<(String, String, String)>, from_pr: bool) -> Vec<(String, String, String)> {
+    rows.into_iter().filter(|(_, verdict, _)| !from_pr || verdict == "failed").collect()
 }
 
 /// Лежит ли коммит на `origin/<ствол>` дерева набора. Неизвестный коммит —
@@ -849,7 +874,7 @@ impl Worker {
     async fn take_ci_jobs(&self, bundle: &Bundle) {
         let jobs = match crate::db::conn(&self.pool).await {
             Ok(c) => c
-                .query("SELECT workflow, job, platform FROM project_ci_job WHERE project_id = $1 ORDER BY 1, 2",
+                .query("SELECT workflow, job, platform, pr_red FROM project_ci_job WHERE project_id = $1 ORDER BY 1, 2",
                        &[&bundle.project])
                 .await
                 .map_err(|e| format!("{e}")),
@@ -870,9 +895,9 @@ impl Worker {
             Err(why) => return println!("{} · CI: {why}", bundle.name),
         };
         for r in jobs {
-            let (workflow, job, platform): (String, String, String) = (r.get(0), r.get(1), r.get(2));
+            let (workflow, job, platform, pr_red): (String, String, String, bool) = (r.get(0), r.get(1), r.get(2), r.get(3));
             let actor = format!("ci:{workflow}/{job}");
-            match self.take_ci_job(bundle, &repo, &workflow, &job, &platform, &actor).await {
+            match self.take_ci_job(bundle, &repo, &workflow, &job, &platform, pr_red).await {
                 Ok(0) => {}
                 Ok(n) => println!("{} · CI {actor}: взято прогонов {n}", bundle.name),
                 Err(why) => println!("{} · CI {actor}: {why}", bundle.name),
@@ -881,7 +906,7 @@ impl Worker {
     }
 
     async fn take_ci_job(
-        &self, bundle: &Bundle, repo: &str, workflow: &str, job: &str, platform: &str, actor: &str,
+        &self, bundle: &Bundle, repo: &str, workflow: &str, job: &str, platform: &str, pr_red: bool,
     ) -> Result<usize, String> {
         let about = gh_json(&format!("repos/{repo}")).await?;
         let trunk = about["default_branch"].as_str().filter(|b| !b.is_empty())
@@ -893,12 +918,22 @@ impl Worker {
         .await?;
         // Ответ без перечня — отказ, а не «прогонов нет»: иначе опечатка в
         // имени файла работы молчала бы вечно, как пустой список.
-        let list = runs["workflow_runs"].as_array()
-            .ok_or_else(|| format!("в ответе о прогонах {workflow} нет `workflow_runs`: {}", cut(&runs.to_string(), 300)))?;
+        let listed = |runs: &Value| runs["workflow_runs"].as_array().cloned()
+            .ok_or_else(|| format!("в ответе о прогонах {workflow} нет `workflow_runs`: {}", cut(&runs.to_string(), 300)));
+        let mut list = listed(&runs)?;
+        if pr_red {
+            list.extend(listed(&gh_json(&format!(
+                "repos/{repo}/actions/workflows/{workflow}/runs?event=pull_request&status=completed&per_page=20"
+            ))
+            .await?)?);
+        }
         let client = crate::db::conn(&self.pool).await.map_err(|e| format!("{e:?}"))?;
         let (mut taken, mut fetched) = (0, false);
-        for run in list {
-            let Some(r) = trunk_run(run, repo, &trunk) else { continue };
+        for run in &list {
+            let Some(r) = job_run(run, repo, &trunk, pr_red) else { continue };
+            // Своё имя у строк из запроса: по нему они видны в летописи, и
+            // отметка взятия у них своя.
+            let actor = &format!("{}:{workflow}/{job}", if r.from_pr { "ci-pr" } else { "ci" });
             let seen: bool = client
                 .query_one(
                     "SELECT EXISTS (SELECT 1 FROM ci_run_taken
@@ -915,14 +950,15 @@ impl Worker {
             // имя ветки в ответе GitHub — слова прогона. Докачивается ствол раз
             // за заход и лишь когда коммита не нашлось: свежий прогон обычно
             // новее, чем знает общий чекаут. Не на стволе — не берётся и не
-            // отмечается: после докачки он может там оказаться.
-            if !on_trunk(&bundle.repo, &r.sha, &trunk) && !fetched {
+            // отмечается: после докачки он может там оказаться. У прогона из
+            // запроса ствола нет по построению — его граница в `job_run`.
+            if !r.from_pr && !on_trunk(&bundle.repo, &r.sha, &trunk) && !fetched {
                 fetched = true;
                 if let Err(why) = Self::git(&bundle.repo, &["fetch", "origin", "--quiet"]) {
                     println!("{} · CI: ствол не докачан: {why}", bundle.name);
                 }
             }
-            if !on_trunk(&bundle.repo, &r.sha, &trunk) {
+            if !r.from_pr && !on_trunk(&bundle.repo, &r.sha, &trunk) {
                 println!("{} · CI {actor}: прогон {} не взят: коммит {} не на origin/{trunk}", bundle.name, r.id, r.sha);
                 continue;
             }
@@ -943,6 +979,7 @@ impl Worker {
                           нет строк прогона (не собралось, не запускалось либо формат не узнан)",
                          bundle.name, r.id);
             }
+            let rows = recordable(rows, r.from_pr);
             let ci = crate::projector::CiRun { platform, run: r.id, attempt: r.attempt, started: &r.started };
             crate::projector::record_test_runs(&self.pool, &bundle.project, &r.sha, &rows, actor, false, Some(ci))
                 .await
@@ -2559,18 +2596,38 @@ mod tests {
             "id": 36642293742_i64, "run_attempt": 2, "head_sha": "6009f67", "run_started_at": "2026-09-29T22:54:37Z",
             "head_branch": branch, "event": event, "head_repository": { "full_name": from },
         });
+        let taken = |from_pr| Some(super::JobRun { id: 36642293742, attempt: 2, sha: "6009f67".into(),
+                                                   started: "2026-09-29T22:54:37Z".into(), from_pr });
         assert_eq!(
-            super::trunk_run(&run("main", "workflow_dispatch", "tot-space/tot-ade"), "tot-space/tot-ade", "main"),
-            Some(super::TrunkRun { id: 36642293742, attempt: 2, sha: "6009f67".into(),
-                                   started: "2026-09-29T22:54:37Z".into() }),
+            super::job_run(&run("main", "workflow_dispatch", "tot-space/tot-ade"), "tot-space/tot-ade", "main", false),
+            taken(false),
         );
         for (branch, event, from) in [("main", "push", "someone/tot-ade"),
                                       ("main", "pull_request_target", "tot-space/tot-ade"),
                                       ("main", "pull_request", "tot-space/tot-ade"),
                                       ("v5-t135-revoke-takes-refusals", "workflow_dispatch", "tot-space/tot-ade")] {
-            assert_eq!(super::trunk_run(&run(branch, event, from), "tot-space/tot-ade", "main"), None,
+            assert_eq!(super::job_run(&run(branch, event, from), "tot-space/tot-ade", "main", false), None,
                        "{branch} · {event} · {from}");
         }
+        // Задание с `pr_red`: свой запрос берётся с любой ветки, чужой — нет.
+        assert_eq!(super::job_run(&run("m5-t135-pair", "pull_request", "tot-space/tot-ade"),
+                                  "tot-space/tot-ade", "main", true), taken(true));
+        for (branch, event, from) in [("m5-t135-pair", "pull_request", "someone/tot-ade"),
+                                      ("m5-t135-pair", "pull_request_target", "tot-space/tot-ade"),
+                                      ("main", "pull_request_target", "someone/tot-ade")] {
+            assert_eq!(super::job_run(&run(branch, event, from), "tot-space/tot-ade", "main", true), None,
+                       "pr_red · {branch} · {event} · {from}");
+        }
+    }
+
+    /// Из запроса на слияние пишутся только падения: его зелёное о стволе не
+    /// говорит. Партия ствола пишется целиком.
+    #[test]
+    fn a_pull_request_run_records_failures_only() {
+        let rows = vec![row("red_one", "failed", "mirror_x"), row("green_one", "passed", "plain"),
+                        row("skipped_one", "ignored", "plain")];
+        assert_eq!(super::recordable(rows.clone(), true), vec![row("red_one", "failed", "mirror_x")]);
+        assert_eq!(super::recordable(rows.clone(), false), rows);
     }
 
     /// Коммит прогона должен лежать на `origin/<ствол>`: коммит с ветки, как
