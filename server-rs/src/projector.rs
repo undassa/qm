@@ -17625,6 +17625,101 @@ mod ci_batch {
     }
 }
 
+/// Пара, закрытая одним коммитом, доказывается только падением из запроса.
+///
+/// Порча, которую ловит проверка: вырожденное окно (зеркало и тело закрыты в
+/// один миг) прощается как «прохода не было», и `prRed` не решает ничего —
+/// `V5-T334` закрыта так без единого падения. Обратная порча — проходы из
+/// запроса ложатся в `test_run` либо падение пишется не под `ci-pr:`.
+#[cfg(test)]
+mod one_commit_pair {
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn a_pair_closed_in_one_commit_needs_a_pull_request_failure() {
+        let url = std::env::var("MH_TEST_DB_URL").expect("MH_TEST_DB_URL: адрес пустой базы");
+        let apart = format!("{}{}", if url.contains('?') { '&' } else { '?' },
+                            "options=-c%20search_path%3Done_commit_pair");
+        let pool = crate::db::pool(&format!("{url}{apart}"), 4).expect("пул тестовой базы");
+        {
+            let client = pool.get().await.expect("соединение с тестовой базой");
+            client
+                .batch_execute("DROP SCHEMA IF EXISTS one_commit_pair CASCADE; CREATE SCHEMA one_commit_pair;")
+                .await
+                .expect("своя схема заводится");
+        }
+        super::ensure(&pool).await.expect("схема встаёт на пустой базе");
+        let client = pool.get().await.expect("соединение");
+        // Своя партия в 1000 — наблюдение началось. Зеркало `R-1` и тело `T-1`
+        // закрыты одним коммитом в 2000.
+        client
+            .batch_execute(
+                "INSERT INTO test_run (project_id, check_name, commit_sha, dirty, verdict, at, ran_in)
+                 VALUES ('П', 'другая', 'a', false, 'passed', 1000, 'plain.rs');
+                 INSERT INTO project_plan_versions (project_id, id) VALUES ('П', 'v1');
+                 INSERT INTO project_plan_milestones (project_id, id, version_id, ord, title)
+                 VALUES ('П', 'M1', 'v1', 1, 'веха');
+                 INSERT INTO project_plan_tasks (project_id, id, milestone_id, ord, title, size, state, kind,
+                                                 entity_kind, entity_name)
+                 VALUES ('П', 'R-1', 'M1', 1, 'зеркало', '', 'closed', 'red', 'task', 'R-1'),
+                        ('П', 'T-1', 'M1', 2, 'тело', '', 'closed', 'dev', 'task', 'T-1');
+                 INSERT INTO task_state (project_id, task_id, state, seen_at, closed_at)
+                 VALUES ('П', 'R-1', 'closed', 2000, 2000), ('П', 'T-1', 'closed', 2000, 2000);
+                 INSERT INTO red_task (project_id, id, parent_task, milestone) VALUES ('П', 'R-1', 'T-1', 'M1');
+                 INSERT INTO project_task_check (project_id, task_id, check_id, said_as)
+                 VALUES ('П', 'R-1', 'зеркало_пары', 'красная фаза');",
+            )
+            .await
+            .expect("пара подсаживается");
+        let red = include_str!("../../instrument/gate/corpus/red-observed-failing.sql");
+        let run = || async { super::execute_method_upto(&client, "П", "query", red, 200, 0).await };
+        let finding = vec!["R-1 — не наблюдалась красной: зеркало_пары".to_owned()];
+
+        let before = run().await;
+        assert_eq!((before.state, &before.detail), ("passed", &vec![]),
+                   "до первого взятого прогона из запроса пару видеть было нечем ({})", before.why);
+
+        // Прибор начал брать запросы в 1500 — раньше, чем пара закрылась.
+        client
+            .batch_execute("INSERT INTO ci_run_taken (project_id, run_id, run_attempt, actor, platform, at)
+                            VALUES ('П', 1, 1, 'ci-pr:ci.yml/red-pair', 'linux', 1500)")
+            .await
+            .expect("отметка подсаживается");
+        assert_eq!(run().await.detail, finding, "вырожденное окно не прощает пару");
+
+        let pr = |id: i64| crate::worker::JobRun {
+            id, attempt: 1, sha: "голова".into(), started: "2026-10-07T10:00:00Z".into(), from_pr: true,
+        };
+        let row = |check: &str, verdict: &str| (check.to_owned(), verdict.to_owned(), "mirror_x.rs".to_owned());
+        crate::worker::record_job_run(&pool, "П", &pr(2), "ci.yml", "red-pair", "linux",
+                                      vec![row("зеркало_пары", "passed"), row("другая", "passed")])
+            .await
+            .expect("прогон запроса пишется");
+        assert_eq!(run().await.detail, finding, "проход из запроса падением не считается");
+        crate::worker::record_job_run(&pool, "П", &pr(3), "ci.yml", "red-pair", "linux",
+                                      vec![row("зеркало_пары", "failed"), row("другая", "passed")])
+            .await
+            .expect("прогон запроса пишется");
+        let written: Vec<(String, String, String, String, String)> = client
+            .query("SELECT check_name, verdict, actor, commit_sha, platform FROM test_run
+                     WHERE project_id = 'П' AND at <> 1000 ORDER BY id", &[])
+            .await
+            .expect("строки читаются")
+            .iter()
+            .map(|r| (r.get(0), r.get(1), r.get(2), r.get(3), r.get(4)))
+            .collect();
+        assert_eq!(written, vec![("зеркало_пары".into(), "failed".into(), "ci-pr:ci.yml/red-pair".into(),
+                                  "голова".into(), "linux".into())],
+                   "из запроса в запись идёт одно падение, под `ci-pr:`, с коммитом головы");
+        let after = run().await;
+        assert_eq!((after.state, &after.detail), ("passed", &vec![]),
+                   "падение из запроса доказывает красную фазу ({})", after.why);
+
+        drop(client);
+        let client = pool.get().await.expect("соединение");
+        client.batch_execute("DROP SCHEMA IF EXISTS one_commit_pair CASCADE").await.expect("схема снимается");
+    }
+}
+
 #[cfg(test)]
 mod test_run_prune {
     use super::TEST_RUN_PRUNE;

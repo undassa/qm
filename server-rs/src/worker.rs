@@ -688,8 +688,18 @@ pub struct JobRun {
     pub from_pr: bool,
 }
 
-/// Прогон ствола — ветка по умолчанию, коммит из САМОГО репозитория набора и
-/// событие не от запроса на слияние; иначе `None`.
+impl JobRun {
+    /// Своё имя у строк из запроса (`ci-pr:`): по нему они видны в летописи,
+    /// отметка взятия у них своя, и по первой такой отметке
+    /// `red-observed-failing` знает, с какого мига прибор видел запросы.
+    pub fn actor(&self, workflow: &str, job: &str) -> String {
+        format!("{}:{workflow}/{job}", if self.from_pr { "ci-pr" } else { "ci" })
+    }
+}
+
+/// Прогон, годный в запись: коммит из САМОГО репозитория набора и либо ветка
+/// по умолчанию не от запроса на слияние, либо — у задания с `pr_red` —
+/// `pull_request`; иначе `None`.
 ///
 /// Имя ветки само по себе ничего не доказывает: форк держит свой `main`, и
 /// его прогон приходит в тот же список с `head_branch = main`. Прогон
@@ -733,10 +743,27 @@ pub fn recordable(rows: Vec<(String, String, String)>, from_pr: bool) -> Vec<(St
     rows.into_iter().filter(|(_, verdict, _)| !from_pr || verdict == "failed").collect()
 }
 
+/// Записать строки взятого прогона под его именем (`JobRun::actor`).
+pub(crate) async fn record_job_run(
+    pool: &Pool, project: &str, r: &JobRun, workflow: &str, job: &str, platform: &str,
+    rows: Vec<(String, String, String)>,
+) -> Result<Value, crate::db::Fail> {
+    let actor = r.actor(workflow, job);
+    let ci = crate::projector::CiRun { platform, run: r.id, attempt: r.attempt, started: &r.started };
+    let rows = recordable(rows, r.from_pr);
+    crate::projector::record_test_runs(pool, project, &r.sha, &rows, &actor, false, Some(ci)).await
+}
+
 /// Лежит ли коммит на `origin/<ствол>` дерева набора. Неизвестный коммит —
 /// «нет»: доказать нечем.
 fn on_trunk(root: &str, sha: &str, trunk: &str) -> bool {
     Worker::git(root, &["merge-base", "--is-ancestor", sha, &format!("origin/{trunk}")]).is_ok()
+}
+
+/// Прогон годен по коммиту: у прогона ствола коммит обязан лежать на стволе.
+/// У прогона из запроса ствола нет по построению — его граница в `job_run`.
+fn on_trunk_or_pr(root: &str, r: &JobRun, trunk: &str) -> bool {
+    r.from_pr || on_trunk(root, &r.sha, trunk)
 }
 
 pub struct Worker {
@@ -921,19 +948,29 @@ impl Worker {
         let listed = |runs: &Value| runs["workflow_runs"].as_array().cloned()
             .ok_or_else(|| format!("в ответе о прогонах {workflow} нет `workflow_runs`: {}", cut(&runs.to_string(), 300)));
         let mut list = listed(&runs)?;
+        // ПОТОЛОК: двадцать последних завершённых прогонов запросов на заход раз
+        // в пять минут. Больше двадцати за пять минут — старшие не увидятся
+        // никогда. Потеря отказывает закрыто: падения в записи нет, и пара
+        // остаётся находкой, а не проходит молча.
+        //
+        // Отказ перечня запросов не отменяет ствол: прогоны ствола того же
+        // задания берутся и без него.
         if pr_red {
-            list.extend(listed(&gh_json(&format!(
+            match gh_json(&format!(
                 "repos/{repo}/actions/workflows/{workflow}/runs?event=pull_request&status=completed&per_page=20"
             ))
-            .await?)?);
+            .await
+            .and_then(|v| listed(&v))
+            {
+                Ok(prs) => list.extend(prs),
+                Err(why) => println!("{} · CI ci-pr:{workflow}/{job}: запросы не прочитаны: {why}", bundle.name),
+            }
         }
         let client = crate::db::conn(&self.pool).await.map_err(|e| format!("{e:?}"))?;
         let (mut taken, mut fetched) = (0, false);
         for run in &list {
             let Some(r) = job_run(run, repo, &trunk, pr_red) else { continue };
-            // Своё имя у строк из запроса: по нему они видны в летописи, и
-            // отметка взятия у них своя.
-            let actor = &format!("{}:{workflow}/{job}", if r.from_pr { "ci-pr" } else { "ci" });
+            let actor = &r.actor(workflow, job);
             let seen: bool = client
                 .query_one(
                     "SELECT EXISTS (SELECT 1 FROM ci_run_taken
@@ -950,15 +987,14 @@ impl Worker {
             // имя ветки в ответе GitHub — слова прогона. Докачивается ствол раз
             // за заход и лишь когда коммита не нашлось: свежий прогон обычно
             // новее, чем знает общий чекаут. Не на стволе — не берётся и не
-            // отмечается: после докачки он может там оказаться. У прогона из
-            // запроса ствола нет по построению — его граница в `job_run`.
-            if !r.from_pr && !on_trunk(&bundle.repo, &r.sha, &trunk) && !fetched {
+            // отмечается: после докачки он может там оказаться.
+            if !on_trunk_or_pr(&bundle.repo, &r, &trunk) && !fetched {
                 fetched = true;
                 if let Err(why) = Self::git(&bundle.repo, &["fetch", "origin", "--quiet"]) {
                     println!("{} · CI: ствол не докачан: {why}", bundle.name);
                 }
             }
-            if !r.from_pr && !on_trunk(&bundle.repo, &r.sha, &trunk) {
+            if !on_trunk_or_pr(&bundle.repo, &r, &trunk) {
                 println!("{} · CI {actor}: прогон {} не взят: коммит {} не на origin/{trunk}", bundle.name, r.id, r.sha);
                 continue;
             }
@@ -979,9 +1015,7 @@ impl Worker {
                           нет строк прогона (не собралось, не запускалось либо формат не узнан)",
                          bundle.name, r.id);
             }
-            let rows = recordable(rows, r.from_pr);
-            let ci = crate::projector::CiRun { platform, run: r.id, attempt: r.attempt, started: &r.started };
-            crate::projector::record_test_runs(&self.pool, &bundle.project, &r.sha, &rows, actor, false, Some(ci))
+            record_job_run(&self.pool, &bundle.project, &r, workflow, job, platform, rows)
                 .await
                 .map_err(|e| format!("прогон {} не записан: {e:?}", r.id))?;
             taken += 1;
@@ -2587,11 +2621,12 @@ mod tests {
         }
     }
 
-    /// Прогон годится в факт о стволе, только если он со ствола САМОГО набора.
-    /// Порча, которую ловит проверка: форк с веткой `main` или
-    /// `pull_request_target` закрывают красную фазу падением не из набора.
+    /// Прогон годится в запись, только если он со ствола САМОГО набора либо, у
+    /// задания с `pr_red`, из его собственного запроса. Порча, которую ловит
+    /// проверка: форк с веткой `main` или `pull_request_target` закрывают
+    /// красную фазу падением не из набора.
     #[test]
-    fn only_a_trunk_run_of_the_project_itself_is_taken() {
+    fn a_trunk_run_or_a_flagged_own_pull_request_is_taken() {
         let run = |branch: &str, event: &str, from: &str| serde_json::json!({
             "id": 36642293742_i64, "run_attempt": 2, "head_sha": "6009f67", "run_started_at": "2026-09-29T22:54:37Z",
             "head_branch": branch, "event": event, "head_repository": { "full_name": from },
@@ -2652,6 +2687,11 @@ mod tests {
         assert!(!super::on_trunk(&path, &side, "main"), "коммит ветки — нет");
         assert!(!super::on_trunk(&path, "0000000000000000000000000000000000000000", "main"),
                 "неизвестный коммит — нет: доказать нечем");
+        // Прогон из запроса ствола не ищет: красного коммита пары на стволе нет
+        // никогда. Прогон ствола с тем же коммитом не берётся.
+        let run = |from_pr| super::JobRun { id: 1, attempt: 1, sha: side.clone(), started: String::new(), from_pr };
+        assert!(super::on_trunk_or_pr(&path, &run(true), "main"), "прогон запроса — без сверки со стволом");
+        assert!(!super::on_trunk_or_pr(&path, &run(false), "main"), "прогон ствола — со сверкой");
         std::fs::remove_dir_all(&tmp).ok();
     }
 }
