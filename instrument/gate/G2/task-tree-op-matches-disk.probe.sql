@@ -1,3 +1,4 @@
+-- Подсадка — в открытую версию: пункт судит только её (решение владельца 2026-10-07).
 -- ОДНА СТРОКА, ПОТОМУ ЧТО ВЕТВЬ ОДНА. Правило не различает «файла нет» и
 -- «датчик туда не дошёл», и подсаживать вторую ветвь не во что. Потолок назван
 -- честно: приговор самотеста — «ответ пункта изменился», и одной строки для
@@ -19,19 +20,19 @@
 WITH d AS (INSERT INTO project_documents (project_id, entity_kind, entity_name, content, content_hash, bytes, revision, updated_at, updated_by)
            SELECT $1, 'task', 'M9-T9990',
                   E'# M9-T9990 · подсадка самотеста\n\n| Поле | Значение |\n|---|---|\n| Веха | '
-                  || (SELECT min(m.id) FROM project_plan_milestones m WHERE m.project_id = $1) || E' |\n',
+                  || (SELECT m.id FROM project_plan_milestones m JOIN version_scope s ON s.project_id = m.project_id AND s.version = m.version_id WHERE m.project_id = $1 ORDER BY CASE coalesce(s.scope, 'open') WHEN 'open' THEN 0 WHEN 'closed' THEN 1 ELSE 2 END, m.id LIMIT 1) || E' |\n',
                   'probe-selftest', 0, 1, 1757000000000, 'probe-selftest'
            RETURNING project_id),
      поле AS (INSERT INTO project_document_fields
                 (project_id, section_ord, ord, name, shape, value_raw, value, entity_kind, entity_name)
               SELECT d.project_id, 0, 0, 'Веха', 'row',
-                     (SELECT min(m.id) FROM project_plan_milestones m WHERE m.project_id = $1),
-                     (SELECT min(m.id) FROM project_plan_milestones m WHERE m.project_id = $1),
+                     (SELECT m.id FROM project_plan_milestones m JOIN version_scope s ON s.project_id = m.project_id AND s.version = m.version_id WHERE m.project_id = $1 ORDER BY CASE coalesce(s.scope, 'open') WHEN 'open' THEN 0 WHEN 'closed' THEN 1 ELSE 2 END, m.id LIMIT 1),
+                     (SELECT m.id FROM project_plan_milestones m JOIN version_scope s ON s.project_id = m.project_id AND s.version = m.version_id WHERE m.project_id = $1 ORDER BY CASE coalesce(s.scope, 'open') WHEN 'open' THEN 0 WHEN 'closed' THEN 1 ELSE 2 END, m.id LIMIT 1),
                      'task', 'M9-T9990' FROM d
               ON CONFLICT DO NOTHING
               RETURNING project_id),
      t AS (INSERT INTO project_plan_tasks (project_id, id, milestone_id, ord, title, size, state, kind, entity_kind, entity_name, origin)
-           SELECT d.project_id, 'M9-T9990', (SELECT min(milestone_id) FROM project_plan_tasks WHERE project_id = $1), 9990,
+           SELECT d.project_id, 'M9-T9990', (SELECT m.id FROM project_plan_milestones m JOIN version_scope s ON s.project_id = m.project_id AND s.version = m.version_id WHERE m.project_id = $1 ORDER BY CASE coalesce(s.scope, 'open') WHEN 'open' THEN 0 WHEN 'closed' THEN 1 ELSE 2 END, m.id LIMIT 1), 9990,
                   'подсадка самотеста', 'S', 'not_started', 'dev', 'task', 'M9-T9990', 'declared' FROM d
            RETURNING project_id)
 INSERT INTO project_task_tree_leaf (project_id, task_id, ord, dir, leaf, is_path, exempt, target_dir, op, path)

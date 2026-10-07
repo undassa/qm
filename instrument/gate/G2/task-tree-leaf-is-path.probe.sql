@@ -1,1 +1,2 @@
-INSERT INTO project_task_tree_leaf(project_id, task_id, ord, dir, leaf, is_path, exempt, target_dir, forward_declared) SELECT $1, min(id), 9999, 'проба', 'не путь, а предмет', false, false, '', false FROM project_plan_tasks WHERE project_id=$1
+-- Подсадка — в открытую версию: пункт судит только её (решение владельца 2026-10-07).
+INSERT INTO project_task_tree_leaf(project_id, task_id, ord, dir, leaf, is_path, exempt, target_dir, forward_declared) SELECT $1, т.id, 9999, 'проба', 'не путь, а предмет', false, false, '', false FROM (SELECT (SELECT s.task_id FROM task_scope s WHERE s.project_id = $1 ORDER BY CASE coalesce(s.scope, 'open') WHEN 'open' THEN 0 WHEN 'closed' THEN 1 ELSE 2 END, s.task_id LIMIT 1) AS id) т WHERE т.id IS NOT NULL

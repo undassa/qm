@@ -1,3 +1,5 @@
+-- Судится открытая версия (и закрытые): задачи и требования следующей и поздних
+-- версий её не держат (решение владельца 2026-10-07). Без открытой версии — весь набор.
 WITH свежий AS (
   SELECT k FROM unnest(ARRAY['repo-file', 'code-file']) AS k WHERE fact_fresh($1, k)),
 датчик AS (
@@ -25,6 +27,7 @@ WITH свежий AS (
     FROM project_task_tree_leaf l
     JOIN project_plan_tasks t ON t.project_id = l.project_id AND t.id = l.task_id AND t.state <> 'closed'
    WHERE l.project_id = $1 AND l.is_path AND NOT l.exempt AND l.path <> '' AND l.op <> ''
+     AND NOT EXISTS (SELECT 1 FROM task_scope sc WHERE sc.project_id = t.project_id AND sc.task_id = t.id AND sc.scope IN ('next','later'))
      -- ЗАДАЧА В РАБОТЕ НЕ СУДИТСЯ. Её пометки описывают ПЕРЕХОД, а не
      -- состояние: «+» значит «заведу», и заведённый файл делает пометку
      -- «неверной» ровно в тот миг, когда работа пошла. «-» — то же зеркально.

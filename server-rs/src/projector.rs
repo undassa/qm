@@ -234,6 +234,7 @@ CREATE OR REPLACE VIEW readiness_bound AS
 /// вместе с каждой колонкой, а забытое оно роняет запуск. Пересоздание дёшево и
 /// верно всегда.
 const PHASE_VIEWS: &str = r#"
+DROP VIEW IF EXISTS requirement_scope;
 DROP VIEW IF EXISTS task_scope;
 DROP VIEW IF EXISTS version_scope;
 DROP VIEW IF EXISTS task_phase;
@@ -389,6 +390,23 @@ CREATE VIEW task_scope AS
     FROM project_plan_tasks t
     JOIN project_plan_milestones m ON m.project_id = t.project_id AND m.id = t.milestone_id
     JOIN version_scope s ON s.project_id = t.project_id AND s.version = m.version_id;
+
+-- Место требования в конвейере — по задачам, которые его держат: самое раннее
+-- из их мест (`open` < `next` < `later`), `closed` — если все держатели в
+-- закрытых версиях. Проектная работа поздних версий открытую не держит
+-- (решение владельца 2026-10-07). Требование, которого не держит НИ ОДНА
+-- задача, — NULL, то есть судится: неразмещённое не прячется за «потом».
+CREATE VIEW requirement_scope AS
+  SELECT r.project_id, r.id AS requirement_id,
+         CASE WHEN count(ts.task_id) = 0 OR bool_or(ts.scope IS NULL) THEN NULL
+              WHEN bool_or(ts.scope = 'open') THEN 'open'
+              WHEN bool_or(ts.scope = 'next') THEN 'next'
+              WHEN bool_or(ts.scope = 'later') THEN 'later'
+              ELSE 'closed' END AS scope
+    FROM project_requirements r
+    LEFT JOIN task_requirement tr ON tr.project_id = r.project_id AND tr.requirement_id = r.id
+    LEFT JOIN task_scope ts ON ts.project_id = tr.project_id AND ts.task_id = tr.task_id
+   GROUP BY r.project_id, r.id;
 "#;
 
 const DDL: &str = r#"
@@ -18426,6 +18444,99 @@ mod version_scope {
                                                             AND c.kind <> 'red' AND c.state <> 'closed'))", &[])
             .await.expect("барьер").iter().map(|r| r.get(0)).collect();
         assert_eq!(open, vec!["V1-T1".to_owned()], "код, которого ждёт тест, барьером не держится");
+    }
+
+    /// Проектная работа поздних версий открытую не держит: требование
+    /// стоит там, где самый ранний его держатель, а пункт G2 судит открытую.
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn later_design_does_not_hold_the_open_version() {
+        let url = std::env::var("MH_TEST_DB_URL").expect("MH_TEST_DB_URL: адрес пустой базы");
+        let apart = format!("{}{}", if url.contains('?') { '&' } else { '?' },
+                            "options=-c%20search_path%3Drequirement_scope");
+        let pool = crate::db::pool(&format!("{url}{apart}"), 2).expect("пул тестовой базы");
+        {
+            let client = pool.get().await.expect("соединение с тестовой базой");
+            client
+                .batch_execute("DROP SCHEMA IF EXISTS requirement_scope CASCADE; CREATE SCHEMA requirement_scope;")
+                .await
+                .expect("своя схема заводится");
+        }
+        super::ensure(&pool).await.expect("схема встаёт на пустой базе");
+        let client = pool.get().await.expect("соединение");
+        client
+            .batch_execute(
+                "INSERT INTO project_plan_versions (project_id, id) VALUES
+                   ('Т', '0.0.9'), ('Т', '0.1.0'), ('Т', '0.1.1'), ('Т', '0.2.0');
+                 INSERT INTO project_plan_milestones (project_id, id, version_id, ord, title) VALUES
+                   ('Т', 'V0', '0.0.9', 0, 'было'), ('Т', 'V1', '0.1.0', 1, 'ядро'),
+                   ('Т', 'V2', '0.1.1', 2, 'следом'), ('Т', 'V3', '0.2.0', 3, 'потом');
+                 INSERT INTO version_state (project_id, version, state, changed_at) VALUES
+                   ('Т', '0.0.9', 'closed', 1), ('Т', '0.1.0', 'open', 1);
+                 INSERT INTO project_plan_tasks (project_id, id, milestone_id, ord, title, size, state, kind,
+                                                 entity_kind, entity_name, parent_task_id) VALUES
+                   ('Т', 'T0', 'V0', 1, 'старое', '', 'closed', 'dev', 'task', 'T0', ''),
+                   ('Т', 'T1', 'V1', 1, 'ядро', '', 'not_started', 'dev', 'task', 'T1', ''),
+                   ('Т', 'T2', 'V2', 1, 'следом', '', 'not_started', 'dev', 'task', 'T2', ''),
+                   ('Т', 'T3', 'V3', 1, 'потом', '', 'not_started', 'dev', 'task', 'T3', ''),
+                   ('Т', 'R1', 'V1', 2, 'тест ядра', '', 'not_started', 'red', 'red-task', 'R1', ''),
+                   ('Т', 'R3', 'V3', 2, 'тест потом', '', 'not_started', 'red', 'red-task', 'R3', '');
+                 INSERT INTO project_requirements (project_id, id, kind, area, text, satisfied) VALUES
+                   ('Т', 'FR-OPEN', 'FR', 'а', 'т', false), ('Т', 'FR-NEXT', 'FR', 'а', 'т', false),
+                   ('Т', 'FR-LATER', 'FR', 'а', 'т', false), ('Т', 'FR-DONE', 'FR', 'а', 'т', false),
+                   ('Т', 'FR-FREE', 'FR', 'а', 'т', false);
+                 INSERT INTO task_requirement (project_id, task_id, requirement_id) VALUES
+                   ('Т', 'T1', 'FR-OPEN'), ('Т', 'T3', 'FR-OPEN'),
+                   ('Т', 'T2', 'FR-NEXT'), ('Т', 'T3', 'FR-NEXT'),
+                   ('Т', 'T3', 'FR-LATER'), ('Т', 'T0', 'FR-DONE');",
+            )
+            .await
+            .expect("набор подсаживается");
+        let scopes = || async {
+            client
+                .query("SELECT requirement_id, scope FROM requirement_scope WHERE project_id = 'Т' ORDER BY 1", &[])
+                .await
+                .expect("вид requirement_scope")
+                .iter()
+                .map(|r| (r.get::<_, String>(0), r.get::<_, Option<String>>(1)))
+                .collect::<Vec<_>>()
+        };
+        let s = |v: &str| Some(v.to_owned());
+        assert_eq!(scopes().await, vec![
+            ("FR-DONE".to_owned(), s("closed")),
+            ("FR-FREE".to_owned(), None),
+            ("FR-LATER".to_owned(), s("later")),
+            ("FR-NEXT".to_owned(), s("next")),
+            ("FR-OPEN".to_owned(), s("open")),
+        ], "самый ранний держатель; без держателя — судится");
+
+        // Пункт G2: красная задача поздней версии без родителя открытую не держит,
+        // а подсадка пробы ложится в открытую и пункт роняет.
+        let red = || async {
+            client
+                .query(include_str!("../../instrument/gate/G2/red-task-complete.sql"), &[&"Т"])
+                .await
+                .expect("пункт red-task-complete")
+                .iter()
+                .map(|r| r.get::<_, String>(0))
+                .collect::<Vec<_>>()
+        };
+        let seen = red().await;
+        assert!(seen.iter().any(|d| d.starts_with("R1 ")), "открытая судится: {seen:?}");
+        assert!(!seen.iter().any(|d| d.starts_with("R3 ")), "поздняя не держит: {seen:?}");
+        client
+            .execute(include_str!("../../instrument/gate/G2/red-task-complete.probe.sql"), &[&"Т"])
+            .await
+            .expect("проба исполняется");
+        let seen = red().await;
+        assert!(seen.iter().any(|d| d.starts_with("M9-TPROBE ")), "проба роняет пункт: {seen:?}");
+
+        // Без открытой версии судится всё.
+        client.batch_execute("DELETE FROM version_state WHERE project_id = 'Т' AND state = 'open';")
+            .await.expect("снята открытая");
+        assert!(scopes().await.iter().all(|(_, sc)| sc.is_none()), "без открытой — всё NULL");
+        let seen = red().await;
+        assert!(seen.iter().any(|d| d.starts_with("R3 ")), "без открытой судится и поздняя: {seen:?}");
     }
 
     /// Дверь `versions`: владелец видит, как идёт каждая версия, теми же

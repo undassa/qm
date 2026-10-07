@@ -1,3 +1,5 @@
+-- Судится открытая версия (и закрытые): задачи и требования следующей и поздних
+-- версий её не держат (решение владельца 2026-10-07). Без открытой версии — весь набор.
 -- ЧТО ДАТЧИК ПРОЧЁЛ, А НЕ ЧТО ЛЕЖИТ В ДЕРЕВЕ. Каталоги правило берёт из
 -- поданных фактов, поэтому путь, до которого датчик не дошёл, даёт ту же
 -- пустоту, что и несуществующий, — а правило утверждало второе.
@@ -43,6 +45,7 @@ SELECT l.task_id || ' — ' || l.path || ': среди прочитанного 
  WHERE l.project_id = $1 AND (fact_fresh($1, 'repo-file') OR fact_fresh($1, 'code-file'))
    AND l.is_path AND NOT l.exempt AND NOT l.forward_declared
    AND l.target_dir <> '' AND l.op <> '+'
+   AND NOT EXISTS (SELECT 1 FROM task_scope sc WHERE sc.project_id = l.project_id AND sc.task_id = l.task_id AND sc.scope IN ('next','later'))
    AND NOT EXISTS (SELECT 1 FROM project_code_dir d
                     WHERE d.project_id = $1 AND d.dir = l.target_dir)
  ORDER BY 1

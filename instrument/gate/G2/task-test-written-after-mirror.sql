@@ -1,3 +1,5 @@
+-- Судится открытая версия (и закрытые): задачи и требования следующей и поздних
+-- версий её не держат (решение владельца 2026-10-07). Без открытой версии — весь набор.
 -- «В ДЕРЕВЕ НЕТ» ПРАВИЛО СКАЗАТЬ НЕ МОЖЕТ. Имена тестов берутся у датчика
 -- `test-name`, а он читает по объявленному перечню: у `tot-ade` это
 -- `crates/**/*.rs`, и тест вне `crates` неотличим здесь от ненаписанного.
@@ -8,7 +10,8 @@ WITH строка AS (
     FROM project_plan_tasks t
     JOIN project_documents d ON d.project_id = t.project_id AND d.entity_kind = t.entity_kind AND d.entity_name = t.entity_name
    CROSS JOIN LATERAL regexp_split_to_table(d.content, E'\n') AS l(line)
-   WHERE t.project_id = $1 AND t.kind = 'dev' AND t.state <> 'closed' AND l.line LIKE '|%'),
+   WHERE t.project_id = $1 AND t.kind = 'dev' AND t.state <> 'closed' AND l.line LIKE '|%'
+     AND NOT EXISTS (SELECT 1 FROM task_scope sc WHERE sc.project_id = t.project_id AND sc.task_id = t.id AND sc.scope IN ('next','later'))),
 проверка AS (
   SELECT DISTINCT c.task_id, c.check_id, r.id AS зеркало
     FROM project_task_check c

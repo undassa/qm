@@ -1,3 +1,4 @@
+-- Подсадка — в открытую версию: пункт судит только её (решение владельца 2026-10-07).
 -- ОДНА СТРОКА, ПОТОМУ ЧТО ВЕТВЬ ОДНА. Правило не различает «каталога нет» и
 -- «датчик туда не дошёл»: различить их нечем, и подсаживать вторую ветвь не во
 -- что. Потолок назван честно: приговор самотеста — «ответ пункта изменился», и
@@ -15,6 +16,6 @@
 -- можно завтра, и проба, гейт и CI останутся зелёными. Колонку держит
 -- читающий, а не прибор.
 INSERT INTO project_task_tree_leaf(project_id, task_id, ord, dir, leaf, is_path, exempt, target_dir, path, forward_declared)
-SELECT $1, min(id), 9998, 'проба', 'файл', true, false, 'нет-такого-каталога-пробы',
+SELECT $1, т.id, 9998, 'проба', 'файл', true, false, 'нет-такого-каталога-пробы',
        'нет-такого-каталога-пробы/файл', false
-  FROM project_plan_tasks WHERE project_id=$1
+  FROM (SELECT (SELECT s.task_id FROM task_scope s WHERE s.project_id = $1 ORDER BY CASE coalesce(s.scope, 'open') WHEN 'open' THEN 0 WHEN 'closed' THEN 1 ELSE 2 END, s.task_id LIMIT 1) AS id) т WHERE т.id IS NOT NULL
