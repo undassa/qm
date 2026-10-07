@@ -28,6 +28,14 @@ pub(crate) fn hash_document(content: &str) -> String {
 /// Вид обязан быть объявлен раскладкой и быть документом: сущность, объявленная
 /// ВНУТРИ другого документа (требование, статья, термин), своего документа не
 /// имеет, и заводить его для неё — заводить двойника.
+/// Пустой текст — не документ, а след сломанной подачи: при заполненном
+/// `/tmp` `content=@файл` читал пустой файл, и дверь заводила пустые карточки
+/// задач с ответом «записано» (tot-space, 2026-10-07, три штуки).
+fn empty_text(content: &str) -> Option<Value> {
+    content.trim().is_empty().then(|| json!({ "status": "empty",
+        "why": "текст документа пуст: пустой документ не заводится и не пишется поверх. Если текст шёл файлом (`content=@файл`), проверьте файл и место на диске" }))
+}
+
 pub(crate) async fn create(pool: &Pool, kinds: &crate::kinds::Kinds, project: &str, fields: Document<'_>, author: &str, now_ms: i64) -> Result<Value, crate::entities::Miss> {
     let Document { kind, name, content } = fields;
     let Some(declared) = kinds.get(kind) else {
@@ -53,6 +61,9 @@ pub(crate) async fn create(pool: &Pool, kinds: &crate::kinds::Kinds, project: &s
             return Ok(json!({ "status": "bad_name",
                               "why": format!("имя «{name}» не подходит под образец вида «{kind}»") }));
         }
+    }
+    if let Some(refused) = empty_text(content) {
+        return Ok(refused);
     }
     let bytes = content.len();
     if bytes > MAX_DOCUMENT_BYTES {
@@ -135,6 +146,9 @@ pub(crate) async fn put(pool: &Pool, project: &str, fields: Document<'_>, author
     if kind.is_empty() {
         return Ok(json!({ "status": "not_found",
                           "why": "вид документа не назван, а без вида адреса нет: `kind=` обязателен" }));
+    }
+    if let Some(refused) = empty_text(content) {
+        return Ok(refused);
     }
     let bytes = content.len();
     if bytes > MAX_DOCUMENT_BYTES {
@@ -615,6 +629,21 @@ mod splice_tests {
         match splice_section(doc, "вопросы", "\n## Q-1\n\n### Решение\n\nа\n\n## Q-2\n\nб\n") {
             Splice::Drops(d) => assert_eq!(d, ["решение"]),
             _ => panic!("потеря второго «Решения» принята"),
+        }
+    }
+}
+
+/// Пустой текст отказан до базы: адрес базы здесь нерабочий, и дошедшая до
+/// неё запись упала бы ошибкой соединения, а не ответом «пусто».
+#[cfg(test)]
+mod empty_text {
+    #[tokio::test]
+    async fn an_empty_text_is_refused_not_written() {
+        let pool = crate::db::pool("postgres://nobody@127.0.0.1:1/none", 1).expect("пул без соединения");
+        for content in ["", "  \n"] {
+            let doc = super::Document { kind: "task", name: "M9-T1", content };
+            let v = super::put(&pool, "p", doc, "t", None, 0).await.expect("отказ без базы");
+            assert_eq!(v["status"], "empty", "пустой текст «{content:?}» не пишется поверх");
         }
     }
 }
