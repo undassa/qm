@@ -963,15 +963,19 @@ pub fn sense(door: &Door, only: Option<&str>, root: &str) -> Result<Value, Strin
         if how == "domain-vs-check" {
             let mut enums = Vec::new();
             let mut checks = Vec::new();
+            let mut migrations: Vec<(String, String)> = Vec::new();
             for f in &files {
                 let short = f.strip_prefix(&format!("{root}/")).unwrap_or(f).to_owned();
                 let Ok(text) = std::fs::read_to_string(f) else { continue };
                 if short.ends_with(".rs") {
                     enums.extend(crate::repo_corpus::enums_of(&text, &short));
                 } else if crate::repo_corpus::migration_up(&short) {
-                    checks.extend(crate::repo_corpus::checks_of(&text, &short));
+                    migrations.push((text, short));
                 }
             }
+            // Множества — всей цепочкой, по порядку файлов: правка `ALTER` и
+            // снятие таблицы меняют то, что стоит в базе.
+            checks.extend(crate::repo_corpus::check_sets(&migrations));
             // Отказ вместо тихого нуля: пропавший каталог обнулил бы оба
             // перечня и показал бы «сверили, сошлось».
             if enums.is_empty() || checks.is_empty() {

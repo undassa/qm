@@ -214,6 +214,134 @@ pub(crate) fn enums_of(text: &str, file: &str) -> Vec<Enum> {
     out
 }
 
+/// Множества `CHECK` ВСЕЙ ЦЕПОЧКИ миграций, по порядку: то, что стоит в базе
+/// после последней миграции, а не то, что когда-либо было написано.
+///
+/// `checks_of` видел множество только внутри `CREATE TABLE` и только в своём
+/// файле. Правка множества миграцией — `ALTER TABLE … ADD CONSTRAINT … CHECK`,
+/// `ADD COLUMN … CHECK`, `DROP CONSTRAINT`, `DROP COLUMN`, `DROP TABLE` — для него
+/// не существовала: у `myack` тяжесть под `CHECK` (0017) не видна, а пятизначное
+/// множество `postmortem_blocks.kind` из 0007 и множества снятых `exporters` и
+/// `provider_events` числились живыми — находки о том, чего в базе нет.
+///
+/// Имя ограничения, данное в `CREATE TABLE` без `CONSTRAINT`, — то, что даёт ему
+/// Postgres: `таблица_колонка_check`; им же снимают.
+/// ponytail: внутри одного файла сначала `CREATE TABLE`, затем правки по порядку —
+/// файл, снимающий таблицу и заводящий её заново, читается неверно.
+pub(crate) fn check_sets(files: &[(String, String)]) -> Vec<CheckSet> {
+    static ALTER: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+        regex::Regex::new(r"(?is)ALTER TABLE\s+(?:IF EXISTS\s+)?(?:ONLY\s+)?(?:[a-z][a-z0-9_]*\.)?([a-z][a-z0-9_]*)\s+([^;]*);")
+            .expect("образец правки таблицы")
+    });
+    static DROP_TABLE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+        regex::Regex::new(r"(?is)DROP TABLE\s+(?:IF EXISTS\s+)?([^;]*)").expect("образец снятой таблицы")
+    });
+    static ADD_CHECK: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+        regex::Regex::new(r"(?i)^ADD\s+(?:CONSTRAINT\s+([a-z_][a-z0-9_]*)\s+)?CHECK\s*\(\s*([a-z_][a-z0-9_]*)\s+IN\s*\(([^)]*)\)")
+            .expect("образец добавленного множества")
+    });
+    static ADD_COLUMN: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+        regex::Regex::new(r"(?i)^ADD\s+(?:COLUMN\s+)?(?:IF NOT EXISTS\s+)?([a-z_][a-z0-9_]*)\s.*?CHECK\s*\(\s*([a-z_][a-z0-9_]*)\s+IN\s*\(([^)]*)\)")
+            .expect("образец колонки с множеством")
+    });
+    static DROP_CONSTRAINT: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+        regex::Regex::new(r"(?i)^DROP\s+CONSTRAINT\s+(?:IF EXISTS\s+)?([a-z_][a-z0-9_]*)").expect("образец снятого ограничения")
+    });
+    static DROP_COLUMN: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+        regex::Regex::new(r"(?i)^DROP\s+(?:COLUMN\s+)?(?:IF EXISTS\s+)?([a-z_][a-z0-9_]*)").expect("образец снятой колонки")
+    });
+    // (таблица, имя ограничения, множество)
+    let mut live: Vec<(String, String, CheckSet)> = Vec::new();
+    let set = |table: &str, col: &str, list: &str, file: &str| -> Option<CheckSet> {
+        let one = format!("CREATE TABLE {table} ({col} text CHECK ({col} IN ({list})));");
+        checks_of(&one, file).pop()
+    };
+    for (text, file) in files {
+        for c in checks_of(text, file) {
+            let (t, col) = c.at.split_once('.').map(|(a, b)| (a.to_owned(), b.to_owned())).unwrap_or_default();
+            live.push((t.clone(), format!("{t}_{col}_check"), c));
+        }
+        let clean = uncommented(text);
+        let mut steps: Vec<(usize, String, String)> = ALTER
+            .captures_iter(&clean)
+            .map(|m| (m.get(0).expect("целиком").start(), m[1].to_lowercase(), m[2].to_owned()))
+            .collect();
+        for m in DROP_TABLE.captures_iter(&clean) {
+            steps.push((m.get(0).expect("целиком").start(), String::new(), m[1].to_owned()));
+        }
+        steps.sort_by_key(|(at, _, _)| *at);
+        for (_, table, body) in steps {
+            if table.is_empty() {
+                for name in body.split(',').filter_map(|n| n.split_whitespace().next()) {
+                    let name = name.rsplit('.').next().unwrap_or(name).to_lowercase();
+                    live.retain(|(t, _, _)| *t != name);
+                }
+                continue;
+            }
+            // Действия режутся запятой верхнего уровня, как в `alters_of`.
+            let mut acts = vec![String::new()];
+            let mut d = 0i32;
+            for ch in body.chars() {
+                match ch {
+                    '(' => d += 1,
+                    ')' => d -= 1,
+                    ',' if d == 0 => {
+                        acts.push(String::new());
+                        continue;
+                    }
+                    _ => {}
+                }
+                acts.last_mut().expect("есть действие").push(ch);
+            }
+            for a in acts {
+                let a: String = a.split_whitespace().collect::<Vec<&str>>().join(" ");
+                if let Some(c) = ADD_CHECK.captures(&a) {
+                    let col = c[2].to_lowercase();
+                    let name = c.get(1).map(|n| n.as_str().to_lowercase()).unwrap_or(format!("{table}_{col}_check"));
+                    if let Some(s) = set(&table, &col, &c[3], file) {
+                        live.push((table.clone(), name, s));
+                    }
+                } else if let Some(c) = ADD_COLUMN.captures(&a) {
+                    let col = c[2].to_lowercase();
+                    if let Some(s) = set(&table, &col, &c[3], file) {
+                        live.push((table.clone(), format!("{table}_{col}_check"), s));
+                    }
+                } else if let Some(c) = DROP_CONSTRAINT.captures(&a) {
+                    let name = c[1].to_lowercase();
+                    live.retain(|(t, n, _)| !(*t == table && *n == name));
+                } else if let Some(c) = DROP_COLUMN.captures(&a) {
+                    let at = format!("{table}.{}", c[1].to_lowercase());
+                    live.retain(|(_, _, s)| s.at != at);
+                }
+            }
+        }
+    }
+    live.into_iter().map(|(_, _, s)| s).collect()
+}
+
+#[cfg(test)]
+#[test]
+fn a_check_set_follows_the_migration_chain() {
+    let files = vec![
+        ("CREATE TABLE blocks (id text, kind text NOT NULL CHECK (kind IN ('text','query')));
+          CREATE TABLE exporters (tier text CHECK (tier IN ('global','team')));
+          CREATE TABLE situations (severity text NOT NULL);".to_owned(), "0001.sql".to_owned()),
+        ("ALTER TABLE blocks DROP CONSTRAINT blocks_kind_check,
+            ADD CONSTRAINT blocks_kind_check CHECK (kind IN ('text','metric_query','log_query'));
+          ALTER TABLE situations ADD CONSTRAINT situations_severity_check CHECK (severity IN ('sev1','sev2'));
+          ALTER TABLE situations ADD COLUMN reason text CHECK (reason IN ('a','b'));
+          DROP TABLE IF EXISTS exporters;".to_owned(), "0002.sql".to_owned()),
+    ];
+    let mut got: Vec<(String, Vec<String>)> = check_sets(&files).into_iter().map(|c| (c.at, c.values)).collect();
+    got.sort();
+    let v = |x: &[&str]| x.iter().map(|s| (*s).to_owned()).collect::<Vec<String>>();
+    assert_eq!(got, vec![
+        ("blocks.kind".to_owned(), v(&["text", "metric_query", "log_query"])),
+        ("situations.reason".to_owned(), v(&["a", "b"])),
+        ("situations.severity".to_owned(), v(&["sev1", "sev2"])),
+    ]);
+}
+
 /// Множества `CHECK` из текста одной миграции. Комментарии снимаются: `--` и
 /// `/* */` вне строки в кавычках съели бы половину определения.
 pub(crate) fn checks_of(text: &str, file: &str) -> Vec<CheckSet> {
