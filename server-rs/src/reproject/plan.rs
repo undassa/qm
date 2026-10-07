@@ -196,15 +196,24 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize,
     // ищется среди НИХ, а не своим образцом имени: образец — копия раскладки,
     // а поле пишут прозой («**M9** — выпуск 0.1.2, редактор»), и десять таких
     // задач tot-ade держали пересборку всего плана (2026-10-07).
-    let known_milestones: HashSet<String> = {
+    let (known_milestones, held_version): (HashSet<String>, HashMap<String, String>) = {
         let client = crate::db::conn(pool).await?;
         let declared = client
             .query("SELECT id FROM project_plan_milestones WHERE project_id = $1 AND origin = 'declared'",
                    &[&project])
             .await?;
-        named.iter().filter(|e| e.0 == "milestone").map(|e| e.1.clone())
-            .chain(declared.iter().map(|r| r.get::<_, String>(0)))
-            .collect()
+        // Этап, получивший документ после объявления, остаётся в своём выпуске,
+        // пока таблица выпуска его не назовёт: иначе выпуск выходил пустым, и
+        // пересборка падала о внешний ключ (tot-ade, документ M9, 2026-10-07).
+        let held = client
+            .query("SELECT id, version_id FROM project_plan_milestones WHERE project_id = $1", &[&project])
+            .await?;
+        (
+            named.iter().filter(|e| e.0 == "milestone").map(|e| e.1.clone())
+                .chain(declared.iter().map(|r| r.get::<_, String>(0)))
+                .collect(),
+            held.iter().map(|r| (r.get(0), r.get(1))).collect(),
+        )
     };
     let titles = titles(pool, project).await?;
     let empty = HashMap::new();
@@ -222,7 +231,7 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize,
         }
         let title = titles.get(&key).cloned().unwrap_or_else(|| e.1.clone());
         if e.0 == "milestone" {
-            let version = milestone_version.get(&e.1).cloned().unwrap_or_default();
+            let version = milestone_version.get(&e.1).or_else(|| held_version.get(&e.1)).cloned().unwrap_or_default();
             milestones.push((e.1.clone(), version, milestones.len() as i32, title,
                              e.0.clone(), e.1.clone()));
             continue;
@@ -722,6 +731,13 @@ mod milestone_field {
         crate::projector::ensure(&pool).await.expect("схема встаёт на пустой базе");
         crate::projector::declare_version(&pool, P, "0.1.2", false).await.expect("выпуск");
         crate::projector::declare_milestone(&pool, P, "M9", "0.1.2", 1, "каркас", false).await.expect("этап");
+        // У объявленного этапа появился документ, а таблица выпуска его не
+        // называет: выпуск остаётся прежним.
+        pool.get().await.expect("соединение").execute(
+            "INSERT INTO project_documents (project_id, entity_kind, entity_name, content, content_hash,
+                                            bytes, revision, updated_at, updated_by)
+             VALUES ($1, 'milestone', 'M9', '# M9 · каркас', '', 0, 1, 0, 't')", &[&P])
+            .await.expect("документ этапа");
         // Имя задачи этапа не называет: иначе запасной ответ по имени скрыл бы
         // непрочитанное поле.
         // Документ и его поле кладутся строками: разбор документа в поля — не
@@ -745,6 +761,10 @@ mod milestone_field {
             .query_one("SELECT milestone_id FROM project_plan_tasks WHERE project_id = $1 AND id = 'window-1'", &[&P])
             .await.expect("задача в плане").get(0);
         assert_eq!(milestone, "M9");
+        let version: String = pool.get().await.expect("соединение")
+            .query_one("SELECT version_id FROM project_plan_milestones WHERE project_id = $1 AND id = 'M9'", &[&P])
+            .await.expect("этап в плане").get(0);
+        assert_eq!(version, "0.1.2", "этап с документом остаётся в объявленном выпуске");
         // Веха прозой без имени этапа — отказ с её словами, а не этап по имени.
         let client = pool.get().await.expect("соединение");
         client.execute(
