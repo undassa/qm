@@ -16,7 +16,7 @@ use std::collections::HashMap;
 /// Прежде этап читался из каталога (`50-plan/v1/M0/M0-T1.md`). Каталог говорил
 /// то же самое, что имя задачи, — только окольно.
 static TASK_MILESTONE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)^([MV]\d+)-T").expect("образец этапа в имени задачи"));
+    Lazy::new(|| Regex::new(r"(?i)^([MV](?:\d+|[A-Z]))-T").expect("образец этапа в имени задачи"));
 /// Имя задачи в поле «Зависит от» — с кавычками кода и без них.
 ///
 /// Требование кавычек стоило 57 зависимостей из 338: половина набора пишет
@@ -183,7 +183,7 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize,
             .query(
                 "SELECT c.value, c.entity_name FROM project_document_cells c
                   WHERE c.project_id = $1 AND c.entity_kind = 'version'
-                    AND c.col = 0 AND c.row_ord > 0 AND c.value ~ '^[MV][0-9]+$'",
+                    AND c.col = 0 AND c.row_ord > 0 AND c.value ~ '^[MV](?:[0-9]+|[A-Z])$'",
                 &[&project],
             )
             .await?

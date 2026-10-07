@@ -4707,9 +4707,9 @@ pub async fn rebuild(pool: &Pool, project: &str, _: &crate::watch::Lease) -> Res
                     -- пояснением, связь с зеркалом рвалась, и ни один гейт
                     -- этого не видел. Не нашлось имени — значение как есть.
                     coalesce(max(CASE WHEN f.name ILIKE 'Родительская%' OR f.name = 'Пара'
-                                      THEN coalesce(substring(f.value from '[MmVv][0-9]+-[Tt][0-9A-Za-z]+(?:-[0-9A-Za-z]+)*'), f.value) END), ''),
+                                      THEN coalesce(substring(f.value from '[MmVv](?:[0-9]+|[A-Za-z])-[Tt][0-9A-Za-z]+(?:-[0-9A-Za-z]+)*'), f.value) END), ''),
                     coalesce(max(CASE WHEN f.name ILIKE 'Этап родителя%' OR f.name = 'Веха'
-                                      THEN coalesce(substring(f.value from '^[[:space:]`]*([A-Za-z]+[0-9]+)(?![A-Za-z0-9-])'), f.value) END), ''),
+                                      THEN coalesce(substring(f.value from '^[[:space:]`]*([A-Za-z]+[0-9]+|[MV][A-Z])(?![A-Za-z0-9-])'), f.value) END), ''),
                     -- Число проверок — ЧИСЛО в начале значения, а не всё
                     -- значение: набор пишет «8, и все восемь названы парой…»,
                     -- и приведение целиком роняло пересчёт.
@@ -4913,7 +4913,7 @@ pub async fn rebuild(pool: &Pool, project: &str, _: &crate::watch::Lease) -> Res
                    JOIN project_document_fields f
                      ON f.project_id = d.project_id AND f.entity_kind = d.entity_kind
                     AND f.entity_name = d.entity_name AND f.name = 'Зависит от',
-                        LATERAL regexp_matches(f.value, '([MmVv][0-9]+-[Tt][0-9a-z]+)', 'g') m
+                        LATERAL regexp_matches(f.value, '([MmVv](?:[0-9]+|[A-Za-z])-[Tt][0-9a-z]+)', 'g') m
                   WHERE d.project_id = $1 AND d.entity_kind = 'red-task') x
            JOIN project_plan_tasks t
              ON t.project_id = $1 AND lower(t.id) = lower(x.named)
@@ -7413,7 +7413,7 @@ pub(crate) async fn question_holders(pool: &Pool, project: &str) -> Result<Value
         .query(
             "SELECT q.id, q.state_text, f.value_raw,
                     (SELECT coalesce(string_agg(DISTINCT m[1] || ' ' || coalesce(t.state, 'нет в плане'), ' · '), '')
-                       FROM regexp_matches(f.value_raw, '([MV][0-9]+-T[0-9a-z]+)', 'g') AS m
+                       FROM regexp_matches(f.value_raw, '([MV](?:[0-9]+|[A-Z])-T[0-9a-z]+)', 'g') AS m
                        LEFT JOIN project_plan_tasks t
                          ON t.project_id = q.project_id AND t.id = m[1]) AS named
                FROM project_questions q
@@ -13357,10 +13357,31 @@ pub(crate) async fn set_version_state(
         // убирается только запросом мимо сервера, и сервер перестаёт быть
         // единственной дверью — а значит, снятое где-то останется.
         if drop_it {
+            // Снимается только строка выпуска, которого в плане уже нет. Строка
+            // выпуска из плана — решение «открыт/закрыт»; снять её значит молча
+            // стереть закрытие, от которого считают. Обратный запрет (не снимать
+            // план, пока есть строка) не держится: план переименованного выпуска
+            // уходит переразбором документа, мимо любой двери. А этот порядок
+            // открыт ровно тогда, когда о строке жалуется лестница (`ladder/03`:
+            // «в плане нет»), так что выход из жалобы есть всегда.
             let mut gone = 0u64;
             gone += client
-                .execute("DELETE FROM version_state WHERE project_id = $1 AND version = $2", &[&project, &version])
+                .execute(
+                    "DELETE FROM version_state WHERE project_id = $1 AND version = $2
+                       AND NOT EXISTS (SELECT 1 FROM project_plan_versions WHERE project_id = $1 AND id = $2)",
+                    &[&project, &version],
+                )
                 .await?;
+            if gone == 0 {
+                let planned: i64 = client
+                    .query_one("SELECT count(*) FROM project_plan_versions WHERE project_id = $1 AND id = $2", &[&project, &version])
+                    .await?
+                    .get(0);
+                if planned > 0 {
+                    return Ok(json!({ "status": "in_plan",
+                        "why": format!("выпуск «{version}» есть в плане: его состояние меняют state=open|closed, а снимают после `version-add id={version} drop=true`") }));
+                }
+            }
             return Ok(json!({ "status": if gone > 0 { "dropped" } else { "not_found" } }));
         }
     let known: i64 = client
@@ -14064,7 +14085,7 @@ pub(crate) async fn rewrite_links(
     }
 
     static NAME: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
-        regex::Regex::new(r"^\s*`?([A-Z]{1,4}-[A-Z0-9]+(?:-\d+[a-z]?)?|R-[MV]\d+-T[0-9a-z]+|[MV]\d+-T[0-9a-z]+|Q-\d+|ST-\d+|ADR-\d+)`?")
+        regex::Regex::new(r"^\s*`?([A-Z]{1,4}-[A-Z0-9]+(?:-\d+[a-z]?)?|R-[MV](?:\d+|[A-Z])-T[0-9a-z]+|[MV](?:\d+|[A-Z])-T[0-9a-z]+|Q-\d+|ST-\d+|ADR-\d+)`?")
             .expect("образец имени в ярлыке")
     });
 
@@ -18522,5 +18543,42 @@ mod version_scope {
         let empty = at("0.2.0");
         assert_eq!((empty["phase"].as_str(), empty["milestones"][0]["tasks"].as_array().map(Vec::len)),
                    (Some("prepare"), Some(0)), "этап без задач виден, версия готовится");
+    }
+
+    /// Строку переименованного выпуска `ladder/03` велит снять — значит, снять
+    /// её дверью можно; строку выпуска из плана снять нельзя: это его закрытие.
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn a_stale_version_row_drops_and_a_planned_one_is_refused() {
+        let url = std::env::var("MH_TEST_DB_URL").expect("MH_TEST_DB_URL: адрес пустой базы");
+        let apart = format!("{}{}", if url.contains('?') { '&' } else { '?' },
+                            "options=-c%20search_path%3Dversion_drop");
+        let pool = crate::db::pool(&format!("{url}{apart}"), 2).expect("пул тестовой базы");
+        {
+            let client = pool.get().await.expect("соединение с тестовой базой");
+            client
+                .batch_execute("DROP SCHEMA IF EXISTS version_drop CASCADE; CREATE SCHEMA version_drop;")
+                .await
+                .expect("своя схема заводится");
+        }
+        super::ensure(&pool).await.expect("схема встаёт на пустой базе");
+        pool.get().await.expect("соединение")
+            .batch_execute(
+                "INSERT INTO project_plan_versions (project_id, id) VALUES ('В', '0.2.0');
+                 INSERT INTO version_state (project_id, version, state, changed_at) VALUES
+                   ('В', '0.2.0', 'closed', 1), ('В', '0.1.0', 'open', 1);")
+            .await
+            .expect("план и строки заводятся");
+        let drop = |v: &'static str| {
+            let pool = pool.clone();
+            async move { super::set_version_state(&pool, "В", v, "closed", "т", true).await.expect("дверь отвечает") }
+        };
+        assert_eq!(drop("0.2.0").await["status"], "in_plan", "выпуск из плана не снимается");
+        assert_eq!(drop("0.1.0").await["status"], "dropped", "строка выпуска, которого в плане нет, снимается");
+        assert_eq!(drop("0.1.0").await["status"], "not_found");
+        let left: Vec<String> = pool.get().await.expect("соединение")
+            .query("SELECT version FROM version_state WHERE project_id = 'В'", &[]).await.expect("строки читаются")
+            .iter().map(|r| r.get(0)).collect();
+        assert_eq!(left, ["0.2.0"], "закрытие выпуска из плана осталось");
     }
 }

@@ -634,8 +634,8 @@ impl Mcp {
             "inputSchema": { "type": "object", "properties": {} } }));
         tools.push(json!({ "name": "profile", "description": "профиль проекта, выведенный из его стека: строки таблиц «Слой | Выбор» набора, возможности, которые из них вышли, и пункты гейтов, к проекту неприменимые, с причиной",
             "inputSchema": { "type": "object", "properties": {} } }));
-        tools.push(json!({ "name": "version-close", "description": "объявить выпуск закрытым или снова открытым; от закрытого считают, что изменилось после него",
-            "inputSchema": { "type": "object", "properties": { "drop": json!({"type":"boolean","description":"снять объявленное этой же дверью"}), "version": s("имя выпуска"),
+        tools.push(json!({ "name": "version-close", "description": "объявить выпуск закрытым или снова открытым; от закрытого считают, что изменилось после него. drop=true снимает строку выпуска, которого в плане уже нет (переименован или снят `version-add drop=true`); выпуск из плана снять отказывает",
+            "inputSchema": { "type": "object", "properties": { "drop": json!({"type":"boolean","description":"снять строку выпуска, которого в плане нет; выпуск из плана сначала снимают `version-add drop=true`"}), "version": s("имя выпуска"),
                 "state": s("closed · open, по умолчанию closed") }, "required": ["version"] } }));
         tools.push(json!({ "name": "step-selftest", "description": "самотест лестницы: каждая ступень роняется подсаженным нарушением в откатываемой транзакции; живой считается та, у которой число выросло — и выросло при всех зелёных гейтах и при всех красных, а не только в сегодняшнем состоянии",
             "inputSchema": { "type": "object", "properties": { "set": s("набор, по умолчанию godzy"),
