@@ -1,1 +1,1 @@
-UPDATE project_plan_tasks SET state='not_started' WHERE project_id=$1 AND state='closed'
+WITH м AS (SELECT m.id FROM project_plan_milestones m LEFT JOIN version_state vs ON vs.project_id = m.project_id AND vs.version = m.version_id AND vs.state = 'open' WHERE m.project_id = $1 ORDER BY (vs.version IS NULL), m.ord LIMIT 1) INSERT INTO project_plan_tasks(project_id, id, milestone_id, ord, title, size, state, kind, origin) SELECT $1, 'M9-TVPROBE', м.id, 9993, 'подсадка самотеста', 'S', 'not_started', 'dev', 'declared' FROM м

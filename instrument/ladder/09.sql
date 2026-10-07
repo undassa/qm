@@ -11,6 +11,9 @@ SELECT t.id || ' — ' || CASE
     ON d.project_id = t.project_id AND d.entity_kind = t.entity_kind AND d.entity_name = t.entity_name
   JOIN task_phase tp
     ON tp.project_id = t.project_id AND tp.task_id = t.id AND tp.open
+  -- Судится открытая версия: задачи будущих версий предполёт пройдут в свой черёд.
+  JOIN task_scope sc ON sc.project_id = t.project_id AND sc.task_id = t.id
+                    AND (sc.scope IS NULL OR sc.scope = 'open')
   LEFT JOIN LATERAL (
        SELECT max(p.task_revision) AS seen,
               bool_or(p.verdict = 'blocked' AND p.task_revision = d.revision) AS blocked,

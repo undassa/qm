@@ -234,8 +234,29 @@ CREATE OR REPLACE VIEW readiness_bound AS
 /// вместе с каждой колонкой, а забытое оно роняет запуск. Пересоздание дёшево и
 /// верно всегда.
 const PHASE_VIEWS: &str = r#"
+DROP VIEW IF EXISTS task_scope;
 DROP VIEW IF EXISTS task_phase;
 DROP VIEW IF EXISTS phase_open;
+-- ВЕРСИЯ — ЕДИНИЦА РАБОТЫ, А НЕ ВЕСЬ НАБОР (решение владельца 2026-10-07).
+--
+-- Прежде выпуск был один на набор, и всё, что судит задачи — предполёт, «все
+-- задачи закрыты», выдача, — судило весь план разом: у `myack` 145 задач кода
+-- одной версией, и одна недописанная задача последнего этапа держала первую.
+-- Теперь задача принадлежит версии своего этапа, и судится открытая версия.
+-- Порядок версий — по номеру (`0.1.0 < 0.1.1 < 0.2.0`, `v1 < v2`): строка номер
+-- не сравнивает (`0.1.10` < `0.1.9`), а массив чисел — сравнивает.
+--
+-- КОНВЕЙЕР. Пока идёт код открытой версии, следующая готовится: её красные
+-- задачи (тесты) уже можно брать. Её код — нет: код версии ждёт, пока закрыты
+-- все её тесты (`next-task`). Остальные версии — `later`: их задачи не
+-- выдаются и открытую не держат.
+--
+-- Набор без открытой версии судится как прежде, целиком (`scope` = NULL): это
+-- его ошибка, и называет её ступень 3 лестницы, а не молчаливое «нечего судить».
+CREATE OR REPLACE FUNCTION version_key(v text) RETURNS int[] AS $в$
+  SELECT CASE WHEN v ~ '^v?[0-9]+(\.[0-9]+)*$'
+              THEN string_to_array(regexp_replace(v, '^v', ''), '.')::int[] END
+$в$ LANGUAGE sql IMMUTABLE;
 DROP VIEW IF EXISTS gate_state;
 
 -- ВЕРДИКТ ГЕЙТА ЦЕЛИКОМ — одной записью, а не пересказом у каждого читателя.
@@ -322,6 +343,32 @@ CREATE VIEW task_phase AS
     FROM project_plan_tasks t
     LEFT JOIN phase_open o
       ON o.project_id = t.project_id AND o.task_kind <> '' AND o.task_kind = t.kind;
+
+-- Версия задачи и её место в конвейере: `open` · `next` · `later` · `closed`,
+-- NULL — у набора нет ровно одной открытой версии (тогда судится всё).
+CREATE VIEW task_scope AS
+  WITH открытая AS (
+    SELECT vs.project_id, min(vs.version) AS version
+      FROM version_state vs WHERE vs.state = 'open'
+     GROUP BY vs.project_id HAVING count(*) = 1),
+  следующая AS (
+    SELECT DISTINCT ON (v.project_id) v.project_id, v.id
+      FROM project_plan_versions v
+      JOIN открытая о ON о.project_id = v.project_id
+      LEFT JOIN version_state vs ON vs.project_id = v.project_id AND vs.version = v.id
+     WHERE vs.state IS NULL AND version_key(v.id) > version_key(о.version)
+     ORDER BY v.project_id, version_key(v.id))
+  SELECT t.project_id, t.id AS task_id, t.kind, t.state, m.version_id AS version,
+         CASE WHEN о.version IS NULL THEN NULL
+              WHEN vs.state = 'closed' THEN 'closed'
+              WHEN m.version_id = о.version THEN 'open'
+              WHEN m.version_id = с.id THEN 'next'
+              ELSE 'later' END AS scope
+    FROM project_plan_tasks t
+    LEFT JOIN project_plan_milestones m ON m.project_id = t.project_id AND m.id = t.milestone_id
+    LEFT JOIN открытая о ON о.project_id = t.project_id
+    LEFT JOIN следующая с ON с.project_id = t.project_id
+    LEFT JOIN version_state vs ON vs.project_id = t.project_id AND vs.version = m.version_id;
 "#;
 
 const DDL: &str = r#"
@@ -5209,7 +5256,15 @@ pub(crate) async fn next_task(pool: &Pool, project: &str) -> Result<Value, crate
             "WITH open AS (
                SELECT t.id, t.milestone_id, t.title, t.ord, t.kind, t.size, t.entity_kind, t.entity_name
                  FROM project_plan_tasks t
-                WHERE t.project_id = $1 AND t.state <> 'closed'),
+                 LEFT JOIN task_scope sc ON sc.project_id = t.project_id AND sc.task_id = t.id
+                WHERE t.project_id = $1 AND t.state <> 'closed'
+                  -- ВЕРСИЯ: выдаётся открытая версия, а из следующей — только
+                  -- тесты (конвейер). Код версии ждёт все её тесты.
+                  AND (sc.scope IS NULL OR sc.scope = 'open' OR (sc.scope = 'next' AND t.kind = 'red'))
+                  AND (sc.scope IS NULL OR t.kind = 'red'
+                       OR NOT EXISTS (SELECT 1 FROM task_scope r
+                                       WHERE r.project_id = t.project_id AND r.version = sc.version
+                                         AND r.kind = 'red' AND r.state <> 'closed'))),
              blocked_by_task AS (
                SELECT d.task_id FROM project_plan_task_deps d
                  JOIN project_plan_tasks p
@@ -5257,7 +5312,24 @@ pub(crate) async fn next_task(pool: &Pool, project: &str) -> Result<Value, crate
         .await?;
 
     let Some(r) = rows.first() else {
-        return Ok(json!({ "task": null, "why": "незакрытых задач с закрытыми зависимостями нет" }));
+        // Пусто может быть оттого, что код открытой версии ждёт её тесты, а сами
+        // тесты заняты или ждут зависимостей. Это называется, а не прячется за
+        // «задач нет».
+        let waiting: Option<String> = client
+            .query_one(
+                "SELECT string_agg(DISTINCT r.task_id, ' · ' ORDER BY r.task_id) FROM task_scope r
+                  WHERE r.project_id = $1 AND r.scope = 'open' AND r.kind = 'red' AND r.state <> 'closed'
+                    AND EXISTS (SELECT 1 FROM task_scope d WHERE d.project_id = $1 AND d.scope = 'open'
+                                   AND d.kind <> 'red' AND d.state <> 'closed')",
+                &[&project],
+            )
+            .await?
+            .get(0);
+        return Ok(match waiting {
+            Some(red) => json!({ "task": null,
+                "why": format!("код открытой версии ждёт её тесты: сначала все красные задачи версии, потом весь её код. Не закрыты: {red}") }),
+            None => json!({ "task": null, "why": "незакрытых задач с закрытыми зависимостями нет" }),
+        });
     };
     let id: String = r.get(0);
     let phase: Option<String> = r.get(5);
@@ -18088,5 +18160,80 @@ mod run_holds_task {
         pool.get().await.expect("соединение")
             .batch_execute("DROP SCHEMA IF EXISTS run_holds_task CASCADE")
             .await.expect("схема снимается");
+    }
+}
+
+/// Версия — единица работы (решение владельца 2026-10-07): задачи судятся по
+/// версии своего этапа, код версии ждёт все её тесты, следующая версия отдаёт
+/// только тесты, поздние — ничего.
+#[cfg(test)]
+mod version_scope {
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn the_open_version_is_judged_and_its_code_waits_for_its_tests() {
+        let url = std::env::var("MH_TEST_DB_URL").expect("MH_TEST_DB_URL: адрес пустой базы");
+        let apart = format!("{}{}", if url.contains('?') { '&' } else { '?' },
+                            "options=-c%20search_path%3Dversion_scope");
+        let pool = crate::db::pool(&format!("{url}{apart}"), 2).expect("пул тестовой базы");
+        {
+            let client = pool.get().await.expect("соединение с тестовой базой");
+            client
+                .batch_execute("DROP SCHEMA IF EXISTS version_scope CASCADE; CREATE SCHEMA version_scope;")
+                .await
+                .expect("своя схема заводится");
+        }
+        super::ensure(&pool).await.expect("схема встаёт на пустой базе");
+        let client = pool.get().await.expect("соединение");
+        // Номера нарочно сравнимы только как числа: 0.1.10 позже 0.1.9.
+        client
+            .batch_execute(
+                "INSERT INTO project_plan_versions (project_id, id) VALUES
+                   ('В', '0.1.0'), ('В', '0.1.9'), ('В', '0.1.10'), ('В', '0.0.9');
+                 INSERT INTO project_plan_milestones (project_id, id, version_id, ord, title) VALUES
+                   ('В', 'V0', '0.0.9', 0, 'было'), ('В', 'V1', '0.1.0', 1, 'ядро'),
+                   ('В', 'V2', '0.1.9', 2, 'следом'), ('В', 'V3', '0.1.10', 3, 'потом');
+                 INSERT INTO version_state (project_id, version, state, changed_at) VALUES
+                   ('В', '0.0.9', 'closed', 1), ('В', '0.1.0', 'open', 1);
+                 INSERT INTO project_plan_tasks (project_id, id, milestone_id, ord, title, size, state, kind,
+                                                 entity_kind, entity_name) VALUES
+                   ('В', 'V0-T1', 'V0', 1, 'старое', '', 'closed', 'dev', 'task', 'V0-T1'),
+                   ('В', 'V1-T1', 'V1', 1, 'код', '', 'not_started', 'dev', 'task', 'V1-T1'),
+                   ('В', 'R-V1-T1', 'V1', 2, 'тест', '', 'not_started', 'red', 'red-task', 'R-V1-T1'),
+                   ('В', 'R-V2-T1', 'V2', 1, 'тест следом', '', 'not_started', 'red', 'red-task', 'R-V2-T1'),
+                   ('В', 'V2-T1', 'V2', 2, 'код следом', '', 'not_started', 'dev', 'task', 'V2-T1'),
+                   ('В', 'R-V3-T1', 'V3', 1, 'тест потом', '', 'not_started', 'red', 'red-task', 'R-V3-T1');",
+            )
+            .await
+            .expect("версии подсаживаются");
+        let scope: Vec<(String, Option<String>)> = client
+            .query("SELECT task_id, scope FROM task_scope WHERE project_id = 'В' ORDER BY task_id", &[])
+            .await
+            .expect("вид task_scope")
+            .iter()
+            .map(|r| (r.get(0), r.get(1)))
+            .collect();
+        let at = |id: &str| scope.iter().find(|(t, _)| t == id).and_then(|(_, s)| s.clone());
+        assert_eq!(at("V0-T1").as_deref(), Some("closed"));
+        assert_eq!(at("V1-T1").as_deref(), Some("open"));
+        assert_eq!(at("R-V2-T1").as_deref(), Some("next"), "0.1.9 — следующая за 0.1.0, а не 0.1.10");
+        assert_eq!(at("R-V3-T1").as_deref(), Some("later"));
+
+        // Тест открытой версии занят: код её ждёт, тест следующей — не наша забота.
+        client
+            .batch_execute("INSERT INTO task_worktree (project_id, task_id, branch, since)
+                            VALUES ('В', 'R-V1-T1', 'red', 1), ('В', 'R-V2-T1', 'red2', 1);")
+            .await
+            .expect("тесты заняты");
+        let next = super::next_task(&pool, "В").await.expect("дверь next-task");
+        assert!(next["task"].is_null(), "код не выдаётся, пока тесты версии не закрыты: {next}");
+        assert!(next["why"].as_str().is_some_and(|w| w.contains("R-V1-T1")), "отказ называет тест: {next}");
+
+        // Без открытой версии набор судится целиком, как прежде.
+        client.batch_execute("DELETE FROM version_state WHERE project_id = 'В' AND state = 'open';")
+            .await.expect("снята открытая");
+        let none: i64 = client
+            .query_one("SELECT count(*) FROM task_scope WHERE project_id = 'В' AND scope IS NOT NULL AND scope <> 'closed'", &[])
+            .await.expect("вид").get(0);
+        assert_eq!(none, 0, "без открытой версии место в конвейере не судится");
     }
 }

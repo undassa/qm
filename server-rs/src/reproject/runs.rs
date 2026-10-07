@@ -16,7 +16,7 @@ static RUN_OF_TASK: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^([MV]\d+)-T[0-9a-z]+$").expect("образец прогона задачи"));
 /// Прогон ВЕРСИИ: тем же образцом, каким объявлен вид `version`.
 static RUN_OF_VERSION: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^(v\d+)$").expect("образец прогона версии"));
+    Lazy::new(|| Regex::new(r"^(v\d+|\d+\.\d+\.\d+)$").expect("образец прогона версии"));
 static RUN_OF_MILESTONE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^([MV]\d+)$").expect("образец прогона этапа"));
 /// Заголовки разделов хранятся без разметки, поэтому обратных кавычек в них нет.
