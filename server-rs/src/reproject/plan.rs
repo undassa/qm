@@ -9,7 +9,7 @@
 use deadpool_postgres::Pool;
 use once_cell::sync::Lazy;
 use regex::Regex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Этап задачи — то, что стоит в её имени до `-T`: у `M0-T1` это `M0`.
 ///
@@ -17,12 +17,6 @@ use std::collections::HashMap;
 /// то же самое, что имя задачи, — только окольно.
 static TASK_MILESTONE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)^([MV]\d+)-T").expect("образец этапа в имени задачи"));
-/// Имя этапа внутри поля «Веха». Поле пишут прозой — «**M9** — выпуск 0.1.2,
-/// редактор», — и целиком оно этапом не было никогда: десять задач tot-ade
-/// назвали так веху, и пересборка всего плана стояла, пока их не нашли
-/// (2026-10-07). Буквенная форма (`MA`) — та же, что у имени этапа.
-static FIELD_MILESTONE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"\b([MV](?:\d+|[A-Z]))\b").expect("образец этапа в поле"));
 /// Имя задачи в поле «Зависит от» — с кавычками кода и без них.
 ///
 /// Требование кавычек стоило 57 зависимостей из 338: половина набора пишет
@@ -198,6 +192,20 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize,
             .collect()
     };
     let fields = fields(pool, project, true).await?;
+    // Этапы, которые план знает: из документов и объявленные ручкой. Веха задачи
+    // ищется среди НИХ, а не своим образцом имени: образец — копия раскладки,
+    // а поле пишут прозой («**M9** — выпуск 0.1.2, редактор»), и десять таких
+    // задач tot-ade держали пересборку всего плана (2026-10-07).
+    let known_milestones: HashSet<String> = {
+        let client = crate::db::conn(pool).await?;
+        let declared = client
+            .query("SELECT id FROM project_plan_milestones WHERE project_id = $1 AND origin = 'declared'",
+                   &[&project])
+            .await?;
+        named.iter().filter(|e| e.0 == "milestone").map(|e| e.1.clone())
+            .chain(declared.iter().map(|r| r.get::<_, String>(0)))
+            .collect()
+    };
     let titles = titles(pool, project).await?;
     let empty = HashMap::new();
 
@@ -244,8 +252,11 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize,
         // проверкой неизвестной вехи ниже: запасной ответ по имени задачи
         // молча увёл бы её в другой этап, чем назвал автор.
         let field = got("Веха");
-        let milestone = match FIELD_MILESTONE.captures(field) {
-            Some(m) => m[1].to_owned(),
+        let named_in_field = field
+            .split(|c: char| !c.is_alphanumeric() && c != '-')
+            .find(|w| known_milestones.contains(*w));
+        let milestone = match named_in_field {
+            Some(m) => m.to_owned(),
             None if field.trim_matches(|c: char| c.is_whitespace() || "*—-".contains(c)).is_empty() => TASK_MILESTONE
                 .captures(&id)
                 .map(|m| m[1].to_uppercase())
