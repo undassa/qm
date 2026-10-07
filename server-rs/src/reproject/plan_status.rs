@@ -19,7 +19,7 @@ static COMMIT: Lazy<Regex> = Lazy::new(|| Regex::new(r"\b([0-9a-f]{7,40})\b").ex
 
 pub(crate) async fn project(pool: &Pool, project: &str) -> Result<usize, crate::db::Fail> {
     // ОБРАЗЕЦ ЗАДАЧИ — ИЗ РАСКЛАДКИ, а не свой. Здесь стоял `[MV]\d+-T…`, а
-    // раскладка говорит `[MmVv]\d+-[Tt][\w-]+`: набор со строчными именами эта
+    // раскладка говорит `[MmVv](\d+|[A-Za-z])-[Tt][\w-]+`: набор со строчными именами эта
     // копия не увидела бы, и доска состояний молча не собралась бы.
     let patterns = {
         let client = crate::db::conn(pool).await?;

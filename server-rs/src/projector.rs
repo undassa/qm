@@ -5193,8 +5193,9 @@ pub async fn rebuild(pool: &Pool, project: &str, _: &crate::watch::Lease) -> Res
         .await?;
 
     // ── Зависимость задачи от этапа ──────────────────────────────────────────
-    // Правило: в поле «Зависит от» стоит имя этапа `M<n>`, НЕ являющееся началом
-    // имени задачи (`M8-T10`), и строка не отрицает зависимость.
+    // Правило: в поле «Зависит от» стоит имя этапа той же формы, что везде
+    // (`M8`, `MA`, `V5`), НЕ являющееся началом имени задачи (`M8-T10`), и
+    // строка не отрицает зависимость. Образец `M\d+` молча терял `MA`.
     //
     // Отрицание проверяется отдельно и намеренно: «ничего в M1» содержит имя
     // этапа и без этой проверки завело бы ребро, которого документ не объявлял, —
@@ -5209,7 +5210,7 @@ pub async fn rebuild(pool: &Pool, project: &str, _: &crate::watch::Lease) -> Res
                FROM project_plan_tasks t
                JOIN project_document_fields f
                  ON f.project_id = t.project_id AND f.entity_kind = t.entity_kind AND f.entity_name = t.entity_name AND f.name LIKE 'Зависит%',
-                    LATERAL regexp_matches(f.value, '(?<!-)\\m(M\\d+)\\M(?!-T)', 'g') m
+                    LATERAL regexp_matches(f.value, '(?<!-)\\m([MV](?:[0-9]+|[A-Z]))\\M(?!-T)', 'g') m
               WHERE t.project_id = $1
                 AND f.value !~ '[Нн]ичего в'
                 AND EXISTS (SELECT 1 FROM project_plan_milestones ms
@@ -9736,13 +9737,31 @@ pub(crate) async fn declare_version(
         // Снятие — той же ручкой, что и объявление. Без него объявленное
         // убирается только запросом мимо сервера, и сервер перестаёт быть
         // единственной дверью — а значит, снятое где-то останется.
+        // Снимается только объявленное. Строка выпуска из документа держит
+        // каскадом его вехи, задачи и их связи (tot-ade v1: 15 вех, большая
+        // часть 777 задач); снятая дверью, она стёрла бы их, а следующая
+        // пересборка вернула бы — потеря и гонка, а не снятие.
         if drop_it {
-            let mut gone = 0u64;
-            gone += client
-                .execute("DELETE FROM project_plan_versions WHERE project_id = $1 AND id = $2", &[&project, &id])
+            let gone = client
+                .execute("DELETE FROM project_plan_versions WHERE project_id = $1 AND id = $2 AND origin = 'declared'",
+                         &[&project, &id])
                 .await?;
-            return Ok(json!({ "status": if gone > 0 { "dropped" } else { "not_found" } }));
+            if gone > 0 {
+                return Ok(json!({ "status": "dropped", "id": id }));
+            }
+            return Ok(match plan_row_document(&client, "project_plan_versions", project, id).await? {
+                Some((kind, name)) => json!({ "status": "projected", "id": id,
+                    "why": format!("выпуск заведён документом, а не объявлением, и уходит вместе с ним: \
+                                    `mh call rm kind={kind} id={name}`") }),
+                None => json!({ "status": "not_found", "id": id }),
+            });
         }
+    // Объявление поверх документа перекрашивало строку в «объявленную», и
+    // следом `drop=true` снимал её с каскадом — обход отказа выше.
+    if let Some((kind, _)) = plan_row_document(&client, "project_plan_versions", project, id).await? {
+        return Ok(json!({ "status": "has_document", "id": id,
+            "why": format!("у выпуска есть документ вида {kind}: план строится по нему — объявлять не нужно") }));
+    }
     client.execute(
         "INSERT INTO project_plan_versions (project_id, id, entity_kind, entity_name, origin)
          VALUES ($1,$2,'version',$2,'declared')
@@ -9762,13 +9781,28 @@ pub(crate) async fn declare_milestone(
         // Снятие — той же ручкой, что и объявление. Без него объявленное
         // убирается только запросом мимо сервера, и сервер перестаёт быть
         // единственной дверью — а значит, снятое где-то останется.
+        // Как у выпуска: веха из документа держит каскадом свои задачи.
         if drop_it {
-            let mut gone = 0u64;
-            gone += client
-                .execute("DELETE FROM project_plan_milestones WHERE project_id = $1 AND id = $2", &[&project, &id])
+            let gone = client
+                .execute("DELETE FROM project_plan_milestones WHERE project_id = $1 AND id = $2 AND origin = 'declared'",
+                         &[&project, &id])
                 .await?;
-            return Ok(json!({ "status": if gone > 0 { "dropped" } else { "not_found" } }));
+            if gone > 0 {
+                return Ok(json!({ "status": "dropped", "id": id }));
+            }
+            return Ok(match plan_row_document(&client, "project_plan_milestones", project, id).await? {
+                Some((kind, name)) => json!({ "status": "projected", "id": id,
+                    "why": format!("веха заведена документом, а не объявлением, и уходит вместе с ним: \
+                                    `mh call rm kind={kind} id={name}`") }),
+                None => json!({ "status": "not_found", "id": id }),
+            });
         }
+    // Объявление поверх документа перекрашивало строку в «объявленную», и
+    // следом `drop=true` снимал её с каскадом — обход отказа выше.
+    if let Some((kind, _)) = plan_row_document(&client, "project_plan_milestones", project, id).await? {
+        return Ok(json!({ "status": "has_document", "id": id,
+            "why": format!("у вехи есть документ вида {kind}: план строится по нему — объявлять не нужно") }));
+    }
     client.execute(
         "INSERT INTO project_plan_milestones (project_id, id, version_id, ord, title,
                                               entity_kind, entity_name, origin)
@@ -11993,6 +12027,24 @@ pub(crate) async fn trunk_head(pool: &Pool, project: &str) -> Result<String, cra
     Ok(row.map(|r| r.get(0)).unwrap_or_default())
 }
 
+/// Документ, которым заведена строка плана (выпуск либо веха), — `None` у
+/// объявленной и у отсутствующей: им и называется дверь, что её снимает.
+async fn plan_row_document(
+    client: &tokio_postgres::Client,
+    table: &'static str,
+    project: &str,
+    id: &str,
+) -> Result<Option<(String, String)>, tokio_postgres::Error> {
+    Ok(client
+        .query_opt(
+            &format!("SELECT entity_kind, entity_name FROM {table}
+                       WHERE project_id = $1 AND id = $2 AND origin <> 'declared'"),
+            &[&project, &id],
+        )
+        .await?
+        .map(|r| (r.get(0), r.get(1))))
+}
+
 /// Вид документа задачи — `task` или `red-task`; `None`, когда задачи нет.
 pub(crate) async fn task_document_kind(
     client: &tokio_postgres::Client,
@@ -13373,13 +13425,22 @@ pub(crate) async fn set_version_state(
                 )
                 .await?;
             if gone == 0 {
-                let planned: i64 = client
-                    .query_one("SELECT count(*) FROM project_plan_versions WHERE project_id = $1 AND id = $2", &[&project, &version])
-                    .await?
-                    .get(0);
-                if planned > 0 {
+                // Рычаг называется по происхождению: `version-add drop=true`
+                // выпуск из документа не снимает, и совет его звать отправлял
+                // в отказ.
+                let planned = client
+                    .query_opt("SELECT origin, entity_kind, entity_name FROM project_plan_versions WHERE project_id = $1 AND id = $2",
+                               &[&project, &version])
+                    .await?;
+                if let Some(row) = planned {
+                    let (origin, kind, name): (String, String, String) = (row.get(0), row.get(1), row.get(2));
+                    let lever = if origin == "declared" {
+                        format!("`version-add id={version} drop=true`")
+                    } else {
+                        format!("`mh call rm kind={kind} id={name}` (документ уходит, и пересборка снимает выпуск из плана)")
+                    };
                     return Ok(json!({ "status": "in_plan",
-                        "why": format!("выпуск «{version}» есть в плане: его состояние меняют state=open|closed, а снимают после `version-add id={version} drop=true`") }));
+                        "why": format!("выпуск «{version}» есть в плане: его состояние меняют state=open|closed, а снимают после {lever}") }));
                 }
             }
             return Ok(json!({ "status": if gone > 0 { "dropped" } else { "not_found" } }));
@@ -17284,7 +17345,7 @@ mod rename {
                ('p', 'index', '20-surface', 'экраны', 'h', 6, 1, 0, 'x'),
                ('p', 'index', 'gone', 'было', 'h', 4, 1, 0, 'x');
              INSERT INTO public.kind_layout VALUES
-               ('run', '{"id": "^([MV][0-9]+(-T[0-9a-z]+)?|v[0-9]+|v[0-9]+/[A-Za-z0-9-]+(/[A-Za-z0-9-]+)?)$"}');
+               ('run', '{"id": "^([MV]([0-9]+|[A-Z])(-T[0-9a-z]+)?|v[0-9]+|[0-9]+\\.[0-9]+\\.[0-9]+|v[0-9]+/[A-Za-z0-9-]+(/[A-Za-z0-9-]+)?)$"}');
              INSERT INTO public.project_documents VALUES
                ('p', 'run', 'v1/M0', 'этап', 1, 0),
                ('p', 'run', 'v1/M0/M0-T1', 'задача этапа v1/M0', 1, 0);

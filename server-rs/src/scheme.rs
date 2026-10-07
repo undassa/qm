@@ -307,7 +307,7 @@ mod patterns_names {
             ("reproject/ids.rs", include_str!("reproject/ids.rs")),
             ("repo_corpus.rs", include_str!("repo_corpus.rs")),
         ];
-        // Имя вида в регулярке: `FR-`, `TC-`, `US-`, `SCR-`, `ST-`, `[MV]\d-T`.
+        // Имя вида в регулярке: `FR-`, `TC-`, `US-`, `SCR-`, `ST-`, `[MV](\d+|[A-Z])-T`.
         let pattern = regex::Regex::new(
             r#"Regex::new\(r"[^"]*(?:\(\?:)?(?:FR|NFR|TC|US|SCR|ST)\b|Regex::new\(r"[^"]*\[MmVv\]|Regex::new\(r"[^"]*\[MV\]"#,
         )
