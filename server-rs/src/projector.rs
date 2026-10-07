@@ -398,11 +398,15 @@ CREATE VIEW task_scope AS
 -- задача, — NULL, то есть судится: неразмещённое не прячется за «потом».
 CREATE VIEW requirement_scope AS
   SELECT r.project_id, r.id AS requirement_id,
+         -- Требование НЕ судится, только когда ВСЕ его держатели в будущих
+         -- версиях. Держатель в закрытой версии оставляет его судимым: иначе
+         -- поздняя задача, назвавшая то же требование, прятала бы дефект
+         -- выпущенной версии (ревью #189).
          CASE WHEN count(ts.task_id) = 0 OR bool_or(ts.scope IS NULL) THEN NULL
               WHEN bool_or(ts.scope = 'open') THEN 'open'
+              WHEN bool_or(ts.scope = 'closed') THEN 'closed'
               WHEN bool_or(ts.scope = 'next') THEN 'next'
-              WHEN bool_or(ts.scope = 'later') THEN 'later'
-              ELSE 'closed' END AS scope
+              ELSE 'later' END AS scope
     FROM project_requirements r
     LEFT JOIN task_requirement tr ON tr.project_id = r.project_id AND tr.requirement_id = r.id
     LEFT JOIN task_scope ts ON ts.project_id = tr.project_id AND ts.task_id = tr.task_id
@@ -18480,15 +18484,17 @@ mod version_scope {
                    ('Т', 'T2', 'V2', 1, 'следом', '', 'not_started', 'dev', 'task', 'T2', ''),
                    ('Т', 'T3', 'V3', 1, 'потом', '', 'not_started', 'dev', 'task', 'T3', ''),
                    ('Т', 'R1', 'V1', 2, 'тест ядра', '', 'not_started', 'red', 'red-task', 'R1', ''),
-                   ('Т', 'R3', 'V3', 2, 'тест потом', '', 'not_started', 'red', 'red-task', 'R3', '');
+                   ('Т', 'R3', 'V3', 2, 'тест потом', '', 'not_started', 'red', 'red-task', 'R3', ''),
+                   ('Т', 'R2', 'V2', 2, 'тест следом', '', 'not_started', 'red', 'red-task', 'R2', '');
                  INSERT INTO project_requirements (project_id, id, kind, area, text, satisfied) VALUES
                    ('Т', 'FR-OPEN', 'FR', 'а', 'т', false), ('Т', 'FR-NEXT', 'FR', 'а', 'т', false),
                    ('Т', 'FR-LATER', 'FR', 'а', 'т', false), ('Т', 'FR-DONE', 'FR', 'а', 'т', false),
-                   ('Т', 'FR-FREE', 'FR', 'а', 'т', false);
+                   ('Т', 'FR-FREE', 'FR', 'а', 'т', false), ('Т', 'FR-SHIPPED', 'FR', 'а', 'т', false);
                  INSERT INTO task_requirement (project_id, task_id, requirement_id) VALUES
                    ('Т', 'T1', 'FR-OPEN'), ('Т', 'T3', 'FR-OPEN'),
                    ('Т', 'T2', 'FR-NEXT'), ('Т', 'T3', 'FR-NEXT'),
-                   ('Т', 'T3', 'FR-LATER'), ('Т', 'T0', 'FR-DONE');",
+                   ('Т', 'T3', 'FR-LATER'), ('Т', 'T0', 'FR-DONE'),
+                   ('Т', 'T0', 'FR-SHIPPED'), ('Т', 'T3', 'FR-SHIPPED');",
             )
             .await
             .expect("набор подсаживается");
@@ -18508,7 +18514,8 @@ mod version_scope {
             ("FR-LATER".to_owned(), s("later")),
             ("FR-NEXT".to_owned(), s("next")),
             ("FR-OPEN".to_owned(), s("open")),
-        ], "самый ранний держатель; без держателя — судится");
+            ("FR-SHIPPED".to_owned(), s("closed")),
+        ], "самый ранний держатель; без держателя — судится; выпущенное с поздним держателем судится");
 
         // Пункт G2: красная задача поздней версии без родителя открытую не держит,
         // а подсадка пробы ложится в открытую и пункт роняет.
@@ -18524,6 +18531,7 @@ mod version_scope {
         let seen = red().await;
         assert!(seen.iter().any(|d| d.starts_with("R1 ")), "открытая судится: {seen:?}");
         assert!(!seen.iter().any(|d| d.starts_with("R3 ")), "поздняя не держит: {seen:?}");
+        assert!(seen.iter().any(|d| d.starts_with("R2 ")), "тесты следующей выдаются конвейером — и судятся: {seen:?}");
         client
             .execute(include_str!("../../instrument/gate/G2/red-task-complete.probe.sql"), &[&"Т"])
             .await

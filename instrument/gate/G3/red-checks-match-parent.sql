@@ -1,3 +1,4 @@
+-- Красные задачи СЛЕДУЮЩЕЙ версии выдаются конвейером заранее — и судятся; не судятся только версии «потом» (ревью #189).
 -- Судится открытая версия (и закрытые): задачи и требования следующей и поздних
 -- версий её не держат (решение владельца 2026-10-07). Без открытой версии — весь набор.
 -- Подсказка «зачеркните» называет ИМЕНА и МЕСТО, а не образец: лишнее в
@@ -26,5 +27,5 @@ SELECT r.id || ' — разошёлся с родителем ' || r.parent_task
           AND NOT EXISTS (SELECT 1 FROM project_task_check pc
                            WHERE pc.project_id = r.project_id AND pc.task_id = r.parent_task_id
                              AND pc.said_as = 'доказательство' AND pc.check_id = rc.check_id)) л
- WHERE r.project_id = $1 AND r.kind = 'red' AND NOT EXISTS (SELECT 1 FROM task_scope sc WHERE sc.project_id = r.project_id AND sc.task_id = r.id AND sc.scope IN ('next','later')) AND (н.names IS NOT NULL OR л.names IS NOT NULL)
+ WHERE r.project_id = $1 AND r.kind = 'red' AND NOT EXISTS (SELECT 1 FROM task_scope sc WHERE sc.project_id = r.project_id AND sc.task_id = r.id AND sc.scope = 'later') AND (н.names IS NOT NULL OR л.names IS NOT NULL)
  ORDER BY 1
