@@ -17678,6 +17678,17 @@ mod one_commit_pair {
         assert_eq!((before.state, &before.detail), ("passed", &vec![]),
                    "до первого взятого прогона из запроса пару видеть было нечем ({})", before.why);
 
+        // Первая отметка в 2500 — пара закрыта раньше, чем прибор начал брать
+        // запросы, и прощение держится, хотя отметка уже есть.
+        client
+            .batch_execute("INSERT INTO ci_run_taken (project_id, run_id, run_attempt, actor, platform, at)
+                            VALUES ('П', 9, 1, 'ci-pr:ci.yml/red-pair', 'linux', 2500)")
+            .await
+            .expect("отметка подсаживается");
+        let early = run().await;
+        assert_eq!((early.state, &early.detail), ("passed", &vec![]),
+                   "пара, закрытая до первой отметки, остаётся прощённой ({})", early.why);
+
         // Прибор начал брать запросы в 1500 — раньше, чем пара закрылась.
         client
             .batch_execute("INSERT INTO ci_run_taken (project_id, run_id, run_attempt, actor, platform, at)
