@@ -235,6 +235,7 @@ CREATE OR REPLACE VIEW readiness_bound AS
 /// верно всегда.
 const PHASE_VIEWS: &str = r#"
 DROP VIEW IF EXISTS task_scope;
+DROP VIEW IF EXISTS version_scope;
 DROP VIEW IF EXISTS task_phase;
 DROP VIEW IF EXISTS phase_open;
 -- ВЕРСИЯ — ЕДИНИЦА РАБОТЫ, А НЕ ВЕСЬ НАБОР (решение владельца 2026-10-07).
@@ -344,9 +345,11 @@ CREATE VIEW task_phase AS
     LEFT JOIN phase_open o
       ON o.project_id = t.project_id AND o.task_kind <> '' AND o.task_kind = t.kind;
 
--- Версия задачи и её место в конвейере: `open` · `next` · `later` · `closed`,
--- NULL — у набора нет ровно одной открытой версии (тогда судится всё).
-CREATE VIEW task_scope AS
+-- Место версии в конвейере: `open` · `next` · `later` · `closed`, NULL — у
+-- набора нет ровно одной открытой версии (тогда судится всё). Своим видом, а
+-- не внутри `task_scope`: дверь `versions` показывает и версию без задач, и
+-- место у неё должно быть то же, по которому судятся задачи, — не пересказ.
+CREATE VIEW version_scope AS
   WITH открытая AS (
     SELECT vs.project_id, min(vs.version) AS version
       FROM version_state vs WHERE vs.state = 'open'
@@ -358,17 +361,24 @@ CREATE VIEW task_scope AS
       LEFT JOIN version_state vs ON vs.project_id = v.project_id AND vs.version = v.id
      WHERE vs.state IS NULL AND version_key(v.id) > version_key(о.version)
      ORDER BY v.project_id, version_key(v.id))
-  SELECT t.project_id, t.id AS task_id, t.kind, t.state, m.version_id AS version,
+  SELECT v.project_id, v.id AS version,
          CASE WHEN о.version IS NULL THEN NULL
               WHEN vs.state = 'closed' THEN 'closed'
-              WHEN m.version_id = о.version THEN 'open'
-              WHEN m.version_id = с.id THEN 'next'
+              WHEN v.id = о.version THEN 'open'
+              WHEN v.id = с.id THEN 'next'
               ELSE 'later' END AS scope
+    FROM project_plan_versions v
+    LEFT JOIN открытая о ON о.project_id = v.project_id
+    LEFT JOIN следующая с ON с.project_id = v.project_id
+    LEFT JOIN version_state vs ON vs.project_id = v.project_id AND vs.version = v.id;
+
+-- Версия задачи и её место в конвейере. Задача всегда в этапе, этап всегда в
+-- версии (внешние ключи), так что место берётся у версии без потерь.
+CREATE VIEW task_scope AS
+  SELECT t.project_id, t.id AS task_id, t.kind, t.state, m.version_id AS version, s.scope
     FROM project_plan_tasks t
-    LEFT JOIN project_plan_milestones m ON m.project_id = t.project_id AND m.id = t.milestone_id
-    LEFT JOIN открытая о ON о.project_id = t.project_id
-    LEFT JOIN следующая с ON с.project_id = t.project_id
-    LEFT JOIN version_state vs ON vs.project_id = t.project_id AND vs.version = m.version_id;
+    JOIN project_plan_milestones m ON m.project_id = t.project_id AND m.id = t.milestone_id
+    JOIN version_scope s ON s.project_id = t.project_id AND s.version = m.version_id;
 "#;
 
 const DDL: &str = r#"
@@ -6356,6 +6366,121 @@ pub(crate) async fn tasks_of_story(pool: &Pool, project: &str, story: &str) -> R
         "tasks": rows.iter().map(|r| r.get::<_, String>(0)).collect::<Vec<_>>(),
         "requirements": requirements,
     }))
+}
+
+/// Версии — как идёт работа по каждой (решение владельца 2026-10-07: версия —
+/// единица работы; в ней сперва все требования, потом все тесты, потом весь код).
+///
+/// Место в конвейере берётся из `version_scope` — того же вида, по которому
+/// судятся задачи (`next-task`, ступени 9–10, G4/G5). Посчитай его дверь сама, и
+/// экран мог бы сказать «открыта» о версии, которую выдача не выдаёт.
+///
+/// Предполёт считается по НЕЗАКРЫТЫМ задачам и только свежий — вердикт на
+/// нынешней правке документа задачи: вердикт до правки о нынешнем тексте не
+/// говорит ничего, и засчитать его «готовым» значило бы соврать зелёным.
+pub(crate) async fn versions(pool: &Pool, project: &str) -> Result<Value, crate::db::Fail> {
+    let client = crate::db::conn(pool).await?;
+    let heads = client
+        .query(
+            // Заголовок версии — первый заголовок её документа: там владелец
+            // пишет, какую ценность версия несёт сама по себе.
+            "SELECT v.id, coalesce(vs.state, 'planned'), sc.scope,
+                    (SELECT s.title FROM project_document_sections s
+                      WHERE s.project_id = v.project_id
+                        AND s.entity_kind = coalesce(nullif(v.entity_kind, ''), 'version')
+                        AND s.entity_name = coalesce(nullif(v.entity_name, ''), v.id)
+                      ORDER BY s.level, s.ord LIMIT 1),
+                    (SELECT count(DISTINCT r.requirement_id) FROM task_requirement r
+                       JOIN project_plan_tasks t ON t.project_id = r.project_id AND t.id = r.task_id
+                       JOIN project_plan_milestones m ON m.project_id = t.project_id AND m.id = t.milestone_id
+                      WHERE r.project_id = v.project_id AND m.version_id = v.id)
+               FROM project_plan_versions v
+               LEFT JOIN version_state vs ON vs.project_id = v.project_id AND vs.version = v.id
+               LEFT JOIN version_scope sc ON sc.project_id = v.project_id AND sc.version = v.id
+              WHERE v.project_id = $1
+              ORDER BY version_key(v.id) NULLS LAST, v.id",
+            &[&project],
+        )
+        .await?;
+    let rows = client
+        .query(
+            "SELECT m.version_id, m.id, m.title, t.id, t.title, t.kind, t.state,
+                    CASE WHEN t.state = 'closed' THEN NULL ELSE
+                      (SELECT CASE WHEN p.verdict = 'blocked' THEN 'blocked' ELSE 'ready' END
+                         FROM preflight_verdict p
+                        WHERE p.project_id = t.project_id AND p.task_id = t.id AND p.task_revision = d.revision
+                        ORDER BY p.at DESC LIMIT 1) END
+               FROM project_plan_milestones m
+               LEFT JOIN project_plan_tasks t ON t.project_id = m.project_id AND t.milestone_id = m.id
+               LEFT JOIN project_documents d
+                 ON d.project_id = t.project_id AND d.entity_kind = t.entity_kind AND d.entity_name = t.entity_name
+              WHERE m.project_id = $1
+              ORDER BY m.ord, m.id, t.ord, t.id",
+            &[&project],
+        )
+        .await?;
+    let mut list = Vec::new();
+    for h in &heads {
+        let id: String = h.get(0);
+        let state: String = h.get(1);
+        let (mut red, mut red_closed, mut code, mut code_closed) = (0, 0, 0, 0);
+        let (mut ready, mut blocked, mut unseen) = (0, 0, 0);
+        let mut milestones: Vec<Value> = Vec::new();
+        for r in rows.iter().filter(|r| r.get::<_, String>(0) == id) {
+            let mid: String = r.get(1);
+            if milestones.last().is_none_or(|m| m["id"] != json!(mid)) {
+                milestones.push(json!({ "id": mid, "title": r.get::<_, String>(2), "tasks": [] }));
+            }
+            let Some(task) = r.get::<_, Option<String>>(3) else { continue };
+            let kind: String = r.get(5);
+            let task_state: String = r.get(6);
+            let closed = task_state == "closed";
+            let preflight: Option<String> = r.get(7);
+            if kind == "red" {
+                red += 1;
+                red_closed += i32::from(closed);
+            } else {
+                code += 1;
+                code_closed += i32::from(closed);
+            }
+            if !closed {
+                match preflight.as_deref() {
+                    Some("blocked") => blocked += 1,
+                    Some(_) => ready += 1,
+                    None => unseen += 1,
+                }
+            }
+            if let Some(Value::Array(tasks)) = milestones.last_mut().map(|m| &mut m["tasks"]) {
+                tasks.push(json!({ "id": task, "title": r.get::<_, String>(4), "kind": kind,
+                                   "state": task_state, "preflight": preflight }));
+            }
+        }
+        // Фаза выводится из чисел, а не объявляется: объявленную некому
+        // держать правдой. Без тестов версия ещё готовится, даже если код уже
+        // пишут: код версии ждёт её тесты, и «код» без них был бы похвалой.
+        let (phase, says) = if state == "closed" {
+            ("closed", "закрыта")
+        } else if red + code > 0 && red_closed == red && code_closed == code {
+            ("release", "выпуск")
+        } else if red > 0 && red_closed == red {
+            ("code", "код")
+        } else if red_closed > 0 {
+            ("tests", "тесты")
+        } else {
+            ("prepare", "подготовка")
+        };
+        list.push(json!({
+            "id": id, "title": h.get::<_, Option<String>>(3), "state": state,
+            "place": h.get::<_, Option<String>>(2),
+            "phase": phase, "phaseSays": says,
+            "tests": { "total": red, "closed": red_closed },
+            "code": { "total": code, "closed": code_closed },
+            "requirements": h.get::<_, i64>(4),
+            "preflight": { "ready": ready, "blocked": blocked, "none": unseen },
+            "milestones": milestones,
+        }));
+    }
+    Ok(json!({ "count": list.len(), "versions": list }))
 }
 
 /// Очередь предполёта: чего ещё не смотрели или смотрели до правки.
@@ -18235,5 +18360,101 @@ mod version_scope {
             .query_one("SELECT count(*) FROM task_scope WHERE project_id = 'В' AND scope IS NOT NULL AND scope <> 'closed'", &[])
             .await.expect("вид").get(0);
         assert_eq!(none, 0, "без открытой версии место в конвейере не судится");
+    }
+
+    /// Дверь `versions`: владелец видит, как идёт каждая версия, теми же
+    /// местами, по которым судит выдача, и фазой, выведенной из чисел.
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn the_versions_door_tells_how_each_version_goes() {
+        let url = std::env::var("MH_TEST_DB_URL").expect("MH_TEST_DB_URL: адрес пустой базы");
+        let apart = format!("{}{}", if url.contains('?') { '&' } else { '?' },
+                            "options=-c%20search_path%3Dversions_door");
+        let pool = crate::db::pool(&format!("{url}{apart}"), 2).expect("пул тестовой базы");
+        {
+            let client = pool.get().await.expect("соединение с тестовой базой");
+            client
+                .batch_execute("DROP SCHEMA IF EXISTS versions_door CASCADE; CREATE SCHEMA versions_door;")
+                .await
+                .expect("своя схема заводится");
+        }
+        super::ensure(&pool).await.expect("схема встаёт на пустой базе");
+        let client = pool.get().await.expect("соединение");
+        client
+            .batch_execute(
+                "INSERT INTO project_plan_versions (project_id, id, entity_kind, entity_name) VALUES
+                   ('В', '0.1.0', 'version', '0.1.0'), ('В', '0.1.9', '', ''), ('В', '0.1.10', '', ''),
+                   ('В', '0.0.9', '', ''), ('В', '0.2.0', '', '');
+                 INSERT INTO project_plan_milestones (project_id, id, version_id, ord, title) VALUES
+                   ('В', 'V0', '0.0.9', 0, 'было'), ('В', 'V1', '0.1.0', 1, 'ядро'), ('В', 'V1b', '0.1.0', 2, 'хвост'),
+                   ('В', 'V2', '0.1.9', 3, 'следом'), ('В', 'V3', '0.1.10', 4, 'потом'), ('В', 'V4', '0.2.0', 5, 'пусто');
+                 INSERT INTO version_state (project_id, version, state, changed_at) VALUES
+                   ('В', '0.0.9', 'closed', 1), ('В', '0.1.0', 'open', 1);
+                 INSERT INTO project_plan_tasks (project_id, id, milestone_id, ord, title, size, state, kind,
+                                                 entity_kind, entity_name) VALUES
+                   ('В', 'V0-T1', 'V0', 1, 'старое', '', 'closed', 'dev', 'task', 'V0-T1'),
+                   ('В', 'R-V1-T1', 'V1', 1, 'тест', '', 'closed', 'red', 'red-task', 'R-V1-T1'),
+                   ('В', 'R-V1-T2', 'V1', 2, 'тест два', '', 'claimed', 'red', 'red-task', 'R-V1-T2'),
+                   ('В', 'V1-T1', 'V1', 3, 'код', '', 'not_started', 'dev', 'task', 'V1-T1'),
+                   ('В', 'V1b-T1', 'V1b', 1, 'код хвоста', '', 'not_started', 'dev', 'task', 'V1b-T1'),
+                   ('В', 'R-V2-T1', 'V2', 1, 'тест следом', '', 'closed', 'red', 'red-task', 'R-V2-T1'),
+                   ('В', 'V2-T1', 'V2', 2, 'код следом', '', 'not_started', 'dev', 'task', 'V2-T1'),
+                   ('В', 'R-V3-T1', 'V3', 1, 'тест потом', '', 'closed', 'red', 'red-task', 'R-V3-T1'),
+                   ('В', 'V3-T1', 'V3', 2, 'код потом', '', 'closed', 'dev', 'task', 'V3-T1');
+                 INSERT INTO task_requirement (project_id, task_id, requirement_id) VALUES
+                   ('В', 'R-V1-T1', 'FR-1'), ('В', 'V1-T1', 'FR-1'), ('В', 'V1b-T1', 'FR-2'), ('В', 'V2-T1', 'FR-3');
+                 INSERT INTO project_documents (project_id, entity_kind, entity_name, content, content_hash,
+                                                bytes, revision, updated_at, updated_by) VALUES
+                   ('В', 'version', '0.1.0', '# Вход по ключу', '', 0, 1, 0, 't'),
+                   ('В', 'red-task', 'R-V1-T2', '', '', 0, 3, 0, 't'),
+                   ('В', 'task', 'V1-T1', '', '', 0, 2, 0, 't'),
+                   ('В', 'task', 'V1b-T1', '', '', 0, 5, 0, 't');
+                 INSERT INTO project_document_sections (project_id, entity_kind, entity_name, ord, level, title,
+                                                        anchor, first_block, last_block) VALUES
+                   ('В', 'version', '0.1.0', 0, 1, 'Вход по ключу', 'vhod', 0, 0);
+                 INSERT INTO preflight_verdict (project_id, task_id, at, task_revision, verdict) VALUES
+                   ('В', 'R-V1-T2', 1, 3, 'blocked'), ('В', 'R-V1-T2', 2, 3, 'ready'),
+                   ('В', 'V1-T1', 1, 2, 'blocked'),
+                   ('В', 'V1b-T1', 1, 4, 'ready');",
+            )
+            .await
+            .expect("версии подсаживаются");
+        let got = super::versions(&pool, "В").await.expect("дверь versions");
+        let ids: Vec<&str> = got["versions"].as_array().expect("список").iter()
+            .map(|v| v["id"].as_str().unwrap_or("")).collect();
+        assert_eq!(ids, ["0.0.9", "0.1.0", "0.1.9", "0.1.10", "0.2.0"], "порядок — по номеру, а не строкой");
+        let at = |id: &str| got["versions"].as_array().unwrap().iter().find(|v| v["id"] == id).cloned().unwrap();
+
+        let old = at("0.0.9");
+        assert_eq!((old["state"].as_str(), old["place"].as_str(), old["phase"].as_str()),
+                   (Some("closed"), Some("closed"), Some("closed")));
+
+        let open = at("0.1.0");
+        assert_eq!(open["title"], "Вход по ключу", "заголовок из документа версии");
+        assert_eq!((open["state"].as_str(), open["place"].as_str()), (Some("open"), Some("open")));
+        assert_eq!(open["tests"], serde_json::json!({ "total": 2, "closed": 1 }));
+        assert_eq!(open["code"], serde_json::json!({ "total": 2, "closed": 0 }));
+        assert_eq!(open["requirements"], 2, "FR-1 дважды — одно требование");
+        assert_eq!((open["phase"].as_str(), open["phaseSays"].as_str()), (Some("tests"), Some("тесты")));
+        // R-V1-T2: последний свежий вердикт — ready; V1-T1: blocked на нынешней
+        // правке; V1b-T1: вердикт до правки — не в счёт.
+        assert_eq!(open["preflight"], serde_json::json!({ "ready": 1, "blocked": 1, "none": 1 }));
+        let ms: Vec<&str> = open["milestones"].as_array().unwrap().iter()
+            .map(|m| m["id"].as_str().unwrap()).collect();
+        assert_eq!(ms, ["V1", "V1b"]);
+        assert_eq!(open["milestones"][0]["tasks"][1],
+                   serde_json::json!({ "id": "R-V1-T2", "title": "тест два", "kind": "red",
+                                       "state": "claimed", "preflight": "ready" }));
+
+        let next = at("0.1.9");
+        assert_eq!((next["state"].as_str(), next["place"].as_str(), next["phase"].as_str()),
+                   (Some("planned"), Some("next"), Some("code")), "все тесты закрыты — идёт код");
+        assert!(next["title"].is_null(), "документа нет — заголовка нет, а не выдуманный");
+        let later = at("0.1.10");
+        assert_eq!((later["place"].as_str(), later["phase"].as_str()), (Some("later"), Some("release")),
+                   "всё закрыто, версия не закрыта — выпуск");
+        let empty = at("0.2.0");
+        assert_eq!((empty["phase"].as_str(), empty["milestones"][0]["tasks"].as_array().map(Vec::len)),
+                   (Some("prepare"), Some(0)), "этап без задач виден, версия готовится");
     }
 }

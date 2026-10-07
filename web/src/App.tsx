@@ -13,6 +13,7 @@ import { useFocusTrap } from "./focus";
 import { отказом } from "./otkaz";
 import { Reader } from "./Reader";
 import { Readiness } from "./Readiness";
+import { Versions } from "./Versions";
 import { Palette, type Jump } from "./Palette";
 import { Together } from "./Together";
 
@@ -52,6 +53,8 @@ const PAGES: { page: string; key: string; view: (id: string, ctx: Ctx) => React.
   { page: "pult", key: "nav.pult", view: (id, ctx) => <Console projectId={id} lang={ctx.lang} onGo={ctx.onGo} /> },
   { page: "machine", key: "nav.machine", view: (id, ctx) => <Machine projectId={id} lang={ctx.lang} /> },
   { page: "where", key: "nav.where", view: (id, ctx) => <Readiness projectId={id} lang={ctx.lang} onFind={ctx.onFind} /> },
+  // Версия — единица работы: ход каждой рядом с готовностью и задачами.
+  { page: "versions", key: "nav.versions", view: (id, ctx) => <Versions projectId={id} lang={ctx.lang} /> },
   { page: "tasks", key: "nav.tasks", view: (id, ctx) => <Work projectId={id} lang={ctx.lang} /> },
   { page: "unknown", key: "nav.unknown", view: (id, ctx) => <Unknown projectId={id} lang={ctx.lang} onFind={ctx.onFind} /> },
   // Раздел — это тип ресурса, а не папка: у требования свои колонки, свои
