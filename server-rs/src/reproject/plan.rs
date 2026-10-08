@@ -215,8 +215,17 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize,
         // Этап, получивший документ после объявления, остаётся в своём выпуске,
         // пока таблица выпуска его не назовёт: иначе выпуск выходил пустым, и
         // пересборка падала о внешний ключ (tot-ade, документ M9, 2026-10-07).
+        // Удерживается только выпуск, который эта пересборка оставит: выпуск,
+        // ушедший из документов, снимается ниже, и веха, возвращённая к нему,
+        // уходила каскадом вместе с объявленными под ней задачами — молча, в
+        // зафиксированной транзакции (ревью переименования v1, 2026-10-08).
+        // Без удержания веха остаётся без выпуска, и пересборка громко падает.
         let held = client
-            .query("SELECT id, version_id FROM project_plan_milestones WHERE project_id = $1", &[&project])
+            .query("SELECT m.id, m.version_id FROM project_plan_milestones m
+                     JOIN project_plan_versions v ON v.project_id = m.project_id AND v.id = m.version_id
+                    WHERE m.project_id = $1
+                      AND (v.origin = 'declared' OR v.id = ANY($2))",
+                   &[&project, &named.iter().filter(|e| e.0 == "version").map(|e| e.1.clone()).collect::<Vec<String>>()])
             .await?;
         (
             named.iter().filter(|e| e.0 == "milestone").map(|e| e.1.clone())
@@ -797,6 +806,43 @@ mod milestone_field {
         let refused = super::project(&pool, P).await.map(|_| ()).map_err(|e| crate::db::Says::says(&e));
         let why = refused.expect_err("веха без имени этапа не уходит в этап по имени задачи");
         assert!(why.contains("M9-T2 → веха «выпуск 0.1.2»"), "отказ называет задачу и её слова: {why}");
+        pool.get().await.expect("соединение")
+            .batch_execute(&format!("DROP SCHEMA IF EXISTS {SCHEMA} CASCADE"))
+            .await.expect("схема снимается");
+    }
+
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn a_milestone_held_by_a_leaving_version_refuses_instead_of_vanishing() {
+        const SCHEMA: &str = "plan_milestone_leaving";
+        let url = std::env::var("MH_TEST_DB_URL").expect("MH_TEST_DB_URL: адрес пустой базы");
+        let apart = format!("{}options=-c%20search_path%3D{SCHEMA}", if url.contains('?') { '&' } else { '?' });
+        let pool = crate::db::pool(&format!("{url}{apart}"), 4).expect("пул тестовой базы");
+        pool.get().await.expect("соединение")
+            .batch_execute(&format!("DROP SCHEMA IF EXISTS {SCHEMA} CASCADE; CREATE SCHEMA {SCHEMA};"))
+            .await.expect("своя схема заводится");
+        crate::projector::ensure(&pool).await.expect("схема встаёт на пустой базе");
+        // Выпуск v1 пришёл из документа, которого больше нет: пересборка его снимет.
+        crate::projector::declare_version(&pool, P, "v1", false).await.expect("выпуск");
+        crate::projector::declare_milestone(&pool, P, "M7", "v1", 1, "этап", false).await.expect("этап");
+        crate::projector::declare_task(&pool, P, crate::projector::Task {
+            id: "M7-T1", milestone: "M7", ord: 1, title: "объявленная", kind: "dev", state: "", size: "",
+        }, false).await.expect("объявленная задача");
+        let client = pool.get().await.expect("соединение");
+        client.execute("UPDATE project_plan_versions SET origin = 'projected' WHERE project_id = $1", &[&P])
+            .await.expect("выпуск выведенный");
+        client.execute(
+            "INSERT INTO project_documents (project_id, entity_kind, entity_name, content, content_hash,
+                                            bytes, revision, updated_at, updated_by)
+             VALUES ($1, 'milestone', 'M7', '# M7 · этап', '', 0, 1, 0, 't')", &[&P])
+            .await.expect("документ этапа");
+        drop(client);
+        let rebuilt = super::project(&pool, P).await.map(|_| ());
+        assert!(rebuilt.is_err(), "этап без оставшегося выпуска роняет пересборку, а не уходит каскадом");
+        let left: i64 = pool.get().await.expect("соединение")
+            .query_one("SELECT count(*) FROM project_plan_tasks WHERE project_id = $1 AND id = 'M7-T1'", &[&P])
+            .await.expect("счёт").get(0);
+        assert_eq!(left, 1, "объявленная задача под этапом цела");
         pool.get().await.expect("соединение")
             .batch_execute(&format!("DROP SCHEMA IF EXISTS {SCHEMA} CASCADE"))
             .await.expect("схема снимается");
