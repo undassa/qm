@@ -17902,7 +17902,10 @@ mod open_holder {
 
         // Сценарий S ревью #194: регрессия закрытой v1 не прощается ни
         // упоминанием «не ломать X» задачей открытой v2, ни задачей поздней v3,
-        // ни одноимённым тестом другого модуля.
+        // ни одноимённым тестом другого модуля. Ни разу не прошедшую же
+        // (красную фазу) прощает и задача поздней v3 — пунктом (`later_red`)
+        // или `project_task_check` (`later_held`); прошедшую (`parses_header`)
+        // та же задача не прощает.
         client
             .batch_execute(
                 "INSERT INTO project_plan_versions (project_id, id) VALUES ('S','v1'),('S','v2'),('S','v3');
@@ -17919,15 +17922,23 @@ mod open_holder {
                  VALUES ('S','A-DONE',1,'round_trip','- [ ] `round_trip`'),
                         ('S','A-DONE',2,'parses_header','- [ ] `parses_header`'),
                         ('S','B-NEW',1,'round_trip','- [ ] не ломать `round_trip`'),
-                        ('S','C-LATER',1,'parses_header','- [ ] не ломать `parses_header`');
+                        ('S','A-DONE',3,'later_red','- [ ] `later_red`'),
+                        ('S','A-DONE',4,'later_held','- [ ] `later_held`'),
+                        ('S','C-LATER',1,'parses_header','- [ ] не ломать `parses_header`'),
+                        ('S','C-LATER',2,'later_red','- [ ] `later_red`');
+                 INSERT INTO project_task_check (project_id, task_id, check_id, said_as)
+                 VALUES ('S','C-LATER','later_held','проверка');
                  INSERT INTO code_fact (project_id, kind, name)
-                 VALUES ('S','test-name','round_trip'),('S','test-name','parses_header');
+                 VALUES ('S','test-name','round_trip'),('S','test-name','parses_header'),
+                        ('S','test-name','later_red'),('S','test-name','later_held');
                  INSERT INTO test_run (project_id, check_name, commit_sha, dirty, verdict, at, ran_in)
                  VALUES ('S','codec_a::tests::round_trip','a',false,'passed',1,'a.rs'),
                         ('S','header::tests::parses_header','a',false,'passed',1,'h.rs'),
                         ('S','codec_a::tests::round_trip','b',false,'failed',2,'a.rs'),
                         ('S','codec_b::tests::round_trip','b',false,'failed',2,'b.rs'),
-                        ('S','header::tests::parses_header','b',false,'failed',2,'h.rs');",
+                        ('S','header::tests::parses_header','b',false,'failed',2,'h.rs'),
+                        ('S','later::tests::later_red','b',false,'failed',2,'l.rs'),
+                        ('S','later::tests::later_held','b',false,'failed',2,'l.rs');",
             )
             .await
             .expect("сценарий S подсаживается");
@@ -17937,7 +17948,7 @@ mod open_holder {
         };
         assert_eq!(s_detail(trunk).await,
                    ["упала на стволе: codec_a::tests::round_trip", "упала на стволе: header::tests::parses_header"],
-                   "прощена лишь ни разу не проходившая одноимённая проверка открытой версии");
+                   "прощены лишь ни разу не проходившие — держит ли их открытая версия или поздняя");
         assert_eq!(s_detail(ready).await,
                    ["A-DONE — проверка пункта приёмки упала на стволе: parses_header",
                     "A-DONE — проверка пункта приёмки упала на стволе: round_trip"],

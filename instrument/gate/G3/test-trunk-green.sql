@@ -25,20 +25,29 @@ SELECT 'упала на стволе: ' || r.check_name
    -- она падает потому, что работа не сделана, и об этом говорят счётчики.
    -- Имя сравнивается и голым: libtest зовёт модульный тест путём
    -- (`escalation::tests::a_role_on_…`), а пункт готовности — именем функции.
-   -- Голое имя прощает лишь проверку, ни разу не прошедшую на стволе под
-   -- полным: красная фаза зелёной не бывала, а одноимённая функция другого
-   -- модуля не прячет регрессию. Держатель — задача открытой версии (или
-   -- набора без открытой версии): задача поздней версии, назвавшая проверку
-   -- «не ломать», выпущенной работы не прикрывает (ревью #194).
-   AND NOT EXISTS (SELECT 1 FROM task_ready_item i
-                     JOIN task_scope t ON t.project_id = i.project_id AND t.task_id = i.task_id
-                    WHERE i.project_id = $1 AND t.state <> 'closed'
-                      AND (t.scope = 'open' OR t.scope IS NULL)
-                      AND (i.check_id = r.check_name
-                           OR (i.check_id = regexp_replace(r.check_name, '^.*::', '')
-                               AND NOT EXISTS (SELECT 1 FROM test_run_trunk p
-                                                WHERE p.project_id = $1 AND p.check_name = r.check_name
-                                                  AND p.verdict = 'passed'))))
+   --
+   -- КРАСНАЯ ФАЗА И РЕГРЕССИЯ РАЗЛИЧАЮТСЯ ИСТОРИЕЙ, А НЕ ВЕРСИЕЙ ДЕРЖАТЕЛЯ.
+   --
+   -- Прощается лишь проверка, НИ РАЗУ не прошедшая на стволе под полным
+   -- именем: красная фаза зелёной не бывала, а прошедшая и упавшая — регрессия
+   -- выпущенной работы, и упоминание её открытой задачей («не ломать X»)
+   -- её не снимает, как и одноимённая функция другого модуля (ревью #194).
+   -- Держатель ни разу не прошедшей — ЛЮБАЯ незакрытая задача, пунктом
+   -- готовности или `project_task_check`, какой бы версии она ни была: тест,
+   -- написанный прежде кода для задачи поздней версии, — честная красная фаза
+   -- (решение владельца 2026-10-07: версии), и требование «держит открытая
+   -- версия» держало бы открытую версию ею вечно (MyAck: M2-T14 в 0.1.1).
+   AND (EXISTS (SELECT 1 FROM test_run_trunk p
+                 WHERE p.project_id = $1 AND p.check_name = r.check_name AND p.verdict = 'passed')
+        OR NOT EXISTS (SELECT 1 FROM task_ready_item i
+                         JOIN project_plan_tasks t ON t.project_id = i.project_id AND t.id = i.task_id
+                        WHERE i.project_id = $1 AND t.state <> 'closed'
+                          AND i.check_id IN (r.check_name, regexp_replace(r.check_name, '^.*::', ''))
+                       UNION ALL
+                       SELECT 1 FROM project_task_check c
+                         JOIN project_plan_tasks t ON t.project_id = c.project_id AND t.id = c.task_id
+                        WHERE c.project_id = $1 AND t.state <> 'closed'
+                          AND c.check_id IN (r.check_name, regexp_replace(r.check_name, '^.*::', ''))))
    -- ЗЕРКАЛО ОБЯЗАНО ПАДАТЬ, И УЗНАЁТСЯ ОНО ПО БИНАРЮ, А НЕ ПО СВЯЗИ.
    --
    -- Связь через задачу этот класс не закрывает: замер 2026-09-21 дал 41

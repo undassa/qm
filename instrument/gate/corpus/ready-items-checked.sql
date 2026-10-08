@@ -128,23 +128,24 @@ WITH прогон AS (
 -- `M2-T13`, `M3-T5`; `TC-EXT-07…09` задачи `M0-T5` пишет открытая `M0-T14`.
 --
 -- Держатель — пункт готовности или `project_task_check` НЕЗАКРЫТОЙ задачи
--- ОТКРЫТОЙ версии (или набора без открытой версии): задача поздней версии
--- открытую работу не держит, как и в `requirement_scope`.
+-- ЛЮБОЙ версии. Версия держателя здесь не спрашивается: держатель прощает
+-- лишь проверку, ни разу не прошедшую на стволе (красная фаза), — а её
+-- честно пишут и для задач поздней версии (решение владельца 2026-10-07:
+-- версии; MyAck: M2-T14 в 0.1.1). Прошедшую и упавшую — регрессию — не
+-- прощает никакой держатель (ревью #194), см. ветку «упала на стволе».
 -- Имя сравнивается голым: libtest зовёт тест путём модуля
 -- (`escalation::tests::a_role_on_…`), пункт — именем функции. Держатель
 -- закрылся, а проверки всё нет или она красна — находка возвращается.
 держат_открытые AS (
   SELECT regexp_replace(i.check_id, '^.*::', '') AS check_id
     FROM task_ready_item i
-    JOIN task_scope t ON t.project_id = i.project_id AND t.task_id = i.task_id
+    JOIN project_plan_tasks t ON t.project_id = i.project_id AND t.id = i.task_id
    WHERE i.project_id = $1 AND i.check_id <> '' AND t.state <> 'closed'
-     AND (t.scope = 'open' OR t.scope IS NULL)
   UNION
   SELECT regexp_replace(c.check_id, '^.*::', '')
     FROM project_task_check c
-    JOIN task_scope t ON t.project_id = c.project_id AND t.task_id = c.task_id
-   WHERE c.project_id = $1 AND t.state <> 'closed'
-     AND (t.scope = 'open' OR t.scope IS NULL))
+    JOIN project_plan_tasks t ON t.project_id = c.project_id AND t.id = c.task_id
+   WHERE c.project_id = $1 AND t.state <> 'closed')
 -- ИМЯ ПРОВЕРКИ ВЫВОДИТСЯ ИЗ ДАТЧИКА, И БЕЗ НЕГО ЭТО «НЕИЗВЕСТНО».
 --
 -- Пункт приёмки называет проверку либо объявленным образцом `id.check`, либо
