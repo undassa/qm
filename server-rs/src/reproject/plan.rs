@@ -436,7 +436,7 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize,
             .collect();
         return Err(crate::db::Fail::Corpus(format!(
             "выпуск уходит из документов, а под ним остаются этапы: {} — назовите их в таблице \
-             другого выпуска или объявите под ним", names.join(", "))));
+             другого выпуска или объявите под другим выпуском", names.join(", "))));
     }
     tx.execute("DELETE FROM project_plan_versions
                  WHERE project_id = $1 AND origin = 'projected' AND id <> ALL($2)",
