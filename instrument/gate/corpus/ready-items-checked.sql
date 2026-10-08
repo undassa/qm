@@ -107,7 +107,10 @@ WITH прогон AS (
    WHERE b.project_id = $1 AND b.owner_kind = 'task'
      AND b.method_kind = 'checks-green' AND b.verdict = 'passed'),
 ответ AS (
-  SELECT r.check_name, bool_or(r.verdict = 'passed') AS зелена
+  SELECT r.check_name, bool_or(r.verdict = 'passed') AS зелена,
+         -- `#[ignore]` на стволе не упал, а не запускался: находка та же,
+         -- но «упала» про неё неправда (замер MyAck 08.10, `seed_the_live_database`).
+         bool_and(r.verdict = 'ignored') AS пропущена
     FROM test_run_trunk r, прогон п
    WHERE r.project_id = $1 AND NOT r.dirty AND r.at = п.at
      -- ЗЕРКАЛО ОБЯЗАНО ПАДАТЬ, И ЭТО НЕ ПОЛОМКА. Граница та же, по которой
@@ -342,7 +345,9 @@ UNION ALL
 -- Прогон у харнеса теперь свой (`test_run`, заявка 20), и вердикт берётся у
 -- него: у последнего прогона с ЧИСТОГО дерева.
 -- DISTINCT: одноимённая функция двух модулей дала бы строку дважды.
-SELECT DISTINCT t.id || ' — проверка пункта приёмки упала на стволе: ' || r.check_id
+SELECT DISTINCT t.id || CASE WHEN о.пропущена
+                             THEN ' — проверка пункта приёмки на стволе не запускается (ignored): '
+                             ELSE ' — проверка пункта приёмки упала на стволе: ' END || r.check_id
   FROM project_plan_tasks t
   JOIN task_ready_item r ON r.project_id = t.project_id AND r.task_id = t.id
   JOIN ответ о ON r.check_id IN (о.check_name, regexp_replace(о.check_name, '^.*::', ''))
