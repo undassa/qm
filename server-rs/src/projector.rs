@@ -17921,6 +17921,8 @@ mod open_holder {
                  INSERT INTO task_ready_item (project_id, task_id, ord, check_id, text)
                  VALUES ('S','A-DONE',1,'round_trip','- [ ] `round_trip`'),
                         ('S','A-DONE',2,'parses_header','- [ ] `parses_header`'),
+                        ('S','A-DONE',5,'skipped_only','- [ ] `skipped_only`'),
+                        ('S','A-DONE',6,'mixed','- [ ] `mixed`'),
                         ('S','B-NEW',1,'round_trip','- [ ] не ломать `round_trip`'),
                         ('S','A-DONE',3,'later_red','- [ ] `later_red`'),
                         ('S','A-DONE',4,'later_held','- [ ] `later_held`'),
@@ -17930,7 +17932,8 @@ mod open_holder {
                  VALUES ('S','C-LATER','later_held','проверка');
                  INSERT INTO code_fact (project_id, kind, name)
                  VALUES ('S','test-name','round_trip'),('S','test-name','parses_header'),
-                        ('S','test-name','later_red'),('S','test-name','later_held');
+                        ('S','test-name','later_red'),('S','test-name','later_held'),
+                        ('S','test-name','skipped_only'),('S','test-name','mixed');
                  INSERT INTO test_run (project_id, check_name, commit_sha, dirty, verdict, at, ran_in)
                  VALUES ('S','codec_a::tests::round_trip','a',false,'passed',1,'a.rs'),
                         ('S','header::tests::parses_header','a',false,'passed',1,'h.rs'),
@@ -17938,7 +17941,10 @@ mod open_holder {
                         ('S','codec_b::tests::round_trip','b',false,'failed',2,'b.rs'),
                         ('S','header::tests::parses_header','b',false,'failed',2,'h.rs'),
                         ('S','later::tests::later_red','b',false,'failed',2,'l.rs'),
-                        ('S','later::tests::later_held','b',false,'failed',2,'l.rs');",
+                        ('S','later::tests::later_held','b',false,'failed',2,'l.rs'),
+                        ('S','live::skipped_only','b',false,'ignored',2,'l.rs'),
+                        ('S','m::mixed','b',false,'failed',2,'m.rs'),
+                        ('S','m::mixed','b',false,'ignored',2,'m.rs');",
             )
             .await
             .expect("сценарий S подсаживается");
@@ -17947,12 +17953,16 @@ mod open_holder {
             async move { super::execute_method_upto(client, "S", "query", sql, 200, 0).await.detail }
         };
         assert_eq!(s_detail(trunk).await,
-                   ["упала на стволе: codec_a::tests::round_trip", "упала на стволе: header::tests::parses_header"],
+                   ["упала на стволе: codec_a::tests::round_trip", "упала на стволе: header::tests::parses_header",
+                    "упала на стволе: m::mixed"],
                    "прощены лишь ни разу не проходившие — держит ли их открытая версия или поздняя");
         assert_eq!(s_detail(ready).await,
-                   ["A-DONE — проверка пункта приёмки упала на стволе: parses_header",
+                   ["A-DONE — проверка пункта приёмки на стволе не запускается (ignored): skipped_only",
+                    "A-DONE — проверка пункта приёмки упала на стволе: mixed",
+                    "A-DONE — проверка пункта приёмки упала на стволе: parses_header",
                     "A-DONE — проверка пункта приёмки упала на стволе: round_trip"],
-                   "регрессия выпущенной работы вменяется, строка — одна");
+                   "регрессия выпущенной работы вменяется, строка — одна; лишь пропущенная названа \
+                    не запущенной, а упавшая рядом с пропуском — упавшей");
 
         // Держатели закрылись — находки вернулись.
         client
