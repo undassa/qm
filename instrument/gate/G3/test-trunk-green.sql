@@ -25,10 +25,20 @@ SELECT 'упала на стволе: ' || r.check_name
    -- она падает потому, что работа не сделана, и об этом говорят счётчики.
    -- Имя сравнивается и голым: libtest зовёт модульный тест путём
    -- (`escalation::tests::a_role_on_…`), а пункт готовности — именем функции.
+   -- Голое имя прощает лишь проверку, ни разу не прошедшую на стволе под
+   -- полным: красная фаза зелёной не бывала, а одноимённая функция другого
+   -- модуля не прячет регрессию. Держатель — задача открытой версии (или
+   -- набора без открытой версии): задача поздней версии, назвавшая проверку
+   -- «не ломать», выпущенной работы не прикрывает (ревью #194).
    AND NOT EXISTS (SELECT 1 FROM task_ready_item i
-                     JOIN project_plan_tasks t ON t.project_id = i.project_id AND t.id = i.task_id
+                     JOIN task_scope t ON t.project_id = i.project_id AND t.task_id = i.task_id
                     WHERE i.project_id = $1 AND t.state <> 'closed'
-                      AND (i.check_id = r.check_name OR i.check_id = regexp_replace(r.check_name, '^.*::', '')))
+                      AND (t.scope = 'open' OR t.scope IS NULL)
+                      AND (i.check_id = r.check_name
+                           OR (i.check_id = regexp_replace(r.check_name, '^.*::', '')
+                               AND NOT EXISTS (SELECT 1 FROM test_run_trunk p
+                                                WHERE p.project_id = $1 AND p.check_name = r.check_name
+                                                  AND p.verdict = 'passed'))))
    -- ЗЕРКАЛО ОБЯЗАНО ПАДАТЬ, И УЗНАЁТСЯ ОНО ПО БИНАРЮ, А НЕ ПО СВЯЗИ.
    --
    -- Связь через задачу этот класс не закрывает: замер 2026-09-21 дал 41

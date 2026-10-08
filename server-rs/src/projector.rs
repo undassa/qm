@@ -17900,6 +17900,49 @@ mod open_holder {
                     "T-SHUT — проверки пункта приёмки нет среди прочитанного датчиком: TC-EXT-09"],
                    "держит открытая задача — закрытой не вменяют");
 
+        // Сценарий S ревью #194: регрессия закрытой v1 не прощается ни
+        // упоминанием «не ломать X» задачей открытой v2, ни задачей поздней v3,
+        // ни одноимённым тестом другого модуля.
+        client
+            .batch_execute(
+                "INSERT INTO project_plan_versions (project_id, id) VALUES ('S','v1'),('S','v2'),('S','v3');
+                 INSERT INTO version_state (project_id, version, state, changed_at)
+                 VALUES ('S','v1','closed',0),('S','v2','open',0);
+                 INSERT INTO project_plan_milestones (project_id, id, version_id, ord, title)
+                 VALUES ('S','M1','v1',1,'m'),('S','M2','v2',1,'m'),('S','M3','v3',1,'m');
+                 INSERT INTO project_plan_tasks (project_id, id, milestone_id, ord, title, size, state, kind,
+                                                 entity_kind, entity_name)
+                 VALUES ('S','A-DONE','M1',1,'выпущена','','closed','dev','task','A-DONE'),
+                        ('S','B-NEW','M2',1,'открыта','','not_started','dev','task','B-NEW'),
+                        ('S','C-LATER','M3',1,'потом','','not_started','dev','task','C-LATER');
+                 INSERT INTO task_ready_item (project_id, task_id, ord, check_id, text)
+                 VALUES ('S','A-DONE',1,'round_trip','- [ ] `round_trip`'),
+                        ('S','A-DONE',2,'parses_header','- [ ] `parses_header`'),
+                        ('S','B-NEW',1,'round_trip','- [ ] не ломать `round_trip`'),
+                        ('S','C-LATER',1,'parses_header','- [ ] не ломать `parses_header`');
+                 INSERT INTO code_fact (project_id, kind, name)
+                 VALUES ('S','test-name','round_trip'),('S','test-name','parses_header');
+                 INSERT INTO test_run (project_id, check_name, commit_sha, dirty, verdict, at, ran_in)
+                 VALUES ('S','codec_a::tests::round_trip','a',false,'passed',1,'a.rs'),
+                        ('S','header::tests::parses_header','a',false,'passed',1,'h.rs'),
+                        ('S','codec_a::tests::round_trip','b',false,'failed',2,'a.rs'),
+                        ('S','codec_b::tests::round_trip','b',false,'failed',2,'b.rs'),
+                        ('S','header::tests::parses_header','b',false,'failed',2,'h.rs');",
+            )
+            .await
+            .expect("сценарий S подсаживается");
+        let s_detail = |sql: &'static str| {
+            let client = &client;
+            async move { super::execute_method_upto(client, "S", "query", sql, 200, 0).await.detail }
+        };
+        assert_eq!(s_detail(trunk).await,
+                   ["упала на стволе: codec_a::tests::round_trip", "упала на стволе: header::tests::parses_header"],
+                   "прощена лишь ни разу не проходившая одноимённая проверка открытой версии");
+        assert_eq!(s_detail(ready).await,
+                   ["A-DONE — проверка пункта приёмки упала на стволе: parses_header",
+                    "A-DONE — проверка пункта приёмки упала на стволе: round_trip"],
+                   "регрессия выпущенной работы вменяется, строка — одна");
+
         // Держатели закрылись — находки вернулись.
         client
             .batch_execute("UPDATE project_plan_tasks SET state = 'closed' WHERE project_id = 'О' AND id <> 'T-SHUT'")

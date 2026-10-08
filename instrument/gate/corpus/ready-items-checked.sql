@@ -127,20 +127,24 @@ WITH прогон AS (
 -- `an_undeclared_door_reddens_both_sides` красен красными фазами `M8-T3`,
 -- `M2-T13`, `M3-T5`; `TC-EXT-07…09` задачи `M0-T5` пишет открытая `M0-T14`.
 --
--- Держатель — пункт готовности или `project_task_check` НЕЗАКРЫТОЙ задачи.
+-- Держатель — пункт готовности или `project_task_check` НЕЗАКРЫТОЙ задачи
+-- ОТКРЫТОЙ версии (или набора без открытой версии): задача поздней версии
+-- открытую работу не держит, как и в `requirement_scope`.
 -- Имя сравнивается голым: libtest зовёт тест путём модуля
 -- (`escalation::tests::a_role_on_…`), пункт — именем функции. Держатель
 -- закрылся, а проверки всё нет или она красна — находка возвращается.
 держат_открытые AS (
   SELECT regexp_replace(i.check_id, '^.*::', '') AS check_id
     FROM task_ready_item i
-    JOIN project_plan_tasks t ON t.project_id = i.project_id AND t.id = i.task_id
+    JOIN task_scope t ON t.project_id = i.project_id AND t.task_id = i.task_id
    WHERE i.project_id = $1 AND i.check_id <> '' AND t.state <> 'closed'
+     AND (t.scope = 'open' OR t.scope IS NULL)
   UNION
   SELECT regexp_replace(c.check_id, '^.*::', '')
     FROM project_task_check c
-    JOIN project_plan_tasks t ON t.project_id = c.project_id AND t.id = c.task_id
-   WHERE c.project_id = $1 AND t.state <> 'closed')
+    JOIN task_scope t ON t.project_id = c.project_id AND t.task_id = c.task_id
+   WHERE c.project_id = $1 AND t.state <> 'closed'
+     AND (t.scope = 'open' OR t.scope IS NULL))
 -- ИМЯ ПРОВЕРКИ ВЫВОДИТСЯ ИЗ ДАТЧИКА, И БЕЗ НЕГО ЭТО «НЕИЗВЕСТНО».
 --
 -- Пункт приёмки называет проверку либо объявленным образцом `id.check`, либо
@@ -336,14 +340,20 @@ UNION ALL
 -- ровно так же, как зелёная, и «готово» держалось на существовании функции.
 -- Прогон у харнеса теперь свой (`test_run`, заявка 20), и вердикт берётся у
 -- него: у последнего прогона с ЧИСТОГО дерева.
-SELECT t.id || ' — проверка пункта приёмки упала на стволе: ' || r.check_id
+-- DISTINCT: одноимённая функция двух модулей дала бы строку дважды.
+SELECT DISTINCT t.id || ' — проверка пункта приёмки упала на стволе: ' || r.check_id
   FROM project_plan_tasks t
   JOIN task_ready_item r ON r.project_id = t.project_id AND r.task_id = t.id
   JOIN ответ о ON r.check_id IN (о.check_name, regexp_replace(о.check_name, '^.*::', ''))
  WHERE t.project_id = $1 AND t.kind = 'dev' AND t.state = 'closed' AND NOT r.done
    AND r.check_id <> '' AND NOT о.зелена
-   AND NOT EXISTS (SELECT 1 FROM держат_открытые д
+   -- Красную прощает держатель только той проверке, что НИ РАЗУ не прошла на
+   -- стволе: прошедшая и упавшая — регрессия выпущенной работы, и упоминание
+   -- её открытой задачей («не ломать X») её не снимает (ревью #194).
+   AND NOT (EXISTS (SELECT 1 FROM держат_открытые д
                     WHERE д.check_id = regexp_replace(r.check_id, '^.*::', ''))
+        AND NOT EXISTS (SELECT 1 FROM test_run_trunk p
+                         WHERE p.project_id = $1 AND p.check_name = о.check_name AND p.verdict = 'passed'))
    -- Зеркала в `ответ` не входят вовсе — см. довод там.
 UNION ALL
 -- Прогона нет вовсе — это «неизвестно», а не «сошлось»: пункт говорит об этом
