@@ -319,6 +319,12 @@ pub fn test_lines(text: &str) -> Vec<TestRow> {
             set_reason(&mut rows, &binary, &name, t);
             continue;
         }
+        // Шапка живёт до конца своего раздела: иначе сообщение чужой паники
+        // (бинарь без тестов, `main` следующего бинаря) досталось бы проверке,
+        // упавшей без паники (`should_panic`, не запаниковавший).
+        if t.starts_with("Running ") || t.starts_with("Doc-tests") || t == "failures:" || t.starts_with("test result:") {
+            header = None;
+        }
         if let Some(rest) = t.strip_prefix("Running ") {
             binary = rest.split_whitespace().next().unwrap_or("").rsplit(['/', '\\']).next().unwrap_or("").to_owned();
         } else if let Some(name) = t.strip_prefix("---- ").and_then(|x| x.strip_suffix(" stdout ----")) {
@@ -327,7 +333,12 @@ pub fn test_lines(text: &str) -> Vec<TestRow> {
             // Свежий Rust вставляет номер нити: `thread 'x' (475211568) panicked at`.
             let tail = tail.strip_prefix('(').and_then(|x| x.split_once(") ")).map_or(tail, |(_, after)| after);
             let Some(tail) = tail.strip_prefix("panicked at ") else { continue };
-            let name = header.take().unwrap_or_else(|| thread.to_owned());
+            // Нить не своей шапки — чужая паника; `main` — нить doc-теста.
+            let name = match header.take() {
+                Some(h) if h != thread && thread != "main" => continue,
+                Some(h) => h,
+                None => thread.to_owned(),
+            };
             // Rust до 1.73 печатал сообщение той же строкой: `panicked at 'msg', file:l:c`.
             match tail.strip_prefix('\'').and_then(|x| x.rsplit_once("', ")) {
                 Some((msg, _)) => set_reason(&mut rows, &binary, &name, msg),
@@ -2750,6 +2761,29 @@ error: 4 targets failed:
         assert_eq!(reason(&rows, "org::tests::fine", "unittests"), "", "прошедшей причина не нужна");
         let doc = rows.iter().find(|r| r.0 == "src/lib.rs - org (line 3)").expect("doc-тест");
         assert_eq!(doc.3, "doc says no", "doc-тест: шапка есть, нить — `main`");
+        // Устаревшая шапка не переносится через бинари: `broken` упал без
+        // паники, а `main` следующего бинаря паникует заглушкой.
+        let stale = "\
+     Running tests/a.rs (target/debug/deps/a-1)
+test broken ... FAILED
+
+failures:
+
+---- broken stdout ----
+note: test did not panic as expected at tests/a.rs:3:4
+
+failures:
+    broken
+
+test result: FAILED. 0 passed; 1 failed
+     Running tests/cli.rs (target/debug/deps/cli-2)
+thread 'main' panicked at tests/cli.rs:1:1:
+not yet implemented: TC-ORG-02
+";
+        assert_eq!(super::test_lines(stale), vec![row("broken", "failed", "a.rs")]);
+        // Паника чужой нити под шапкой не своя.
+        let other = "test x ... FAILED\n---- x stdout ----\nthread 'helper' panicked at a.rs:1:1:\nnot yet implemented: TC-ORG-02\n";
+        assert_eq!(super::test_lines(other)[0].3, "");
         // Простыня усекается.
         let long = format!("test x ... FAILED\nthread 'x' panicked at a.rs:1:1:\n{}\n", "я".repeat(500));
         assert_eq!(super::test_lines(&long)[0].3.chars().count(), 200);

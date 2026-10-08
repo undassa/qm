@@ -87,9 +87,31 @@ SELECT 'упала на стволе: ' || r.check_name
    -- пункту готовности или по `project_task_check`). Заглушка проверки,
    -- которую держат одни закрытые задачи или никто, — находка: задача
    -- закрылась, а тело так и не написано.
+   --
+   -- ДВА ОГРАНИЧЕНИЯ, БЕЗ КОТОРЫХ ПРОЩЕНИЕ ПРЯТАЛО БЫ РЕГРЕССИЮ.
+   --
+   -- Id в сообщении к упавшей проверке не привязан: зелёная проверка
+   -- законченной работы, упёршаяся в чужую заглушку открытой задачи, упала бы
+   -- той же фразой. Поэтому прощается лишь проверка, НИ РАЗУ не прошедшая на
+   -- стволе в том же бинаре: красная фаза зелёной не бывала.
+   --
+   -- И закрытого держателя не перебивает открытый со-держатель (эпик-родитель
+   -- держит те же TC): если проверку уже забрала себе ЗАКРЫТАЯ обычная задача,
+   -- тело обязано быть написано — как в правиле зеркала выше.
    AND NOT EXISTS (SELECT 1
                      FROM (SELECT substring(r.reason FROM '^not yet implemented: ([A-Z]+-[A-Z]+-[0-9]+[a-z]?)') AS id) s
                     WHERE s.id IS NOT NULL
+                      AND NOT EXISTS (SELECT 1 FROM test_run_trunk p
+                                       WHERE p.project_id = $1 AND p.check_name = r.check_name
+                                         AND p.ran_in IS NOT DISTINCT FROM r.ran_in AND p.verdict = 'passed')
+                      AND NOT EXISTS (SELECT 1 FROM task_ready_item i
+                                        JOIN project_plan_tasks t ON t.project_id = i.project_id AND t.id = i.task_id
+                                       WHERE i.project_id = $1 AND i.check_id = s.id
+                                         AND t.state = 'closed' AND t.kind <> 'red')
+                      AND NOT EXISTS (SELECT 1 FROM project_task_check c
+                                        JOIN project_plan_tasks t ON t.project_id = c.project_id AND t.id = c.task_id
+                                       WHERE c.project_id = $1 AND c.check_id = s.id
+                                         AND t.state = 'closed' AND t.kind <> 'red')
                       AND (EXISTS (SELECT 1 FROM task_ready_item i
                                      JOIN project_plan_tasks t ON t.project_id = i.project_id AND t.id = i.task_id
                                     WHERE i.project_id = $1 AND i.check_id = s.id AND t.state <> 'closed')

@@ -17786,9 +17786,14 @@ mod todo_stub {
                         ('З', 'T-SHUT', 'M1', 2, 'закрытая', '', 'closed', 'dev', 'task', 'T-SHUT');
                  INSERT INTO task_ready_item (project_id, task_id, ord, check_id, text)
                  VALUES ('З', 'T-OPEN', 1, 'TC-ORG-02', '- [ ] `TC-ORG-02`'),
-                        ('З', 'T-SHUT', 1, 'TC-ORG-03', '- [x] `TC-ORG-03`');
+                        ('З', 'T-SHUT', 1, 'TC-ORG-03', '- [x] `TC-ORG-03`'),
+                        ('З', 'T-OPEN', 2, 'TC-ORG-06', '- [ ] `TC-ORG-06`');
                  INSERT INTO project_task_check (project_id, task_id, check_id, said_as)
-                 VALUES ('З', 'T-OPEN', 'TC-ORG-04b', 'проверка'), ('З', 'T-SHUT', 'TC-ORG-05', 'проверка');",
+                 VALUES ('З', 'T-OPEN', 'TC-ORG-04b', 'проверка'), ('З', 'T-SHUT', 'TC-ORG-05', 'проверка'),
+                        ('З', 'T-SHUT', 'TC-ORG-06', 'проверка');
+                 -- `org_regress` уже бывала зелёной на стволе: законченная работа.
+                 INSERT INTO test_run (project_id, check_name, commit_sha, dirty, verdict, at, ran_in)
+                 VALUES ('З', 'org_regress', 'z', false, 'passed', 1, 'org.rs');",
             )
             .await
             .expect("набор подсаживается");
@@ -17801,11 +17806,16 @@ mod todo_stub {
             row("org_nobody", "not yet implemented: TC-ORG-09"),
             row("org_sums", "assertion `left == right` failed"),
             row("org_silent", ""),
+            // Регрессия законченной работы, упёршаяся в чужую заглушку открытой задачи.
+            row("org_regress", "not yet implemented: TC-ORG-02"),
+            // Открытый со-держатель (эпик) не перебивает закрытого.
+            row("org_cosheld", "not yet implemented: TC-ORG-06"),
         ];
         super::record_test_runs(&pool, "З", "a", &rows, "mh-runner", false, None).await.expect("прогон пишется");
         let trunk = include_str!("../../instrument/gate/G3/test-trunk-green.sql");
         let got = super::execute_method_upto(&client, "З", "query", trunk, 200, 0).await.detail;
-        assert_eq!(got, ["org_closed_by_check", "org_closed_by_item", "org_nobody", "org_silent", "org_sums"]
+        assert_eq!(got, ["org_closed_by_check", "org_closed_by_item", "org_cosheld", "org_nobody", "org_regress", "org_silent",
+                        "org_sums"]
                        .map(|n| format!("упала на стволе: {n}")),
                    "прощена лишь заглушка открытой задачи");
 
