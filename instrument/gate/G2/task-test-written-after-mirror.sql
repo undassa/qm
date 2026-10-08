@@ -16,7 +16,7 @@ WITH строка AS (
   SELECT DISTINCT c.task_id, c.check_id, r.id AS зеркало
     FROM project_task_check c
     JOIN строка s ON s.task_id = c.task_id
-     AND s.line ~ ('^\|\s*`?' || c.check_id || '`?\s*\|') AND s.line !~* 'закрывает\s+`?[MmVv][0-9]+-[Tt][0-9A-Za-z]+'
+     AND s.line ~ ('^\|\s*`?' || c.check_id || '`?\s*\|') AND s.line !~* 'закрывает\s+`?[MmVv](?:[0-9]+|[A-Za-z])-[Tt][0-9A-Za-z]+'
     JOIN red_task r ON r.project_id = c.project_id AND r.parent_task = c.task_id
     JOIN project_plan_tasks rt ON rt.project_id = r.project_id AND rt.id = r.id AND rt.state = 'closed'
    WHERE c.project_id = $1 AND c.said_as = 'доказательство'

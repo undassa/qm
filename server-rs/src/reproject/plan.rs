@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 /// Прежде этап читался из каталога (`50-plan/v1/M0/M0-T1.md`). Каталог говорил
 /// то же самое, что имя задачи, — только окольно.
 static TASK_MILESTONE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)^([MV]\d+)-T").expect("образец этапа в имени задачи"));
+    Lazy::new(|| Regex::new(r"(?i)^([MV](?:\d+|[A-Z]))-T").expect("образец этапа в имени задачи"));
 /// Имя задачи в поле «Зависит от» — с кавычками кода и без них.
 ///
 /// Требование кавычек стоило 57 зависимостей из 338: половина набора пишет
@@ -177,13 +177,23 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize,
     // Какому выпуску принадлежит этап, говорит сам выпуск: его документ
     // перечисляет этапы таблицей, первой колонкой. Прежде это читалось из
     // каталога, в котором лежал файл.
+    //
+    // Этап, названный двумя выпусками, достаётся ЗАВЕДЁННОМУ ПОЗЖЕ (по первой
+    // правке имени, равные — по имени): так стоит переименование, новый
+    // документ пишется рядом со старым. Без порядка победителя решал порядок
+    // строк запроса. Отказ здесь не годится: tot-ade сейчас ровно в таком
+    // состоянии (0.0.9 и v1 перечисляют все 15 этапов), и отказ остановил бы
+    // его пересборку до снятия v1.
     let milestone_version: HashMap<String, String> = {
         let client = crate::db::conn(pool).await?;
         client
             .query(
                 "SELECT c.value, c.entity_name FROM project_document_cells c
                   WHERE c.project_id = $1 AND c.entity_kind = 'version'
-                    AND c.col = 0 AND c.row_ord > 0 AND c.value ~ '^[MV][0-9]+$'",
+                    AND c.col = 0 AND c.row_ord > 0 AND c.value ~ '^[MV](?:[0-9]+|[A-Z])$'
+                  ORDER BY (SELECT min(r.written_at) FROM project_document_revisions r
+                             WHERE r.project_id = c.project_id AND r.entity_kind = 'version'
+                               AND r.entity_name = c.entity_name) NULLS FIRST, c.entity_name",
                 &[&project],
             )
             .await?
@@ -344,9 +354,6 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize,
         )));
     }
     let task_ids: Vec<String> = tasks.iter().map(|t| t.0.clone()).collect();
-    tx.execute("DELETE FROM project_plan_versions
-                 WHERE project_id = $1 AND origin = 'projected' AND id <> ALL($2)",
-               &[&project, &version_ids]).await?;
     for (id, kind, name) in &versions {
         tx.execute(
             "INSERT INTO project_plan_versions(project_id, id, entity_kind, entity_name)
@@ -407,6 +414,14 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize,
             &[&project, id, version, ord, title, kind, name],
         ).await?;
     }
+    // Ушедший выпуск снимается ПОСЛЕ того, как вехи переехали к новому. Снятый
+    // раньше, он каскадом уносил свои вехи, их задачи и рёбра в этой же
+    // транзакции: спроецированное возвращалось вставкой ниже, а объявленное —
+    // задачи и рёбра, повешенные дверями под эти вехи, — пропадало насовсем
+    // (tot-ade при переименовании v1: M5-T416, V5-T416 и 18 объявленных рёбер).
+    tx.execute("DELETE FROM project_plan_versions
+                 WHERE project_id = $1 AND origin = 'projected' AND id <> ALL($2)",
+               &[&project, &version_ids]).await?;
     // СНОСИТСЯ ТОЛЬКО СВОЁ. Красные задачи кладёт `rebuild` из `red_task`, а этот
     // проход сносил их заодно: их нет в его перечне, значит под «лишние» они
     // подходили.

@@ -8,7 +8,7 @@ WITH строка AS (
   SELECT DISTINCT c.check_id, c.task_id, s.state
     FROM project_task_check c
     JOIN строка s ON s.task_id = c.task_id
-     AND s.line ~ ('^\|\s*`?' || c.check_id || '`?\s*\|') AND s.line !~* 'закрывает\s+`?[MmVv][0-9]+-[Tt][0-9A-Za-z]+'
+     AND s.line ~ ('^\|\s*`?' || c.check_id || '`?\s*\|') AND s.line !~* 'закрывает\s+`?[MmVv](?:[0-9]+|[A-Za-z])-[Tt][0-9A-Za-z]+'
    WHERE c.project_id = $1)
 SELECT k.id || ' — закрывают сразу ' || string_agg(z.task_id, ', ' ORDER BY z.task_id)
        || ': у сценария одна задача, остальные пишут «закрывает <задача>»' AS detail

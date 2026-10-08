@@ -634,8 +634,8 @@ impl Mcp {
             "inputSchema": { "type": "object", "properties": {} } }));
         tools.push(json!({ "name": "profile", "description": "профиль проекта, выведенный из его стека: строки таблиц «Слой | Выбор» набора, возможности, которые из них вышли, и пункты гейтов, к проекту неприменимые, с причиной",
             "inputSchema": { "type": "object", "properties": {} } }));
-        tools.push(json!({ "name": "version-close", "description": "объявить выпуск закрытым или снова открытым; от закрытого считают, что изменилось после него",
-            "inputSchema": { "type": "object", "properties": { "drop": json!({"type":"boolean","description":"снять объявленное этой же дверью"}), "version": s("имя выпуска"),
+        tools.push(json!({ "name": "version-close", "description": "объявить выпуск закрытым или снова открытым; от закрытого считают, что изменилось после него. drop=true снимает строку выпуска, которого в плане уже нет (переименован, снят `version-add drop=true` или ушёл со своим документом `rm kind=version id=<v>`); выпуск из плана снять отказывает",
+            "inputSchema": { "type": "object", "properties": { "drop": json!({"type":"boolean","description":"снять строку выпуска, которого в плане нет; выпуск из плана сначала снимают: объявленный — `version-add drop=true`, заведённый документом — `rm kind=version id=<v>`"}), "version": s("имя выпуска"),
                 "state": s("closed · open, по умолчанию closed") }, "required": ["version"] } }));
         tools.push(json!({ "name": "step-selftest", "description": "самотест лестницы: каждая ступень роняется подсаженным нарушением в откатываемой транзакции; живой считается та, у которой число выросло — и выросло при всех зелёных гейтах и при всех красных, а не только в сегодняшнем состоянии",
             "inputSchema": { "type": "object", "properties": { "set": s("набор, по умолчанию godzy"),
@@ -3908,5 +3908,137 @@ mod tests {
             let args = crate::client::args_of(&words[3..]).expect("доводы строки разбираются");
             assert_eq!(says(&words[2], args), None, "напечатанная строка «{line}» отвергнута сверкой");
         }
+    }
+}
+
+/// Выпуск из документа снимается его документом, а не `version-add drop`:
+/// строка плана держит каскадом вехи и задачи, и снятая дверью она стёрла бы
+/// их до следующей пересборки (tot-ade v1: 15 вех, большая часть 777 задач).
+/// Здесь же — веха с буквой и `V<n>` в «Зависит от»: образец `M\d+` их терял.
+#[cfg(test)]
+mod a_projected_version {
+    use serde_json::json;
+
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn leaves_with_its_document_and_the_door_refuses_to_drop_it() {
+        let url = std::env::var("MH_TEST_DB_URL").expect("MH_TEST_DB_URL: адрес пустой базы");
+        let apart = format!("{}{}", if url.contains('?') { '&' } else { '?' },
+                            "options=-c%20search_path%3Dprojected_version");
+        let pool = crate::db::pool(&format!("{url}{apart}"), 2).expect("пул тестовой базы");
+        pool.get().await.expect("соединение")
+            .batch_execute("DROP SCHEMA IF EXISTS projected_version CASCADE; CREATE SCHEMA projected_version;")
+            .await.expect("своя схема заводится");
+        crate::projector::ensure(&pool).await.expect("схема встаёт на пустой базе");
+        crate::instrument::apply(&pool).await.expect("прибор раскладывается");
+        let door = super::Mcp {
+            pool: pool.clone(),
+            kinds: std::sync::Arc::new(crate::kinds::Kinds::from_db(&pool).await.expect("виды")),
+            project: "p".to_owned(),
+            author: "проба".to_owned(),
+        };
+        let text = |v: &serde_json::Value| v["content"][0]["text"].as_str().unwrap_or("").to_owned();
+        let add = |kind: &'static str, id: &'static str, content: &'static str| {
+            let door = &door;
+            async move {
+                let v = door.call("document-add", &json!({ "kind": kind, "id": id, "content": content })).await;
+                assert!(text(&v).contains("created"), "{kind} {id} не заведён: {v}");
+            }
+        };
+        let plan = "| Этап | Что |\n|---|---|\n| M1 | ядро |\n| MA | десятый |\n| V5 | пятый |\n";
+        add("version", "v1", plan).await;
+        add("milestone", "M1", "# M1 ядро\n").await;
+        add("milestone", "MA", "# MA десятый\n").await;
+        add("milestone", "V5", "# V5 пятый\n").await;
+        add("task", "M1-T1", "# M1-T1 первая\n\n- **Веха:** M1\n- **Зависит от:** MA, V5\n").await;
+        // Пересборка — своей дорогой плана и проекций: полная `reproject` на
+        // пустой базе упирается в таблицы, которые заводит не этот сервер.
+        let rebuild = || {
+            let pool = pool.clone();
+            async move {
+                crate::watch::rebuilding(&pool, "p", async |lease| {
+                    crate::reproject::plan::project(&pool, "p").await?;
+                    crate::projector::rebuild(&pool, "p", lease).await
+                })
+                .await
+                .expect("пересборка плана")
+            }
+        };
+        rebuild().await;
+
+        let count = |sql: &'static str| {
+            let pool = pool.clone();
+            async move { pool.get().await.expect("соединение").query_one(sql, &[]).await.expect(sql).get::<_, i64>(0) }
+        };
+        let below = "SELECT (SELECT count(*) FROM project_plan_milestones WHERE project_id = 'p')
+                          + (SELECT count(*) FROM project_plan_tasks WHERE project_id = 'p')";
+        let held = count(below).await;
+        assert!(held >= 4, "план не собрался: {held} строк ниже выпуска");
+        let deps: Vec<String> = pool.get().await.expect("соединение")
+            .query("SELECT milestone_id FROM task_milestone_dep WHERE project_id = 'p' AND task_id = 'M1-T1' ORDER BY 1", &[])
+            .await.expect("рёбра").iter().map(|r| r.get(0)).collect();
+        assert_eq!(deps, ["MA", "V5"], "веха с буквой и V<n> в «Зависит от» — рёбра");
+
+        // Дверь объявления выпуск из документа не снимает и называет документ.
+        let refused = door.call("version-add", &json!({ "id": "v1", "drop": true })).await;
+        assert!(text(&refused).contains("projected") && text(&refused).contains("rm kind=version id=v1"), "{refused}");
+        assert_eq!(count(below).await, held, "отказ ничего ниже выпуска не тронул");
+        let over = door.call("version-add", &json!({ "id": "v1" })).await;
+        assert!(text(&over).contains("has_document") && text(&over).contains("put kind=version id=v1"), "объявление поверх документа: {over}");
+        let still = door.call("version-add", &json!({ "id": "v1", "drop": true })).await;
+        assert!(text(&still).contains("projected"), "после объявления поверх: {still}");
+        let milestone = door.call("milestone-add", &json!({ "id": "M1", "version": "v1", "drop": true })).await;
+        assert!(text(&milestone).contains("rm kind=milestone id=M1"), "{milestone}");
+        assert_eq!(count(below).await, held, "веха из документа со своими задачами стоит");
+        assert_eq!(count("SELECT count(*) FROM project_plan_versions WHERE project_id = 'p' AND id = 'v1'").await, 1);
+
+        // Закрытие выпуска из плана не снимается и называет тот же рычаг.
+        door.call("version-close", &json!({ "version": "v1" })).await;
+        let in_plan = door.call("version-close", &json!({ "version": "v1", "drop": true })).await;
+        assert!(text(&in_plan).contains("in_plan") && text(&in_plan).contains("rm kind=version id=v1")
+                && !text(&in_plan).contains("version-add"), "{in_plan}");
+
+        // Под этап v1 повешены дверями задача и ребро: их пересборка не вернёт.
+        let task = door.call("task-add", &json!({ "id": "M1-T9", "milestone": "M1", "title": "объявлена", "kind": "dev" })).await;
+        assert!(text(&task).contains("declared"), "{task}");
+        let dep = door.call("task-dep-add", &json!({ "task": "M1-T9", "dependsOn": "M1-T1" })).await;
+        assert_ne!(dep["isError"], json!(true), "{dep}");
+        let declared_below = "SELECT (SELECT count(*) FROM project_plan_tasks WHERE project_id = 'p' AND id = 'M1-T9')
+                                   + (SELECT count(*) FROM project_plan_task_deps WHERE project_id = 'p' AND task_id = 'M1-T9')";
+        assert_eq!(count(declared_below).await, 2);
+
+        // Переименование: v2 перечисляет те же этапы, v1 уходит, и пересборка
+        // одна — этапы переезжают и выпуск снимается в одной транзакции.
+        add("version", "v2", plan).await;
+        let rm = crate::store::remove(&pool, "p", "version", "v1").await.expect("документ снимается");
+        assert_eq!(rm["status"], "deleted", "{rm}");
+        rebuild().await;
+        assert_eq!(count("SELECT count(*) FROM project_plan_versions WHERE project_id = 'p' AND id = 'v1'").await, 0);
+        assert_eq!(count("SELECT count(*) FROM project_plan_milestones WHERE project_id = 'p' AND version_id = 'v2'").await, 3);
+        assert_eq!(count(declared_below).await, 2, "объявленная задача и ребро под переехавшим этапом пережили снятие v1");
+
+        // Этап, названный двумя выпусками, достаётся заведённому позже, а не
+        // порядку строк: v0 заведён после v2, хотя по имени раньше.
+        add("version", "v0", "| Этап | Что |\n|---|---|\n| M1 | ядро |\n").await;
+        pool.get().await.expect("соединение")
+            .batch_execute("UPDATE project_document_revisions SET written_at = written_at + 100000
+                             WHERE project_id = 'p' AND entity_kind = 'version' AND entity_name = 'v0'")
+            .await.expect("v0 позже");
+        rebuild().await;
+        assert_eq!(count("SELECT count(*) FROM project_plan_milestones WHERE project_id = 'p' AND id = 'M1' AND version_id = 'v0'").await, 1,
+                   "этап у выпуска, заведённого позже");
+        let dropped = door.call("version-close", &json!({ "version": "v1", "drop": true })).await;
+        assert!(text(&dropped).contains("dropped"), "{dropped}");
+
+        // Объявленный выпуск снимается своей дверью, и отказ закрытия называет её.
+        door.call("version-add", &json!({ "id": "v9" })).await;
+        door.call("version-close", &json!({ "version": "v9" })).await;
+        let declared = door.call("version-close", &json!({ "version": "v9", "drop": true })).await;
+        assert!(text(&declared).contains("version-add id=v9 drop=true"), "{declared}");
+        let gone = door.call("version-add", &json!({ "id": "v9", "drop": true })).await;
+        assert!(text(&gone).contains("dropped"), "{gone}");
+
+        pool.get().await.expect("соединение")
+            .batch_execute("DROP SCHEMA IF EXISTS projected_version CASCADE").await.expect("схема снимается");
     }
 }

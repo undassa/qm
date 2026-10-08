@@ -24,7 +24,7 @@ static SCREEN_ID: Lazy<Regex> = Lazy::new(|| Regex::new(r"\b(SCR-[A-Z0-9]+-\d+)\
 /// экранов набора tot выглядели никем не востребованными.
 static SCREEN_NUMBER: Lazy<Regex> = Lazy::new(|| Regex::new(r"\b(\d{2})\b").expect("образец номера экрана"));
 static TASK_NAME: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)^([MV]\d+-T[0-9a-z]+)$").expect("образец задачи"));
+    Lazy::new(|| Regex::new(r"(?i)^([MV](?:\d+|[A-Z])-T[0-9a-z]+)$").expect("образец задачи"));
 static REQUIREMENT_ID: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"\b((?:FR|NFR)-[A-Z0-9]+(?:-\d+[a-z]?)?)\b").expect("образец требования"));
 static SEPARATOR: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[\s|:-]+$").expect("образец разделителя"));

@@ -13,12 +13,12 @@ use std::collections::{HashMap, HashSet};
 /// задачи. Выпуск прогона — выпуск его этапа; прежде он читался из каталога
 /// (`60-runs/v1/M0/M0-T1.md`), а каталог говорил то же, что этап.
 static RUN_OF_TASK: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^([MV]\d+)-T[0-9a-z]+$").expect("образец прогона задачи"));
+    Lazy::new(|| Regex::new(r"^([MV](?:\d+|[A-Z]))-T[0-9a-z]+$").expect("образец прогона задачи"));
 /// Прогон ВЕРСИИ: тем же образцом, каким объявлен вид `version`.
 static RUN_OF_VERSION: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^(v\d+|\d+\.\d+\.\d+)$").expect("образец прогона версии"));
 static RUN_OF_MILESTONE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^([MV]\d+)$").expect("образец прогона этапа"));
+    Lazy::new(|| Regex::new(r"^([MV](?:\d+|[A-Z]))$").expect("образец прогона этапа"));
 /// Заголовки разделов хранятся без разметки, поэтому обратных кавычек в них нет.
 static STORY_IN_TITLE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^\s*`?(US-[A-Z0-9]+-\d+)`?\b").expect("образец истории"));
@@ -85,7 +85,7 @@ pub(crate) async fn project(
             .query(
                 "SELECT c.value, c.entity_name FROM project_document_cells c
                   WHERE c.project_id = $1 AND c.entity_kind = 'version'
-                    AND c.col = 0 AND c.row_ord > 0 AND c.value ~ '^[MV][0-9]+$'",
+                    AND c.col = 0 AND c.row_ord > 0 AND c.value ~ '^[MV](?:[0-9]+|[A-Z])$'",
                 &[&project],
             )
             .await?
@@ -264,4 +264,44 @@ pub(crate) async fn project(
     }
     tx.commit().await?;
     Ok((features.len(), links.len(), runs.len()))
+}
+
+#[cfg(test)]
+mod names {
+    use super::{RUN_OF_MILESTONE, RUN_OF_TASK, RUN_OF_VERSION};
+
+    /// Этапы за M9 зовутся буквой (MA, MB): так они сортируются строкой после
+    /// M9. Образец из одних цифр молча не проецировал выжимку такого этапа.
+    #[test]
+    fn a_lettered_milestone_is_a_milestone_and_tasks_and_versions_keep_their_place() {
+        for m in ["M8", "MA", "V5", "M10"] {
+            assert!(RUN_OF_TASK.captures(m).is_none(), "{m} — не задача");
+            assert_eq!(RUN_OF_MILESTONE.captures(m).map(|c| c[1].to_owned()).as_deref(), Some(m), "{m} — этап");
+        }
+        for (t, m) in [("M5-T12", "M5"), ("MA-T1", "MA")] {
+            assert_eq!(RUN_OF_TASK.captures(t).map(|c| c[1].to_owned()).as_deref(), Some(m), "{t} — задача этапа {m}");
+            assert!(RUN_OF_MILESTONE.captures(t).is_none(), "{t} — не этап");
+        }
+        for v in ["0.0.9", "v1"] {
+            assert!(RUN_OF_MILESTONE.captures(v).is_none(), "{v} — не этап");
+            assert!(RUN_OF_VERSION.captures(v).is_some(), "{v} — выпуск");
+        }
+        assert!(RUN_OF_MILESTONE.captures("MVP").is_none(), "слово не этап");
+    }
+
+    /// Образец вида `run` в раскладке и образцы проекции — два места одной
+    /// формы имени. Разошлись — и дверь отказывала `bad_name` выжимке версии
+    /// `0.0.9`, которую проекция читает: написать её было нельзя вовсе.
+    #[test]
+    fn the_run_kind_accepts_every_name_the_projection_reads() {
+        let kinds: serde_json::Value =
+            serde_json::from_str(include_str!("../../../instrument/kinds.json")).expect("раскладка разбирается");
+        let kind = regex::Regex::new(kinds["kinds"]["run"]["id"].as_str().expect("образец вида run"))
+            .expect("образец вида run собирается");
+        for id in ["M8", "MA", "V5", "M5-T12", "MA-T1", "v1", "0.0.9", "0.1.10"] {
+            let read = RUN_OF_TASK.is_match(id) || RUN_OF_MILESTONE.is_match(id) || RUN_OF_VERSION.is_match(id);
+            assert!(read, "{id} проекция читает");
+            assert!(kind.is_match(id), "{id} проекция читает, а вид run отказывает");
+        }
+    }
 }
