@@ -17832,6 +17832,101 @@ mod todo_stub {
     }
 }
 
+/// Проверку закрытой задачи, которую держит открытая, закрытой не вменяют;
+/// модульный путь libtest сличается с голым именем функции пункта.
+///
+/// Порча, которую ловит проверка: страж закрытой задачи, красный от красной
+/// фазы поздней или ещё не написанный открытой, держит лестницу выдачи
+/// (MyAck 2026-10-08), а `escalation::tests::x` не узнаётся пунктом `x`.
+#[cfg(test)]
+mod open_holder {
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn a_check_an_open_task_holds_is_not_charged_to_a_closed_one() {
+        let url = std::env::var("MH_TEST_DB_URL").expect("MH_TEST_DB_URL: адрес пустой базы");
+        let apart = format!("{}{}", if url.contains('?') { '&' } else { '?' },
+                            "options=-c%20search_path%3Dopen_holder");
+        let pool = crate::db::pool(&format!("{url}{apart}"), 4).expect("пул тестовой базы");
+        {
+            let client = pool.get().await.expect("соединение с тестовой базой");
+            client
+                .batch_execute("DROP SCHEMA IF EXISTS open_holder CASCADE; CREATE SCHEMA open_holder;")
+                .await
+                .expect("своя схема заводится");
+        }
+        super::ensure(&pool).await.expect("схема встаёт на пустой базе");
+        let client = pool.get().await.expect("соединение");
+        client
+            .batch_execute(
+                "CREATE OR REPLACE FUNCTION fact_fresh(p text, f text) RETURNS boolean AS 'SELECT true' LANGUAGE sql;
+                 INSERT INTO project_plan_versions (project_id, id) VALUES ('О', 'v1');
+                 INSERT INTO project_plan_milestones (project_id, id, version_id, ord, title)
+                 VALUES ('О', 'M1', 'v1', 1, 'веха');
+                 INSERT INTO project_plan_tasks (project_id, id, milestone_id, ord, title, size, state, kind,
+                                                 entity_kind, entity_name)
+                 VALUES ('О', 'T-SHUT', 'M1', 1, 'закрытая', '', 'closed', 'dev', 'task', 'T-SHUT'),
+                        ('О', 'T-ITEM', 'M1', 2, 'открытая', '', 'not_started', 'dev', 'task', 'T-ITEM'),
+                        ('О', 'T-CHECK', 'M1', 3, 'открытая', '', 'not_started', 'red', 'task', 'T-CHECK');
+                 INSERT INTO task_ready_item (project_id, task_id, ord, check_id, text)
+                 VALUES ('О', 'T-SHUT', 1, 'held_red', '- [ ] `held_red`'),
+                        ('О', 'T-SHUT', 2, 'lone_red', '- [ ] `lone_red`'),
+                        ('О', 'T-SHUT', 3, 'TC-EXT-07', '- [ ] `TC-EXT-07`'),
+                        ('О', 'T-SHUT', 4, 'TC-EXT-09', '- [ ] `TC-EXT-09`'),
+                        ('О', 'T-ITEM', 1, 'held_red', '- [ ] `held_red`'),
+                        ('О', 'T-ITEM', 2, 'open_red', '- [ ] `open_red`');
+                 INSERT INTO project_task_check (project_id, task_id, check_id, said_as)
+                 VALUES ('О', 'T-CHECK', 'TC-EXT-07', 'проверка');
+                 INSERT INTO code_fact (project_id, kind, name)
+                 VALUES ('О', 'test-name', 'held_red'), ('О', 'test-name', 'lone_red');",
+            )
+            .await
+            .expect("набор подсаживается");
+        let row = |name: &str| (name.to_owned(), "failed".to_owned(), "esc.rs".to_owned(), String::new());
+        let rows = vec![row("escalation::tests::held_red"), row("escalation::tests::lone_red"),
+                        row("escalation::tests::open_red")];
+        super::record_test_runs(&pool, "О", "a", &rows, "mh-runner", false, None).await.expect("прогон пишется");
+        let trunk = include_str!("../../instrument/gate/G3/test-trunk-green.sql");
+        let ready = include_str!("../../instrument/gate/corpus/ready-items-checked.sql");
+        let detail = |sql: &'static str| {
+            let client = &client;
+            async move { super::execute_method_upto(client, "О", "query", sql, 200, 0).await.detail }
+        };
+
+        assert_eq!(detail(trunk).await,
+                   ["упала на стволе: escalation::tests::lone_red"],
+                   "модульный путь узнаётся пунктом открытой задачи по голому имени");
+        assert_eq!(detail(ready).await,
+                   ["T-SHUT — проверка пункта приёмки упала на стволе: lone_red",
+                    "T-SHUT — проверки пункта приёмки нет среди прочитанного датчиком: TC-EXT-09"],
+                   "держит открытая задача — закрытой не вменяют");
+
+        // Держатели закрылись — находки вернулись.
+        client
+            .batch_execute("UPDATE project_plan_tasks SET state = 'closed' WHERE project_id = 'О' AND id <> 'T-SHUT'")
+            .await
+            .expect("держатели закрываются");
+        assert_eq!(detail(ready).await,
+                   ["T-ITEM — проверка пункта приёмки упала на стволе: held_red",
+                    "T-ITEM — проверка пункта приёмки упала на стволе: open_red",
+                    "T-ITEM — проверки пункта приёмки нет среди прочитанного датчиком: open_red",
+                    "T-SHUT — проверка пункта приёмки упала на стволе: held_red",
+                    "T-SHUT — проверка пункта приёмки упала на стволе: lone_red",
+                    "T-SHUT — проверки пункта приёмки нет среди прочитанного датчиком: TC-EXT-07",
+                    "T-SHUT — проверки пункта приёмки нет среди прочитанного датчиком: TC-EXT-09"],
+                   "закрылся держатель — проверка снова вменяется");
+
+        client
+            .execute(include_str!("../../instrument/gate/corpus/ready-items-checked.probe.sql"), &[&"О"])
+            .await
+            .expect("проба пишется");
+        assert!(detail(ready).await.iter().any(|d| d.starts_with("READY-PROBE")), "проба валит пункт");
+
+        drop(client);
+        let client = pool.get().await.expect("соединение");
+        client.batch_execute("DROP SCHEMA IF EXISTS open_holder CASCADE").await.expect("схема снимается");
+    }
+}
+
 /// Партия из журнала CI доказывает красную фазу и не судит о стволе.
 ///
 /// Порча, которую ловит проверка: партия CI — горстка проверок — становится

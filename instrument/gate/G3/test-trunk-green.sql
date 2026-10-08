@@ -23,9 +23,12 @@ SELECT 'упала на стволе: ' || r.check_name
    AND fact_fresh($1, 'test-name')
    -- Проверку, которую ещё напишет НЕЗАКРЫТАЯ задача, поломкой ствола не зовут:
    -- она падает потому, что работа не сделана, и об этом говорят счётчики.
+   -- Имя сравнивается и голым: libtest зовёт модульный тест путём
+   -- (`escalation::tests::a_role_on_…`), а пункт готовности — именем функции.
    AND NOT EXISTS (SELECT 1 FROM task_ready_item i
                      JOIN project_plan_tasks t ON t.project_id = i.project_id AND t.id = i.task_id
-                    WHERE i.project_id = $1 AND i.check_id = r.check_name AND t.state <> 'closed')
+                    WHERE i.project_id = $1 AND t.state <> 'closed'
+                      AND (i.check_id = r.check_name OR i.check_id = regexp_replace(r.check_name, '^.*::', '')))
    -- ЗЕРКАЛО ОБЯЗАНО ПАДАТЬ, И УЗНАЁТСЯ ОНО ПО БИНАРЮ, А НЕ ПО СВЯЗИ.
    --
    -- Связь через задачу этот класс не закрывает: замер 2026-09-21 дал 41
@@ -63,13 +66,13 @@ SELECT 'упала на стволе: ' || r.check_name
    AND NOT EXISTS (SELECT 1 FROM project_task_check c
                      JOIN project_plan_tasks t
                        ON t.project_id = c.project_id AND t.id = c.task_id
-                    WHERE c.project_id = $1 AND c.check_id = r.check_name
+                    WHERE c.project_id = $1 AND c.check_id IN (r.check_name, regexp_replace(r.check_name, '^.*::', ''))
                       AND t.kind = 'red'
                       AND NOT EXISTS (SELECT 1 FROM project_task_check c2
                                         JOIN project_plan_tasks t2
                                           ON t2.project_id = c2.project_id AND t2.id = c2.task_id
                                        WHERE c2.project_id = $1
-                                         AND c2.check_id = r.check_name
+                                         AND c2.check_id IN (r.check_name, regexp_replace(r.check_name, '^.*::', ''))
                                          AND t2.kind <> 'red'
                                          AND t2.state = 'closed'))
    -- ЗАГЛУШКА, НАЗВАННАЯ ПРОВЕРКОЙ ОТКРЫТОЙ ЗАДАЧИ, — КРАСНАЯ ФАЗА MYACK.

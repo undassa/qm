@@ -116,7 +116,31 @@ WITH прогон AS (
      -- `M2-T3 · s10_ac_1_finding_reaches_its_delta_in_three_transitions`,
      -- жила в `mirror_finding_to_delta.rs` и падала по построению.
      AND r.ran_in NOT LIKE 'mirror\_%'
-   GROUP BY r.check_name)
+   GROUP BY r.check_name),
+-- ПРОВЕРКУ, КОТОРУЮ ЖДЁТ ДРУГАЯ ОТКРЫТАЯ ЗАДАЧА, ЗАКРЫТОЙ НЕ ВМЕНЯЮТ — то же
+-- правило, что у соседа `G4 · closed-unwritten`.
+--
+-- Красную фазу поздней задачи или её недоделанную работу закрытая задача
+-- держать зелёной не может: страж закрытой краснеет законно, пока открыт
+-- держатель той же проверки. Без этого выдача заперлась бы на работе, которую
+-- сама ещё не выдала. Замер MyAck 2026-10-08: страж `M0-T9`
+-- `an_undeclared_door_reddens_both_sides` красен красными фазами `M8-T3`,
+-- `M2-T13`, `M3-T5`; `TC-EXT-07…09` задачи `M0-T5` пишет открытая `M0-T14`.
+--
+-- Держатель — пункт готовности или `project_task_check` НЕЗАКРЫТОЙ задачи.
+-- Имя сравнивается голым: libtest зовёт тест путём модуля
+-- (`escalation::tests::a_role_on_…`), пункт — именем функции. Держатель
+-- закрылся, а проверки всё нет или она красна — находка возвращается.
+держат_открытые AS (
+  SELECT regexp_replace(i.check_id, '^.*::', '') AS check_id
+    FROM task_ready_item i
+    JOIN project_plan_tasks t ON t.project_id = i.project_id AND t.id = i.task_id
+   WHERE i.project_id = $1 AND i.check_id <> '' AND t.state <> 'closed'
+  UNION
+  SELECT regexp_replace(c.check_id, '^.*::', '')
+    FROM project_task_check c
+    JOIN project_plan_tasks t ON t.project_id = c.project_id AND t.id = c.task_id
+   WHERE c.project_id = $1 AND t.state <> 'closed')
 -- ИМЯ ПРОВЕРКИ ВЫВОДИТСЯ ИЗ ДАТЧИКА, И БЕЗ НЕГО ЭТО «НЕИЗВЕСТНО».
 --
 -- Пункт приёмки называет проверку либо объявленным образцом `id.check`, либо
@@ -258,6 +282,8 @@ SELECT t.id || coalesce(' — `' || wd.check_id || '` не найдена: в к
    -- Переадресованный пункт судится своей веткой ниже, а не этой.
    AND NOT EXISTS (SELECT 1 FROM переадресован п
                     WHERE п.task_id = r.task_id AND п.ord = r.ord)
+   AND NOT EXISTS (SELECT 1 FROM держат_открытые д
+                    WHERE д.check_id = regexp_replace(r.check_id, '^.*::', ''))
 UNION ALL
 -- ПЕРЕАДРЕСАЦИЯ ПРОВЕРЯЕМА, И ПРОВЕРЯЕТСЯ СТРОЖЕ ПРЕЖНЕГО.
 --
@@ -313,9 +339,11 @@ UNION ALL
 SELECT t.id || ' — проверка пункта приёмки упала на стволе: ' || r.check_id
   FROM project_plan_tasks t
   JOIN task_ready_item r ON r.project_id = t.project_id AND r.task_id = t.id
-  JOIN ответ о ON о.check_name = r.check_id
+  JOIN ответ о ON r.check_id IN (о.check_name, regexp_replace(о.check_name, '^.*::', ''))
  WHERE t.project_id = $1 AND t.kind = 'dev' AND t.state = 'closed' AND NOT r.done
    AND r.check_id <> '' AND NOT о.зелена
+   AND NOT EXISTS (SELECT 1 FROM держат_открытые д
+                    WHERE д.check_id = regexp_replace(r.check_id, '^.*::', ''))
    -- Зеркала в `ответ` не входят вовсе — см. довод там.
 UNION ALL
 -- Прогона нет вовсе — это «неизвестно», а не «сошлось»: пункт говорит об этом
