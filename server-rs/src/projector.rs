@@ -1877,6 +1877,14 @@ ALTER TABLE test_run ADD COLUMN IF NOT EXISTS ran_in text NOT NULL DEFAULT '';
 -- Отсюда `test_run_trunk` ниже: партии, про которые спрашивают «как ствол
 -- сейчас», — только свои.
 ALTER TABLE test_run ADD COLUMN IF NOT EXISTS platform text NOT NULL DEFAULT '';
+-- ЧЕМ ПРОВЕРКА УПАЛА: первая строка сообщения паники из раздела отказов
+-- libtest, усечённая. Пусто (NULL) — прошла, либо прогон сообщения не печатал.
+--
+-- Нужна ради красной фазы MyAck: тест пишется раньше кода, против заглушки
+-- `todo!("TC-ORG-02")`, и падает словами `not yet implemented: TC-ORG-02`.
+-- По имени функции и по бинарю такое падение неотличимо от поломки ствола —
+-- отличает его только сообщение (см. `test-trunk-green`).
+ALTER TABLE test_run ADD COLUMN IF NOT EXISTS reason text;
 
 -- ГДЕ НАБОР ГОНЯЕТ ТО, ЧЕГО ЗДЕСЬ НЕ СОБРАТЬ: файл работы, имя задания и
 -- платформа. Объявляется ИСТОЧНИК, а не вердикт: журнал читает и разбирает
@@ -11650,7 +11658,7 @@ pub(crate) async fn head_measured_since(
 /// `ci` пуст у прогона харнеса; у партии из журнала CI это её прогон GitHub
 /// (см. `test_run_trunk`).
 pub(crate) async fn record_test_runs(
-    pool: &Pool, project: &str, commit: &str, rows: &[(String, String, String)], actor: &str,
+    pool: &Pool, project: &str, commit: &str, rows: &[crate::worker::TestRow], actor: &str,
     dirty: bool, ci: Option<CiRun<'_>>,
 ) -> Result<Value, crate::db::Fail> {
     let platform = ci.as_ref().map_or("", |c| c.platform);
@@ -11686,11 +11694,12 @@ pub(crate) async fn record_test_runs(
             return Ok(json!({ "kind": "test-run", "recorded": 0, "already": c.run }));
         }
     }
-    for (check, verdict, binary) in rows {
+    for (check, verdict, binary, reason) in rows {
+        let reason = Some(reason).filter(|r| !r.is_empty());
         tx.execute(
-            "INSERT INTO test_run (project_id, check_name, commit_sha, dirty, verdict, at, actor, ran_in, platform)
-             VALUES ($1,$2,$3,$8,$4,$5,$6,$7,$9)",
-            &[&project, check, &commit, verdict, &at, &actor, binary, &dirty, &platform],
+            "INSERT INTO test_run (project_id, check_name, commit_sha, dirty, verdict, at, actor, ran_in, platform, reason)
+             VALUES ($1,$2,$3,$8,$4,$5,$6,$7,$9,$10)",
+            &[&project, check, &commit, verdict, &at, &actor, binary, &dirty, &platform, &reason],
         )
         .await?;
     }
@@ -17740,6 +17749,79 @@ mod test_run_last {
     }
 }
 
+/// Заглушка `todo!("TC-…")`, чью проверку держит открытая задача, — красная
+/// фаза MyAck, а не поломка ствола.
+///
+/// Порча, которую ловит проверка: пункт `test-trunk-green` зовёт поломкой
+/// каждую такую заглушку (491 из 495 падений MyAck) — или, наоборот, прощает
+/// заглушку закрытой задачи и обычное падение.
+#[cfg(test)]
+mod todo_stub {
+    #[tokio::test]
+    #[ignore = "нужна пустая база Postgres: MH_TEST_DB_URL"]
+    async fn a_stub_of_open_work_is_the_red_phase_and_nothing_else_is() {
+        let url = std::env::var("MH_TEST_DB_URL").expect("MH_TEST_DB_URL: адрес пустой базы");
+        let apart = format!("{}{}", if url.contains('?') { '&' } else { '?' },
+                            "options=-c%20search_path%3Dtodo_stub");
+        let pool = crate::db::pool(&format!("{url}{apart}"), 4).expect("пул тестовой базы");
+        {
+            let client = pool.get().await.expect("соединение с тестовой базой");
+            client
+                .batch_execute("DROP SCHEMA IF EXISTS todo_stub CASCADE; CREATE SCHEMA todo_stub;")
+                .await
+                .expect("своя схема заводится");
+        }
+        super::ensure(&pool).await.expect("схема встаёт на пустой базе");
+        let client = pool.get().await.expect("соединение");
+        // Датчик `test-name` — не предмет проверки: свежим его объявляет своя схема.
+        client
+            .batch_execute(
+                "CREATE OR REPLACE FUNCTION fact_fresh(p text, f text) RETURNS boolean AS 'SELECT true' LANGUAGE sql;
+                 INSERT INTO project_plan_versions (project_id, id) VALUES ('З', 'v1');
+                 INSERT INTO project_plan_milestones (project_id, id, version_id, ord, title)
+                 VALUES ('З', 'M1', 'v1', 1, 'веха');
+                 INSERT INTO project_plan_tasks (project_id, id, milestone_id, ord, title, size, state, kind,
+                                                 entity_kind, entity_name)
+                 VALUES ('З', 'T-OPEN', 'M1', 1, 'открытая', '', 'not_started', 'dev', 'task', 'T-OPEN'),
+                        ('З', 'T-SHUT', 'M1', 2, 'закрытая', '', 'closed', 'dev', 'task', 'T-SHUT');
+                 INSERT INTO task_ready_item (project_id, task_id, ord, check_id, text)
+                 VALUES ('З', 'T-OPEN', 1, 'TC-ORG-02', '- [ ] `TC-ORG-02`'),
+                        ('З', 'T-SHUT', 1, 'TC-ORG-03', '- [x] `TC-ORG-03`');
+                 INSERT INTO project_task_check (project_id, task_id, check_id, said_as)
+                 VALUES ('З', 'T-OPEN', 'TC-ORG-04b', 'проверка'), ('З', 'T-SHUT', 'TC-ORG-05', 'проверка');",
+            )
+            .await
+            .expect("набор подсаживается");
+        let row = |name: &str, reason: &str| (name.to_owned(), "failed".to_owned(), "org.rs".to_owned(), reason.to_owned());
+        let rows = vec![
+            row("org_roles_by_item", "not yet implemented: TC-ORG-02"),
+            row("org_roles_by_check", "not yet implemented: TC-ORG-04b таблица ролей"),
+            row("org_closed_by_item", "not yet implemented: TC-ORG-03"),
+            row("org_closed_by_check", "not yet implemented: TC-ORG-05"),
+            row("org_nobody", "not yet implemented: TC-ORG-09"),
+            row("org_sums", "assertion `left == right` failed"),
+            row("org_silent", ""),
+        ];
+        super::record_test_runs(&pool, "З", "a", &rows, "mh-runner", false, None).await.expect("прогон пишется");
+        let trunk = include_str!("../../instrument/gate/G3/test-trunk-green.sql");
+        let got = super::execute_method_upto(&client, "З", "query", trunk, 200, 0).await.detail;
+        assert_eq!(got, ["org_closed_by_check", "org_closed_by_item", "org_nobody", "org_silent", "org_sums"]
+                       .map(|n| format!("упала на стволе: {n}")),
+                   "прощена лишь заглушка открытой задачи");
+
+        client
+            .execute(include_str!("../../instrument/gate/G3/test-trunk-green.probe.sql"), &[&"З"])
+            .await
+            .expect("проба пишется");
+        let got = super::execute_method_upto(&client, "З", "query", trunk, 200, 0).await.detail;
+        assert_eq!(got, vec!["упала на стволе: PROBE-TRUNK-GREEN".to_owned()], "проба валит пункт");
+
+        drop(client);
+        let client = pool.get().await.expect("соединение");
+        client.batch_execute("DROP SCHEMA IF EXISTS todo_stub CASCADE").await.expect("схема снимается");
+    }
+}
+
 /// Партия из журнала CI доказывает красную фазу и не судит о стволе.
 ///
 /// Порча, которую ловит проверка: партия CI — горстка проверок — становится
@@ -17808,7 +17890,7 @@ mod ci_batch {
 
         // Партия CI: одна проверка, упавшая, в бинаре БЕЗ `mirror_` — просочись
         // она в «последний прогон», пункт про ствол назвал бы её поломкой.
-        let rows = vec![("окно_отзыв".to_owned(), "failed".to_owned(), "windows_only.rs".to_owned())];
+        let rows = vec![("окно_отзыв".to_owned(), "failed".to_owned(), "windows_only.rs".to_owned(), String::new())];
         let ci = |platform: &'static str, run: i64, attempt: i64| {
             Some(super::CiRun { platform, run, attempt, started: "2026-09-29T22:54:37Z" })
         };
@@ -17945,7 +18027,7 @@ mod one_commit_pair {
         let pr = |id: i64| crate::worker::JobRun {
             id, attempt: 1, sha: "голова".into(), started: "2026-10-07T10:00:00Z".into(), from_pr: true,
         };
-        let row = |check: &str, verdict: &str| (check.to_owned(), verdict.to_owned(), "mirror_x.rs".to_owned());
+        let row = |check: &str, verdict: &str| (check.to_owned(), verdict.to_owned(), "mirror_x.rs".to_owned(), String::new());
         crate::worker::record_job_run(&pool, "П", &pr(2), "ci.yml", "red-pair", "linux",
                                       vec![row("зеркало_пары", "passed"), row("другая", "passed")])
             .await

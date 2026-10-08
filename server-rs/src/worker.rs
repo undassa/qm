@@ -185,17 +185,21 @@ fn fld<'a>(v: &'a Value, key: &str, who: &str) -> &'a Value {
 /// пишет открытая задача), ствол выходит зелёным при красном стороже.
 /// Добавлять `(exit)` всегда нельзя: каждая красная фаза в обычном бинаре
 /// краснила бы ствол. Что именно упало, харнес не хранит (mh#175).
-pub fn batch_of_run(mut rows: Vec<(String, String, String)>, ok: bool) -> Vec<(String, String, String)> {
+pub fn batch_of_run(mut rows: Vec<TestRow>, ok: bool) -> Vec<TestRow> {
     if ok {
         return rows;
     }
     if rows.is_empty() {
-        rows.push(("(build)".to_owned(), "build-failed".to_owned(), String::new()));
-    } else if !rows.iter().any(|(_, verdict, _)| verdict == "failed") {
-        rows.push(("(exit)".to_owned(), "failed".to_owned(), String::new()));
+        rows.push(("(build)".to_owned(), "build-failed".to_owned(), String::new(), String::new()));
+    } else if !rows.iter().any(|(_, verdict, _, _)| verdict == "failed") {
+        rows.push(("(exit)".to_owned(), "failed".to_owned(), String::new(), String::new()));
     }
     rows
 }
+
+/// Строка прогона: имя проверки, вердикт, бинарь (`ran_in`) и чем упала
+/// (`reason`, пусто — не упала или сообщения нет).
+pub type TestRow = (String, String, String, String);
 
 /// Строки прогона — из текста, который напечатал `cargo test` либо nextest.
 ///
@@ -210,7 +214,7 @@ pub fn batch_of_run(mut rows: Vec<(String, String, String)>, ok: bool) -> Vec<(S
 /// разбор отвечает «проверок ноль» — неотличимо от несобравшегося. Цвет
 /// снимается по той же причине: задание с `CARGO_TERM_COLOR=always` печатает
 /// `test x ... \e[31mFAILED\e[0m`, и вердикт не узнавался.
-pub fn test_lines(text: &str) -> Vec<(String, String, String)> {
+pub fn test_lines(text: &str) -> Vec<TestRow> {
     let plain = ANSI.replace_all(text, "");
     let lines: Vec<&str> = plain
         .lines()
@@ -219,7 +223,7 @@ pub fn test_lines(text: &str) -> Vec<(String, String, String)> {
             GH_STAMP.find(l).map_or(l, |m| &l[m.end()..])
         })
         .collect();
-    let mut rows: Vec<(String, String, String)> = Vec::new();
+    let mut rows: Vec<TestRow> = Vec::new();
     // ДВА ФОРМАТА, И ГЛАВНЫЙ — NEXTEST.
     //
     // «Упало на стволе» определяет не харнес, а сам набор своим рецептом:
@@ -256,6 +260,7 @@ pub fn test_lines(text: &str) -> Vec<(String, String, String)> {
             name.to_owned(),
             verdict.to_owned(),
             binary.rsplit("::").next().unwrap_or(binary).to_owned(),
+            String::new(),
         ));
     }
     // ЧЕМ ШЛА ПРОВЕРКА. `cargo test` печатает `Running tests/<файл>.rs (…)`
@@ -295,9 +300,53 @@ pub fn test_lines(text: &str) -> Vec<(String, String, String)> {
         } else {
             continue;
         };
-        rows.push((name.to_owned(), verdict.to_owned(), binary.clone()));
+        rows.push((name.to_owned(), verdict.to_owned(), binary.clone(), String::new()));
+    }
+    // ЧЕМ УПАЛА: первая строка сообщения паники. libtest печатает её в разделе
+    // отказов своего бинаря — до следующей `Running`:
+    //     ---- tc_org_02 stdout ----
+    //     thread 'tc_org_02' panicked at tests/org.rs:12:5:
+    //     not yet implemented: TC-ORG-02
+    // Имя — из шапки `---- … stdout ----`, без неё (nextest печатает свою) — из
+    // имени нити. Бинарь — из той же `Running`, что и у строк вердиктов: при
+    // `--no-fail-fast` одно имя бывает в двух бинарях.
+    let mut header: Option<String> = None;
+    let mut pending: Option<String> = None;
+    let mut binary = String::new();
+    for line in &lines {
+        let t = line.trim();
+        if let Some(name) = pending.take() {
+            set_reason(&mut rows, &binary, &name, t);
+            continue;
+        }
+        if let Some(rest) = t.strip_prefix("Running ") {
+            binary = rest.split_whitespace().next().unwrap_or("").rsplit(['/', '\\']).next().unwrap_or("").to_owned();
+        } else if let Some(name) = t.strip_prefix("---- ").and_then(|x| x.strip_suffix(" stdout ----")) {
+            header = Some(name.to_owned());
+        } else if let Some((thread, tail)) = t.strip_prefix("thread '").and_then(|x| x.split_once("' ")) {
+            // Свежий Rust вставляет номер нити: `thread 'x' (475211568) panicked at`.
+            let tail = tail.strip_prefix('(').and_then(|x| x.split_once(") ")).map_or(tail, |(_, after)| after);
+            let Some(tail) = tail.strip_prefix("panicked at ") else { continue };
+            let name = header.take().unwrap_or_else(|| thread.to_owned());
+            // Rust до 1.73 печатал сообщение той же строкой: `panicked at 'msg', file:l:c`.
+            match tail.strip_prefix('\'').and_then(|x| x.rsplit_once("', ")) {
+                Some((msg, _)) => set_reason(&mut rows, &binary, &name, msg),
+                None => pending = Some(name),
+            }
+        }
     }
     rows
+}
+
+/// Сообщение — упавшей строке с этим именем и ещё без причины; при равных
+/// именах — той, что из текущего бинаря. Усечено: в строку идёт причина, а не
+/// простыня.
+fn set_reason(rows: &mut [TestRow], binary: &str, name: &str, msg: &str) {
+    let open = |r: &TestRow| r.0 == name && r.1 == "failed" && r.3.is_empty();
+    let i = rows.iter().position(|r| open(r) && r.2 == binary).or_else(|| rows.iter().position(open));
+    if let (Some(i), false) = (i, msg.is_empty()) {
+        rows[i].3 = msg.chars().take(200).collect();
+    }
 }
 
 /// Сколько группа просроченной команды получает на выход после TERM, прежде
@@ -739,14 +788,14 @@ pub fn job_run(run: &Value, repo: &str, trunk: &str, pr_red: bool) -> Option<Job
 
 /// Строки прогона, годные в запись. Из запроса на слияние — только падения:
 /// прошедшая там проверка ствола не видела (см. `job_run`).
-pub fn recordable(rows: Vec<(String, String, String)>, from_pr: bool) -> Vec<(String, String, String)> {
-    rows.into_iter().filter(|(_, verdict, _)| !from_pr || verdict == "failed").collect()
+pub fn recordable(rows: Vec<TestRow>, from_pr: bool) -> Vec<TestRow> {
+    rows.into_iter().filter(|(_, verdict, _, _)| !from_pr || verdict == "failed").collect()
 }
 
 /// Записать строки взятого прогона под его именем (`JobRun::actor`).
 pub(crate) async fn record_job_run(
     pool: &Pool, project: &str, r: &JobRun, workflow: &str, job: &str, platform: &str,
-    rows: Vec<(String, String, String)>,
+    rows: Vec<TestRow>,
 ) -> Result<Value, crate::db::Fail> {
     let actor = r.actor(workflow, job);
     let ci = crate::projector::CiRun { platform, run: r.id, attempt: r.attempt, started: &r.started };
@@ -1025,7 +1074,7 @@ impl Worker {
 
     /// Строки прогона из журнала одного задания. Задания с таким именем в
     /// прогоне нет — строк нет: его не запускали, и мерить нечего.
-    async fn ci_job_rows(repo: &str, run: i64, job: &str) -> Result<Vec<(String, String, String)>, String> {
+    async fn ci_job_rows(repo: &str, run: i64, job: &str) -> Result<Vec<TestRow>, String> {
         let jobs = gh_json(&format!("repos/{repo}/actions/runs/{run}/jobs?per_page=100")).await?;
         let list = jobs["jobs"].as_array()
             .ok_or_else(|| format!("в ответе о заданиях прогона {run} нет `jobs`"))?;
@@ -1156,7 +1205,7 @@ impl Worker {
     /// Ненулевой код выхода у красного профиля — норма: `just red` обязан
     /// упасть. Поэтому «не собралось» здесь распознаётся по ПУСТОМУ разбору, а
     /// не по коду выхода.
-    async fn profile(cwd: &str, cmd: &str) -> Result<(Vec<(String, String, String)>, bool), String> {
+    async fn profile(cwd: &str, cmd: &str) -> Result<(Vec<TestRow>, bool), String> {
         // ОДИН ПОТОК, А НЕ ДВА СКЛЕЕННЫХ. `cargo` печатает `Running tests/<файл>`
         // в stderr, а `test <имя> ... ok` — в stdout. Прежде оба читались
         // порознь и склеивались подряд: все имена бинарей оказывались ПОСЛЕ
@@ -2532,14 +2581,14 @@ mod tests {
         assert!(!alive, "внук {} в своей группе пережил потолок", pid.trim());
     }
 
-    fn row(name: &str, verdict: &str, binary: &str) -> (String, String, String) {
-        (name.to_owned(), verdict.to_owned(), binary.to_owned())
+    fn row(name: &str, verdict: &str, binary: &str) -> super::TestRow {
+        (name.to_owned(), verdict.to_owned(), binary.to_owned(), String::new())
     }
 
     #[test]
     fn a_red_exit_is_recorded_even_when_every_check_passed() {
-        let row = |n: &str, v: &str| (n.to_owned(), v.to_owned(), String::new());
-        let names = |rows: Vec<(String, String, String)>| rows.into_iter().map(|(n, v, _)| format!("{n}:{v}")).collect::<Vec<_>>();
+        let row = |n: &str, v: &str| (n.to_owned(), v.to_owned(), String::new(), String::new());
+        let names = |rows: Vec<super::TestRow>| rows.into_iter().map(|(n, v, _, _)| format!("{n}:{v}")).collect::<Vec<_>>();
         assert_eq!(names(super::batch_of_run(vec![row("a", "passed")], false)), ["a:passed", "(exit):failed"]);
         assert_eq!(names(super::batch_of_run(vec![row("a", "failed")], false)), ["a:failed"]);
         assert_eq!(names(super::batch_of_run(vec![], false)), ["(build):build-failed"]);
@@ -2608,6 +2657,102 @@ mod tests {
             row("green_one", "passed", "plain"),
             row("red_one", "failed", "mirror_x.rs"),
         ]);
+    }
+
+    /// Причина падения — из раздела отказов libtest, своего бинаря. Вывод —
+    /// как у `cargo test --no-fail-fast` по MyAck: одно имя в двух бинарях,
+    /// заглушка `todo!` новым и старым форматом, обычный `assert`, бинарь без
+    /// раздела отказов и doc-тесты.
+    #[test]
+    fn a_failure_carries_its_panic_message() {
+        let text = "\
+     Running unittests src/lib.rs (target/debug/deps/myack-0a1b)
+
+running 2 tests
+test org::tests::tc_org_02 ... FAILED
+test org::tests::fine ... ok
+
+failures:
+
+---- org::tests::tc_org_02 stdout ----
+
+thread 'org::tests::tc_org_02' (475211568) panicked at src/org.rs:12:5:
+not yet implemented: TC-ORG-02
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    org::tests::tc_org_02
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/api.rs (target/debug/deps/api-2c3d)
+
+running 3 tests
+test org::tests::tc_org_02 ... FAILED
+test sums ... FAILED
+test legacy ... FAILED
+
+failures:
+
+---- org::tests::tc_org_02 stdout ----
+thread 'org::tests::tc_org_02' panicked at tests/api.rs:5:5:
+not yet implemented: TC-ORG-03 таблица ролей
+
+---- sums stdout ----
+thread 'sums' panicked at tests/api.rs:9:5:
+assertion `left == right` failed
+  left: 1
+ right: 2
+
+---- legacy stdout ----
+thread 'main' panicked at 'not yet implemented: TC-AUTH-01b', tests/api.rs:20:5
+
+failures:
+    org::tests::tc_org_02
+    sums
+    legacy
+
+test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/quiet.rs (target/debug/deps/quiet-4e5f)
+
+running 1 test
+test quiet_one ... FAILED
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests myack
+
+running 1 test
+test src/lib.rs - org (line 3) ... FAILED
+
+failures:
+
+---- src/lib.rs - org (line 3) stdout ----
+Test executable failed (exit status: 101).
+
+stderr:
+thread 'main' panicked at src/lib.rs:4:1:
+doc says no
+
+error: 4 targets failed:
+";
+        let reason = |rows: &[super::TestRow], name: &str, bin: &str| {
+            rows.iter().find(|r| r.0 == name && r.2 == bin).map(|r| r.3.clone()).expect(name)
+        };
+        let rows = super::test_lines(text);
+        assert_eq!(reason(&rows, "org::tests::tc_org_02", "unittests"), "not yet implemented: TC-ORG-02");
+        assert_eq!(reason(&rows, "org::tests::tc_org_02", "api.rs"), "not yet implemented: TC-ORG-03 таблица ролей");
+        assert_eq!(reason(&rows, "sums", "api.rs"), "assertion `left == right` failed", "только первая строка");
+        assert_eq!(reason(&rows, "legacy", "api.rs"), "not yet implemented: TC-AUTH-01b", "формат до Rust 1.73");
+        assert_eq!(reason(&rows, "quiet_one", "quiet.rs"), "", "нет раздела отказов — нет причины");
+        assert_eq!(reason(&rows, "org::tests::fine", "unittests"), "", "прошедшей причина не нужна");
+        let doc = rows.iter().find(|r| r.0 == "src/lib.rs - org (line 3)").expect("doc-тест");
+        assert_eq!(doc.3, "doc says no", "doc-тест: шапка есть, нить — `main`");
+        // Простыня усекается.
+        let long = format!("test x ... FAILED\nthread 'x' panicked at a.rs:1:1:\n{}\n", "я".repeat(500));
+        assert_eq!(super::test_lines(&long)[0].3.chars().count(), 200);
     }
 
     #[test]

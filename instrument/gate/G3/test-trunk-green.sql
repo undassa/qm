@@ -72,4 +72,28 @@ SELECT 'упала на стволе: ' || r.check_name
                                          AND c2.check_id = r.check_name
                                          AND t2.kind <> 'red'
                                          AND t2.state = 'closed'))
+   -- ЗАГЛУШКА, НАЗВАННАЯ ПРОВЕРКОЙ ОТКРЫТОЙ ЗАДАЧИ, — КРАСНАЯ ФАЗА MYACK.
+   --
+   -- Красная фаза MyAck устроена не зеркалом, а заглушкой: тест пишется
+   -- первым, против `todo!("TC-ORG-02")`, и падает словами `not yet
+   -- implemented: TC-ORG-02`. Имя функции теста при этом своё, бинарь —
+   -- обычный, и два исключения выше его не узнают. Замер 2026-10-08: 491 из
+   -- 495 падений ствола MyAck — такие заглушки, все за открытыми задачами, и
+   -- пункт звал их поломкой, держа лестницу. Решение владельца 2026-10-07:
+   -- тест прежде кода, против заглушки, названной проверкой, — это парадигма,
+   -- а не порча.
+   --
+   -- Прощается только заглушка, чью проверку держит НЕЗАКРЫТАЯ задача (по
+   -- пункту готовности или по `project_task_check`). Заглушка проверки,
+   -- которую держат одни закрытые задачи или никто, — находка: задача
+   -- закрылась, а тело так и не написано.
+   AND NOT EXISTS (SELECT 1
+                     FROM (SELECT substring(r.reason FROM '^not yet implemented: ([A-Z]+-[A-Z]+-[0-9]+[a-z]?)') AS id) s
+                    WHERE s.id IS NOT NULL
+                      AND (EXISTS (SELECT 1 FROM task_ready_item i
+                                     JOIN project_plan_tasks t ON t.project_id = i.project_id AND t.id = i.task_id
+                                    WHERE i.project_id = $1 AND i.check_id = s.id AND t.state <> 'closed')
+                        OR EXISTS (SELECT 1 FROM project_task_check c
+                                     JOIN project_plan_tasks t ON t.project_id = c.project_id AND t.id = c.task_id
+                                    WHERE c.project_id = $1 AND c.check_id = s.id AND t.state <> 'closed')))
  ORDER BY 1
