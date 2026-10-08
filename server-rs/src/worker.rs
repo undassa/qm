@@ -1231,6 +1231,7 @@ impl Worker {
             Err(e) => return Err(format!("прогон не завёлся: {e}")),
         };
         let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        keep_run_text(cwd, cmd, &text);
         Ok((test_lines(&text), out.status.success()))
     }
 
@@ -2872,5 +2873,26 @@ not yet implemented: TC-ORG-02
         assert!(super::on_trunk_or_pr(&path, &run(true), "main"), "прогон запроса — без сверки со стволом");
         assert!(!super::on_trunk_or_pr(&path, &run(false), "main"), "прогон ствола — со сверкой");
         std::fs::remove_dir_all(&tmp).ok();
+    }
+}
+
+/// Текст прогона — на диск, последний на пару «дерево · команда» (#175).
+///
+/// Запись `test_run` хранит имена упавших, но не почему они упали; падение,
+/// которое не повторяется вне раннера, без текста не разобрать вовсе — так
+/// стоял ствол myack 2026-10-08 (#197). Файл перезаписывается каждым прогоном:
+/// нужен последний, а не архив. Не записалось — говорим и идём дальше: замер
+/// важнее его стенограммы.
+fn keep_run_text(cwd: &str, cmd: &str, text: &str) {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    cmd.hash(&mut h);
+    let dir = std::path::Path::new(&std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()))
+        .join(".local/state/mh/test-runs");
+    let name: String = cwd.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+    let path = dir.join(format!("{name}-{:08x}.log", h.finish() as u32));
+    match std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, text)) {
+        Ok(()) => println!("текст прогона: {}", path.display()),
+        Err(e) => println!("текст прогона не записан ({}): {e}", path.display()),
     }
 }
