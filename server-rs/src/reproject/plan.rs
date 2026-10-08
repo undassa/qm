@@ -215,17 +215,8 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize,
         // Этап, получивший документ после объявления, остаётся в своём выпуске,
         // пока таблица выпуска его не назовёт: иначе выпуск выходил пустым, и
         // пересборка падала о внешний ключ (tot-ade, документ M9, 2026-10-07).
-        // Удерживается только выпуск, который эта пересборка оставит: выпуск,
-        // ушедший из документов, снимается ниже, и веха, возвращённая к нему,
-        // уходила каскадом вместе с объявленными под ней задачами — молча, в
-        // зафиксированной транзакции (ревью переименования v1, 2026-10-08).
-        // Без удержания веха остаётся без выпуска, и пересборка громко падает.
         let held = client
-            .query("SELECT m.id, m.version_id FROM project_plan_milestones m
-                     JOIN project_plan_versions v ON v.project_id = m.project_id AND v.id = m.version_id
-                    WHERE m.project_id = $1
-                      AND (v.origin = 'declared' OR v.id = ANY($2))",
-                   &[&project, &named.iter().filter(|e| e.0 == "version").map(|e| e.1.clone()).collect::<Vec<String>>()])
+            .query("SELECT id, version_id FROM project_plan_milestones WHERE project_id = $1", &[&project])
             .await?;
         (
             named.iter().filter(|e| e.0 == "milestone").map(|e| e.1.clone())
@@ -428,6 +419,25 @@ pub(crate) async fn project(pool: &Pool, project: &str) -> Result<(usize, usize,
     // транзакции: спроецированное возвращалось вставкой ниже, а объявленное —
     // задачи и рёбра, повешенные дверями под эти вехи, — пропадало насовсем
     // (tot-ade при переименовании v1: M5-T416, V5-T416 и 18 объявленных рёбер).
+    // Ушедший выпуск не уносит ни одного этапа. Этап, оставшийся под ним, —
+    // удержанный с прежним выпуском или объявленный ручкой без документа, —
+    // уходил каскадом со своими задачами и рёбрами, молча, в зафиксированной
+    // транзакции (ревью переименования v1 → 0.0.9, 2026-10-08). Отказ называет
+    // этапы: их выпуск называет документ выпуска или объявление.
+    let stranded = tx.query(
+        "SELECT m.id, m.version_id FROM project_plan_milestones m
+           JOIN project_plan_versions v ON v.project_id = m.project_id AND v.id = m.version_id
+          WHERE m.project_id = $1 AND v.origin = 'projected' AND v.id <> ALL($2)
+          ORDER BY m.id",
+        &[&project, &version_ids]).await?;
+    if !stranded.is_empty() {
+        let names: Vec<String> = stranded.iter()
+            .map(|r| format!("{} (выпуск {})", r.get::<_, String>(0), r.get::<_, String>(1)))
+            .collect();
+        return Err(crate::db::Fail::Corpus(format!(
+            "выпуск уходит из документов, а под ним остаются этапы: {} — назовите их в таблице \
+             другого выпуска или объявите под ним", names.join(", "))));
+    }
     tx.execute("DELETE FROM project_plan_versions
                  WHERE project_id = $1 AND origin = 'projected' AND id <> ALL($2)",
                &[&project, &version_ids]).await?;
@@ -837,12 +847,19 @@ mod milestone_field {
              VALUES ($1, 'milestone', 'M7', '# M7 · этап', '', 0, 1, 0, 't')", &[&P])
             .await.expect("документ этапа");
         drop(client);
-        let rebuilt = super::project(&pool, P).await.map(|_| ());
-        assert!(rebuilt.is_err(), "этап без оставшегося выпуска роняет пересборку, а не уходит каскадом");
+        // Второй этап объявлен ручкой и документа не имеет: перечень пересборки
+        // его не видит, и защита только перечисленных его не прикрыла бы.
+        crate::projector::declare_milestone(&pool, P, "M8", "v1", 2, "без документа", false).await.expect("этап");
+        crate::projector::declare_task(&pool, P, crate::projector::Task {
+            id: "M8-T1", milestone: "M8", ord: 1, title: "объявленная", kind: "dev", state: "", size: "",
+        }, false).await.expect("объявленная задача");
+        let rebuilt = super::project(&pool, P).await.map(|_| ()).map_err(|e| crate::db::Says::says(&e));
+        let why = rebuilt.expect_err("этап без оставшегося выпуска роняет пересборку, а не уходит каскадом");
+        assert!(why.contains("M7 (выпуск v1)") && why.contains("M8 (выпуск v1)"), "отказ называет этапы: {why}");
         let left: i64 = pool.get().await.expect("соединение")
-            .query_one("SELECT count(*) FROM project_plan_tasks WHERE project_id = $1 AND id = 'M7-T1'", &[&P])
+            .query_one("SELECT count(*) FROM project_plan_tasks WHERE project_id = $1 AND id IN ('M7-T1', 'M8-T1')", &[&P])
             .await.expect("счёт").get(0);
-        assert_eq!(left, 1, "объявленная задача под этапом цела");
+        assert_eq!(left, 2, "объявленные задачи под этапами целы");
         pool.get().await.expect("соединение")
             .batch_execute(&format!("DROP SCHEMA IF EXISTS {SCHEMA} CASCADE"))
             .await.expect("схема снимается");
