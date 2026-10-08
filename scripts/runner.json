@@ -5,7 +5,7 @@
       "project": "308ed7a2-d18f-4a76-a9c4-c792ce7de0d3",
       "repo": "/opt/src/github.com/myack-dev/myack",
       "test": {
-        "cmd": "SQLX_OFFLINE=true MYACK_TEST_DATABASE_URL=postgres://myack:myack@127.0.0.1:55433/myack?sslmode=disable cargo test --workspace --no-fail-fast",
+        "cmd": "SQLX_OFFLINE=true MYACK_TEST_DATABASE_URL=postgres://myack:myack@127.0.0.1:55433/myack?sslmode=disable MYACK_TEST_STOCK_DATABASE_URL=postgres://myack:myack@127.0.0.1:55434/myack?sslmode=disable cargo test --workspace --no-fail-fast",
         "dir": "backend"
       }
     },
