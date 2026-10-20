@@ -13,7 +13,7 @@ EnvironmentFile=/opt/src/github.com/undassa/mh/server-rs/.env
 # заголовка, который сессия называет сама. Секрет живёт в /etc/mh (root:undassa
 # 640) — не мир и не репозиторий; выдаётся `mh-server key-add mh-runner …`.
 EnvironmentFile=/etc/mh/mh-runner.env
-ExecStart=/opt/src/github.com/undassa/mh/server-rs/target/release/mh-worker /opt/src/github.com/undassa/mh/scripts/runner.json
+ExecStart=/opt/src/github.com/undassa/mh/server-rs/target/release/mentat-worker /opt/src/github.com/undassa/mh/scripts/runner.json
 WorkingDirectory=/opt/src/github.com/undassa/mh
 Restart=always
 RestartSec=5

@@ -31,7 +31,7 @@ fn required(name: &str) -> String {
     match std::env::var(name) {
         Ok(v) if !v.trim().is_empty() => v,
         _ => {
-            eprintln!("mh-launcher: не задано {name}; без этого граница не описана, и пускатель не поднимается");
+            eprintln!("mentat-launcher: не задано {name}; без этого граница не описана, и пускатель не поднимается");
             std::process::exit(2);
         }
     }
@@ -58,7 +58,7 @@ async fn main() {
     let listener = match UnixListener::bind(&path) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("mh-launcher: сокет {path} не занять: {e}");
+            eprintln!("mentat-launcher: сокет {path} не занять: {e}");
             std::process::exit(2);
         }
     };
@@ -66,10 +66,10 @@ async fn main() {
     // все прочие не пишут ничего. Проверки «кто там» внутри нет намеренно: она
     // была бы вторым описанием того же права и разошлась бы с первым.
     if let Err(e) = std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o660)) {
-        eprintln!("mh-launcher: права на {path} не выставлены: {e}");
+        eprintln!("mentat-launcher: права на {path} не выставлены: {e}");
         std::process::exit(2);
     }
-    eprintln!("mh-launcher: слушает {path}");
+    eprintln!("mentat-launcher: слушает {path}");
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
@@ -84,7 +84,7 @@ async fn main() {
                 };
                 tokio::spawn(async move { serve(stream, &rules).await });
             }
-            Err(e) => eprintln!("mh-launcher: соединение не принято: {e}"),
+            Err(e) => eprintln!("mentat-launcher: соединение не принято: {e}"),
         }
     }
 }

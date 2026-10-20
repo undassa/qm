@@ -2150,7 +2150,7 @@ CREATE TABLE IF NOT EXISTS phase_state (
 -- общий, а десять правок подряд обязаны стоить одного прогона, а не десяти.
 --
 -- Отметка лежит В БАЗЕ, а не в памяти процесса: пишут в набор двое — сервер по
--- HTTP и `mh-server mcp`, запускаемый отдельным процессом. Флаг в памяти одного
+-- HTTP и `mentat-server mcp`, запускаемый отдельным процессом. Флаг в памяти одного
 -- из них второй бы не увидел, и правка через MCP осталась бы непосчитанной.
 CREATE TABLE IF NOT EXISTS gate_dirty (
   project_id text PRIMARY KEY,
@@ -4215,7 +4215,7 @@ SELECT e.project_id, e.kind, e.id, st.updated_at, st.created_at,
                                             THEN 'YYYY-MM-DD HH24:MI' ELSE 'YYYY-MM-DD' END)
                        ELSE 'по цепочке из ' || ц.depth || ' связей: ' || ц.cause || ' обновлена '
                             || to_char(to_timestamp(ц.cause_at/1000),'YYYY-MM-DD') END)
-                 || '. Перечитать ' || ц.cause || ' и переснять отпечаток: mh call entity-confirm kind='
+                 || '. Перечитать ' || ц.cause || ' и переснять отпечаток: mentat call entity-confirm kind='
                  || e.kind || ' id=' || e.id || ' why="что перечитано и почему запись в силе"'
        END AS why
   FROM entity_row e
@@ -5451,7 +5451,7 @@ pub(crate) async fn next_task(pool: &Pool, project: &str) -> Result<Value, crate
             .await?;
         let holder: Option<String> = held.as_ref().map(|h| h.get(0));
         let named: Option<String> = held.as_ref().and_then(|h| h.get(1));
-        // ПРОТУХШИЙ ДАТЧИК — НЕ НАХОДКА, а непрогнанный `mh sense`, и барьер
+        // ПРОТУХШИЙ ДАТЧИК — НЕ НАХОДКА, а непрогнанный `mentat sense`, и барьер
         // обязан говорить это сам. Ручка `gate` такую оговорку несёт давно:
         // пункт, читающий несвежий род фактов, красен не потому, что что-то
         // нашлось, а потому что мерить сейчас нечем. Пока это красило доску,
@@ -5656,7 +5656,7 @@ pub(crate) async fn task_blockers(pool: &Pool, project: &str, task: &str) -> Res
              run.as_ref().map(|id| format!(
                  "у задачи живой прогон `{id}` ({}): второму её не отдают. Сам он не \
                   истекает; если его никто не ведёт, закрыть: \
-                  `mh call run-state runId={id} state=cancelled note=<почему>`",
+                  `mentat call run-state runId={id} state=cancelled note=<почему>`",
                  run_by.clone().unwrap_or_default()))]
             .into_iter().flatten().collect::<Vec<_>>().join(". ")
         },
@@ -6013,7 +6013,7 @@ pub(crate) async fn gate(
     // всё-таки посчиталось. Они отдаются вместе со словом о том, что доверять
     // им нельзя, — и это слово стоит первым.
     let stale = last_reproject(&client, project).await.filter(|(ok, _, _)| !*ok);
-    // ПРОТУХШИЙ ДАТЧИК — НЕ НАХОДКА, А НЕПРОГНАННЫЙ `mh sense`. Первый запуск
+    // ПРОТУХШИЙ ДАТЧИК — НЕ НАХОДКА, А НЕПРОГНАННЫЙ `mentat sense`. Первый запуск
     // после смены бинарника даёт пригоршню краснот «датчик подавал и ПРОТУХ», и
     // человек, не знающий этого, идёт их чинить. Само поведение верное — но
     // сказать, чем оно лечится, обязан тот, кто его показывает.
@@ -6040,7 +6040,7 @@ pub(crate) async fn gate(
            //
            // Потом замер завёл СВОЮ копию правила, и копия отстала: пробу он не
            // переписывал ни разу — её колонку заполняли только переезды схемы, —
-           // и `mh call gate` отдавал пустую пробу у всех ста шестидесяти
+           // и `mentat call gate` отдавал пустую пробу у всех ста шестидесяти
            // пунктов, говоря рядом `probeRuns: true`. Прочитанное вполовину
            // хуже непрочитанного: оно выглядит полным. Предмет и граница `since`
            // не отдавались вовсе, а именно они решают, когда пункт говорит
@@ -6268,7 +6268,7 @@ pub(crate) async fn gate(
         }));
     }
     // Пригоршня краснот «датчик подавал и ПРОТУХ» — не находки, а непрогнанный
-    // `mh sense`. Числа отдаются как есть, но чем это лечится, сказано рядом.
+    // `mentat sense`. Числа отдаются как есть, но чем это лечится, сказано рядом.
     let sensors_note = if stale_sensors.is_empty() {
         Value::Null
     } else {
@@ -6891,7 +6891,7 @@ pub(crate) async fn set_method(pool: &Pool, project: &str, fields: Method<'_>) -
         let item = if text.trim().is_empty() { ord.to_string() } else { format!("«{}»", text.trim()) };
         return Ok(json!({ "status": "no_item",
             "why": format!("пункта {item} у {kind} {id} нет: способ объявлять нечему \
-                            — пункты называет `mh call readiness kind={kind} id={id}`") }));
+                            — пункты называет `mentat call readiness kind={kind} id={id}`") }));
     };
     let n = client
         .execute(
@@ -9782,7 +9782,7 @@ pub(crate) async fn declare_version(
             return Ok(match plan_row_document(&client, "project_plan_versions", project, id).await? {
                 Some((kind, name)) => json!({ "status": "projected", "id": id,
                     "why": format!("выпуск заведён документом, а не объявлением, и уходит вместе с ним: \
-                                    `mh call rm kind={kind} id={name}`") }),
+                                    `mentat call rm kind={kind} id={name}`") }),
                 None => json!({ "status": "not_found", "id": id }),
             });
         }
@@ -9791,7 +9791,7 @@ pub(crate) async fn declare_version(
     if let Some((kind, name)) = plan_row_document(&client, "project_plan_versions", project, id).await? {
         return Ok(json!({ "status": "has_document", "id": id,
             "why": format!("у выпуска есть документ, и план строится по нему: правят его \
-                            `mh call put kind={kind} id={name}`, снимают `mh call rm kind={kind} id={name}`") }));
+                            `mentat call put kind={kind} id={name}`, снимают `mentat call rm kind={kind} id={name}`") }));
     }
     client.execute(
         "INSERT INTO project_plan_versions (project_id, id, entity_kind, entity_name, origin)
@@ -9824,7 +9824,7 @@ pub(crate) async fn declare_milestone(
             return Ok(match plan_row_document(&client, "project_plan_milestones", project, id).await? {
                 Some((kind, name)) => json!({ "status": "projected", "id": id,
                     "why": format!("веха заведена документом, а не объявлением, и уходит вместе с ним: \
-                                    `mh call rm kind={kind} id={name}`") }),
+                                    `mentat call rm kind={kind} id={name}`") }),
                 None => json!({ "status": "not_found", "id": id }),
             });
         }
@@ -9833,7 +9833,7 @@ pub(crate) async fn declare_milestone(
     if let Some((kind, name)) = plan_row_document(&client, "project_plan_milestones", project, id).await? {
         return Ok(json!({ "status": "has_document", "id": id,
             "why": format!("у вехи есть документ, и план строится по нему: правят его \
-                            `mh call put kind={kind} id={name}`, снимают `mh call rm kind={kind} id={name}`") }));
+                            `mentat call put kind={kind} id={name}`, снимают `mentat call rm kind={kind} id={name}`") }));
     }
     client.execute(
         "INSERT INTO project_plan_milestones (project_id, id, version_id, ord, title,
@@ -9870,7 +9870,7 @@ pub(crate) async fn declare_task(pool: &Pool, project: &str, fields: Task<'_>, d
         return Ok(match kind {
             Some(kind) => json!({ "status": "projected", "id": id,
                 "why": format!("задача заведена документом, а не объявлением, и уходит вместе с ним: \
-                                `mh call rm kind={kind} id={id}`") }),
+                                `mentat call rm kind={kind} id={id}`") }),
             None => json!({ "status": "not_found", "id": id }),
         });
     }
@@ -13470,7 +13470,7 @@ pub(crate) async fn set_version_state(
                     let lever = if origin == "declared" {
                         format!("`version-add id={version} drop=true`")
                     } else {
-                        format!("`mh call rm kind={kind} id={name}` (документ уходит, и пересборка снимает выпуск из плана)")
+                        format!("`mentat call rm kind={kind} id={name}` (документ уходит, и пересборка снимает выпуск из плана)")
                     };
                     return Ok(json!({ "status": "in_plan",
                         "why": format!("выпуск «{version}» есть в плане: его состояние меняют state=open|closed, а снимают после {lever}") }));
@@ -14692,7 +14692,7 @@ pub(crate) async fn execute_method_upto(
                                 } else {
                                     format!("{name} — в последнем чистом прогоне ствола её нет вовсе: \
                                              имя не то, либо проверка не идёт профилем, которым снят прогон \
-                                             (`mh call test-run names={name}`)")
+                                             (`mentat call test-run names={name}`)")
                                 }
                             })
                             .collect();
@@ -16062,7 +16062,7 @@ pub(crate) async fn waves(pool: &Pool, project: &str) -> Result<Value, crate::db
                                      в рабочем дереве, и второму её не отдают"),
         (held_run > 0).then_some("карточки с непустым `heldByRun` в очередь не идут: у задачи живой \
                                   прогон. Сам он не истекает; брошенный закрывают \
-                                  `mh call run-state runId=… state=cancelled note=…`"),
+                                  `mentat call run-state runId=… state=cancelled note=…`"),
     ].into_iter().flatten().collect::<Vec<_>>().join(". ");
     Ok(json!({
         "cards": cards,
@@ -16875,10 +16875,10 @@ mod work_run_token {
             DDL.contains("replace(work_run, '{имя}', '{name}')"),
             "перенос записанных ступеней на новую метку идёт схемой"
         );
-        let command = "mh call question id={name}";
-        assert_eq!(command.replace(WORK_RUN_NAME, "Q-1"), "mh call question id=Q-1");
-        let from_old_memory = "mh call question id={имя}".replace("{имя}", WORK_RUN_NAME);
-        assert_eq!(from_old_memory.replace(WORK_RUN_NAME, "Q-1"), "mh call question id=Q-1");
+        let command = "mentat call question id={name}";
+        assert_eq!(command.replace(WORK_RUN_NAME, "Q-1"), "mentat call question id=Q-1");
+        let from_old_memory = "mentat call question id={имя}".replace("{имя}", WORK_RUN_NAME);
+        assert_eq!(from_old_memory.replace(WORK_RUN_NAME, "Q-1"), "mentat call question id=Q-1");
     }
 }
 
@@ -17463,9 +17463,9 @@ mod reopened_why {
     /// «такой двери нет». Проба связывает два перечня в один.
     #[test]
     fn the_call_the_finding_names_is_a_door_that_exists() {
-        let call = "mh call entity-confirm kind=";
+        let call = "mentat call entity-confirm kind=";
         assert!(super::DDL.contains(call), "находка больше не называет зов подтверждения");
-        let door = call.trim_start_matches("mh call ").split(' ').next().unwrap();
+        let door = call.trim_start_matches("mentat call ").split(' ').next().unwrap();
         assert!(crate::mcp::Mcp::writes().contains(&door), "дверь «{door}» не объявлена пишущей");
     }
 }

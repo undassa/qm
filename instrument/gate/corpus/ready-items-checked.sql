@@ -195,7 +195,7 @@ SELECT t.id || ' — закрыта, а ' || count(*) || ' из ' || (
          SELECT count(*) FROM task_ready_item a
           WHERE a.project_id = t.project_id AND a.task_id = t.id)
        || ' пунктов приёмки не называют проверки и не отмечены: судить их нечем'
-       || ' — `mh call ready task=' || t.id || '`'
+       || ' — `mentat call ready task=' || t.id || '`'
   FROM project_plan_tasks t
   JOIN task_ready_item r ON r.project_id = t.project_id AND r.task_id = t.id
   LEFT JOIN task_state ts ON ts.project_id = t.project_id AND ts.task_id = t.id
@@ -246,7 +246,7 @@ UNION ALL
 -- задачи — это по-прежнему один предмет, и десять строк о нём читать никто не
 -- станет. Довод тот же, что записан двумя ветками выше.
 SELECT t.id || ' — заявлений «проверки зелены» не прошло: ' || count(*)
-       || ' — `mh call readiness kind=task id=' || t.id || '`'
+       || ' — `mentat call readiness kind=task id=' || t.id || '`'
   FROM project_plan_tasks t
   JOIN task_ready_item r ON r.project_id = t.project_id AND r.task_id = t.id
   -- То же соединение, что у круга замера: вердикт ложится на заявление, а

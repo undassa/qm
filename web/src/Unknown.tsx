@@ -97,7 +97,7 @@ export function Unknown({ projectId, onFind,
       title: "пункты готовности без способа проверки",
       count: gaps.withoutMethod,
       says: "строка списка внутри задачи или документа: сказано, что должно быть сделано, и не сказано, чем это проверить",
-      closes: `объявить способ: mh call ${gaps.closedBy}`,
+      closes: `объявить способ: mentat call ${gaps.closedBy}`,
       body: (
         <table className="rows u-tab">
           <thead>

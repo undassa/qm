@@ -14,9 +14,9 @@
 //!
 //!
 //! Три способа звать:
-//!   mh call <ручка> [имя=значение …]   спросить ручку
-//!   mh tools                            перечень ручек — у сервера, не свой
-//!   mh mcp                              тот же разговор по stdio, для агента
+//!   mentat call <ручка> [имя=значение …]   спросить ручку
+//!   mentat tools                            перечень ручек — у сервера, не свой
+//!   mentat mcp                              тот же разговор по stdio, для агента
 
 use mh_server::{client, door};
 
@@ -24,7 +24,7 @@ use mh_server::{client, door};
 ///
 /// `println!` роняет процесс паникой, когда читатель ушёл, и код выхода
 /// становится 101 — вне договора, объявленного справкой выше (0, 1, 2, 75).
-/// `mh call … | head` под `set -o pipefail` валил бы всякий сценарий, а ответ
+/// `mentat call … | head` под `set -o pipefail` валил бы всякий сценарий, а ответ
 /// при этом приходил целиком: труба оборвалась ПОСЛЕ того, как прочли нужное.
 /// Печатать больше некому — это исход, а не ошибка.
 fn say(v: &serde_json::Value) {
@@ -40,17 +40,17 @@ fn main() {
     let what = args.next().unwrap_or_default();
     if what.is_empty() || what == "--help" || what == "-h" {
         eprintln!(
-            "mh — клиент харнеса\n\n\
-             \x20 mh call <ручка> [имя=значение …]   спросить ручку\n\
-             \x20 mh tools                           какие ручки есть\n\
-             \x20 mh mcp                             разговор по stdio для агента\n\
-             \x20 mh install [куда]                  умения, субагенты и связка — с сервера\n\
-             \x20 mh guard                           сторож: наряд хука со входа, отказ — выходом 2\n\
-             \x20 mh sense [что]                     показать, что датчики сняли бы с этого дерева (подаёт харнес)\n\n\
+            "mentat — клиент Mentat\n\n\
+             \x20 mentat call <ручка> [имя=значение …]   спросить ручку\n\
+             \x20 mentat tools                           какие ручки есть\n\
+             \x20 mentat mcp                             разговор по stdio для агента\n\
+             \x20 mentat install [куда]                  умения, субагенты и связка — с сервера\n\
+             \x20 mentat guard                           сторож: наряд хука со входа, отказ — выходом 2\n\
+             \x20 mentat sense [что]                     показать, что датчики сняли бы с этого дерева (подаёт харнес)\n\n\
              Доводы: имя=значение · имя=@файл (строкой) · имя:=<json> · имя:=@файл (json)\n\
              Окружение: MH_URL (по умолчанию http://127.0.0.1:8096), MH_PROJECT,\n\
              \x20           MH_PRINCIPAL, MH_EDGE_SECRET\n\n\
-             Коды выхода `mh call`: 0 — ответ, 1 — дверь отказала по существу,\n\
+             Коды выхода `mentat call`: 0 — ответ, 1 — дверь отказала по существу,\n\
              \x20 2 — не дозвонились или доводы кривые, 75 — сервер перегружен:\n\
              \x20 работа не сделана, повторите тот же вызов через несколько секунд.\n"
         );
@@ -63,11 +63,11 @@ fn main() {
         // an agent whose launch carries no secret: tot-ade's own Claude Code over
         // ACP could not write a line of its draft (tot-tester, 2026-10-07).
         Err(why) if what == "guard" => {
-            eprintln!("mh guard: правила не проверены — {why}");
+            eprintln!("mentat guard: правила не проверены — {why}");
             std::process::exit(0);
         }
         Err(why) => {
-            eprintln!("mh {what}: {why}");
+            eprintln!("mentat {what}: {why}");
             std::process::exit(2);
         }
     };
@@ -79,7 +79,7 @@ fn main() {
             let root = match client::sense_root() {
                 Ok(r) => r,
                 Err(why) => {
-                    eprintln!("mh sense: {why}");
+                    eprintln!("mentat sense: {why}");
                     std::process::exit(2);
                 }
             };
@@ -89,7 +89,7 @@ fn main() {
             match client::sense(&door, only.as_deref(), &root) {
                 Ok(v) => say(&v),
                 Err(why) => {
-                    eprintln!("mh sense: {why}");
+                    eprintln!("mentat sense: {why}");
                     std::process::exit(2);
                 }
             }
@@ -99,7 +99,7 @@ fn main() {
             match client::install(&door, &into) {
                 Ok(v) => say(&v),
                 Err(why) => {
-                    eprintln!("mh install: {why}");
+                    eprintln!("mentat install: {why}");
                     std::process::exit(2);
                 }
             }
@@ -107,20 +107,20 @@ fn main() {
         "tools" => match door.tools() {
             Ok(v) => say(&v),
             Err(why) => {
-                eprintln!("mh tools: {why}");
+                eprintln!("mentat tools: {why}");
                 std::process::exit(2);
             }
         },
         "call" => {
             let Some(name) = args.next() else {
-                eprintln!("mh call: не названа ручка");
+                eprintln!("mentat call: не названа ручка");
                 std::process::exit(2);
             };
             let rest: Vec<String> = args.collect();
             let parsed = match client::args_of(&rest) {
                 Ok(a) => a,
                 Err(why) => {
-                    eprintln!("mh call: {why}");
+                    eprintln!("mentat call: {why}");
                     std::process::exit(2);
                 }
             };
@@ -140,7 +140,7 @@ fn main() {
                     }
                 }
                 Err(why) => {
-                    eprintln!("mh call: {why}");
+                    eprintln!("mentat call: {why}");
                     std::process::exit(2);
                 }
             }

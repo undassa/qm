@@ -70,7 +70,7 @@ WITH судимые AS (
                         AND r.parent_task_id = t.id))
 SELECT с.id || ' — красной пары нет, и в задаче не записано, почему: поле'
        || ' «Без красной фазы» называет причину, а доказательство идёт'
-       || ' в «Чем доказывается» — `mh call task id=' || с.id || '`' AS detail
+       || ' в «Чем доказывается» — `mentat call task id=' || с.id || '`' AS detail
   FROM судимые с
  WHERE NOT EXISTS (SELECT 1 FROM project_document_fields f
                     WHERE f.project_id = с.project_id AND f.entity_kind = с.entity_kind

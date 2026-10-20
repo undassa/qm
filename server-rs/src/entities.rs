@@ -347,7 +347,7 @@ async fn relations_of(
                     .collect();
                 if !counted.is_empty() {
                     out.insert("links".into(), Value::Object(counted));
-                    out.insert("linksBy".into(), json!(format!("mh call links-of kind={kind} id={id}")));
+                    out.insert("linksBy".into(), json!(format!("mentat call links-of kind={kind} id={id}")));
                 }
             }
         }
@@ -368,7 +368,7 @@ async fn relations_of(
                 out.insert("backlinks".into(), json!(n));
                 out.insert(
                     "backlinksBy".into(),
-                    json!(format!("mh call backlinks kind={owner_kind} id={owner_name}")),
+                    json!(format!("mentat call backlinks kind={owner_kind} id={owner_name}")),
                 );
             }
         }
@@ -397,7 +397,7 @@ async fn relations_of(
                             "why": if inner {
                                 "это разбор ДОКУМЕНТА-ХОЗЯИНА: у внутренней сущности своего документа нет"
                             } else { "" },
-                            "by": format!("mh call sections kind={owner_kind} id={owner_name}") }),
+                            "by": format!("mentat call sections kind={owner_kind} id={owner_name}") }),
                 );
             }
         }
@@ -430,7 +430,7 @@ async fn relations_of(
 ///
 /// Объявленное состояние говорит, чем запись закончили; живое — можно ли этому
 /// ещё верить. Каскад считал это верно, а наружу отдавала одна дверь из пяти:
-/// `mh call task` показывал `closed` при переоткрытой задаче.
+/// `mentat call task` показывал `closed` при переоткрытой задаче.
 async fn live(
     client: &impl deadpool_postgres::GenericClient,
     project: &str,
@@ -458,7 +458,7 @@ async fn live(
         // Значение не меняется — на него смотрят читатели; рядом кладётся
         // смысл и дверь, которая отвечает про закрытость.
         return Ok(json!({ "state": state,
-            "means": "запись свежа: ни одна её связь не менялась после неё. Это не про то, закрыта ли задача — про закрытость отвечает `mh call task-status id=…`" }));
+            "means": "запись свежа: ни одна её связь не менялась после неё. Это не про то, закрыта ли задача — про закрытость отвечает `mentat call task-status id=…`" }));
     }
     Ok(json!({ "state": state, "why": r.get::<_, String>(1),
             "through": r.get::<_, i32>(2), "cause": r.get::<_, Option<String>>(3),

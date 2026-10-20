@@ -52,7 +52,7 @@
    "ownerKind": "agent",
    "owner": "godzy-answer",
    "touches": "corpus",
-   "workRun": "mh call question id={name}"
+   "workRun": "mentat call question id={name}"
   },
   {
    "ord": 6,
@@ -61,7 +61,7 @@
    "ownerKind": "skill",
    "owner": "godzy-gate",
    "touches": "corpus",
-   "workRun": "mh call gate id={name}"
+   "workRun": "mentat call gate id={name}"
   },
   {
    "ord": 7,
@@ -104,7 +104,7 @@
    "ownerKind": "skill",
    "owner": "godzy-gate",
    "touches": "repository",
-   "workRun": "mh call gate id={name}"
+   "workRun": "mentat call gate id={name}"
   },
   {
    "ord": 12,

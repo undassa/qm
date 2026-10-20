@@ -22,7 +22,7 @@ fn required(names: &[&str]) -> String {
             }
         }
     }
-    eprintln!("mh-server: не задано {}; без этого сервер не поднимается", names.join(" или "));
+    eprintln!("mentat-server: не задано {}; без этого сервер не поднимается", names.join(" или "));
     std::process::exit(2);
 }
 
@@ -59,14 +59,14 @@ async fn main() {
     let pool = match db::pool(&url, size) {
         Ok(pool) => pool,
         Err(why) => {
-            eprintln!("mh-server: {why}");
+            eprintln!("mentat-server: {why}");
             std::process::exit(2);
         }
     };
 
     // Таблицы — ДО раскладки видов: раскладка теперь одна из них.
     if let Err(e) = projector::ensure(&pool).await {
-        eprintln!("mh-server: таблицы проекций не заводятся: {e}");
+        eprintln!("mentat-server: таблицы проекций не заводятся: {e}");
         std::process::exit(2);
     }
 
@@ -79,9 +79,9 @@ async fn main() {
     // выкладки от команды, которая просто хотела спросить дверь.
     if std::env::args().nth(1).is_none() {
         match instrument::apply(&pool).await {
-            Ok(v) => eprintln!("mh-server: прибор разложен: {v}"),
+            Ok(v) => eprintln!("mentat-server: прибор разложен: {v}"),
             Err(why) => {
-                eprintln!("mh-server: прибор не раскладывается: {why}");
+                eprintln!("mentat-server: прибор не раскладывается: {why}");
                 std::process::exit(2);
             }
         }
@@ -97,12 +97,12 @@ async fn main() {
     let kinds = match kinds::Kinds::from_db(&pool).await {
         Ok(k) if !k.is_empty() => k,
         Ok(_) => {
-            eprintln!("mh-server: раскладка видов пуста, хотя прибор только что разложен: \
+            eprintln!("mentat-server: раскладка видов пуста, хотя прибор только что разложен: \
                        это несогласие базы с объявлением, а не пустой проект");
             std::process::exit(2);
         }
         Err(why) => {
-            eprintln!("mh-server: {why}");
+            eprintln!("mentat-server: {why}");
             std::process::exit(2);
         }
     };
@@ -132,14 +132,14 @@ async fn main() {
         let project = rest.next().unwrap_or_default();
         let why = rest.collect::<Vec<_>>().join(" ");
         if session.is_empty() || principal.is_empty() {
-            eprintln!("mh-server key-add <сессия> <принципал> [набор] [зачем]");
+            eprintln!("mentat-server key-add <сессия> <принципал> [набор] [зачем]");
             std::process::exit(2);
         }
         match projector::key_add(&app.pool, &session, &principal, &project, "key-add", &why).await {
             Ok((secret, said)) => {
                 println!("{said}");
                 println!("MH_EDGE_SECRET={secret}");
-                eprintln!("mh-server: секрет показан один раз; в базе лежит только его отпечаток");
+                eprintln!("mentat-server: секрет показан один раз; в базе лежит только его отпечаток");
             }
             Err(e) => {
                 eprintln!("ключ не выдан: {}", e.says());
@@ -156,7 +156,7 @@ async fn main() {
         let session = rest.next().unwrap_or_default();
         let why = rest.collect::<Vec<_>>().join(" ");
         if session.is_empty() {
-            eprintln!("mh-server key-drop <сессия> [почему]");
+            eprintln!("mentat-server key-drop <сессия> [почему]");
             std::process::exit(2);
         }
         match projector::key_drop(&app.pool, &session, &why).await {
@@ -175,7 +175,7 @@ async fn main() {
     if std::env::args().nth(1).as_deref() == Some("parse-check") {
         let project = std::env::var("MH_PROJECT").unwrap_or_default();
         if project.is_empty() {
-            eprintln!("mh-server parse-check: не задан MH_PROJECT — сверять нечего");
+            eprintln!("mentat-server parse-check: не задан MH_PROJECT — сверять нечего");
             std::process::exit(2);
         }
         match parse::check_against_donor(&app.pool, &project).await {
@@ -197,7 +197,7 @@ async fn main() {
     if std::env::args().nth(1).as_deref() == Some("call") {
         let project = std::env::var("MH_PROJECT").unwrap_or_default();
         let Some(name) = std::env::args().nth(2) else {
-            eprintln!("mh-server call: не названа дверь");
+            eprintln!("mentat-server call: не названа дверь");
             std::process::exit(2);
         };
         let args = match std::env::args().nth(3) {
@@ -205,7 +205,7 @@ async fn main() {
             Some(json) => match serde_json::from_str(&json) {
                 Ok(v) => v,
                 Err(e) => {
-                    eprintln!("mh-server call: доводы не разбираются как JSON: {e}");
+                    eprintln!("mentat-server call: доводы не разбираются как JSON: {e}");
                     std::process::exit(2);
                 }
             },
@@ -239,7 +239,7 @@ async fn main() {
         // они не принадлежат ни одному проекту. Так уже вышло: шесть снятых
         // терминов и семь заявленных предметов легли под пустым именем.
         if project.is_empty() {
-            eprintln!("mh-server rebuild: не задан MH_PROJECT — собирать нечего");
+            eprintln!("mentat-server rebuild: не задан MH_PROJECT — собирать нечего");
             std::process::exit(2);
         }
         let (pool, project) = (&app.pool, project.as_str());
@@ -267,7 +267,7 @@ async fn main() {
     if std::env::args().nth(1).as_deref() == Some("reproject") {
         let project = std::env::var("MH_PROJECT").unwrap_or_default();
         if project.is_empty() {
-            eprintln!("mh-server reproject: не задан MH_PROJECT — пересобирать нечего");
+            eprintln!("mentat-server reproject: не задан MH_PROJECT — пересобирать нечего");
             std::process::exit(2);
         }
         // Исход записывается и здесь: подкоманда — та же пересборка, и упавшая
@@ -287,7 +287,7 @@ async fn main() {
             };
             // ПАРА, А НЕ ПОЛОВИНА. Пересборка снимает из плана красные задачи
             // и состояния — их кладёт СБОРКА, и между двумя командами база
-            // неполна. Дверь `mh call reproject` делает обе половины и всегда
+            // неполна. Дверь `mentat call reproject` делает обе половины и всегда
             // делала; подкоманда останавливалась на первой и печатала успех.
             //
             // Стоило дня: красные задачи «исчезли», пункт, читающий их,
@@ -298,7 +298,7 @@ async fn main() {
             let after = if half {
                 serde_json::json!({
                     "warning": "СДЕЛАНА ПОЛОВИНА. В плане сейчас нет красных задач и \
-                                состояний: их кладёт `mh-server rebuild`. Пока он не \
+                                состояний: их кладёт `mentat-server rebuild`. Пока он не \
                                 прогнан, всё прочитанное соврёт.",
                 })
             } else {
@@ -343,13 +343,13 @@ async fn main() {
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("mh-server: порт {port} не занять: {e}");
+            eprintln!("mentat-server: порт {port} не занять: {e}");
             std::process::exit(2);
         }
     };
-    println!("mh-server: слушает http://{addr}/next/");
+    println!("mentat-server: слушает http://{addr}/next/");
     if let Err(e) = axum::serve(listener, router).await {
-        eprintln!("mh-server: остановился: {e}");
+        eprintln!("mentat-server: остановился: {e}");
         std::process::exit(1);
     }
 }

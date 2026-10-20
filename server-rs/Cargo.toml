@@ -2,6 +2,25 @@
 name = "mh-server"
 version = "0.1.0"
 edition = "2021"
+# The package and its library keep the name mh-server / mh_server; the
+# binaries are called Mentat.
+autobins = false
+
+[[bin]]
+name = "mentat-server"
+path = "src/main.rs"
+
+[[bin]]
+name = "mentat"
+path = "src/bin/mentat.rs"
+
+[[bin]]
+name = "mentat-worker"
+path = "src/bin/mentat-worker.rs"
+
+[[bin]]
+name = "mentat-launcher"
+path = "src/bin/mentat-launcher.rs"
 
 [dependencies]
 axum = "0.7"
