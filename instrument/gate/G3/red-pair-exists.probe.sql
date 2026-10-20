@@ -5,6 +5,9 @@ WITH д AS (INSERT INTO project_documents (project_id, entity_kind, entity_name,
            SELECT $1, д.entity_name, (SELECT min(milestone_id) FROM project_plan_tasks WHERE project_id = $1), 9993,
                   'подсадка самотеста: задача кода без красной пары', 'S', 'closed', 'dev', 'task', д.entity_name, 'declared'
              FROM д
+            -- Набор без этапов (план живёт в Multica): подсаживать некуда, ноль
+            -- строк — законный ответ, а не NULL в milestone_id, роняющий выкладку.
+            WHERE EXISTS (SELECT 1 FROM project_plan_tasks WHERE project_id = $1)
            RETURNING id)
 INSERT INTO task_state (project_id, task_id, state, closing_commit, seen_at, closed_at)
 SELECT $1, з.id, 'closed', '', (extract(epoch FROM now()) * 1000)::bigint, (extract(epoch FROM now()) * 1000)::bigint FROM з
